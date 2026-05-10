@@ -37,17 +37,31 @@ function successEvent(overrides: Record<string, unknown> = {}): ToolCallEvent {
       truncated: false,
       strippedBroadcasts: false,
       mentionsModified: false,
-      attribution: { repo: "acme/web", parentSessionId: null },
       ...overrides,
     }),
   };
 }
 
 function denialEvent(reason: string, channel = "#ops"): ToolCallEvent {
+  // Denials are status="completed" — the renderer keys off ok:false + reason, not status.
+  return {
+    ...BASE,
+    status: "completed",
+    args: { channel, text: "deploy started" },
+    output: JSON.stringify({
+      ok: false,
+      reason,
+      agentMessage: `denial: ${reason}`,
+    }),
+  };
+}
+
+function legacyDenialEvent(reason: string): ToolCallEvent {
+  // Legacy shape: status="error" with the bare reason code as `output`.
   return {
     ...BASE,
     status: "error",
-    args: { channel, text: "deploy started" },
+    args: { channel: "#ops", text: "deploy started" },
     output: reason,
   };
 }
@@ -111,6 +125,33 @@ describe("SlackNotifyEvent", () => {
   it("renders rate_limited with retry-window copy", () => {
     renderExpanded(denialEvent("rate_limited"));
     expect(screen.getByText(/rate-limited/i)).toBeInTheDocument();
+  });
+
+  it("surfaces the concrete retryAfter for rate_limited when provided", () => {
+    const event: ToolCallEvent = {
+      ...BASE,
+      status: "completed",
+      args: { channel: "#ops", text: "hi" },
+      output: JSON.stringify({
+        ok: false,
+        reason: "rate_limited",
+        agentMessage: "Slack rate-limited the request.",
+        retryAfter: 30,
+      }),
+    };
+    renderExpanded(event);
+    expect(screen.getByText(/wait/i)).toBeInTheDocument();
+    expect(screen.getByText("30s")).toBeInTheDocument();
+  });
+
+  it("renders bridge_error when the plugin couldn't reach the control plane", () => {
+    renderExpanded(denialEvent("bridge_error"));
+    expect(screen.getByText(/couldn't reach the control plane/i)).toBeInTheDocument();
+  });
+
+  it("renders legacy denial events (status=error, bare reason) for backward compat", () => {
+    renderExpanded(legacyDenialEvent("channel_not_found_or_forbidden"));
+    expect(screen.getByText(/channel not found or bot is not in the channel/i)).toBeInTheDocument();
   });
 
   it("falls back gracefully when the output is unparseable", () => {

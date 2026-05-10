@@ -14,7 +14,7 @@
 
 import type { SlackMentionsPolicy } from "../types/integrations";
 
-/** Reasons the control plane can return for a denied or failed slack-notify request. */
+/** Denial reasons across the slack-notify flow (control plane + plugin). */
 export const SLACK_DENIAL_REASONS = [
   "feature_unavailable",
   "feature_disabled",
@@ -23,12 +23,14 @@ export const SLACK_DENIAL_REASONS = [
   "rate_limited",
   "slack_api_error",
   "invalid_input",
+  "bridge_error",
 ] as const;
 
 export type SlackDenialReason = (typeof SLACK_DENIAL_REASONS)[number];
 
-/** HTTP status codes the control plane emits for each denial reason. */
-export const SLACK_DENIAL_STATUS: Record<SlackDenialReason, number> = {
+export type SlackWireDenialReason = Exclude<SlackDenialReason, "bridge_error">;
+
+export const SLACK_DENIAL_STATUS: Record<SlackWireDenialReason, number> = {
   feature_unavailable: 503,
   feature_disabled: 403,
   empty_message_after_sanitization: 422,
@@ -52,10 +54,20 @@ export interface SlackNotifySuccessOutput {
 
 /** HTTP failure body returned by the slack-notify endpoint to the sandbox. */
 export interface SlackNotifyFailureBody {
-  error: SlackDenialReason;
+  error: SlackWireDenialReason;
   message?: string;
   retryAfter?: number;
 }
+
+/** `agentMessage` is guidance for the model; `reason` is the code the renderer keys on. */
+export type SlackNotifyToolEnvelope =
+  | SlackNotifySuccessOutput
+  | {
+      ok: false;
+      reason: SlackDenialReason;
+      agentMessage: string;
+      retryAfter?: number;
+    };
 
 /** Default mention policy when no per-repo or global override is set. */
 export const DEFAULT_MENTIONS_POLICY: SlackMentionsPolicy = "allow";

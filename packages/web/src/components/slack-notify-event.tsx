@@ -4,16 +4,14 @@ import {
   SLACK_DENIAL_REASONS,
   type SlackDenialReason,
   type SlackNotifySuccessOutput,
+  type SlackNotifyToolEnvelope,
 } from "@open-inspect/shared";
 import type { SandboxEvent } from "@/types/session";
 import { getSafeExternalUrl } from "@/lib/urls";
 import { ChevronRightIcon, ErrorIcon, LinkIcon, SlackIcon } from "@/components/ui/icons";
 
 type ToolCallEvent = Extract<SandboxEvent, { type: "tool_call" }>;
-
-/** Defensive wire-shape: tolerates older events that omit non-essential fields. */
-type ParsedSuccess = Pick<SlackNotifySuccessOutput, "ok" | "channelInput"> &
-  Partial<Omit<SlackNotifySuccessOutput, "ok" | "channelInput">>;
+type ParsedDenial = Exclude<SlackNotifyToolEnvelope, SlackNotifySuccessOutput>;
 
 const DENIAL_COPY: Record<SlackDenialReason, { headline: string; hint?: string }> = {
   feature_unavailable: {
@@ -39,37 +37,43 @@ const DENIAL_COPY: Record<SlackDenialReason, { headline: string; hint?: string }
   invalid_input: {
     headline: "The notification arguments were invalid.",
   },
+  bridge_error: {
+    headline: "Couldn't reach the control plane to post the notification.",
+  },
 };
 
-function parseSuccess(output: string | undefined): ParsedSuccess | null {
+function parseEnvelope(output: string | undefined): SlackNotifyToolEnvelope | null {
   if (!output) return null;
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(output);
-    if (
-      parsed &&
-      typeof parsed === "object" &&
-      (parsed as { ok?: unknown }).ok === true &&
-      typeof (parsed as { channelInput?: unknown }).channelInput === "string"
-    ) {
-      return parsed as ParsedSuccess;
-    }
+    parsed = JSON.parse(output);
   } catch {
     return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const obj = parsed as Record<string, unknown>;
+  if (obj.ok === true && typeof obj.channelInput === "string") {
+    return obj as unknown as SlackNotifySuccessOutput;
+  }
+  if (
+    obj.ok === false &&
+    typeof obj.reason === "string" &&
+    (SLACK_DENIAL_REASONS as readonly string[]).includes(obj.reason)
+  ) {
+    return obj as unknown as ParsedDenial;
   }
   return null;
 }
 
-function getDenialReason(event: ToolCallEvent): SlackDenialReason | null {
-  if (event.status !== "error") return null;
-  if (typeof event.output !== "string") return null;
-  return (SLACK_DENIAL_REASONS as readonly string[]).includes(event.output)
-    ? (event.output as SlackDenialReason)
-    : null;
-}
-
-function getChannelInput(event: ToolCallEvent): string | undefined {
-  const fromArgs = event.args?.channel;
-  return typeof fromArgs === "string" ? fromArgs : undefined;
+function getLegacyDenialReason(event: ToolCallEvent): SlackDenialReason | null {
+  if (
+    event.status === "error" &&
+    typeof event.output === "string" &&
+    (SLACK_DENIAL_REASONS as readonly string[]).includes(event.output)
+  ) {
+    return event.output as SlackDenialReason;
+  }
+  return null;
 }
 
 interface SlackNotifyEventProps {
@@ -85,9 +89,13 @@ export function SlackNotifyEvent({
   onToggle,
   showTime = true,
 }: SlackNotifyEventProps) {
-  const success = parseSuccess(event.output);
-  const denial = success ? null : getDenialReason(event);
-  const channelInput = success?.channelInput ?? getChannelInput(event);
+  const envelope = parseEnvelope(event.output);
+  const success = envelope?.ok === true ? envelope : null;
+  const envelopeDenial = envelope?.ok === false ? envelope : null;
+  const denial: SlackDenialReason | null = envelopeDenial?.reason ?? getLegacyDenialReason(event);
+  const argsChannel = event.args?.channel;
+  const channelInput =
+    success?.channelInput ?? (typeof argsChannel === "string" ? argsChannel : undefined);
   const time = new Date(event.timestamp * 1000).toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
@@ -129,7 +137,11 @@ export function SlackNotifyEvent({
           {success ? (
             <SlackNotifySuccessBody success={success} />
           ) : denial ? (
-            <SlackNotifyDenialBody reason={denial} channelInput={channelInput} />
+            <SlackNotifyDenialBody
+              reason={denial}
+              channelInput={channelInput}
+              retryAfterSeconds={envelopeDenial?.retryAfter}
+            />
           ) : (
             <span className="text-secondary-foreground">No details available</span>
           )}
@@ -139,7 +151,7 @@ export function SlackNotifyEvent({
   );
 }
 
-function SlackNotifySuccessBody({ success }: { success: ParsedSuccess }) {
+function SlackNotifySuccessBody({ success }: { success: SlackNotifySuccessOutput }) {
   const notes: string[] = [];
   if (success.truncated) notes.push("Message was truncated to fit Slack length limits.");
   if (success.strippedBroadcasts) notes.push("Broadcast mentions (@channel/@here) were stripped.");
@@ -181,15 +193,24 @@ function SlackNotifySuccessBody({ success }: { success: ParsedSuccess }) {
 function SlackNotifyDenialBody({
   reason,
   channelInput,
+  retryAfterSeconds,
 }: {
   reason: SlackDenialReason;
   channelInput: string | undefined;
+  retryAfterSeconds: number | undefined;
 }) {
   const { headline, hint } = DENIAL_COPY[reason];
+  const showRetryAfter =
+    reason === "rate_limited" && typeof retryAfterSeconds === "number" && retryAfterSeconds > 0;
   return (
     <div className="space-y-1">
       <div className="text-foreground">{headline}</div>
       {hint ? <div className="text-secondary-foreground">{hint}</div> : null}
+      {showRetryAfter ? (
+        <div className="text-muted-foreground">
+          Wait <span className="text-foreground">{retryAfterSeconds}s</span> before retrying.
+        </div>
+      ) : null}
       {channelInput ? (
         <div className="text-muted-foreground">
           Requested channel: <span className="text-foreground">{channelInput}</span>
