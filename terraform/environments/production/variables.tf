@@ -506,24 +506,29 @@ variable "r2_media_bucket_name" {
 # =============================================================================
 # Access Control
 # =============================================================================
-# Three provider-agnostic allowlists gate sign-in; a user is admitted if they
-# match ANY configured allowlist. Leave all three empty only with
-# unsafe_allow_all_users = true.
+# Four allowlists gate sign-in; a user is admitted if they match ANY configured
+# allowlist. Leave them all empty only with unsafe_allow_all_users = true.
 
 variable "allowed_users" {
-  description = "Comma-separated list of GitHub usernames allowed to sign in. Leave empty only when another allowlist (allowed_email_domains, allowed_emails) is set or unsafe_allow_all_users is true."
+  description = "Comma-separated list of GitHub usernames allowed to sign in. Leave empty only when another allowlist (allowed_email_domains, allowed_emails, allowed_github_orgs) is set or unsafe_allow_all_users is true."
   type        = string
   default     = ""
 }
 
 variable "allowed_email_domains" {
-  description = "Comma-separated list of email domains allowed to sign in (e.g., 'example.com,corp.io'). Matches any provider's verified email. Leave empty only when another allowlist (allowed_users, allowed_emails) is set or unsafe_allow_all_users is true."
+  description = "Comma-separated list of email domains allowed to sign in (e.g., 'example.com,corp.io'). Matches any provider's verified email. Leave empty only when another allowlist (allowed_users, allowed_emails, allowed_github_orgs) is set or unsafe_allow_all_users is true."
   type        = string
   default     = ""
 }
 
 variable "allowed_emails" {
   description = "Comma-separated list of exact email addresses allowed to sign in, matched case-insensitively against any provider's verified email. Use this for individual users on shared domains (e.g. one person@gmail.com) where allowed_email_domains would be too broad. Leave empty only when another allowlist is set or unsafe_allow_all_users is true."
+  type        = string
+  default     = ""
+}
+
+variable "allowed_github_orgs" {
+  description = "Comma-separated list of GitHub organization logins whose active members are allowed to sign in. The signing-in user's OAuth token is checked against GitHub's membership API at sign-in (read:org is requested only when this is set) and requires GitHub App Organization permissions: Members read-only. Leave empty only when another allowlist is set or unsafe_allow_all_users is true."
   type        = string
   default     = ""
 }

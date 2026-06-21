@@ -3,12 +3,18 @@ import type { JWT } from "next-auth/jwt";
 import GitHubProvider from "next-auth/providers/github";
 import type { GithubEmail, GithubProfile } from "next-auth/providers/github";
 import GoogleProvider from "next-auth/providers/google";
+import { DEFAULT_APP_NAME } from "@open-inspect/shared";
 import {
+  type AccessAllowReason,
   type AccessControlConfig,
-  checkAccessAllowed,
+  getAccessAllowReason,
   parseAllowlist,
   parseBooleanEnv,
 } from "./access-control";
+import {
+  checkGitHubOrganizationAccess,
+  type GitHubOrganizationAccessResult,
+} from "./github-org-membership";
 
 export async function getVerifiedPrimaryGitHubEmail(
   accessToken: string | undefined
@@ -55,9 +61,20 @@ declare module "next-auth/jwt" {
   }
 }
 
+export const BASE_GITHUB_OAUTH_SCOPE = "read:user user:email repo";
+
+export function buildGitHubOAuthScope(
+  allowedOrganizations = parseAllowlist(process.env.ALLOWED_GITHUB_ORGS)
+): string {
+  return allowedOrganizations.length > 0
+    ? `${BASE_GITHUB_OAUTH_SCOPE} read:org`
+    : BASE_GITHUB_OAUTH_SCOPE;
+}
+
 /**
- * Decide whether a sign-in attempt is allowed. Pure and exported so the policy
- * is unit-testable — NextAuth's inline signIn callback otherwise can't be reached.
+ * Resolve the static (synchronous) allow reason for a sign-in attempt, or null
+ * when the static allowlists don't admit it. Pure and exported so the policy is
+ * unit-testable — NextAuth's inline signIn callback otherwise can't be reached.
  *
  * - GitHub: the email was already resolved to the verified primary in the
  *   provider's userinfo override, so only the allowlist gate applies.
@@ -67,13 +84,17 @@ declare module "next-auth/jwt" {
  *   security-sensitive check in the sign-in path. `email_verified` is normalized
  *   defensively — boolean `true` or a case-insensitive "true" string — because
  *   Google has returned the string form in some flows. Anything else fails closed.
+ *
+ * GitHub organization membership is intentionally NOT resolved here: it needs an
+ * async call to GitHub's API, so the signIn callback applies it as a fallback
+ * when this returns null.
  */
-export function buildSignInDecision(args: {
+export function getStaticSignInReason(args: {
   provider: string | undefined;
   profile: Profile | undefined;
   email: string | null | undefined;
   config: AccessControlConfig;
-}): boolean {
+}): AccessAllowReason | null {
   const { provider, profile, email, config } = args;
 
   if (provider === "google") {
@@ -82,14 +103,14 @@ export function buildSignInDecision(args: {
       googleProfile?.email_verified === true ||
       String(googleProfile?.email_verified).toLowerCase() === "true";
     if (!emailVerified) {
-      return false;
+      return null;
     }
-    return checkAccessAllowed(config, { email: email ?? undefined });
+    return getAccessAllowReason(config, { email: email ?? undefined });
   }
 
   // GitHub (default).
   const githubProfile = profile as { login?: string } | undefined;
-  return checkAccessAllowed(config, {
+  return getAccessAllowReason(config, {
     githubUsername: githubProfile?.login,
     email: email ?? undefined,
   });
@@ -179,13 +200,35 @@ export function applySessionUser(session: Session, token: JWT): Session {
   return session;
 }
 
+function logSignInDecision(
+  login: string | undefined,
+  decision: "allow" | "deny",
+  reason: string
+): void {
+  console.info("[auth] sign-in decision", {
+    login: login ?? null,
+    decision,
+    reason,
+  });
+}
+
+function getOrgMembershipDecisionReason(orgMembership: GitHubOrganizationAccessResult): string {
+  if (orgMembership.allowed) {
+    return "org_membership";
+  }
+
+  return orgMembership.reason === "unavailable"
+    ? "org_membership_unavailable"
+    : "org_membership_denied";
+}
+
 const providers: NextAuthOptions["providers"] = [
   GitHubProvider<GithubProfile>({
     clientId: process.env.GITHUB_CLIENT_ID!,
     clientSecret: process.env.GITHUB_CLIENT_SECRET!,
     authorization: {
       params: {
-        scope: "read:user user:email repo",
+        scope: buildGitHubOAuthScope(),
       },
     },
     userinfo: {
@@ -227,15 +270,49 @@ export const authOptions: NextAuthOptions = {
         allowedDomains: parseAllowlist(process.env.ALLOWED_EMAIL_DOMAINS),
         allowedUsers: parseAllowlist(process.env.ALLOWED_USERS),
         allowedEmails: parseAllowlist(process.env.ALLOWED_EMAILS),
+        allowedOrganizations: parseAllowlist(process.env.ALLOWED_GITHUB_ORGS),
         unsafeAllowAllUsers: parseBooleanEnv(process.env.UNSAFE_ALLOW_ALL_USERS),
       };
 
-      return buildSignInDecision({
-        provider: account?.provider,
+      const provider = account?.provider;
+      const githubProfile = profile as { login?: string } | undefined;
+
+      // Static, synchronous allowlist gate. Provider-aware: Google requires a
+      // verified email before any email-based match (see getStaticSignInReason).
+      const staticReason = getStaticSignInReason({
+        provider,
         profile,
         email: user.email,
         config,
       });
+      if (staticReason) {
+        logSignInDecision(githubProfile?.login, "allow", staticReason);
+        return true;
+      }
+
+      // GitHub organization membership fallback. Org membership is a GitHub
+      // concept and the async check calls GitHub's API with the OAuth token, so
+      // it never runs for Google sign-ins or when no orgs are configured (fail
+      // closed).
+      const allowedOrganizations = config.allowedOrganizations ?? [];
+      if (provider === "google" || allowedOrganizations.length === 0) {
+        logSignInDecision(githubProfile?.login, "deny", "no_matching_policy");
+        return false;
+      }
+
+      const orgMembership = await checkGitHubOrganizationAccess({
+        accessToken: account?.access_token,
+        allowedOrganizations,
+        userAgent: process.env.NEXT_PUBLIC_APP_NAME?.trim() || DEFAULT_APP_NAME,
+      });
+
+      logSignInDecision(
+        githubProfile?.login,
+        orgMembership.allowed ? "allow" : "deny",
+        getOrgMembershipDecisionReason(orgMembership)
+      );
+
+      return orgMembership.allowed;
     },
     async jwt({ token, account, profile }) {
       return applyJwtClaims(token, account, profile);

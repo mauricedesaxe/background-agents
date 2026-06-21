@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { parseAllowlist, parseBooleanEnv, checkAccessAllowed } from "./access-control";
+import {
+  parseAllowlist,
+  parseBooleanEnv,
+  checkAccessAllowed,
+  getAccessAllowReason,
+} from "./access-control";
 
 describe("parseAllowlist", () => {
   it("returns empty array for undefined", () => {
@@ -87,6 +92,29 @@ describe("checkAccessAllowed", () => {
       expect(checkAccessAllowed(config, { email: "listed@gmail.com" })).toBe(true);
       expect(checkAccessAllowed(config, { email: "other@gmail.com" })).toBe(false);
       expect(checkAccessAllowed(config, {})).toBe(false);
+    });
+  });
+
+  describe("when only allowedOrganizations is set", () => {
+    // Org membership is resolved asynchronously (checkGitHubOrganizationAccess),
+    // never by this synchronous policy — so it can only deny here, while still
+    // refusing to fall back to unsafe allow-all.
+    const config = {
+      allowedDomains: [],
+      allowedUsers: [],
+      allowedEmails: [],
+      allowedOrganizations: ["acme"],
+      unsafeAllowAllUsers: false,
+    };
+
+    it("denies synchronously — membership is checked asynchronously elsewhere", () => {
+      expect(checkAccessAllowed(config, {})).toBe(false);
+      expect(checkAccessAllowed(config, { githubUsername: "anyuser" })).toBe(false);
+      expect(checkAccessAllowed(config, { email: "anyone@example.com" })).toBe(false);
+    });
+
+    it("keeps the unsafe allow-all gate closed because an allowlist is configured", () => {
+      expect(checkAccessAllowed({ ...config, unsafeAllowAllUsers: true }, {})).toBe(false);
     });
   });
 
@@ -218,6 +246,30 @@ describe("checkAccessAllowed", () => {
     });
   });
 
+  describe("when allowedUsers, allowedDomains, and allowedOrganizations are set (OR logic)", () => {
+    const config = {
+      allowedDomains: ["company.com"],
+      allowedUsers: ["specialuser"],
+      allowedEmails: [],
+      allowedOrganizations: ["acme"],
+      unsafeAllowAllUsers: false,
+    };
+
+    it("allows users matching a synchronous list (username or domain)", () => {
+      expect(checkAccessAllowed(config, { githubUsername: "specialuser" })).toBe(true);
+      expect(checkAccessAllowed(config, { email: "user@company.com" })).toBe(true);
+    });
+
+    it("denies users matching none of the synchronous lists (org checked elsewhere)", () => {
+      expect(
+        checkAccessAllowed(config, {
+          githubUsername: "randomuser",
+          email: "user@other.com",
+        })
+      ).toBe(false);
+    });
+  });
+
   describe("when unsafeAllowAllUsers is true with populated allowlists", () => {
     const config = {
       allowedDomains: ["company.com"],
@@ -234,6 +286,21 @@ describe("checkAccessAllowed", () => {
     it("denies users not in the allowlist", () => {
       expect(checkAccessAllowed(config, { githubUsername: "randomuser" })).toBe(false);
       expect(checkAccessAllowed(config, { email: "user@other.com" })).toBe(false);
+    });
+
+    it("does not bypass a populated organization allowlist", () => {
+      const orgConfig = {
+        allowedDomains: [],
+        allowedUsers: [],
+        allowedEmails: [],
+        allowedOrganizations: ["acme"],
+        unsafeAllowAllUsers: true,
+      };
+
+      // A populated org allowlist keeps the unsafe allow-all gate closed; the
+      // synchronous check then denies (membership is resolved asynchronously).
+      expect(checkAccessAllowed(orgConfig, {})).toBe(false);
+      expect(checkAccessAllowed(orgConfig, { githubUsername: "anyuser" })).toBe(false);
     });
   });
 
@@ -254,5 +321,45 @@ describe("checkAccessAllowed", () => {
       expect(checkAccessAllowed(config, { email: "user@company.com" })).toBe(true);
       expect(checkAccessAllowed(config, { email: "user@partner.org" })).toBe(true);
     });
+  });
+});
+
+describe("getAccessAllowReason", () => {
+  it("returns the matching allow reason", () => {
+    expect(
+      getAccessAllowReason(
+        {
+          allowedDomains: [],
+          allowedUsers: ["alice"],
+          allowedEmails: [],
+          unsafeAllowAllUsers: false,
+        },
+        { githubUsername: "Alice" }
+      )
+    ).toBe("username_allowlist");
+
+    expect(
+      getAccessAllowReason(
+        {
+          allowedDomains: [],
+          allowedUsers: [],
+          allowedEmails: ["pm@gmail.com"],
+          unsafeAllowAllUsers: false,
+        },
+        { email: "PM@gmail.com" }
+      )
+    ).toBe("email_allowlist");
+
+    expect(
+      getAccessAllowReason(
+        {
+          allowedDomains: ["company.com"],
+          allowedUsers: [],
+          allowedEmails: [],
+          unsafeAllowAllUsers: false,
+        },
+        { email: "user@company.com" }
+      )
+    ).toBe("email_domain_allowlist");
   });
 });
