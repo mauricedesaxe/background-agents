@@ -1,17 +1,27 @@
 export {
   addReaction,
+  authTest,
   getChannelInfo,
   getPermalink,
   getThreadMessages,
   getUserInfo,
+  listChannels,
   openView,
+  postEphemeral,
   postMessage,
   publishView,
   removeReaction,
   updateMessage,
   verifySlackSignature,
 } from "./client";
-export type { SlackChannelInfo, SlackEnvelope, SlackThreadMessage, SlackUser } from "./client";
+export type {
+  SlackAuthTestResult,
+  SlackChannelInfo,
+  SlackChannelListing,
+  SlackEnvelope,
+  SlackThreadMessage,
+  SlackUser,
+} from "./client";
 export {
   applyMentionPolicy,
   sanitizeAgentText,

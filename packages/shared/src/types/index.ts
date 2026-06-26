@@ -763,7 +763,8 @@ export type AutomationTriggerType =
   | "github_event"
   | "linear_event"
   | "sentry"
-  | "webhook";
+  | "webhook"
+  | "slack_event";
 
 export type AutomationRunStatus = "starting" | "running" | "completed" | "failed" | "skipped";
 
