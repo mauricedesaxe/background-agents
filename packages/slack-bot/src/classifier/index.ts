@@ -7,13 +7,10 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import type { Env, RepoConfig, ThreadContext, ClassificationResult } from "../types";
-import {
-  getAvailableRepos,
-  buildRepoDescriptions,
-  getReposByChannel,
-  getRoutingRules,
-} from "./repos";
-import { matchRoutingRules, type ConfidenceLevel } from "@open-inspect/shared";
+import { getAvailableRepos, buildRepoDescriptions, getReposByChannel } from "./repos";
+import { resolveRoutingRuleTargets } from "./routing";
+import { escapeMrkdwnText, type ConfidenceLevel } from "@open-inspect/shared";
+import { targetId, targetLabel, type SlackSessionTarget } from "../targets";
 import { createLogger } from "../logger";
 
 const log = createLogger("classifier");
@@ -191,53 +188,43 @@ export class RepoClassifier {
   }
 
   /**
-   * Match the message against the workspace's Slack routing rules.
+   * Match the message against the workspace's Slack routing rules (resolution
+   * lives in {@link resolveRoutingRuleTargets}).
    *
    * Returns a high-confidence result when exactly one accessible target matches,
    * a clarification result when several distinct targets match (so the user
    * picks rather than the bot guessing), or `null` when no rule applies — in
    * which case the caller falls through to channel association and the LLM.
-   *
-   * Rules whose target is not in the accessible repo list are skipped, so a
-   * stale rule never routes to an inaccessible repository.
    */
   private async classifyByRoutingRules(
     message: string,
     repos: RepoConfig[],
     traceId?: string
   ): Promise<ClassificationResult | null> {
-    const matched = matchRoutingRules(message, await getRoutingRules(this.env, traceId));
-    if (matched.length === 0) return null;
-
-    const targets = new Map<string, { repo: RepoConfig; keyword: string }>();
-    for (const rule of matched) {
-      const repo = repos.find(
-        (r) => r.fullName.toLowerCase() === rule.target || r.id.toLowerCase() === rule.target
-      );
-      if (repo && !targets.has(repo.id)) {
-        targets.set(repo.id, { repo, keyword: rule.keyword });
-      }
-    }
-
-    const resolved = [...targets.values()];
+    const resolved = await resolveRoutingRuleTargets(this.env, message, repos, traceId);
     if (resolved.length === 0) return null;
 
     if (resolved.length === 1) {
-      const { repo, keyword } = resolved[0];
-      log.info("classifier.routing_rule_match", { trace_id: traceId, repo_id: repo.id, keyword });
+      const { target, keyword } = resolved[0];
+      log.info("classifier.routing_rule_match", {
+        trace_id: traceId,
+        target_id: targetId(target),
+        keyword,
+      });
       return {
-        repo,
+        target,
         confidence: "high",
-        reasoning: `Matched routing rule "${keyword}" → ${repo.fullName}`,
+        // Reasoning renders as mrkdwn; keyword and label are both user text.
+        reasoning: `Matched routing rule "${escapeMrkdwnText(keyword)}" → ${escapeMrkdwnText(targetLabel(target))}`,
         needsClarification: false,
       };
     }
 
     return {
-      repo: null,
+      target: null,
       confidence: "medium",
-      reasoning: "Multiple routing rules matched; asking which repository to use.",
-      alternatives: resolved.map((t) => t.repo),
+      reasoning: "Multiple routing rules matched; asking which one to use.",
+      alternatives: resolved.map((t) => t.target),
       needsClarification: true,
     };
   }
@@ -256,29 +243,31 @@ export class RepoClassifier {
     // If no repos available, return immediately
     if (repos.length === 0) {
       return {
-        repo: null,
+        target: null,
         confidence: "low",
         reasoning: "No repositories are currently available.",
         needsClarification: true,
       };
     }
 
+    // Deterministic routing rules (explicit keyword → repo or environment) take
+    // precedence over everything below — including the single-repo shortcut,
+    // which would otherwise make environment-targeted rules unreachable in
+    // one-repo workspaces — but never override an active thread (handled before
+    // classify is called).
+    const routed = await this.classifyByRoutingRules(message, repos, traceId);
+    if (routed) {
+      return routed;
+    }
+
     // If only one repo, skip classification
     if (repos.length === 1) {
       return {
-        repo: repos[0],
+        target: { kind: "repository", repo: repos[0] },
         confidence: "high",
         reasoning: "Only one repository is available.",
         needsClarification: false,
       };
-    }
-
-    // Deterministic routing rules (explicit keyword → repo) take precedence over
-    // channel association and LLM inference, but never override an active thread
-    // (handled before classify is called).
-    const routed = await this.classifyByRoutingRules(message, repos, traceId);
-    if (routed) {
-      return routed;
     }
 
     // Check for channel-specific repos first
@@ -286,7 +275,7 @@ export class RepoClassifier {
       const channelRepos = await getReposByChannel(this.env, context.channelId, traceId);
       if (channelRepos.length === 1) {
         return {
-          repo: channelRepos[0],
+          target: { kind: "repository", repo: channelRepos[0] },
           confidence: "high",
           reasoning: `Channel is associated with repository ${channelRepos[0].fullName}`,
           needsClarification: false,
@@ -330,7 +319,7 @@ export class RepoClassifier {
       }
 
       // Find alternative repos
-      const alternatives: RepoConfig[] = [];
+      const alternatives: SlackSessionTarget[] = [];
       for (const altId of llmResult.alternatives) {
         const altRepo = repos.find(
           (r) =>
@@ -338,12 +327,12 @@ export class RepoClassifier {
             r.fullName.toLowerCase() === altId.toLowerCase()
         );
         if (altRepo && altRepo.id !== matchedRepo?.id) {
-          alternatives.push(altRepo);
+          alternatives.push({ kind: "repository", repo: altRepo });
         }
       }
 
       return {
-        repo: matchedRepo,
+        target: matchedRepo ? { kind: "repository", repo: matchedRepo } : null,
         confidence: llmResult.confidence,
         reasoning: llmResult.reasoning,
         alternatives: alternatives.length > 0 ? alternatives : undefined,
@@ -362,7 +351,7 @@ export class RepoClassifier {
       });
 
       return {
-        repo: null,
+        target: null,
         confidence: "low",
         reasoning:
           "Could not classify repository from structured model output. Please select a repository.",
