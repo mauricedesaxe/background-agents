@@ -5,7 +5,9 @@
  * wrapping existing GitHub API functions.
  */
 
-import type { InstallationRepository } from "@open-inspect/shared";
+import { z } from "zod";
+import { toDisplayStatus, type InstallationRepository } from "@open-inspect/shared";
+import type { PullRequestStatus } from "@open-inspect/shared";
 import type {
   SourceControlProvider,
   SourceControlAuthContext,
@@ -14,13 +16,15 @@ import type {
   RepositoryInfo,
   CreatePullRequestConfig,
   CreatePullRequestResult,
+  GetPullRequestConfig,
+  PullRequestSnapshot,
   BuildManualPullRequestUrlConfig,
   BuildGitPushSpecConfig,
   GitPushSpec,
   GitPushAuthContext,
   CredentialHelperAuth,
 } from "../types";
-import { SourceControlProviderError } from "../errors";
+import { SourceControlProviderError, parseProviderResponse } from "../errors";
 import {
   getCachedInstallationToken,
   getCachedInstallationTokenWithExpiry,
@@ -38,6 +42,68 @@ function extractHttpStatus(error: unknown): number | undefined {
     return error.status;
   }
   return undefined;
+}
+
+/** GitHub pull-request state fields as the REST API reports them. */
+interface GitHubPullRequestStateFields {
+  /** GitHub's wire state is strictly open/closed; merged is a separate flag. */
+  state: "open" | "closed";
+  draft?: boolean | null;
+  merged?: boolean | null;
+}
+
+/**
+ * Pure mapping from GitHub's PR state fields to the stored status. GitHub
+ * models merged as state "closed" + merged true; terminal states win over a
+ * stale draft flag (isDraft is only meaningful while open). Shared by
+ * createPullRequest (user-authed) and getPullRequest (app-authed).
+ */
+export function deriveGitHubPullRequestStatus(
+  data: GitHubPullRequestStateFields
+): PullRequestStatus {
+  if (data.merged) return { lifecycleState: "merged", isDraft: false };
+  if (data.state === "closed") return { lifecycleState: "closed", isDraft: false };
+  return { lifecycleState: "open", isDraft: data.draft === true };
+}
+
+/**
+ * Wire schema of a GitHub REST pull request, limited to the fields we read.
+ * `state` is a strict enum — an unexpected value is schema drift and fails
+ * the parse rather than being coerced into an apparently-valid status.
+ */
+const githubPullResponseSchema = z.object({
+  number: z.number(),
+  html_url: z.string(),
+  url: z.string(),
+  state: z.enum(["open", "closed"]),
+  draft: z.boolean().nullable().optional(),
+  merged: z.boolean().nullable().optional(),
+  updated_at: z.string().optional(),
+  head: z.object({ ref: z.string(), sha: z.string().optional() }),
+  base: z.object({
+    ref: z.string(),
+    repo: z
+      .object({
+        id: z.number().optional(),
+        name: z.string().optional(),
+        owner: z.object({ login: z.string().optional() }).optional(),
+      })
+      .nullable()
+      .optional(),
+  }),
+});
+
+/** Wire shape of GET /repositories/{id}, limited to the location fields. */
+const githubRepositoryLocationSchema = z.object({
+  name: z.string(),
+  owner: z.object({ login: z.string() }),
+});
+
+/** Parse GitHub's ISO-8601 updated_at into epoch ms; undefined when absent/invalid. */
+function parseProviderUpdatedAt(updatedAt: string | undefined): number | undefined {
+  if (!updatedAt) return undefined;
+  const parsed = Date.parse(updatedAt);
+  return Number.isNaN(parsed) ? undefined : parsed;
 }
 
 /**
@@ -144,39 +210,23 @@ export class GitHubSourceControlProvider implements SourceControlProvider {
       );
     }
 
-    const data = (await response.json()) as {
-      number: number;
-      html_url: string;
-      url: string;
-      state: string;
-      draft: boolean;
-      merged: boolean;
-      head: { ref: string };
-      base: { ref: string };
-    };
+    const data = await parseProviderResponse(
+      response,
+      githubPullResponseSchema,
+      "Failed to create PR"
+    );
 
-    // Map GitHub state to our state type
-    // GitHub uses state: "closed" + merged: true for merged PRs
-    let state: CreatePullRequestResult["state"];
-    if (data.draft) {
-      state = "draft";
-    } else if (data.merged) {
-      state = "merged";
-    } else if (data.state === "open") {
-      state = "open";
-    } else if (data.state === "closed") {
-      state = "closed";
-    } else {
-      state = "open"; // Default to open for unknown states
-    }
-
+    const repositoryExternalId = data.base.repo?.id;
     const result: CreatePullRequestResult = {
       id: data.number,
       webUrl: data.html_url,
       apiUrl: data.url,
-      state,
+      state: toDisplayStatus(deriveGitHubPullRequestStatus(data)),
       sourceBranch: data.head.ref,
       targetBranch: data.base.ref,
+      headSha: data.head.sha,
+      repositoryExternalId:
+        repositoryExternalId !== undefined ? String(repositoryExternalId) : undefined,
     };
 
     // Add labels if requested
@@ -202,6 +252,133 @@ export class GitHubSourceControlProvider implements SourceControlProvider {
     }
 
     return result;
+  }
+
+  /**
+   * Read the current state of a pull request using GitHub App credentials.
+   *
+   * On a 404 with a known stable repo id, re-resolves the repository's
+   * current owner/name by id and retries once (rename/transfer tolerance).
+   */
+  async getPullRequest(config: GetPullRequestConfig): Promise<PullRequestSnapshot> {
+    if (!this.appConfig) {
+      throw new SourceControlProviderError(
+        "GitHub App not configured - cannot get pull request",
+        "permanent"
+      );
+    }
+
+    let token: string;
+    try {
+      token = await getCachedInstallationToken(this.appConfig, {
+        cacheStore: this.cacheStore,
+        userAgent: this.userAgent,
+      });
+    } catch (error) {
+      throw SourceControlProviderError.fromFetchError(
+        `Failed to generate GitHub App token: ${error instanceof Error ? error.message : String(error)}`,
+        error,
+        extractHttpStatus(error)
+      );
+    }
+
+    let response = await this.fetchPullRequest(token, config.owner, config.name, config.number);
+
+    if (response.status === 404 && config.repositoryExternalId) {
+      const resolved = await this.resolveRepositoryLocationById(token, config.repositoryExternalId);
+      if (resolved) {
+        response = await this.fetchPullRequest(token, resolved.owner, resolved.name, config.number);
+      }
+    }
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw SourceControlProviderError.fromFetchError(
+        `Failed to get pull request: ${response.status} ${error}`,
+        new Error(error),
+        response.status
+      );
+    }
+
+    const data = await parseProviderResponse(
+      response,
+      githubPullResponseSchema,
+      "Failed to get pull request"
+    );
+    const status = deriveGitHubPullRequestStatus(data);
+    const repositoryExternalId = data.base.repo?.id;
+
+    return {
+      number: data.number,
+      url: data.html_url,
+      lifecycleState: status.lifecycleState,
+      isDraft: status.isDraft,
+      headBranch: data.head.ref,
+      baseBranch: data.base.ref,
+      headSha: data.head.sha,
+      // The response's base repo is authoritative for the current location.
+      repoOwner: data.base.repo?.owner?.login ?? config.owner,
+      repoName: data.base.repo?.name ?? config.name,
+      repositoryExternalId:
+        repositoryExternalId !== undefined
+          ? String(repositoryExternalId)
+          : config.repositoryExternalId,
+      providerUpdatedAt: parseProviderUpdatedAt(data.updated_at),
+    };
+  }
+
+  private fetchPullRequest(
+    token: string,
+    owner: string,
+    name: string,
+    number: number
+  ): Promise<Response> {
+    return fetchWithTimeout(`${GITHUB_API_BASE}/repos/${owner}/${name}/pulls/${number}`, {
+      headers: {
+        Accept: "application/vnd.github.v3+json",
+        Authorization: `Bearer ${token}`,
+        "User-Agent": this.userAgent,
+      },
+    });
+  }
+
+  /**
+   * Resolve a repository's current owner/name from its stable numeric id.
+   *
+   * GET /repositories/{id} is GitHub's stable-but-undocumented by-id alias of
+   * GET /repos/{owner}/{name} (identical response schema; acknowledged by
+   * GitHub staff). Acceptable here because this is a best-effort repair path:
+   * if the endpoint ever disappears, resolution degrades to "not resolved"
+   * and the caller surfaces the original 404.
+   */
+  private async resolveRepositoryLocationById(
+    token: string,
+    repositoryExternalId: string
+  ): Promise<{ owner: string; name: string } | null> {
+    const response = await fetchWithTimeout(
+      `${GITHUB_API_BASE}/repositories/${encodeURIComponent(repositoryExternalId)}`,
+      {
+        headers: {
+          Accept: "application/vnd.github.v3+json",
+          Authorization: `Bearer ${token}`,
+          "User-Agent": this.userAgent,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      return null;
+    }
+
+    // Best-effort repair path: a malformed resolution body degrades to "not
+    // resolved" so the caller surfaces the original 404 instead.
+    const parsed = githubRepositoryLocationSchema.safeParse(
+      await response.json().catch(() => null)
+    );
+    if (!parsed.success) {
+      return null;
+    }
+    return { owner: parsed.data.owner.login, name: parsed.data.name };
   }
 
   /**
