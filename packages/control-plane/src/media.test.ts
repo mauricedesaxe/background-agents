@@ -29,7 +29,14 @@ describe("media helpers", () => {
     expect(isSupportedScreenshotMimeType("image/png")).toBe(true);
     expect(isSupportedScreenshotMimeType("image/jpeg")).toBe(true);
     expect(isSupportedScreenshotMimeType("image/webp")).toBe(true);
+    expect(isSupportedScreenshotMimeType("image/svg+xml")).toBe(true);
     expect(isSupportedScreenshotMimeType("image/gif")).toBe(false);
+  });
+
+  it("builds an svg object key with a .svg extension", () => {
+    expect(buildMediaObjectKey("session-1", "artifact-1", "svg")).toBe(
+      "sessions/session-1/media/artifact-1.svg"
+    );
   });
 
   it("accepts only supported video mime types", () => {
@@ -149,6 +156,43 @@ describe("media helpers", () => {
       expect(detectScreenshotFileType(bytes)).toEqual(expected);
     }
   );
+
+  it.each([
+    ["bare svg root", "<svg xmlns='http://www.w3.org/2000/svg'></svg>"],
+    [
+      "xml prolog then svg",
+      "<?xml version='1.0' encoding='UTF-8'?>\n<svg xmlns='http://www.w3.org/2000/svg'/>",
+    ],
+    ["leading whitespace", "\n\t  <svg></svg>"],
+    ["self-closing root", "<svg/>"],
+    ["uppercase tag", "<SVG></SVG>"],
+  ])("detects text-based SVG (%s)", (_label, markup) => {
+    const bytes = new TextEncoder().encode(markup);
+    expect(detectScreenshotFileType(bytes)).toEqual({
+      mimeType: "image/svg+xml",
+      extension: "svg",
+    });
+  });
+
+  it("detects SVG when the payload carries a UTF-8 BOM", () => {
+    const body = new TextEncoder().encode("<svg></svg>");
+    const withBom = Uint8Array.from([0xef, 0xbb, 0xbf, ...body]);
+    expect(detectScreenshotFileType(withBom)).toEqual({
+      mimeType: "image/svg+xml",
+      extension: "svg",
+    });
+  });
+
+  it("does not misdetect binary data containing the <svg byte sequence as SVG", () => {
+    // "<svg" bytes embedded in an otherwise-binary payload (contains a NUL byte).
+    const binary = Uint8Array.from([0x00, 0x01, 0x3c, 0x73, 0x76, 0x67, 0x00, 0x02]);
+    expect(detectScreenshotFileType(binary)).toBeNull();
+  });
+
+  it("does not treat plain text without an svg root as a screenshot", () => {
+    const bytes = new TextEncoder().encode("<html><body>not a diagram</body></html>");
+    expect(detectScreenshotFileType(bytes)).toBeNull();
+  });
 
   it("parses optional booleans with whitespace and casing", () => {
     expect(parseOptionalBoolean(" TRUE ")).toBe(true);

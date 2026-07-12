@@ -235,6 +235,55 @@ describe("useSessionSocket", () => {
     });
   });
 
+  it("hydrates SVG screenshot metadata from subscribed artifacts", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1"));
+
+    await waitFor(() => {
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+
+    const socket = FakeWebSocket.instances[0];
+    act(() => {
+      socket.open();
+    });
+
+    act(() => {
+      socket.receive(
+        createSubscribedMessage([
+          {
+            id: "artifact-svg-1",
+            type: "screenshot",
+            url: "sessions/session-1/media/artifact-svg-1.svg",
+            metadata: {
+              objectKey: "sessions/session-1/media/artifact-svg-1.svg",
+              mimeType: "image/svg+xml",
+              sizeBytes: 256,
+              caption: "Request flow diagram",
+            },
+            createdAt: 4321,
+          },
+        ])
+      );
+    });
+
+    await waitFor(() => {
+      expect(result.current.artifacts).toEqual([
+        {
+          id: "artifact-svg-1",
+          type: "screenshot",
+          url: "sessions/session-1/media/artifact-svg-1.svg",
+          metadata: expect.objectContaining({
+            objectKey: "sessions/session-1/media/artifact-svg-1.svg",
+            mimeType: "image/svg+xml",
+            sizeBytes: 256,
+            caption: "Request flow diagram",
+          }),
+          createdAt: 4321,
+        },
+      ]);
+    });
+  });
+
   it("revalidates the sidebar session list on title updates", async () => {
     const { result } = renderHook(() => useSessionSocket("session-1"));
 

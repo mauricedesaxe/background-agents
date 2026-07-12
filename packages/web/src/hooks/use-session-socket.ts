@@ -188,6 +188,7 @@ const MEDIA_MIME_TYPES = new Set<MediaMimeType>([
   "image/png",
   "image/jpeg",
   "image/webp",
+  "image/svg+xml",
   "video/mp4",
 ]);
 

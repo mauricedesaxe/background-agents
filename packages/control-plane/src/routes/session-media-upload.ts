@@ -5,6 +5,7 @@ import {
   detectScreenshotFileType,
   detectVideoFileType,
   isMultipartFile,
+  isSupportedScreenshotMimeType,
   isSupportedVideoMimeType,
   parseDimensions,
   parseOptionalBoolean,
@@ -74,12 +75,7 @@ async function handleMediaUpload(
     return error(`Screenshot uploads must be ${SCREENSHOT_MAX_BYTES} bytes or smaller`, 400);
   }
 
-  if (
-    fileEntry.type &&
-    fileEntry.type !== "image/png" &&
-    fileEntry.type !== "image/jpeg" &&
-    fileEntry.type !== "image/webp"
-  ) {
+  if (fileEntry.type && !isSupportedScreenshotMimeType(fileEntry.type)) {
     return error("Unsupported screenshot MIME type", 400);
   }
 

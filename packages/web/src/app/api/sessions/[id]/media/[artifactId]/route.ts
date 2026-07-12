@@ -46,6 +46,10 @@ export async function GET(
       "Content-Range",
       "Accept-Ranges",
       "ETag",
+      // Preserve the SVG hardening headers set upstream so a directly-opened media URL
+      // stays sandboxed (SVG can carry inline script).
+      "Content-Security-Policy",
+      "X-Content-Type-Options",
     ]) {
       const headerValue = response.headers.get(headerName);
       if (headerValue) {

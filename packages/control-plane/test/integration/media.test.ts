@@ -4,6 +4,9 @@ import { generateInternalToken } from "../../src/auth/internal";
 import { initNamedSession, queryDO, seedMessage, seedSandboxAuthHash } from "./helpers";
 
 const PNG_SIGNATURE = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const SVG_BYTES = new TextEncoder().encode(
+  "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><rect width='10' height='10'/></svg>"
+);
 const MP4_BYTES = Uint8Array.from([
   0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0x00, 0x00, 0x02, 0x00,
   0x69, 0x73, 0x6f, 0x6d, 0x69, 0x73, 0x6f, 0x32,
@@ -152,6 +155,124 @@ describe("session media routes", () => {
       messageId: "msg-1",
       url: body.objectKey,
     });
+  });
+
+  it("uploads an SVG diagram as a screenshot artifact and stores it with the svg mime type", async () => {
+    const sessionName = `media-svg-upload-${Date.now()}`;
+    const { stub } = await initNamedSession(sessionName);
+    await seedSandboxAuthHash(stub, {
+      authToken: "sandbox-svg-token",
+      sandboxId: "sandbox-1",
+    });
+    await seedProcessingMessage(stub, "msg-1");
+
+    const formData = new FormData();
+    formData.append("file", new File([SVG_BYTES], "diagram.svg", { type: "image/svg+xml" }));
+    formData.append("artifactType", "screenshot");
+    formData.append("caption", "Request flow diagram");
+
+    const response = await SELF.fetch(`https://test.local/sessions/${sessionName}/media`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer sandbox-svg-token",
+      },
+      body: formData,
+    });
+
+    expect(response.status).toBe(201);
+    const body = await response.json<{ artifactId: string; objectKey: string }>();
+    expect(body.objectKey).toBe(`sessions/${sessionName}/media/${body.artifactId}.svg`);
+
+    const object = await env.MEDIA_BUCKET.get(body.objectKey);
+    expect(object).not.toBeNull();
+    expect(object?.httpMetadata?.contentType).toBe("image/svg+xml");
+
+    const artifacts = await queryDO<{ type: string; metadata: string }>(
+      stub,
+      "SELECT type, metadata FROM artifacts WHERE id = ?",
+      body.artifactId
+    );
+    expect(artifacts).toHaveLength(1);
+    expect(artifacts[0].type).toBe("screenshot");
+    expect(JSON.parse(artifacts[0].metadata)).toMatchObject({
+      objectKey: body.objectKey,
+      mimeType: "image/svg+xml",
+      sizeBytes: SVG_BYTES.byteLength,
+      caption: "Request flow diagram",
+    });
+  });
+
+  it("streams a stored SVG artifact with the svg mime type and hardening headers", async () => {
+    const sessionName = `media-svg-stream-${Date.now()}`;
+    const { stub } = await initNamedSession(sessionName);
+    await seedSandboxAuthHash(stub, {
+      authToken: "sandbox-svg-stream-token",
+      sandboxId: "sandbox-1",
+    });
+    await seedProcessingMessage(stub, "msg-1");
+
+    const uploadForm = new FormData();
+    uploadForm.append("file", new File([SVG_BYTES], "diagram.svg", { type: "image/svg+xml" }));
+    uploadForm.append("artifactType", "screenshot");
+
+    const uploadResponse = await SELF.fetch(`https://test.local/sessions/${sessionName}/media`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer sandbox-svg-stream-token",
+      },
+      body: uploadForm,
+    });
+    const uploadBody = await uploadResponse.json<{ artifactId: string; objectKey: string }>();
+
+    const response = await SELF.fetch(
+      `https://test.local/sessions/${sessionName}/media/${uploadBody.artifactId}`,
+      {
+        headers: await internalAuthHeaders(),
+      }
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("image/svg+xml");
+    expect(response.headers.get("Content-Security-Policy")).toBe(
+      "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+    );
+    expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(Array.from(SVG_BYTES));
+  });
+
+  it("does not set SVG hardening headers on raster screenshots", async () => {
+    const sessionName = `media-png-headers-${Date.now()}`;
+    const { stub } = await initNamedSession(sessionName);
+    await seedSandboxAuthHash(stub, {
+      authToken: "sandbox-png-headers-token",
+      sandboxId: "sandbox-1",
+    });
+    await seedProcessingMessage(stub, "msg-1");
+
+    const uploadForm = new FormData();
+    uploadForm.append("file", new File([PNG_SIGNATURE], "shot.png", { type: "image/png" }));
+    uploadForm.append("artifactType", "screenshot");
+
+    const uploadResponse = await SELF.fetch(`https://test.local/sessions/${sessionName}/media`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer sandbox-png-headers-token",
+      },
+      body: uploadForm,
+    });
+    const uploadBody = await uploadResponse.json<{ artifactId: string; objectKey: string }>();
+
+    const response = await SELF.fetch(
+      `https://test.local/sessions/${sessionName}/media/${uploadBody.artifactId}`,
+      {
+        headers: await internalAuthHeaders(),
+      }
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("image/png");
+    expect(response.headers.get("Content-Security-Policy")).toBeNull();
+    expect(response.headers.get("X-Content-Type-Options")).toBeNull();
   });
 
   it("uploads a video and persists it on the active prompt", async () => {

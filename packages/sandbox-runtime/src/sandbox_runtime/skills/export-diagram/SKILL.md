@@ -1,14 +1,18 @@
 ---
 name: export-diagram
-description: Hand-author a tldraw .tldr file and export it to a PNG diagram, then surface it in the Open-Inspect web UI or embed it in a PR
+description: Hand-author a tldraw .tldr file and export it to a diagram (SVG for the web UI, PNG for PRs), then surface it in the Open-Inspect web UI or embed it in a PR
 ---
 
 # export-diagram
 
 Use this skill to produce a real rendered diagram (architecture, data flow, sequence, ERD,
-flowchart, wireframe) as a PNG. You hand-author a `.tldr` JSON file, export it to PNG with the
-`tldraw` CLI (bundled in the image), and then either upload it to the session web UI or commit it
-into a PR so GitHub renders it inline.
+flowchart, wireframe). You hand-author a `.tldr` JSON file, export it with the `tldraw` CLI
+(bundled in the image), and then either upload it to the session web UI or commit it into a PR so
+GitHub renders it inline.
+
+Prefer **SVG for the web UI** (`upload-media` now accepts it) — SVG renders crisply at any size and
+sidesteps the PNG rasterizer's timeout on large canvases entirely. Use **PNG for PR embeds**, since
+GitHub renders committed PNGs inline reliably.
 
 This is for genuine diagrams. For a screenshot you already have on disk, use `upload-screenshot`.
 
@@ -20,8 +24,8 @@ This is for genuine diagrams. For a screenshot you already have on disk, use `up
 - The image runs as **root**. tldraw-cli v6 already launches its browser with `--no-sandbox` and
   `--disable-setuid-sandbox` baked in, so **no extra flags or env vars are needed** — the plain
   `tldraw export ...` command works as root out of the box.
-- Output is PNG only for the web UI path (`upload-media` accepts `.png` / `.jpg` / `.webp`, not
-  SVG).
+- `upload-media` accepts `.svg`, `.png`, `.jpg`, and `.webp` for the web UI. SVG is preferred for
+  the web UI (renders at any size, no rasterizer timeout); PNG still works if you need a raster.
 
 ## When To Use It
 
@@ -298,42 +302,47 @@ Tips for bigger diagrams:
    python3 -m json.tool diagram.tldr > /dev/null
    ```
 
-3. **Export to PNG, wrapped in `timeout` so it can never hang the session.** `-o` is a
-   **directory**, not a filename; the output is named after the input (`diagram.tldr` →
-   `diagram.png`). No `--no-sandbox` flag is needed (tldraw-cli passes it). Keep `--scale` at the
-   default (omit it) — a high scale on a large canvas can make the headless renderer time out.
+3. **Export, wrapped in `timeout` so it can never hang the session.** `-o` is a **directory**, not
+   a filename; the output is named after the input (`diagram.tldr` → `diagram.svg` / `diagram.png`).
+   No `--no-sandbox` flag is needed (tldraw-cli passes it).
 
-   ```bash
-   timeout 120 tldraw export diagram.tldr -f png -o ./
-   ```
-
-   If this exits non-zero (`124` = timed out) or leaves a 0-byte `diagram.png`, the canvas is too
-   large/complex for the PNG rasterizer. **Fall back to SVG**, which renders reliably at any size:
+   **For the web UI, export SVG** — it renders at any size and never hits the rasterizer timeout:
 
    ```bash
    timeout 120 tldraw export diagram.tldr -f svg -o ./   # -> diagram.svg
    ```
 
-   SVG can't go to the web UI (`upload-media` is raster only), but it embeds cleanly in a PR (step 5b,
-   just use the `.svg` path). For the web UI specifically, instead **simplify the diagram** (fewer,
-   closer-together shapes) and re-export PNG.
-
-4. **Confirm the output exists and is non-empty** before claiming success (PNG, or SVG if you fell
-   back):
+   **For a PR embed, export PNG** (GitHub renders committed PNGs inline). Keep `--scale` at the
+   default (omit it) — a high scale on a large canvas can make the headless PNG renderer time out:
 
    ```bash
-   ls -l diagram.png diagram.svg 2>/dev/null
+   timeout 120 tldraw export diagram.tldr -f png -o ./   # -> diagram.png
+   ```
+
+   If the PNG export exits non-zero (`124` = timed out) or leaves a 0-byte `diagram.png`, the canvas
+   is too large/complex for the PNG rasterizer. For a PR you can use the SVG path instead (step 5b
+   works with `.svg`). Otherwise **simplify the diagram** (fewer, closer-together shapes) and
+   re-export.
+
+4. **Confirm the output exists and is non-empty** before claiming success (the SVG or PNG you
+   exported):
+
+   ```bash
+   ls -l diagram.svg diagram.png 2>/dev/null
    ```
 
 5. **Surface it** one of two ways (below).
 
 ### (a) Web UI
 
+Prefer the SVG you exported — it renders as a media card exactly like a raster screenshot:
+
 ```bash
-upload-media diagram.png --caption "Client to server request flow"
+upload-media diagram.svg --caption "Client to server request flow"
 ```
 
-Report the returned `artifactId`. `upload-media` is PNG/JPG/WEBP only, which is why we export PNG.
+Report the returned `artifactId`. `upload-media` accepts `.svg`, `.png`, `.jpg`, and `.webp`; SVG is
+preferred for the web UI. If you only have a PNG, `upload-media diagram.png ...` works the same way.
 
 ### (b) PR embed
 
@@ -357,13 +366,15 @@ Then in the PR description:
 
 The task is not complete until either:
 
-- **Web UI:** `upload-media` returned JSON containing an `artifactId`, and you reported it; or
+- **Web UI:** `upload-media` returned JSON containing an `artifactId`, and you reported it (SVG
+  preferred, PNG accepted); or
 - **PR:** `docs/diagrams/diagram.png` exists, is committed, and the PR body references it with a
   relative `![...](docs/diagrams/diagram.png)` path.
 
 ## Guardrails
 
-- Do not claim the diagram was created unless the PNG file actually exists on disk (`ls -l` it).
+- Do not claim the diagram was created unless the exported file (`diagram.svg` or `diagram.png`)
+  actually exists on disk (`ls -l` it).
 - Do not claim it was uploaded unless `upload-media` returned an `artifactId`.
 - If `tldraw export` fails (e.g. `migrationFailed`, or a JSON/index error), report the actual error
   and fix the file — do not retry silently. A `migrationFailed` / `split` error almost always means

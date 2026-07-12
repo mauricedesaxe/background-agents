@@ -11,6 +11,7 @@ const SCREENSHOT_EXTENSIONS = {
   "image/png": "png",
   "image/jpeg": "jpg",
   "image/webp": "webp",
+  "image/svg+xml": "svg",
 } as const;
 
 const VIDEO_EXTENSIONS = {
@@ -71,7 +72,36 @@ export function detectScreenshotFileType(bytes: Uint8Array): ScreenshotFileType 
     return { mimeType: "image/webp", extension: "webp" };
   }
 
+  // SVG is text, not a binary format, so it has no magic-byte signature. Decode the
+  // leading bytes as UTF-8 and look for an `<svg` root tag, tolerating a leading BOM,
+  // whitespace, and an optional XML prolog / DOCTYPE / comment before the root element.
+  if (isSvgMarkup(bytes)) {
+    return { mimeType: "image/svg+xml", extension: "svg" };
+  }
+
   return null;
+}
+
+// Only decode a bounded prefix — the SVG root element appears near the start, and this
+// keeps the check cheap for large files.
+const SVG_SNIFF_MAX_BYTES = 1024;
+const SVG_ROOT_PATTERN = /<svg[\s/>]/i;
+
+function isSvgMarkup(bytes: Uint8Array): boolean {
+  if (bytes.length === 0) return false;
+  // Strip a UTF-8 BOM if present so the prolog/root check starts at the real content.
+  let start = 0;
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    start = 3;
+  }
+  const slice = bytes.subarray(start, start + SVG_SNIFF_MAX_BYTES);
+  // A NUL byte in the sniff window means this is binary, not SVG text. This rejects
+  // raster payloads that happen to contain the "<svg" byte sequence.
+  if (slice.includes(0x00)) return false;
+  // Decode non-fatally so a multi-byte character truncated at the sniff boundary does
+  // not cause a false rejection; the root `<svg` tag is ASCII and appears near the start.
+  const text = new TextDecoder("utf-8").decode(slice);
+  return SVG_ROOT_PATTERN.test(text);
 }
 
 export function detectVideoFileType(bytes: Uint8Array): VideoFileType | null {

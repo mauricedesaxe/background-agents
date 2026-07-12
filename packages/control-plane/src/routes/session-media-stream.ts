@@ -10,7 +10,7 @@ const logger = createLogger("router:session-media");
 
 function getMediaMimeType(
   artifact: Pick<ArtifactResponse, "metadata">
-): "image/png" | "image/jpeg" | "image/webp" | "video/mp4" | null {
+): "image/png" | "image/jpeg" | "image/webp" | "image/svg+xml" | "video/mp4" | null {
   const mimeType = artifact.metadata?.mimeType;
   if (typeof mimeType !== "string") return null;
   if (isSupportedScreenshotMimeType(mimeType) || isSupportedVideoMimeType(mimeType)) {
@@ -21,13 +21,22 @@ function getMediaMimeType(
 
 function getContentTypeFromHeaders(
   headers: Headers
-): "image/png" | "image/jpeg" | "image/webp" | "video/mp4" | null {
+): "image/png" | "image/jpeg" | "image/webp" | "image/svg+xml" | "video/mp4" | null {
   const contentType = headers.get("Content-Type");
   if (!contentType) return null;
   if (isSupportedScreenshotMimeType(contentType) || isSupportedVideoMimeType(contentType)) {
     return contentType;
   }
   return null;
+}
+
+// SVG can carry inline <script>. It's rendered via <img> in the UI (which never executes
+// script), but be defensive in case the media URL is opened directly: lock the document
+// down with a restrictive CSP + sandbox and disable MIME sniffing.
+function applySvgSecurityHeaders(headers: Headers, contentType: string): void {
+  if (contentType !== "image/svg+xml") return;
+  headers.set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+  headers.set("X-Content-Type-Options", "nosniff");
 }
 
 async function handleMediaGet(
@@ -91,6 +100,7 @@ async function handleMediaGet(
     }
 
     headers.set("Content-Type", contentType);
+    applySvgSecurityHeaders(headers, contentType);
     headers.set("ETag", head.httpEtag);
     headers.set("Accept-Ranges", "bytes");
     headers.set("Content-Range", `bytes ${parsedRange.start}-${parsedRange.end}/${head.size}`);
@@ -126,6 +136,7 @@ async function handleMediaGet(
   }
 
   headers.set("Content-Type", contentType);
+  applySvgSecurityHeaders(headers, contentType);
   headers.set("ETag", object.httpEtag);
   headers.set("Accept-Ranges", "bytes");
   headers.set("Content-Length", String(object.size));

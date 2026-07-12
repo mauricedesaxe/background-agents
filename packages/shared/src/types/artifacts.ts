@@ -90,8 +90,8 @@ export interface ManualPullRequestArtifactMetadata {
 export interface ScreenshotArtifactMetadata {
   /** R2 object key */
   objectKey: string;
-  /** MIME type: image/png, image/jpeg, image/webp */
-  mimeType: "image/png" | "image/jpeg" | "image/webp";
+  /** MIME type: image/png, image/jpeg, image/webp, image/svg+xml */
+  mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/svg+xml";
   /** File size in bytes */
   sizeBytes: number;
   /** Viewport dimensions at capture time */
