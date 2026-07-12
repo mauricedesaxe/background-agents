@@ -22,6 +22,9 @@ from daytona import CreateSnapshotParams, Daytona, Image
 OPENCODE_VERSION = "1.14.41"
 CODE_SERVER_VERSION = "4.109.5"
 AGENT_BROWSER_VERSION = "0.21.2"
+# Railway CLI — provides the `railway` binary the railway MCP (`railway mcp`)
+# needs. stdio MCPs run a local binary, so it must live in the image.
+RAILWAY_CLI_VERSION = "5.26.0"
 # tldraw diagram export CLI (bins `tldraw` / `tldraw-cli`). Renders `.tldr`
 # files to PNG via a bundled puppeteer (v25.x, Chrome-for-Testing). v6.0.1's
 # puppeteer launch args are hardcoded to include `--no-sandbox` and
@@ -38,7 +41,7 @@ JJ_SHA256 = "59e5588583ac82b623239929368c65b90735931c0f26b5a16c1f04d5bb97643d"
 # git system-wide so per-request token brokerage matches the Modal base image.
 # -tldraw-jj: @kitschpatrol/tldraw-cli + verified chrome-headless-shell
 # pre-warm, plus the Jujutsu binary.
-SANDBOX_VERSION = "daytona-v4-tldraw-jj-shmflags"
+SANDBOX_VERSION = "daytona-v5-tldraw-jj-railway-skills"
 
 
 def build_base_image(repo_root: Path) -> Image:
@@ -85,6 +88,7 @@ def build_base_image(repo_root: Path) -> Image:
             "rm /tmp/code-server.deb",
             f"npm install -g agent-browser@{AGENT_BROWSER_VERSION}",
             "agent-browser install",
+            f"npm install -g @railway/cli@{RAILWAY_CLI_VERSION}",
             f"npm install -g @kitschpatrol/tldraw-cli@{TLDRAW_CLI_VERSION}",
             # Add --disable-dev-shm-usage + --disable-gpu to tldraw-cli's
             # HARDCODED puppeteer launch args (it exposes no passthrough). These
