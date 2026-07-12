@@ -22,10 +22,17 @@ from daytona import CreateSnapshotParams, Daytona, Image
 OPENCODE_VERSION = "1.14.41"
 CODE_SERVER_VERSION = "4.109.5"
 AGENT_BROWSER_VERSION = "0.21.2"
+# tldraw diagram export CLI (bins `tldraw` / `tldraw-cli`). Renders `.tldr`
+# files to PNG via a bundled puppeteer (v25.x, Chrome-for-Testing). v6.0.1's
+# puppeteer launch args are hardcoded to include `--no-sandbox` and
+# `--disable-setuid-sandbox`, so it runs correctly as root with no extra
+# passthrough (there is no PUPPETEER_ARGS-style env var).
+TLDRAW_CLI_VERSION = "6.0.1"
 # Bump when changing image contents to invalidate the Daytona snapshot.
 # daytona-v2: install the SCM credential-helper shim and configure
 # git system-wide so per-request token brokerage matches the Modal base image.
-SANDBOX_VERSION = "daytona-v2-credential-helper"
+# -tldraw: add @kitschpatrol/tldraw-cli + pre-warm its headless-shell Chrome.
+SANDBOX_VERSION = "daytona-v2-credential-helper-tldraw"
 
 
 def build_base_image(repo_root: Path) -> Image:
@@ -72,6 +79,16 @@ def build_base_image(repo_root: Path) -> Image:
             "rm /tmp/code-server.deb",
             f"npm install -g agent-browser@{AGENT_BROWSER_VERSION}",
             "agent-browser install",
+            f"npm install -g @kitschpatrol/tldraw-cli@{TLDRAW_CLI_VERSION}",
+            # Pre-warm the browser tldraw-cli renders with so runtime exports
+            # don't pay a first-run Chrome download. tldraw-cli v6 launches
+            # puppeteer with `headless: 'shell'`, which uses the
+            # `chrome-headless-shell` binary (not full Chrome), so install that
+            # specific target. Run it through tldraw-cli's own bundled puppeteer
+            # (via --prefix) so the exact pinned build is fetched into the
+            # puppeteer cache under $HOME/.cache/puppeteer (HOME=/root).
+            "npx --prefix /usr/lib/node_modules/@kitschpatrol/tldraw-cli "
+            "puppeteer browsers install chrome-headless-shell",
             "mkdir -p /workspace /app /tmp/opencode",
             # Install the SCM credential-helper shim and configure git
             # system-wide. The shim delegates to the Python helper module
