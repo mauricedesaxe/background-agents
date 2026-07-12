@@ -31,8 +31,8 @@ TLDRAW_CLI_VERSION = "6.0.1"
 # Bump when changing image contents to invalidate the Daytona snapshot.
 # daytona-v2: install the SCM credential-helper shim and configure
 # git system-wide so per-request token brokerage matches the Modal base image.
-# -tldraw: add @kitschpatrol/tldraw-cli + pre-warm its headless-shell Chrome.
-SANDBOX_VERSION = "daytona-v2-credential-helper-tldraw"
+# -tldraw2: add @kitschpatrol/tldraw-cli (headless-shell pre-warm pending).
+SANDBOX_VERSION = "daytona-v2-credential-helper-tldraw2"
 
 
 def build_base_image(repo_root: Path) -> Image:
@@ -80,15 +80,12 @@ def build_base_image(repo_root: Path) -> Image:
             f"npm install -g agent-browser@{AGENT_BROWSER_VERSION}",
             "agent-browser install",
             f"npm install -g @kitschpatrol/tldraw-cli@{TLDRAW_CLI_VERSION}",
-            # Pre-warm the browser tldraw-cli renders with so runtime exports
-            # don't pay a first-run Chrome download. tldraw-cli v6 launches
-            # puppeteer with `headless: 'shell'`, which uses the
-            # `chrome-headless-shell` binary (not full Chrome), so install that
-            # specific target. Run it through tldraw-cli's own bundled puppeteer
-            # (via --prefix) so the exact pinned build is fetched into the
-            # puppeteer cache under $HOME/.cache/puppeteer (HOME=/root).
-            "npx --prefix /usr/lib/node_modules/@kitschpatrol/tldraw-cli "
-            "puppeteer browsers install chrome-headless-shell",
+            # NOTE: chrome-headless-shell (tldraw-cli launches puppeteer with
+            # headless:'shell') is intentionally NOT pre-warmed here. The
+            # `npx puppeteer browsers install` path aborts on this image's
+            # Node 22 (puppeteer's devEngines requires Node >=24.16). A
+            # Node-22-safe install command is being verified in a live sandbox
+            # before it's baked in.
             "mkdir -p /workspace /app /tmp/opencode",
             # Install the SCM credential-helper shim and configure git
             # system-wide. The shim delegates to the Python helper module
