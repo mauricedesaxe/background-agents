@@ -807,6 +807,7 @@ class SandboxSupervisor:
         except Exception as e:
             self.log.warn("opencode.global_deps_seed_failed", exc=e)
         self._install_skills(workdir)
+        self._install_agents(workdir)
         self._install_bin_scripts()
 
     def _install_bin_scripts(self) -> None:
@@ -856,6 +857,32 @@ class SandboxSupervisor:
 
         if installed_any:
             self.log.info("opencode.skills_installed", skills_path=str(skills_dest))
+
+    def _install_agents(self, workdir: Path) -> None:
+        """Copy bundled reviewer agents into the .opencode/agent directory.
+
+        These are OpenCode subagents (frontmatter `mode: subagent`); OpenCode
+        discovers each `<name>.md` from `.opencode/agent/` and makes it invocable
+        by the primary agent's task tool (and via `@<name>`). The `review`/`work`
+        skills spawn them by name.
+        """
+        agents_dir = Path("/app/sandbox_runtime/agents")
+        if not agents_dir.is_dir():
+            return
+
+        agents_dest = workdir / ".opencode" / "agent"
+        agents_dest.mkdir(parents=True, exist_ok=True)
+        installed_any = False
+
+        for agent_file in agents_dir.iterdir():
+            if not agent_file.is_file() or agent_file.suffix != ".md":
+                continue
+
+            shutil.copy(agent_file, agents_dest / agent_file.name)
+            installed_any = True
+
+        if installed_any:
+            self.log.info("opencode.agents_installed", agents_path=str(agents_dest))
 
     def _setup_openai_oauth(self) -> None:
         """Write OpenCode auth.json for ChatGPT OAuth if refresh token is configured."""

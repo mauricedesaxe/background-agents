@@ -12,7 +12,10 @@ latest fetched trunk (`jj diff --from 'trunk()' --to @`), which already includes
 uncommitted edits in the working copy. Collate their findings into a single chat report.
 Do not post to GitHub.
 
-The universal reviewers (shipped in `.claude/agents/`):
+The universal reviewers are OpenCode subagents shipped in `.opencode/agent/` (each a
+`<name>.md` with `mode: subagent`). OpenCode discovers them automatically — spawn each by
+name with the **task tool** (its `description` scopes it), or fall back to an `@<name>`
+mention. They carry a read-only permission block, so a reviewer can't mutate the repo:
 
 **Unconditional — run on every `/review`:**
 
@@ -60,7 +63,7 @@ The universal reviewers (shipped in `.claude/agents/`):
   (PHILOSOPHY §19). The agent itself self-checks the declaration; pass it the path
   to `CLAUDE.md` in the prompt so it can confirm.
 
-**Project-specific reviewers** live alongside the universal ones in `.claude/agents/`.
+**Project-specific reviewers** live alongside the universal ones in `.opencode/agent/`.
 A project may add its own domain reviewer(s) — namespaced and scoped by their
 `description` to one area or sub-app — and the `review` skill runs them **only for diffs
 under that area's paths**. A project reviewer either runs **in addition to** the universal
@@ -115,8 +118,12 @@ grep -E '^\*\*Commercial readiness:\*\* +(yes|no)' CLAUDE.md | head -1
 
 ## Step 3: spawn all agents in parallel
 
-Each agent already knows its own scope. Send all the tool calls in a single
-message so they run concurrently. Each prompt should give the agent:
+Spawn each reviewer as an OpenCode subagent with the **task tool**, passing the subagent's
+name (e.g. `code-reviewer`) as the agent to run. OpenCode has already discovered them from
+`.opencode/agent/`. If a direct task spawn isn't available in the current run, invoke the
+same subagent with an `@<name>` mention instead — same agent, same read-only permissions.
+Each agent already knows its own scope. Send all the task calls in a single message so they
+run concurrently. Each prompt should give the agent:
 
 1. The diff source — "the branch diff `jj diff --from 'trunk()' --to @` (committed
    plus uncommitted, since jj snapshots the working copy into `@`)".

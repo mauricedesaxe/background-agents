@@ -41,7 +41,7 @@ JJ_SHA256 = "59e5588583ac82b623239929368c65b90735931c0f26b5a16c1f04d5bb97643d"
 # git system-wide so per-request token brokerage matches the Modal base image.
 # -tldraw-jj: @kitschpatrol/tldraw-cli + verified chrome-headless-shell
 # pre-warm, plus the Jujutsu binary.
-SANDBOX_VERSION = "daytona-v5-tldraw-jj-railway-skills"
+SANDBOX_VERSION = "daytona-v6-review-agents"
 
 
 def build_base_image(repo_root: Path) -> Image:

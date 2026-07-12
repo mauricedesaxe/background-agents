@@ -251,13 +251,15 @@ Do not start writing code yet. The plan is a text artefact for review.
 
 ## Step 4: adversarial plan review
 
-Spawn two agents in parallel (single message, concurrent tool calls) with the plan and
-the issue body:
+Spawn two OpenCode subagents in parallel — use the **task tool** with each subagent's name
+(single message, concurrent task calls), or an `@<name>` mention if a direct task spawn
+isn't available — passing the plan and the issue body. Both live in `.opencode/agent/`
+(`mode: subagent`, read-only) and are discovered automatically:
 
-- `plan-reviewer` (`.claude/agents/plan-reviewer.md`) — attacks the plan against
+- `plan-reviewer` (`.opencode/agent/plan-reviewer.md`) — attacks the plan against
   `CLAUDE.md`, any product spec (`docs/PRD.md` if present), and the business logic
   *before* any code exists.
-- `yagni-reviewer` (`.claude/agents/yagni-reviewer.md`) in **plan mode** — attacks the
+- `yagni-reviewer` (`.opencode/agent/yagni-reviewer.md`) in **plan mode** — attacks the
   plan for speculative generality: proposed abstractions, config knobs, extension
   points, generic layers, speculative schema, and premature infrastructure that no
   current, felt need justifies (PHILOSOPHY §1 / §13 / §14 / §19). Its angle is narrower
