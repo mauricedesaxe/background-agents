@@ -38,7 +38,7 @@ JJ_SHA256 = "59e5588583ac82b623239929368c65b90735931c0f26b5a16c1f04d5bb97643d"
 # git system-wide so per-request token brokerage matches the Modal base image.
 # -tldraw-jj: @kitschpatrol/tldraw-cli + verified chrome-headless-shell
 # pre-warm, plus the Jujutsu binary.
-SANDBOX_VERSION = "daytona-v3-credential-helper-tldraw-jj"
+SANDBOX_VERSION = "daytona-v4-tldraw-jj-shmflags"
 
 
 def build_base_image(repo_root: Path) -> Image:
@@ -86,6 +86,21 @@ def build_base_image(repo_root: Path) -> Image:
             f"npm install -g agent-browser@{AGENT_BROWSER_VERSION}",
             "agent-browser install",
             f"npm install -g @kitschpatrol/tldraw-cli@{TLDRAW_CLI_VERSION}",
+            # Add --disable-dev-shm-usage + --disable-gpu to tldraw-cli's
+            # HARDCODED puppeteer launch args (it exposes no passthrough). These
+            # are the standard container-Chrome flags; --disable-dev-shm-usage
+            # removes the reliance on /dev/shm (only 64M here) so concurrent
+            # sessions can't wedge an export. Both bundled entrypoints carry the
+            # inlined args (they're backtick template literals, so the sed is
+            # single-quoted to keep backticks literal). grep-guarded + `|| true`:
+            # idempotent, and a miss never fails the build (the skill also wraps
+            # exports in `timeout`, so this flag is preventative, not load-bearing).
+            "D=$(npm root -g)/@kitschpatrol/tldraw-cli/dist; "
+            "for f in \"$D/bin/cli.js\" \"$D/lib/index.js\"; do "
+            "[ -f \"$f\" ] || continue; "
+            "grep -q -- '--disable-dev-shm-usage' \"$f\" || "
+            "sed -i 's/`--no-sandbox`,/`--no-sandbox`,`--disable-dev-shm-usage`,`--disable-gpu`,/' \"$f\"; "
+            "done || true",
             # Pre-warm the chrome-headless-shell build tldraw-cli's puppeteer
             # (headless:'shell') requires. Call @puppeteer/browsers DIRECTLY:
             # the `puppeteer` bin declares devEngines>=Node24 and throws

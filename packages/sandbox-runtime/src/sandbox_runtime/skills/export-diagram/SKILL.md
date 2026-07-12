@@ -298,18 +298,31 @@ Tips for bigger diagrams:
    python3 -m json.tool diagram.tldr > /dev/null
    ```
 
-3. **Export to PNG.** `-o` is a **directory**, not a filename; the output is named after the input
-   (`diagram.tldr` → `diagram.png`). Use `--scale 2` for crisper output. No `--no-sandbox` flag is
-   needed — tldraw-cli already passes it:
+3. **Export to PNG, wrapped in `timeout` so it can never hang the session.** `-o` is a
+   **directory**, not a filename; the output is named after the input (`diagram.tldr` →
+   `diagram.png`). No `--no-sandbox` flag is needed (tldraw-cli passes it). Keep `--scale` at the
+   default (omit it) — a high scale on a large canvas can make the headless renderer time out.
 
    ```bash
-   tldraw export diagram.tldr -f png -o ./ --scale 2
+   timeout 120 tldraw export diagram.tldr -f png -o ./
    ```
 
-4. **Confirm the PNG exists** before claiming success:
+   If this exits non-zero (`124` = timed out) or leaves a 0-byte `diagram.png`, the canvas is too
+   large/complex for the PNG rasterizer. **Fall back to SVG**, which renders reliably at any size:
 
    ```bash
-   ls -l diagram.png
+   timeout 120 tldraw export diagram.tldr -f svg -o ./   # -> diagram.svg
+   ```
+
+   SVG can't go to the web UI (`upload-media` is raster only), but it embeds cleanly in a PR (step 5b,
+   just use the `.svg` path). For the web UI specifically, instead **simplify the diagram** (fewer,
+   closer-together shapes) and re-export PNG.
+
+4. **Confirm the output exists and is non-empty** before claiming success (PNG, or SVG if you fell
+   back):
+
+   ```bash
+   ls -l diagram.png diagram.svg 2>/dev/null
    ```
 
 5. **Surface it** one of two ways (below).
