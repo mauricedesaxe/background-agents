@@ -8,6 +8,7 @@ function createHandler() {
   };
   const messageQueue = {
     failStuckProcessingMessage: vi.fn<() => Promise<void>>().mockResolvedValue(),
+    failStuckPendingMessage: vi.fn<() => Promise<void>>().mockResolvedValue(),
   };
   const lifecycleManager = {
     handleAlarm: vi.fn<() => Promise<void>>().mockResolvedValue(),
@@ -83,5 +84,15 @@ describe("createAlarmHandler", () => {
     });
     expect(messageQueue.failStuckProcessingMessage).toHaveBeenCalledTimes(1);
     expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
+  });
+
+  it("always runs the pending-message watchdog before lifecycle handling", async () => {
+    const { handler, repository, messageQueue } = createHandler();
+    repository.getProcessingMessageWithStartedAt.mockReturnValue(null);
+
+    await handler.handle();
+
+    // Self-guarded, so it runs unconditionally; it decides internally whether to act.
+    expect(messageQueue.failStuckPendingMessage).toHaveBeenCalledTimes(1);
   });
 });

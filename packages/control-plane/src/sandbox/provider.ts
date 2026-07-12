@@ -147,6 +147,8 @@ export interface RestoreConfig {
   model: string;
   /** User-provided environment variables (repo secrets) */
   userEnvVars?: Record<string, string>;
+  /** OpenCode session ID to reattach to (from a prior run of this session). */
+  opencodeSessionId?: string;
   /** Sandbox lifetime in seconds. Defaults to DEFAULT_SANDBOX_TIMEOUT_SECONDS. */
   timeoutSeconds?: number;
   /** Git branch to work on (defaults to repo's default branch) */

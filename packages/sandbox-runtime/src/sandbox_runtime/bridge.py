@@ -257,6 +257,12 @@ class AgentBridge:
 
         # Session state
         self.opencode_session_id: str | None = None
+        # Control-plane-provided id for reattaching to a prior conversation on
+        # resume. Preferred over the on-disk cache; verified before use so a
+        # stale id (e.g. full sandbox recreate) falls back to a fresh session.
+        self.provided_opencode_session_id: str | None = (
+            os.environ.get("OPENCODE_SESSION_ID") or None
+        )
         self.session_id_file = Path(tempfile.gettempdir()) / "opencode-session-id"
         self.repo_path = Path("/workspace")
         # Supervisor-written canonical repo manifest; push targeting resolves
@@ -1839,33 +1845,52 @@ class AgentBridge:
             self.log.error("git.identity_error", exc=e)
 
     async def _load_session_id(self) -> None:
-        """Load OpenCode session ID from file if it exists."""
-        if self.session_id_file.exists():
+        """Load the OpenCode session ID to reattach to, if any.
+
+        Prefers the control-plane-provided OPENCODE_SESSION_ID (reattach on
+        resume) over the on-disk cache, then verifies the session still exists
+        via OpenCode. A missing/absent id, or one that no longer exists, leaves
+        ``opencode_session_id`` unset so a fresh session is created as before.
+        """
+        candidate: str | None = None
+        source: str | None = None
+        if self.provided_opencode_session_id:
+            candidate = self.provided_opencode_session_id
+            source = "env"
+        elif self.session_id_file.exists():
             try:
-                self.opencode_session_id = self.session_id_file.read_text().strip()
-                self.log.info(
-                    "opencode.session.ensure",
-                    opencode_session_id=self.opencode_session_id,
-                    action="loaded",
-                )
-
-                if self.http_client:
-                    try:
-                        resp = await self.http_client.get(
-                            f"{self.opencode_base_url}/session/{self.opencode_session_id}",
-                            timeout=self.OPENCODE_REQUEST_TIMEOUT,
-                        )
-                        if resp.status_code != 200:
-                            self.log.info(
-                                "opencode.session.invalid",
-                                opencode_session_id=self.opencode_session_id,
-                            )
-                            self.opencode_session_id = None
-                    except Exception:
-                        self.opencode_session_id = None
-
+                candidate = self.session_id_file.read_text().strip() or None
+                source = "file"
             except Exception as e:
                 self.log.error("opencode.session.load_error", exc=e)
+                return
+
+        if not candidate:
+            return
+
+        self.opencode_session_id = candidate
+        self.log.info(
+            "opencode.session.ensure",
+            opencode_session_id=self.opencode_session_id,
+            action="loaded",
+            source=source,
+        )
+
+        # Verify the session still exists; clear it (fresh session) if not.
+        if self.http_client:
+            try:
+                resp = await self.http_client.get(
+                    f"{self.opencode_base_url}/session/{self.opencode_session_id}",
+                    timeout=self.OPENCODE_REQUEST_TIMEOUT,
+                )
+                if resp.status_code != 200:
+                    self.log.info(
+                        "opencode.session.invalid",
+                        opencode_session_id=self.opencode_session_id,
+                    )
+                    self.opencode_session_id = None
+            except Exception:
+                self.opencode_session_id = None
 
     async def _save_session_id(self) -> None:
         """Save OpenCode session ID to file for persistence."""

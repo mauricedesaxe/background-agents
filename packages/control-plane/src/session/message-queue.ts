@@ -32,6 +32,16 @@ interface PromptMessageData {
   attachments?: Array<{ type: string; name: string; url?: string; content?: string }>;
 }
 
+/**
+ * How long a pending message may wait for a spawned/resumed sandbox to connect
+ * before the watchdog fails it. Without this a spawn/resume that never yields a
+ * connected sandbox leaves the message stuck at `pending` forever, and the only
+ * error signal (a transient `sandbox_error` broadcast) is lost to any client
+ * mid-reconnect. This is intentionally generous — cold boots plus git sync can
+ * take a while — and only fires when nothing has started processing.
+ */
+export const PENDING_SANDBOX_CONNECT_TIMEOUT_MS = 5 * 60 * 1000;
+
 interface MessageQueueDeps {
   env: Env;
   ctx: DurableObjectState;
@@ -50,6 +60,12 @@ interface MessageQueueDeps {
   setSessionStatus: (status: SessionStatus) => Promise<void>;
   reconcileSessionStatusAfterExecution: (success: boolean) => Promise<void>;
   scheduleExecutionTimeout?: (startedAtMs: number) => Promise<void>;
+  /**
+   * Arm the DO alarm to fire no later than `deadlineMs` so the watchdog can
+   * fail a pending message whose sandbox never connected. Uses the same single
+   * alarm slot as the execution/inactivity timeouts (earliest deadline wins).
+   */
+  scheduleSandboxConnectTimeout?: (deadlineMs: number) => Promise<void>;
 }
 
 interface StopExecutionOptions {
@@ -171,6 +187,13 @@ export class SessionMessageQueue {
         reason: "no_sandbox",
       });
       this.deps.broadcast({ type: "sandbox_spawning" });
+      // Arm the watchdog before spawning so a spawn/resume that never yields a
+      // connected sandbox eventually fails the message instead of stalling
+      // silently. A successful connect moves the message to `processing`, which
+      // neutralizes the watchdog (it only acts on a still-pending message).
+      if (this.deps.scheduleSandboxConnectTimeout) {
+        await this.deps.scheduleSandboxConnectTimeout(now + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
+      }
       await this.deps.spawnSandbox();
       return;
     }
@@ -299,6 +322,57 @@ export class SessionMessageQueue {
     this.deps.broadcast({ type: "processing_status", isProcessing: false });
     this.deps.ctx.waitUntil(
       this.deps.callbackService.notifyComplete(processingMessage.id, false, stuckError)
+    );
+    await this.deps.reconcileSessionStatusAfterExecution(false);
+  }
+
+  /**
+   * Watchdog for a pending message whose sandbox never connected.
+   *
+   * Mirrors {@link failStuckProcessingMessage} but targets `pending`: if a
+   * message has been waiting past PENDING_SANDBOX_CONNECT_TIMEOUT_MS with no
+   * sandbox connected and nothing processing, mark it failed and persist a
+   * durable `execution_complete` error event (the same store `getReplay`
+   * reads) so a reconnecting client sees the failure rather than a silent
+   * stall. No-op when a sandbox connected, something is processing, or the
+   * pending message hasn't actually aged out — all of which mean the normal
+   * dispatch path is (or already was) handling it.
+   */
+  async failStuckPendingMessage(): Promise<void> {
+    // A connected sandbox or an in-flight message means dispatch is handling
+    // this normally; the watchdog must not interfere.
+    if (this.deps.wsManager.getSandboxSocket()) return;
+    if (this.deps.repository.getProcessingMessage()) return;
+
+    const pending = this.deps.repository.getNextPendingMessage();
+    if (!pending) return;
+
+    const now = Date.now();
+    if (now - pending.created_at < PENDING_SANDBOX_CONNECT_TIMEOUT_MS) return;
+
+    this.deps.repository.updateMessageCompletion(pending.id, "failed", now);
+
+    const timeoutError = "Sandbox failed to start (timed out waiting to connect)";
+    const syntheticEvent: Extract<SandboxEvent, { type: "execution_complete" }> = {
+      type: "execution_complete",
+      messageId: pending.id,
+      success: false,
+      error: timeoutError,
+      sandboxId: "",
+      timestamp: now / 1000,
+    };
+    this.deps.repository.upsertExecutionCompleteEvent(pending.id, syntheticEvent, now);
+
+    this.deps.log.warn("prompt.pending_timeout", {
+      event: "prompt.pending_timeout",
+      message_id: pending.id,
+      waited_ms: now - pending.created_at,
+    });
+
+    this.deps.broadcast({ type: "sandbox_event", event: syntheticEvent });
+    this.deps.broadcast({ type: "processing_status", isProcessing: false });
+    this.deps.ctx.waitUntil(
+      this.deps.callbackService.notifyComplete(pending.id, false, timeoutError)
     );
     await this.deps.reconcileSessionStatusAfterExecution(false);
   }

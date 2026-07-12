@@ -355,6 +355,12 @@ export class SessionDO extends DurableObject<Env> {
             await this.ctx.storage.setAlarm(deadline);
           }
         },
+        scheduleSandboxConnectTimeout: async (deadlineMs: number) => {
+          const currentAlarm = await this.ctx.storage.getAlarm();
+          if (!currentAlarm || deadlineMs < currentAlarm) {
+            await this.ctx.storage.setAlarm(deadlineMs);
+          }
+        },
       });
     }
 
@@ -1124,6 +1130,14 @@ export class SessionDO extends DurableObject<Env> {
     const event = this.parseWebSocketMessage(message, "sandbox", sandboxEventSchema);
     if (!event) return;
 
+    // Persist the bridge-reported OpenCode session id so a later respawn can
+    // reattach to the same conversation. The bridge emits it in its `ready`
+    // event on every (re)connect; without this the resume config always sends
+    // a null id and every restart starts a fresh, empty OpenCode session.
+    if (event.type === "ready") {
+      this.persistOpencodeSessionId(event.opencodeSessionId);
+    }
+
     try {
       await this.processSandboxEvent(event);
     } catch (e) {
@@ -1131,6 +1145,24 @@ export class SessionDO extends DurableObject<Env> {
         error: e instanceof Error ? e : String(e),
       });
     }
+  }
+
+  /**
+   * Store the OpenCode session id reported by the bridge, if it is new.
+   * `getSession()` reads straight from SQLite, so the write is the only state
+   * needed — subsequent reads see the updated value.
+   */
+  private persistOpencodeSessionId(opencodeSessionId: string | null | undefined): void {
+    if (typeof opencodeSessionId !== "string" || opencodeSessionId.length === 0) return;
+
+    const session = this.getSession();
+    if (!session || session.opencode_session_id === opencodeSessionId) return;
+
+    this.repository.updateOpencodeSessionId(session.id, opencodeSessionId, Date.now());
+    this.log.info("opencode.session.persisted", {
+      event: "opencode.session.persisted",
+      opencode_session_id: opencodeSessionId,
+    });
   }
 
   /**

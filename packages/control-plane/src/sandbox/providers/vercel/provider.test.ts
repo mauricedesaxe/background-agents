@@ -242,6 +242,26 @@ describe("VercelSandboxProvider", () => {
     });
   });
 
+  it("injects OPENCODE_SESSION_ID when the config carries one (reattach on resume)", async () => {
+    const client = createMockClient();
+    const provider = new VercelSandboxProvider(client, providerConfig);
+
+    await provider.createSandbox({ ...baseCreateConfig, opencodeSessionId: "oc-123" });
+
+    const createCall = vi.mocked(client.createSandbox).mock.calls[0][0];
+    expect(createCall.env).toMatchObject({ OPENCODE_SESSION_ID: "oc-123" });
+  });
+
+  it("omits OPENCODE_SESSION_ID on a fresh spawn with no prior session", async () => {
+    const client = createMockClient();
+    const provider = new VercelSandboxProvider(client, providerConfig);
+
+    await provider.createSandbox(baseCreateConfig);
+
+    const createCall = vi.mocked(client.createSandbox).mock.calls[0][0];
+    expect(createCall.env).not.toHaveProperty("OPENCODE_SESSION_ID");
+  });
+
   it("caps the default sandbox timeout at Vercel's 45 minute limit", async () => {
     const client = createMockClient();
     const provider = new VercelSandboxProvider(client, providerConfig);

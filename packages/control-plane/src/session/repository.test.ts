@@ -202,6 +202,16 @@ describe("SessionRepository", () => {
     });
   });
 
+  describe("updateOpencodeSessionId", () => {
+    it("updates the opencode session id and timestamp", () => {
+      repo.updateOpencodeSessionId("sess-1", "oc-123", 3000);
+
+      expect(mock.calls.length).toBe(1);
+      expect(mock.calls[0].query).toContain("UPDATE session SET opencode_session_id");
+      expect(mock.calls[0].params).toEqual(["oc-123", 3000, "sess-1"]);
+    });
+  });
+
   describe("updateSessionTitleIfUnset", () => {
     it("updates the title only when the current title is unset", () => {
       mock.setData(`SELECT * FROM session LIMIT 1`, [{ id: "sess-1", title: null }]);

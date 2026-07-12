@@ -6,7 +6,10 @@ import type { SessionRepository } from "../repository";
 
 export interface AlarmHandlerDeps {
   repository: Pick<SessionRepository, "getProcessingMessageWithStartedAt">;
-  messageQueue: Pick<SessionMessageQueue, "failStuckProcessingMessage">;
+  messageQueue: Pick<
+    SessionMessageQueue,
+    "failStuckProcessingMessage" | "failStuckPendingMessage"
+  >;
   lifecycleManager: Pick<SandboxLifecycleManager, "handleAlarm">;
   executionTimeoutMs: number;
   now: () => number;
@@ -48,6 +51,11 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
           await deps.messageQueue.failStuckProcessingMessage();
         }
       }
+
+      // Pending-message watchdog: fail a message whose spawned/resumed sandbox
+      // never connected. Self-guards (still pending, no sandbox, not processing,
+      // aged out), so it's safe to run on every alarm regardless of what armed it.
+      await deps.messageQueue.failStuckPendingMessage();
 
       await deps.lifecycleManager.handleAlarm();
     },

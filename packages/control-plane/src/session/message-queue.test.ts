@@ -117,6 +117,7 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
   const setSessionStatus = vi.fn(async (_status: string) => {});
   const reconcileSessionStatusAfterExecution = vi.fn(async (_success: boolean) => {});
   const updateLastActivity = vi.fn();
+  const scheduleSandboxConnectTimeout = vi.fn(async (_deadlineMs: number) => {});
   const waitUntil = vi.fn();
 
   const queue = new SessionMessageQueue({
@@ -142,6 +143,7 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
     broadcast,
     setSessionStatus,
     reconcileSessionStatusAfterExecution,
+    scheduleSandboxConnectTimeout,
   });
 
   return {
@@ -153,6 +155,7 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
     spawnSandbox,
     setSessionStatus,
     reconcileSessionStatusAfterExecution,
+    scheduleSandboxConnectTimeout,
     waitUntil,
   };
 }
@@ -171,7 +174,7 @@ describe("SessionMessageQueue", () => {
     expect(h.setSessionStatus).not.toHaveBeenCalled();
   });
 
-  it("spawns sandbox when queue has work but no sandbox socket", async () => {
+  it("spawns sandbox and arms the connect watchdog when there is work but no sandbox socket", async () => {
     const h = buildQueue();
     h.repository.getNextPendingMessage.mockReturnValue(createMessage());
 
@@ -179,6 +182,8 @@ describe("SessionMessageQueue", () => {
 
     expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_spawning" });
     expect(h.spawnSandbox).toHaveBeenCalledTimes(1);
+    expect(h.scheduleSandboxConnectTimeout).toHaveBeenCalledTimes(1);
+    expect(h.scheduleSandboxConnectTimeout.mock.calls[0][0]).toBeGreaterThan(Date.now());
     expect(h.repository.updateMessageToProcessing).not.toHaveBeenCalled();
   });
 
@@ -269,6 +274,71 @@ describe("SessionMessageQueue", () => {
     await h.queue.failStuckProcessingMessage();
 
     expect(h.reconcileSessionStatusAfterExecution).toHaveBeenCalledWith(false);
+  });
+
+  describe("failStuckPendingMessage", () => {
+    it("fails an aged-out pending message and persists a durable error event", async () => {
+      const h = buildQueue();
+      h.wsManager.getSandboxSocket.mockReturnValue(null);
+      h.repository.getProcessingMessage.mockReturnValue(null);
+      h.repository.getNextPendingMessage.mockReturnValue(
+        createMessage({ id: "msg-stuck", created_at: 0 })
+      );
+
+      await h.queue.failStuckPendingMessage();
+
+      expect(h.repository.updateMessageCompletion).toHaveBeenCalledWith(
+        "msg-stuck",
+        "failed",
+        expect.any(Number)
+      );
+      // Durable event (getReplay reads this store), not just a transient broadcast.
+      expect(h.repository.upsertExecutionCompleteEvent).toHaveBeenCalledWith(
+        "msg-stuck",
+        expect.objectContaining({ type: "execution_complete", success: false }),
+        expect.any(Number)
+      );
+      expect(h.broadcast).toHaveBeenCalledWith({
+        type: "processing_status",
+        isProcessing: false,
+      });
+      expect(h.reconcileSessionStatusAfterExecution).toHaveBeenCalledWith(false);
+    });
+
+    it("does nothing when a sandbox is connected", async () => {
+      const h = buildQueue();
+      h.wsManager.getSandboxSocket.mockReturnValue({} as WebSocket);
+      h.repository.getNextPendingMessage.mockReturnValue(
+        createMessage({ id: "msg-stuck", created_at: 0 })
+      );
+
+      await h.queue.failStuckPendingMessage();
+
+      expect(h.repository.updateMessageCompletion).not.toHaveBeenCalled();
+    });
+
+    it("does nothing when a message is already processing", async () => {
+      const h = buildQueue();
+      h.wsManager.getSandboxSocket.mockReturnValue(null);
+      h.repository.getProcessingMessage.mockReturnValue({ id: "msg-processing" });
+
+      await h.queue.failStuckPendingMessage();
+
+      expect(h.repository.updateMessageCompletion).not.toHaveBeenCalled();
+    });
+
+    it("does nothing when the pending message has not aged out yet", async () => {
+      const h = buildQueue();
+      h.wsManager.getSandboxSocket.mockReturnValue(null);
+      h.repository.getProcessingMessage.mockReturnValue(null);
+      h.repository.getNextPendingMessage.mockReturnValue(
+        createMessage({ id: "msg-fresh", created_at: Date.now() })
+      );
+
+      await h.queue.failStuckPendingMessage();
+
+      expect(h.repository.updateMessageCompletion).not.toHaveBeenCalled();
+    });
   });
 
   describe("enqueuePromptFromApi", () => {

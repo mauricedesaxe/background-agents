@@ -374,6 +374,13 @@ export class VercelSandboxProvider implements SandboxProvider {
 
     this.injectScmEnvVars(envVars);
 
+    // Reattach to a prior OpenCode conversation when resuming. The bridge reads
+    // OPENCODE_SESSION_ID and prefers it over its /tmp cache; an absent/empty
+    // value reproduces a fresh session, so this is a no-op on first spawn.
+    if (config.opencodeSessionId) {
+      envVars.OPENCODE_SESSION_ID = config.opencodeSessionId;
+    }
+
     if (mode.restoredFromSnapshot) envVars.RESTORED_FROM_SNAPSHOT = "true";
     if (mode.fromPrebuiltImage) {
       envVars.FROM_REPO_IMAGE = "true";

@@ -206,6 +206,12 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       SESSION_CONFIG: JSON.stringify(sessionConfig),
     });
 
+    // Reattach to a prior OpenCode conversation on resume; the bridge verifies
+    // the id and falls back to a fresh session if it no longer exists.
+    if (config.opencodeSessionId) {
+      envVars.OPENCODE_SESSION_ID = config.opencodeSessionId;
+    }
+
     if (config.codeServerEnabled) {
       envVars.CODE_SERVER_PASSWORD = await this.deriveCodeServerPassword(config.sandboxId);
       envVars.CODE_SERVER_PORT = String(resolveServicePorts(config.sandboxSettings).codeServerPort);

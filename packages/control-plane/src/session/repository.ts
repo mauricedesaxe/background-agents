@@ -381,6 +381,19 @@ export class SessionRepository {
     );
   }
 
+  updateOpencodeSessionId(
+    sessionId: string,
+    opencodeSessionId: string,
+    updatedAt: number
+  ): void {
+    this.sql.exec(
+      `UPDATE session SET opencode_session_id = ?, updated_at = ? WHERE id = ?`,
+      opencodeSessionId,
+      updatedAt,
+      sessionId
+    );
+  }
+
   addSessionCost(cost: number, updatedAt: number): void {
     this.sql.exec(
       `UPDATE session
