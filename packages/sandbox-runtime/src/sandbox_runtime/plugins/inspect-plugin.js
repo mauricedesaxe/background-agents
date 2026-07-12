@@ -7,7 +7,8 @@
 import { tool } from "@opencode-ai/plugin";
 import { z } from "zod";
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -89,6 +90,87 @@ async function getCurrentBranch(repoPath) {
   }
 }
 
+// Run a jj subcommand inside `repoPath`. Returns trimmed stdout.
+async function jj(repoPath, jjArgs) {
+  const { stdout } = await execFileAsync("jj", ["--repository", repoPath, ...jjArgs], {
+    timeout: 15000,
+  });
+  return stdout.trim();
+}
+
+/**
+ * Finalize a colocated Jujutsu (jj) working copy so git HEAD includes all of
+ * the agent's uncommitted work before the PR is pushed.
+ *
+ * The control plane pushes git HEAD to the PR branch. But in a colocated jj
+ * repo, jj keeps git HEAD at the PARENT of jj's working-copy commit `@`, so any
+ * uncommitted changes in `@` are absent from HEAD and would be silently dropped
+ * from the PR. We fix that here by finalizing `@` into a real commit and
+ * exporting it to git HEAD.
+ *
+ * This is a complete no-op for plain git repos (no `.jj` directory) so existing
+ * PR behavior is unchanged. The sequence is idempotent: if `@` is already empty
+ * (the agent committed everything itself), we do NOT create an empty commit.
+ *
+ * Verified against jj 0.43.0. Notes:
+ *  - jj needs its own identity to commit; `jj git init --colocate` does not copy
+ *    git's user.name/user.email. We set it (repo-local) from git's config right
+ *    before committing. jj warns that the setting only affects future commits,
+ *    but `jj commit` rewrites `@` into a new commit that DOES pick up the
+ *    freshly-set identity, so the resulting HEAD is authored correctly.
+ *  - `jj log -r @ -T empty` prints "true"/"false" to detect whether `@` has
+ *    changes, so we only commit when there is work to finalize.
+ */
+async function finalizeJujutsuWorkingCopy(repoPath, commitMessage) {
+  // No-op unless this repo is a colocated jj checkout.
+  if (!existsSync(join(repoPath, ".jj"))) {
+    return;
+  }
+
+  console.log(`[create-pull-request] Colocated jj repo detected at ${repoPath}; finalizing @`);
+
+  try {
+    // jj needs an identity to author a commit. `--colocate` does not inherit
+    // git's, so seed it (repo-local) from git's config. Idempotent.
+    const gitName = (
+      await execFileAsync("git", ["-C", repoPath, "config", "user.name"], { timeout: 5000 })
+        .then((r) => r.stdout.trim())
+        .catch(() => "")
+    );
+    const gitEmail = (
+      await execFileAsync("git", ["-C", repoPath, "config", "user.email"], { timeout: 5000 })
+        .then((r) => r.stdout.trim())
+        .catch(() => "")
+    );
+    if (gitName) {
+      await jj(repoPath, ["config", "set", "--repo", "user.name", gitName]);
+    }
+    if (gitEmail) {
+      await jj(repoPath, ["config", "set", "--repo", "user.email", gitEmail]);
+    }
+
+    // Only finalize when `@` actually has changes, so a repo where the agent
+    // already committed everything doesn't gain a stray empty commit.
+    const isEmpty = (await jj(repoPath, ["log", "-r", "@", "-T", "empty", "--no-graph"])) === "true";
+    if (!isEmpty) {
+      console.log("[create-pull-request] jj @ is non-empty; committing to finalize");
+      await jj(repoPath, ["commit", "-m", commitMessage]);
+    } else {
+      console.log("[create-pull-request] jj @ is empty; nothing to finalize");
+    }
+
+    // Push the finalized jj commit(s) into the underlying git repo's HEAD/refs
+    // so the control plane pushes the complete work.
+    await jj(repoPath, ["git", "export"]);
+    console.log("[create-pull-request] jj working copy finalized and exported to git HEAD");
+  } catch (e) {
+    // Don't let a jj hiccup swallow the PR flow silently — surface it, but let
+    // the caller decide. We rethrow so the PR isn't created from a stale HEAD.
+    console.log(`[create-pull-request] Failed to finalize jj working copy: ${e.message}`);
+    throw e;
+  }
+}
+
 // Use tool() helper - args should be a ZodRawShape (plain object), NOT a ZodObject
 // OpenCode wraps it with z.object() internally
 export default tool({
@@ -154,6 +236,25 @@ export default tool({
       repoPath = match ? match.path : undefined;
     } else if (repositories.length > 1) {
       return `Failed to create pull request: this session spans multiple repositories — pass repo with one of: ${validValues}.`;
+    }
+
+    // Resolve the directory the git/jj commands operate on. When repo wasn't
+    // specified and the session has exactly one repo, use that repo's path;
+    // otherwise fall back to the process cwd (matches getCurrentBranch, which
+    // runs git without -C when repoPath is undefined).
+    const effectiveRepoPath =
+      repoPath || (repositories.length === 1 ? repositories[0].path : undefined) || process.cwd();
+
+    // If this is a colocated jj repo, finalize the working copy so git HEAD
+    // (what the control plane pushes) contains all uncommitted work. No-op for
+    // plain git repos. For multi-repo sessions this only finalizes the single
+    // target repo resolved above; other repos are untouched, which is correct
+    // since only the target repo's HEAD is pushed for this PR.
+    try {
+      await finalizeJujutsuWorkingCopy(effectiveRepoPath, title);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `Failed to create pull request: could not finalize Jujutsu working copy (${message}). Your uncommitted changes were not included, so no PR was created.`;
     }
 
     const headBranch = await getCurrentBranch(repoPath);
