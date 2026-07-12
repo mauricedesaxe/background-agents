@@ -28,11 +28,17 @@ AGENT_BROWSER_VERSION = "0.21.2"
 # `--disable-setuid-sandbox`, so it runs correctly as root with no extra
 # passthrough (there is no PUPPETEER_ARGS-style env var).
 TLDRAW_CLI_VERSION = "6.0.1"
+# Jujutsu (jj) VCS — musl static binary from jj-vcs/jj releases; runs on this
+# Debian image with no extra deps. This puts jj on PATH; wiring it into the
+# git-based PR flow is a separate, non-image change.
+JJ_VERSION = "0.43.0"
+JJ_SHA256 = "59e5588583ac82b623239929368c65b90735931c0f26b5a16c1f04d5bb97643d"
 # Bump when changing image contents to invalidate the Daytona snapshot.
 # daytona-v2: install the SCM credential-helper shim and configure
 # git system-wide so per-request token brokerage matches the Modal base image.
-# -tldraw2: add @kitschpatrol/tldraw-cli (headless-shell pre-warm pending).
-SANDBOX_VERSION = "daytona-v2-credential-helper-tldraw2"
+# -tldraw-jj: @kitschpatrol/tldraw-cli + verified chrome-headless-shell
+# pre-warm, plus the Jujutsu binary.
+SANDBOX_VERSION = "daytona-v3-credential-helper-tldraw-jj"
 
 
 def build_base_image(repo_root: Path) -> Image:
@@ -80,12 +86,23 @@ def build_base_image(repo_root: Path) -> Image:
             f"npm install -g agent-browser@{AGENT_BROWSER_VERSION}",
             "agent-browser install",
             f"npm install -g @kitschpatrol/tldraw-cli@{TLDRAW_CLI_VERSION}",
-            # NOTE: chrome-headless-shell (tldraw-cli launches puppeteer with
-            # headless:'shell') is intentionally NOT pre-warmed here. The
-            # `npx puppeteer browsers install` path aborts on this image's
-            # Node 22 (puppeteer's devEngines requires Node >=24.16). A
-            # Node-22-safe install command is being verified in a live sandbox
-            # before it's baked in.
+            # Pre-warm the chrome-headless-shell build tldraw-cli's puppeteer
+            # (headless:'shell') requires. Call @puppeteer/browsers DIRECTLY:
+            # the `puppeteer` bin declares devEngines>=Node24 and throws
+            # EBADDEVENGINES on this Node 22 image, but @puppeteer/browsers has
+            # no such field. Pin the exact build from tldraw-cli's bundled
+            # puppeteer-core (not @stable, which can drift). Retry flaky Google
+            # Storage downloads; non-fatal so a failed download never breaks the
+            # base snapshot (tldraw just needs a reinstall then).
+            "PINNED=$(node -e \"import('/usr/lib/node_modules/@kitschpatrol/tldraw-cli/node_modules/puppeteer-core/lib/puppeteer/revisions.js').then(m=>console.log(m.PUPPETEER_REVISIONS['chrome-headless-shell']))\"); "
+            "n=0; until [ $n -ge 5 ]; do "
+            "node /usr/lib/node_modules/@kitschpatrol/tldraw-cli/node_modules/@puppeteer/browsers/lib/main-cli.js "
+            "install \"chrome-headless-shell@$PINNED\" --path \"$HOME/.cache/puppeteer\" && break; "
+            "n=$((n+1)); sleep 3; done "
+            "|| echo 'WARN: chrome-headless-shell pre-warm failed; tldraw export unavailable until reinstalled'",
+            # Jujutsu (jj) static binary — retry download, sha256-verify, non-fatal.
+            f"n=0; until [ $n -ge 5 ]; do curl -fsSL -o /tmp/jj.tar.gz https://github.com/jj-vcs/jj/releases/download/v{JJ_VERSION}/jj-v{JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz && break; n=$((n+1)); sleep 3; done; "
+            f"if echo '{JJ_SHA256}  /tmp/jj.tar.gz' | sha256sum -c -; then tar -xzf /tmp/jj.tar.gz -C /usr/local/bin ./jj && chmod 0755 /usr/local/bin/jj; else echo 'WARN: jj download failed or checksum mismatch; jj not installed'; fi; rm -f /tmp/jj.tar.gz",
             "mkdir -p /workspace /app /tmp/opencode",
             # Install the SCM credential-helper shim and configure git
             # system-wide. The shim delegates to the Python helper module
