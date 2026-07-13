@@ -32,6 +32,34 @@ const log = createLogger("daytona-provider");
 
 const DEFAULT_PREVIEW_EXPIRY_SECONDS = 3900;
 
+// Default sandbox sizing. Daytona's own default is ~1 vCPU / 1 GiB, which is
+// too small for real build + test workloads (parallel solc/tsc/webpack) and
+// leads to OOM kills that take down the OpenCode server mid-run. These are the
+// floor applied when the session doesn't request explicit resources.
+const DEFAULT_SANDBOX_CPU_CORES = 4;
+const DEFAULT_SANDBOX_MEMORY_GIB = 8;
+const MIB_PER_GIB = 1024;
+
+/**
+ * Resolve Daytona create-time resources from session settings, falling back to
+ * the build-friendly defaults. `memoryMib` (the shared unit) is converted to
+ * Daytona's GiB. Disk is intentionally left to the provider default so we don't
+ * inflate usage against the org disk cap.
+ */
+export function resolveDaytonaResources(settings: SandboxSettings | undefined): {
+  cpu: number;
+  memory: number;
+} {
+  const cpu = settings?.cpuCores ?? DEFAULT_SANDBOX_CPU_CORES;
+  // Round GiB up (and never below 1) so a sub-GiB or fractional request never
+  // collapses to 0 GiB, which Daytona would treat as no reservation and
+  // reintroduce the OOM problem. Matches the Vercel provider's ceil mapping.
+  const memory = settings?.memoryMib
+    ? Math.max(1, Math.ceil(settings.memoryMib / MIB_PER_GIB))
+    : DEFAULT_SANDBOX_MEMORY_GIB;
+  return { cpu, memory };
+}
+
 // ---------------------------------------------------------------------------
 // Provider config
 // ---------------------------------------------------------------------------
@@ -71,6 +99,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       const envVars = await this.buildEnvVars(config);
       const labels = this.buildLabels(config);
 
+      const { cpu, memory } = resolveDaytonaResources(config.sandboxSettings);
       const params: DaytonaCreateSandboxParams = {
         name: config.sandboxId,
         snapshot: this.client.config.baseSnapshot,
@@ -79,6 +108,8 @@ export class DaytonaSandboxProvider implements SandboxProvider {
         autoStopInterval: this.client.config.autoStopIntervalMinutes,
         autoArchiveInterval: this.client.config.autoArchiveIntervalMinutes,
         public: false,
+        cpu,
+        memory,
       };
       if (this.client.config.target) {
         params.target = this.client.config.target;
