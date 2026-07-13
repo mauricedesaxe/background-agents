@@ -1204,6 +1204,9 @@ class AgentBridge:
         compaction_occurred = False
 
         start_time = time.time()
+        # Baseline for OOM detection: if this cgroup's oom_kill counter rises
+        # while we stream, a drop below is very likely OpenCode being OOM-killed.
+        oom_kill_baseline = self._read_oom_kill_count()
         loop = asyncio.get_running_loop()
 
         def buffer_part(oc_msg_id: str, part: dict[str, Any], delta: Any) -> None:
@@ -1615,7 +1618,38 @@ class AgentBridge:
                 compaction_occurred=compaction_occurred,
             ):
                 yield final_event
+            # Read the OOM counter after the salvage round-trip above, by which
+            # point the kernel has settled any kill: a rise since baseline means
+            # OpenCode was OOM-killed, so surface a readable cause instead of the
+            # raw transport error.
+            if self._read_oom_kill_count() > oom_kill_baseline:
+                raise SSEConnectionError(
+                    "The agent ran out of memory and was restarted. Try a "
+                    "smaller or less parallel task, or a larger sandbox."
+                ) from e
             raise SSEConnectionError(f"SSE stream connection dropped: {e}")
+
+    def _read_oom_kill_count(self) -> int:
+        """Return this cgroup's cumulative ``oom_kill`` count, or 0 if unknown.
+
+        Reads cgroup-v2 ``/sys/fs/cgroup/memory.events`` and parses the
+        ``oom_kill N`` line by key (the file has several lines: low / high /
+        max / oom / oom_kill). Any problem (missing file, not cgroup-v2,
+        unreadable, or a missing key) is treated as 0 so callers fall back to
+        the generic path without special-casing.
+        """
+        try:
+            events = Path("/sys/fs/cgroup/memory.events").read_text()
+        except (OSError, ValueError):
+            return 0
+        for line in events.splitlines():
+            key, _, value = line.partition(" ")
+            if key == "oom_kill":
+                try:
+                    return int(value)
+                except ValueError:
+                    return 0
+        return 0
 
     async def _fetch_final_message_state(
         self,
