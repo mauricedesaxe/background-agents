@@ -121,6 +121,19 @@ class SandboxSupervisor:
     SIDECAR_TIMEOUT_SECONDS = 5
     MCP_PACKAGE_INSTALL_TIMEOUT_SECONDS = 180
 
+    # OOM-killer bias (Linux oom_score_adj, range -1000..1000; lower = less
+    # likely to be killed). Under memory pressure from a build/test workload we
+    # want the kernel to kill the memory-hungry build subprocesses (solc, tsc,
+    # webpack) rather than the OpenCode server or the bridge, whose death fails
+    # the whole run. We bias these down but deliberately avoid -1000 (full
+    # immunity), which would let a runaway build deadlock the OOM killer instead
+    # of shedding memory. Build subprocesses inherit OpenCode's value, but their
+    # much larger resident memory keeps them the preferred victim. The reporting
+    # path (supervisor, then bridge) is protected most so a real error surfaces.
+    SUPERVISOR_OOM_SCORE_ADJ = -900
+    BRIDGE_OOM_SCORE_ADJ = -700
+    OPENCODE_OOM_SCORE_ADJ = -500
+
     def __init__(self):
         self.opencode_process: asyncio.subprocess.Process | None = None
         self.bridge_process: asyncio.subprocess.Process | None = None
@@ -1185,6 +1198,22 @@ class SandboxSupervisor:
         self.log.warn("port_readiness.timeout", port=port, timeout=timeout_seconds)
         return False
 
+    def _set_oom_score_adj(self, pid: int, score: int, *, name: str) -> None:
+        """Bias the Linux OOM killer for a managed child process.
+
+        Writing a negative value to /proc/<pid>/oom_score_adj makes the kernel
+        prefer other processes when memory runs out. Lowering the value below
+        the current one requires privilege (root / CAP_SYS_RESOURCE); if we
+        can't, we log and continue rather than fail the boot.
+        """
+        try:
+            Path(f"/proc/{pid}/oom_score_adj").write_text(str(score))
+            self.log.info("oom.score_adj_set", component=name, pid=pid, score=score)
+        except OSError as e:
+            self.log.warn(
+                "oom.score_adj_failed", component=name, pid=pid, score=score, error=str(e)
+            )
+
     async def start_opencode(self) -> None:
         """Start OpenCode server with configuration."""
         self._setup_openai_oauth()
@@ -1247,6 +1276,13 @@ class SandboxSupervisor:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             limit=_LOG_FORWARD_STREAM_LIMIT_BYTES,
+        )
+
+        # Protect the OpenCode server from the OOM killer so a memory-hungry
+        # build subprocess is sacrificed instead of the whole run. Re-applied on
+        # every restart because start_opencode() runs again after a crash.
+        self._set_oom_score_adj(
+            self.opencode_process.pid, self.OPENCODE_OOM_SCORE_ADJ, name="opencode"
         )
 
         # Start log forwarder
@@ -1327,6 +1363,10 @@ class SandboxSupervisor:
             stderr=asyncio.subprocess.STDOUT,
             limit=_LOG_FORWARD_STREAM_LIMIT_BYTES,
         )
+
+        # Protect the bridge from the OOM killer: it is the control-plane link
+        # and must survive to report a real error and restart OpenCode.
+        self._set_oom_score_adj(self.bridge_process.pid, self.BRIDGE_OOM_SCORE_ADJ, name="bridge")
 
         # Start log forwarder for bridge
         asyncio.create_task(self._forward_bridge_logs())
@@ -1777,6 +1817,11 @@ class SandboxSupervisor:
             repo_owner=self.repo_owner,
             repo_name=self.repo_name,
         )
+
+        # Protect the supervisor from the OOM killer first: it owns process
+        # monitoring and restart, so it must outlive its children under memory
+        # pressure. Children inherit this and are lowered individually on spawn.
+        self._set_oom_score_adj(os.getpid(), self.SUPERVISOR_OOM_SCORE_ADJ, name="supervisor")
 
         # Detect operating mode
         image_build_mode = os.environ.get("IMAGE_BUILD_MODE") == "true"

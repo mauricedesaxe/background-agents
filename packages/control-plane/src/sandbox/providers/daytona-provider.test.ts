@@ -7,7 +7,11 @@
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { computeHmacHex } from "@open-inspect/shared";
-import { DaytonaSandboxProvider, type DaytonaProviderConfig } from "./daytona-provider";
+import {
+  DaytonaSandboxProvider,
+  resolveDaytonaResources,
+  type DaytonaProviderConfig,
+} from "./daytona-provider";
 import { SandboxProviderError } from "../provider";
 import type { CreateSandboxConfig, ResumeConfig, StopConfig } from "../provider";
 import {
@@ -101,6 +105,33 @@ const baseStopConfig: StopConfig = {
 
 // ==================== Tests ====================
 
+describe("resolveDaytonaResources", () => {
+  it("falls back to build-friendly defaults when settings are absent", () => {
+    expect(resolveDaytonaResources(undefined)).toEqual({ cpu: 4, memory: 8 });
+    expect(resolveDaytonaResources({})).toEqual({ cpu: 4, memory: 8 });
+  });
+
+  it("honors explicit cpuCores and converts memoryMib to GiB", () => {
+    expect(resolveDaytonaResources({ cpuCores: 8, memoryMib: 16384 })).toEqual({
+      cpu: 8,
+      memory: 16,
+    });
+  });
+
+  it("falls back per-field when only one resource is set", () => {
+    expect(resolveDaytonaResources({ cpuCores: 2 })).toEqual({ cpu: 2, memory: 8 });
+    expect(resolveDaytonaResources({ memoryMib: 2048 })).toEqual({ cpu: 4, memory: 2 });
+  });
+
+  it("rounds sub-GiB and fractional memory up, never to 0 GiB", () => {
+    // 256 MiB and 512 MiB must not collapse to memory: 0.
+    expect(resolveDaytonaResources({ memoryMib: 256 }).memory).toBe(1);
+    expect(resolveDaytonaResources({ memoryMib: 512 }).memory).toBe(1);
+    // 1.5 GiB rounds up to 2, not down to 1.
+    expect(resolveDaytonaResources({ memoryMib: 1536 }).memory).toBe(2);
+  });
+});
+
 describe("DaytonaSandboxProvider", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -138,6 +169,23 @@ describe("DaytonaSandboxProvider", () => {
       expect(createCall.autoStopInterval).toBe(120);
       expect(createCall.autoArchiveInterval).toBe(10080);
       expect(createCall.public).toBe(false);
+      // Build-friendly defaults so parallel compiles don't OOM the sandbox.
+      expect(createCall.cpu).toBe(4);
+      expect(createCall.memory).toBe(8);
+    });
+
+    it("maps sandboxSettings cpuCores/memoryMib onto Daytona cpu/memory (GiB)", async () => {
+      const client = createMockClient();
+      const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+      await provider.createSandbox({
+        ...baseCreateConfig,
+        sandboxSettings: { cpuCores: 2, memoryMib: 4096 },
+      });
+
+      const createCall = (client.createSandbox as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(createCall.cpu).toBe(2);
+      expect(createCall.memory).toBe(4);
     });
 
     it("assembles env vars correctly for GitHub, without embedding any token", async () => {

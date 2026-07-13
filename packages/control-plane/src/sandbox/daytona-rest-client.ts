@@ -66,6 +66,12 @@ export interface DaytonaCreateSandboxParams {
   autoArchiveInterval?: number;
   public?: boolean;
   target?: string;
+  /** vCPU cores allocated to the sandbox */
+  cpu?: number;
+  /** Memory allocated to the sandbox, in GiB */
+  memory?: number;
+  /** Disk allocated to the sandbox, in GiB */
+  disk?: number;
 }
 
 // ---------------------------------------------------------------------------
