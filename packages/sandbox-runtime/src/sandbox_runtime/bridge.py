@@ -19,7 +19,8 @@ import secrets
 import subprocess
 import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, NoReturn
@@ -182,6 +183,101 @@ class SessionTerminatedError(Exception):
     pass
 
 
+class EventPump:
+    """Buffers prompt events and drains them to a sink on a separate task.
+
+    The prompt consumer used to `await` the WebSocket send for every event
+    inline, so a slow send stalled the loop that reads OpenCode's SSE stream.
+    That backpressure filled OpenCode's send buffer until it severed the
+    connection (an incomplete chunked read). This decouples the two: the
+    producer `enqueue`s events without blocking, and the pump task drains them
+    to the sink as fast as the sink allows, so the SSE reader keeps draining.
+
+    Single producer (the prompt loop) and single consumer (the pump task) run
+    on one event loop, so the deque needs no lock. On overflow the oldest
+    droppable event is evicted first (a token's content is cumulative, so a
+    later token replaces it losslessly), then any other non-critical event,
+    then the oldest event, purely to bound memory. Critical events are never
+    dropped.
+    """
+
+    def __init__(
+        self,
+        sink: Callable[[dict[str, Any]], Awaitable[None]],
+        *,
+        max_buffered: int,
+        critical_types: set[str],
+        droppable_types: set[str],
+    ) -> None:
+        self._sink = sink
+        self._max_buffered = max_buffered
+        self._critical_types = critical_types
+        self._droppable_types = droppable_types
+        self._buffer: deque[dict[str, Any]] = deque()
+        self._wakeup = asyncio.Event()
+        self._closed = False
+        self._dropped = 0
+        self._task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._run())
+
+    def enqueue(self, event: dict[str, Any]) -> None:
+        """Buffer an event for delivery. Never blocks the caller."""
+        if len(self._buffer) >= self._max_buffered:
+            self._evict_one()
+        self._buffer.append(event)
+        self._wakeup.set()
+
+    def _evict_one(self) -> None:
+        # Prefer dropping a superseded event (a token's content is cumulative,
+        # so a later token replaces it losslessly). Fall back to any other
+        # non-critical event, then the oldest event, only to bound memory under
+        # extreme sustained backpressure.
+        if self._drop_first(lambda t: t in self._droppable_types):
+            return
+        if self._drop_first(lambda t: t not in self._critical_types):
+            return
+        self._buffer.popleft()
+        self._dropped += 1
+
+    def _drop_first(self, predicate: Callable[[str], bool]) -> bool:
+        for i, buffered in enumerate(self._buffer):
+            if predicate(buffered.get("type", "")):
+                del self._buffer[i]
+                self._dropped += 1
+                return True
+        return False
+
+    async def _run(self) -> None:
+        while True:
+            while self._buffer:
+                await self._sink(self._buffer.popleft())
+            if self._closed:
+                return
+            self._wakeup.clear()
+            if not self._buffer:
+                await self._wakeup.wait()
+
+    async def aclose(self) -> int:
+        """Drain every buffered event to the sink, then stop. Returns drop count.
+
+        Awaiting this before sending a terminal event guarantees the terminal
+        event lands after everything already produced.
+        """
+        self._closed = True
+        self._wakeup.set()
+        if self._task is not None:
+            await self._task
+            self._task = None
+        return self._dropped
+
+    def cancel(self) -> None:
+        """Stop the pump without draining. Idempotent; safe after aclose."""
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+
+
 class AgentBridge:
     """
     Bridge between sandbox OpenCode instance and control plane.
@@ -209,6 +305,10 @@ class AgentBridge:
     GIT_CONFIG_TIMEOUT_SECONDS = 10.0
     MAX_PENDING_PART_EVENTS = 2000
     MAX_EVENT_BUFFER_SIZE = 1000
+    # Cap on events buffered between the SSE reader and the WebSocket sender
+    # while a prompt streams. Sized generously since it only fills when the
+    # send genuinely can't keep up; overflow evicts superseded events first.
+    MAX_STREAM_BUFFER_SIZE = 2000
     OPENCODE_DEFAULT_TITLE_RE = re.compile(
         r"^(new session|child session) - " r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$",
         re.IGNORECASE,
@@ -220,6 +320,9 @@ class AgentBridge:
         "push_complete",
         "push_error",
     }
+    # Events whose payload is cumulative, so a later one supersedes an earlier
+    # one. These are safe to drop first under stream backpressure.
+    SUPERSEDABLE_EVENT_TYPES: ClassVar[set[str]] = {"token"}
 
     def __init__(
         self,
@@ -711,6 +814,7 @@ class AgentBridge:
         author_data = cmd.get("author", {})
         start_time = time.time()
         outcome = "success"
+        pump: EventPump | None = None
 
         self.log.info(
             "prompt.start",
@@ -735,6 +839,13 @@ class AgentBridge:
             had_error = False
             error_message = None
             emitted_output = False
+            pump = EventPump(
+                self._send_event,
+                max_buffered=self.MAX_STREAM_BUFFER_SIZE,
+                critical_types=self.CRITICAL_EVENT_TYPES,
+                droppable_types=self.SUPERSEDABLE_EVENT_TYPES,
+            )
+            pump.start()
             async for event in self._stream_opencode_response_sse(
                 message_id, content, model, reasoning_effort
             ):
@@ -743,7 +854,7 @@ class AgentBridge:
                     error_message = event.get("error")
                 elif event.get("type") in ("token", "tool_call", "step_finish"):
                     emitted_output = True
-                await self._send_event(event)
+                pump.enqueue(event)
 
             if not had_error and not emitted_output:
                 had_error = True
@@ -758,6 +869,9 @@ class AgentBridge:
             if had_error:
                 outcome = "error"
 
+            # Drain everything the agent produced before the terminal event, so
+            # execution_complete always lands last.
+            self._log_dropped_events(message_id, await pump.aclose())
             await self._send_event(
                 {
                     "type": "execution_complete",
@@ -770,6 +884,9 @@ class AgentBridge:
         except Exception as e:
             outcome = "error"
             self.log.error("prompt.error", exc=e, message_id=message_id)
+            if pump is not None:
+                # Deliver any output salvaged before the failure, then complete.
+                self._log_dropped_events(message_id, await pump.aclose())
             await self._send_event(
                 {
                     "type": "execution_complete",
@@ -779,6 +896,8 @@ class AgentBridge:
                 }
             )
         finally:
+            if pump is not None:
+                pump.cancel()
             duration_ms = int((time.time() - start_time) * 1000)
             self.log.info(
                 "prompt.run",
@@ -787,6 +906,14 @@ class AgentBridge:
                 reasoning_effort=reasoning_effort,
                 outcome=outcome,
                 duration_ms=duration_ms,
+            )
+
+    def _log_dropped_events(self, message_id: str, dropped: int) -> None:
+        if dropped:
+            self.log.warn(
+                "bridge.stream_events_dropped",
+                message_id=message_id,
+                dropped=dropped,
             )
 
     async def _create_opencode_session(self) -> None:

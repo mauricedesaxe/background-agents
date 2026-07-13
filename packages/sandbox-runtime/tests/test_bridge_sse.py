@@ -792,6 +792,68 @@ class TestSSEStreaming:
         assert complete["error"] == "OpenCode completed without emitting assistant output."
 
 
+class TestHandlePromptStreaming:
+    """Tests for how _handle_prompt pumps stream events to the control plane."""
+
+    @pytest.mark.asyncio
+    async def test_streams_events_in_order_when_the_send_is_slow(self, bridge: AgentBridge):
+        """A slow WebSocket send must not reorder events or stall the stream."""
+        bridge._configure_git_identity = AsyncMock()
+
+        async def burst(*_args: Any, **_kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+            for i in range(5):
+                yield {"type": "token", "content": f"t{i}", "messageId": "cp-msg-1"}
+            yield {"type": "tool_call", "messageId": "cp-msg-1"}
+
+        bridge._stream_opencode_response_sse = burst
+
+        sent: list[dict[str, Any]] = []
+
+        async def slow_send(event: dict[str, Any]) -> None:
+            await asyncio.sleep(0)
+            sent.append(event)
+
+        bridge._send_event = slow_send
+
+        await bridge._handle_prompt({"messageId": "cp-msg-1", "content": "x"})
+
+        assert [e.get("content", e["type"]) for e in sent] == [
+            "t0",
+            "t1",
+            "t2",
+            "t3",
+            "t4",
+            "tool_call",
+            "execution_complete",
+        ]
+        assert sent[-1]["type"] == "execution_complete"
+        assert sent[-1]["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_delivers_buffered_output_before_a_failure_completion(self, bridge: AgentBridge):
+        """A mid-stream failure still flushes salvaged output before execution_complete."""
+        bridge._configure_git_identity = AsyncMock()
+
+        async def burst_then_raise(*_args: Any, **_kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+            yield {"type": "token", "content": "partial", "messageId": "cp-msg-1"}
+            raise SSEConnectionError("stream dropped")
+
+        bridge._stream_opencode_response_sse = burst_then_raise
+
+        sent: list[dict[str, Any]] = []
+
+        async def send(event: dict[str, Any]) -> None:
+            sent.append(event)
+
+        bridge._send_event = send
+
+        await bridge._handle_prompt({"messageId": "cp-msg-1", "content": "x"})
+
+        assert sent[0]["content"] == "partial"
+        assert sent[-1]["type"] == "execution_complete"
+        assert sent[-1]["success"] is False
+
+
 class TestFetchFinalMessageState:
     """Tests for _fetch_final_message_state method.
 
