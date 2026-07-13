@@ -13,7 +13,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -1326,6 +1326,128 @@ class DelayedMockHttpClient:
 
     def stream(self, method: str, url: str, timeout: Any = None):
         return self._sse_response
+
+
+class TestReadOomKillCount:
+    """_read_oom_kill_count parses the cgroup-v2 counter and fails soft."""
+
+    def test_parses_oom_kill_line_by_key(self, bridge: AgentBridge, monkeypatch):
+        mock_path = MagicMock()
+        mock_path.return_value.read_text.return_value = "low 0\nhigh 0\nmax 5\noom 2\noom_kill 3\n"
+        monkeypatch.setattr("sandbox_runtime.bridge.Path", mock_path)
+        assert bridge._read_oom_kill_count() == 3
+
+    def test_missing_oom_kill_key_returns_zero(self, bridge: AgentBridge, monkeypatch):
+        mock_path = MagicMock()
+        mock_path.return_value.read_text.return_value = "low 0\nhigh 0\nmax 5\n"
+        monkeypatch.setattr("sandbox_runtime.bridge.Path", mock_path)
+        assert bridge._read_oom_kill_count() == 0
+
+    def test_missing_file_returns_zero(self, bridge: AgentBridge, monkeypatch):
+        mock_path = MagicMock()
+        mock_path.return_value.read_text.side_effect = FileNotFoundError()
+        monkeypatch.setattr("sandbox_runtime.bridge.Path", mock_path)
+        assert bridge._read_oom_kill_count() == 0
+
+    def test_malformed_value_returns_zero(self, bridge: AgentBridge, monkeypatch):
+        mock_path = MagicMock()
+        mock_path.return_value.read_text.return_value = "oom_kill not-a-number\n"
+        monkeypatch.setattr("sandbox_runtime.bridge.Path", mock_path)
+        assert bridge._read_oom_kill_count() == 0
+
+    def test_oom_kill_line_with_no_value_returns_zero(self, bridge: AgentBridge, monkeypatch):
+        # A truncated/mid-write file can yield the key with no value.
+        mock_path = MagicMock()
+        mock_path.return_value.read_text.return_value = "low 0\noom_kill\n"
+        monkeypatch.setattr("sandbox_runtime.bridge.Path", mock_path)
+        assert bridge._read_oom_kill_count() == 0
+
+
+class TestSSEDropOomMessage:
+    """A mid-stream drop reports OOM when the cgroup oom_kill counter rose."""
+
+    async def _drain(self, bridge: AgentBridge):
+        async for _ in bridge._stream_opencode_response_sse("cp-msg-1", "Test prompt"):
+            pass
+
+    async def test_reports_oom_when_counter_rose(
+        self, bridge: AgentBridge, opencode_message_id: str, monkeypatch
+    ):
+        bridge.http_client = DelayedMockHttpClient(
+            ErrorMidStreamMockSSEResponse(
+                [], httpx.RemoteProtocolError("peer closed connection (incomplete chunked read)")
+            )
+        )
+        # First call is the baseline (stream start), second is at the drop.
+        monkeypatch.setattr(bridge, "_read_oom_kill_count", MagicMock(side_effect=[0, 1]))
+
+        with pytest.raises(SSEConnectionError, match="ran out of memory"):
+            await self._drain(bridge)
+
+    async def test_generic_message_when_counter_unchanged(
+        self, bridge: AgentBridge, opencode_message_id: str, monkeypatch
+    ):
+        bridge.http_client = DelayedMockHttpClient(
+            ErrorMidStreamMockSSEResponse(
+                [], httpx.RemoteProtocolError("peer closed connection (incomplete chunked read)")
+            )
+        )
+        monkeypatch.setattr(bridge, "_read_oom_kill_count", MagicMock(side_effect=[0, 0]))
+
+        with pytest.raises(SSEConnectionError, match="SSE stream connection dropped"):
+            await self._drain(bridge)
+
+    async def test_salvages_output_and_reads_counter_after_salvage(
+        self, bridge: AgentBridge, opencode_message_id: str, monkeypatch
+    ):
+        # An OOM drop that still has salvageable output. Pins two invariants:
+        # partial output is delivered before the OOM raise, and the counter is
+        # read only after the salvage round-trip (the handler's ordering contract).
+        http_client = DelayedMockHttpClient(
+            ErrorMidStreamMockSSEResponse(
+                events_before_error=[create_sse_event("server.connected", {})],
+                exc=httpx.RemoteProtocolError("peer closed connection (incomplete chunked read)"),
+            )
+        )
+        http_client.get_responses = [
+            MockResponse(
+                200,
+                [
+                    {
+                        "info": {
+                            "id": "oc-msg-1",
+                            "role": "assistant",
+                            "parentID": opencode_message_id,
+                        },
+                        "parts": [{"id": "part-1", "type": "text", "text": "partial answer"}],
+                    }
+                ],
+            )
+        ]
+        bridge.http_client = http_client
+
+        reads: list[int] = []
+
+        def fake_oom_read() -> int:
+            reads.append(1)
+            if len(reads) == 1:
+                return 0  # baseline, captured at stream start
+            # Second read is at the drop: salvage must already have run.
+            assert any(u.endswith("/abort") for u in http_client.post_urls)
+            assert any(u.endswith("/message") for u in http_client.get_urls)
+            return 1
+
+        monkeypatch.setattr(bridge, "_read_oom_kill_count", fake_oom_read)
+
+        events: list[dict[str, Any]] = []
+        with pytest.raises(SSEConnectionError, match="ran out of memory"):
+            async for event in bridge._stream_opencode_response_sse("msg-1", "test"):
+                events.append(event)
+
+        assert any(
+            e.get("type") == "token" and e.get("content") == "partial answer" for e in events
+        )
+        assert len(reads) == 2
 
 
 class TestInactivityTimeout:

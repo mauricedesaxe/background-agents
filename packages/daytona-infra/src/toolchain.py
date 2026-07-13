@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from daytona import CreateSnapshotParams, Daytona, Image
+from daytona import CreateSnapshotParams, Daytona, Image, Resources
 
 # OpenCode version to install.
 #
@@ -41,7 +41,13 @@ JJ_SHA256 = "59e5588583ac82b623239929368c65b90735931c0f26b5a16c1f04d5bb97643d"
 # git system-wide so per-request token brokerage matches the Modal base image.
 # -tldraw-jj: @kitschpatrol/tldraw-cli + verified chrome-headless-shell
 # pre-warm, plus the Jujutsu binary.
-SANDBOX_VERSION = "daytona-v6-review-agents"
+SANDBOX_VERSION = "daytona-v7-4gib"
+
+# Resources baked into the base snapshot. Daytona applies these to every sandbox
+# created from it and rejects overriding them at create time. Memory (GiB) is the
+# lever for the OOM problem; cpu (cores) is a modest bump for parallel builds.
+SANDBOX_CPU_CORES = 2
+SANDBOX_MEMORY_GIB = 4
 
 
 def build_base_image(repo_root: Path) -> Image:
@@ -160,6 +166,12 @@ def create_base_snapshot(daytona: Daytona, repo_root: Path, snapshot_name: str) 
             name=snapshot_name,
             image=image,
             entrypoint=["python", "-m", "sandbox_runtime.entrypoint"],
+            # Daytona bakes resources into the snapshot; sandboxes created from
+            # it inherit these and cannot override them at create time. ~1 GiB
+            # (the provider default) OOM-kills OpenCode during heavy builds, so
+            # give sandboxes real headroom. Disk is left at the provider default
+            # to avoid shrinking it and to not add org disk-cap pressure (#8).
+            resources=Resources(cpu=SANDBOX_CPU_CORES, memory=SANDBOX_MEMORY_GIB),
         ),
         on_logs=lambda chunk: print(chunk, end="\n"),
     )
