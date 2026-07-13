@@ -1462,9 +1462,33 @@ class AgentBridge:
                 f"(no data received). Total elapsed: {elapsed:.0f}s"
             )
 
-        except httpx.ReadError as e:
-            self.log.error("bridge.sse_read_error", exc=e)
-            raise SSEConnectionError(f"SSE read error: {e}")
+        except (httpx.RemoteProtocolError, httpx.ReadError) as e:
+            # OpenCode drops the /event stream mid-response under high output
+            # (fan-out, test suites). httpx raises RemoteProtocolError for the
+            # incomplete chunked read; ReadError covers lower-level socket
+            # resets. RemoteProtocolError is a sibling of ReadError under
+            # TransportError, so the old ReadError-only handler never caught it.
+            # Salvage whatever OpenCode already produced instead of failing raw,
+            # mirroring the inactivity-timeout path above.
+            elapsed = time.time() - start_time
+            self.log.error(
+                "bridge.sse_connection_dropped",
+                exc=e,
+                operation="bridge.sse",
+                message_id=message_id,
+                elapsed_ms=int(elapsed * 1000),
+            )
+            await self._request_opencode_stop(reason="sse_connection_dropped")
+            async for final_event in self._fetch_final_message_state(
+                message_id,
+                opencode_message_id,
+                cumulative_text,
+                allowed_assistant_msg_ids,
+                user_message_ids=user_message_ids,
+                compaction_occurred=compaction_occurred,
+            ):
+                yield final_event
+            raise SSEConnectionError(f"SSE stream connection dropped: {e}")
 
     async def _fetch_final_message_state(
         self,

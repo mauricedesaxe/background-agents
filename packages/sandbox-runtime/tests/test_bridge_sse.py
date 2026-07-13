@@ -15,9 +15,10 @@ from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
-from sandbox_runtime.bridge import AgentBridge, OpenCodeIdentifier
+from sandbox_runtime.bridge import AgentBridge, OpenCodeIdentifier, SSEConnectionError
 from tests.conftest import MockResponse
 
 
@@ -1210,6 +1211,31 @@ class HangingMockSSEResponse:
         pass
 
 
+class ErrorMidStreamMockSSEResponse:
+    """Mock SSE response that yields some events, then drops the connection.
+
+    Simulates OpenCode severing the /event stream mid-response, which httpx
+    surfaces as RemoteProtocolError (incomplete chunked read) or ReadError.
+    """
+
+    def __init__(self, events_before_error: list[str], exc: Exception, status_code: int = 200):
+        self.status_code = status_code
+        self._events = events_before_error
+        self._exc = exc
+
+    async def aiter_text(self) -> AsyncIterator[str]:
+        for event in self._events:
+            yield event
+            await asyncio.sleep(0)
+        raise self._exc
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+
 class DelayedMockHttpClient:
     """Mock HTTP client that uses delayed/hanging SSE responses."""
 
@@ -1430,6 +1456,82 @@ class TestPromptMaxDuration:
         bridge.http_client = http_client
 
         with pytest.raises(RuntimeError, match="Prompt exceeded max duration"):
+            async for _event in bridge._stream_opencode_response_sse("msg-1", "test"):
+                pass
+
+        assert any(url.endswith("/abort") for url in http_client.post_urls)
+        assert any(url.endswith("/message") for url in http_client.get_urls)
+
+
+class TestSSEConnectionDropped:
+    """Tests for the OpenCode /event stream dropping mid-response."""
+
+    def _bridge(self) -> AgentBridge:
+        bridge = AgentBridge(
+            sandbox_id="test-sandbox",
+            session_id="test-session",
+            control_plane_url="http://localhost:8787",
+            auth_token="test-token",
+        )
+        bridge.opencode_session_id = "oc-session-123"
+        return bridge
+
+    @pytest.mark.asyncio
+    async def test_remote_protocol_error_yields_salvaged_output(self, opencode_message_id: str):
+        """A mid-stream incomplete chunked read recovers partial output, then raises."""
+        bridge = self._bridge()
+        sse_response = ErrorMidStreamMockSSEResponse(
+            events_before_error=[create_sse_event("server.connected", {})],
+            exc=httpx.RemoteProtocolError(
+                "peer closed connection without sending complete message body "
+                "(incomplete chunked read)"
+            ),
+        )
+        http_client = DelayedMockHttpClient(sse_response)
+        # Final-state fetch returns an assistant message the stream never got to emit.
+        http_client.get_responses = [
+            MockResponse(
+                200,
+                [
+                    {
+                        "info": {
+                            "id": "oc-msg-1",
+                            "role": "assistant",
+                            "parentID": opencode_message_id,
+                        },
+                        "parts": [{"id": "part-1", "type": "text", "text": "partial answer"}],
+                    }
+                ],
+            )
+        ]
+        bridge.http_client = http_client
+
+        events: list[dict[str, Any]] = []
+        with pytest.raises(SSEConnectionError):
+            async for event in bridge._stream_opencode_response_sse("msg-1", "test"):
+                events.append(event)
+
+        # The salvaged token reaches the caller before the error propagates.
+        assert any(
+            e.get("type") == "token" and e.get("content") == "partial answer" for e in events
+        )
+        # Salvage ran: OpenCode was stopped and final message state was fetched.
+        assert any(url.endswith("/abort") for url in http_client.post_urls)
+        assert any(url.endswith("/message") for url in http_client.get_urls)
+
+    @pytest.mark.asyncio
+    async def test_read_error_salvages_final_state(self):
+        """A lower-level socket read error also salvages instead of failing raw."""
+        bridge = self._bridge()
+        sse_response = ErrorMidStreamMockSSEResponse(
+            events_before_error=[create_sse_event("server.connected", {})],
+            exc=httpx.ReadError("connection reset"),
+        )
+        http_client = DelayedMockHttpClient(sse_response)
+        http_client.get_responses = [MockResponse(200, [])]
+        bridge.http_client = http_client
+
+        with pytest.raises(SSEConnectionError):
             async for _event in bridge._stream_opencode_response_sse("msg-1", "test"):
                 pass
 
