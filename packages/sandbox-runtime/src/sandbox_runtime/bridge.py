@@ -1087,8 +1087,14 @@ class AgentBridge:
                 "modelID": model_id,
             }
 
+            # OpenCode's prompt route strips "options" from the model ref and honours only the
+            # top-level "variant", which it maps to provider options per model. The anthropic
+            # and openai arms below still write "options" and are kept as they are until that
+            # is confirmed and migrated separately; the tests pin the two shapes apart.
             if reasoning_effort:
-                if provider_id == "anthropic":
+                if provider_id == "openrouter":
+                    request_body["variant"] = reasoning_effort
+                elif provider_id == "anthropic":
                     if model_id in self.ANTHROPIC_ADAPTIVE_THINKING_MODELS:
                         anthropic_options: dict[str, Any] = {
                             "thinking": {"type": "adaptive"},
