@@ -192,6 +192,8 @@ Choose the AI model that fits your task, with per-session reasoning effort contr
 | OpenAI           | GPT 5.4, GPT 5.5, 5.3 Codex, 5.3 Codex Spark                    |
 | OpenCode Zen     | Kimi K2.5/K2.6, MiniMax M2.5, Qwen3.7 Max, GLM 5/5.1 (opt-in)   |
 | Z.AI Coding Plan | GLM 5.2 (opt-in)                                                |
+| DeepSeek         | DeepSeek V4 Flash, V4 Pro (opt-in)                              |
+| OpenRouter       | Gemini 3.1 Flash Lite/Pro, Grok 4.3/4.5 (opt-in)                |
 
 OpenAI models work with your existing ChatGPT subscription via OAuth — no separate API key needed.
 See **[docs/AVAILABLE_MODELS.md](docs/AVAILABLE_MODELS.md)** for the full model list and

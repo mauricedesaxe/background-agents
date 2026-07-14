@@ -1,9 +1,10 @@
 # Available Models
 
 Open-Inspect exposes these models in the model picker and integration preferences. The default
-enabled set includes Anthropic and OpenAI models. OpenCode Zen, Z.AI Coding Plan, and DeepSeek
-models are available but must be enabled in **Settings > Models**. Z.AI Coding Plan requires
-`ZHIPU_API_KEY`; DeepSeek requires `DEEPSEEK_API_KEY`.
+enabled set includes Anthropic and OpenAI models. OpenCode Zen, Z.AI Coding Plan, DeepSeek, and
+OpenRouter models are available but must be enabled in **Settings > Models**. Z.AI Coding Plan
+requires `ZHIPU_API_KEY`; DeepSeek requires `DEEPSEEK_API_KEY`; OpenRouter requires
+`OPENROUTER_API_KEY`.
 
 ## Anthropic
 
@@ -60,3 +61,14 @@ DeepSeek models require `DEEPSEEK_API_KEY` as a global or repository secret.
 | ---------------------------- | ----------------- | ------------ | ----------------- | -------------- |
 | `deepseek/deepseek-v4-flash` | DeepSeek V4 Flash | Fast model   | Not supported     | N/A            |
 | `deepseek/deepseek-v4-pro`   | DeepSeek V4 Pro   | Most capable | Not supported     | N/A            |
+
+## OpenRouter
+
+OpenRouter models require `OPENROUTER_API_KEY` as a global or repository secret.
+
+| Model ID                                   | Display name          | Description            | Reasoning efforts              | Default effort |
+| ------------------------------------------ | --------------------- | ---------------------- | ------------------------------ | -------------- |
+| `openrouter/google/gemini-3.1-flash-lite`  | Gemini 3.1 Flash Lite | Google, fast and cheap | none, low, medium, high, xhigh | high           |
+| `openrouter/google/gemini-3.1-pro-preview` | Gemini 3.1 Pro        | Google, most capable   | none, low, medium, high, xhigh | high           |
+| `openrouter/x-ai/grok-4.3`                 | Grok 4.3              | xAI, balanced          | Not supported                  | N/A            |
+| `openrouter/x-ai/grok-4.5`                 | Grok 4.5              | xAI, most capable      | Not supported                  | N/A            |

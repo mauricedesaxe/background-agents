@@ -570,8 +570,9 @@ per-environment scope. A session receives global secrets plus its **session targ
 > **Daytona and Vercel users**: LLM API keys (e.g., `ANTHROPIC_API_KEY` for Claude models) must be
 > added as global secrets. Modal injects these automatically via its own secrets mechanism.
 >
-> **Opt-in model providers**: DeepSeek models require `DEEPSEEK_API_KEY`, and Z.AI Coding Plan
-> models require `ZHIPU_API_KEY`, as a global secret with any sandbox provider.
+> **Opt-in model providers**: DeepSeek models require `DEEPSEEK_API_KEY`, Z.AI Coding Plan models
+> require `ZHIPU_API_KEY`, and OpenRouter models require `OPENROUTER_API_KEY`, as a global secret
+> with any sandbox provider.
 
 See [Secrets Management](./SECRETS.md) for setup instructions.
 

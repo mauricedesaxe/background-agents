@@ -1071,8 +1071,9 @@ injects keys automatically), these providers require you to add them as global s
 
 1. Go to **Settings > Secrets** in the web app
 2. Select **All Repositories (Global)** from the scope dropdown
-3. Add the key for your chosen provider (e.g., `ANTHROPIC_API_KEY` for Claude models or
-   `DEEPSEEK_API_KEY` for DeepSeek models, or `ZHIPU_API_KEY` for Z.AI Coding Plan models)
+3. Add the key for your chosen provider (e.g., `ANTHROPIC_API_KEY` for Claude models,
+   `DEEPSEEK_API_KEY` for DeepSeek models, `ZHIPU_API_KEY` for Z.AI Coding Plan models, or
+   `OPENROUTER_API_KEY` for OpenRouter models)
 4. Click **Save**
 
 See [Secrets Management](SECRETS.md) for more on global and repository secrets.
