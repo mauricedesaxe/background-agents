@@ -54,6 +54,13 @@ mention. They carry a read-only permission block, so a reviewer can't mutate the
   five-primitive concurrency stack, `Result`/discriminated unions, boundary
   schemas) — those pay off today, so they aren't YAGNI. Overlap with
   `code-reviewer`'s code-level YAGNI is expected; both run.
+- `clarity-reviewer` — documentation & comment discipline and self-explanatory
+  code (PHILOSOPHY §21): comments that explain *what* instead of *why*, task/issue
+  refs that rot, prose docs that duplicate code+commits or drift, permanent ADRs used
+  as a docs strategy, commented-out code — and the flip side, code only unclear
+  because a bad name / magic value / dense block wasn't made self-explanatory (fix is
+  rename-or-extract, not add-a-comment). Calibrated: a load-bearing *why* comment, a
+  glossary, a nav pointer, or a temporary decision ADR earns its keep and is not a finding.
 
 **Conditional — run when `CLAUDE.md` declares `Commercial readiness: yes`:**
 
@@ -133,7 +140,7 @@ run concurrently. Each prompt should give the agent:
    scope.
 
 Always spawn: `code-reviewer`, `test-reviewer`, `data-reviewer`, `git-hygiene-reviewer`,
-`yagni-reviewer`, plus any project-specific reviewers matching the diff's paths (see the
+`yagni-reviewer`, `clarity-reviewer`, plus any project-specific reviewers matching the diff's paths (see the
 reviewer→path mapping in the project's `CLAUDE.md`; a scoped reviewer may run *in place of*
 `code-reviewer` rather than alongside it). `yagni-reviewer` is app-agnostic — it runs
 alongside any scoped reviewers too.
