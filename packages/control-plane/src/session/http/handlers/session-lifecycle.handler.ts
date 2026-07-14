@@ -102,6 +102,7 @@ export interface SessionLifecycleHandler {
   updateTitle: (request: Request) => Promise<Response>;
   archive: (request: Request) => Promise<Response>;
   unarchive: (request: Request) => Promise<Response>;
+  archiveCascade: () => Promise<Response>;
   cancel: () => Promise<Response>;
 }
 
@@ -378,6 +379,41 @@ export function createSessionLifecycleHandler(
       await deps.transitionSessionStatus("active");
 
       return Response.json({ status: "active" });
+    },
+
+    /**
+     * Trusted DO-to-DO archive used by the parent→child archive cascade. The
+     * only caller is another SessionDO (never a client), so there is no
+     * participant check. Any in-flight execution is stopped with the status
+     * reconcile suppressed so the archived status sticks instead of being
+     * flipped back to active/completed once the current run finishes.
+     *
+     * transitionSessionStatus("archived") cascades onward to this session's own
+     * children, so grandchildren are archived without extra recursion here.
+     */
+    async archiveCascade(): Promise<Response> {
+      const session = deps.getSession();
+      // Child DO may never have been created (or was already torn down); the
+      // cascade is best-effort, so treat a missing session as already done.
+      if (!session) {
+        return Response.json({ status: "archived" });
+      }
+
+      // Already archived — no-op, and no re-cascade to descendants.
+      if (session.status === "archived") {
+        return Response.json({ status: "archived" });
+      }
+
+      // Only running sessions have execution to stop; terminal-but-not-archived
+      // children (completed/failed/cancelled) just need the status flip so they
+      // leave the sidebar.
+      if (!TERMINAL_STATUSES.has(session.status)) {
+        await deps.stopExecution({ suppressStatusReconcile: true });
+      }
+
+      await deps.transitionSessionStatus("archived");
+
+      return Response.json({ status: "archived" });
     },
 
     async cancel(): Promise<Response> {

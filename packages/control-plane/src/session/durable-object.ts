@@ -203,6 +203,7 @@ export class SessionDO extends DurableObject<Env> {
     updateTitle: (request) => this.sessionLifecycleHandler.updateTitle(request),
     archive: (request) => this.sessionLifecycleHandler.archive(request),
     unarchive: (request) => this.sessionLifecycleHandler.unarchive(request),
+    archiveCascade: () => this.sessionLifecycleHandler.archiveCascade(),
     verifySandboxToken: (request) => this.sandboxHandler.verifySandboxToken(request),
     openaiTokenRefresh: () => this.sandboxHandler.openaiTokenRefresh(),
     scmCredentials: () => this.sandboxHandler.scmCredentials(),
@@ -1642,7 +1643,64 @@ export class SessionDO extends DurableObject<Env> {
     // Notify parent session (if this is a child) so its UI can refresh
     this.notifyParentOfStatusChange(session, publicSessionId, status);
 
+    // Archiving a session cascades to its child/sub-task sessions so they leave
+    // the sidebar too. Gated on "archived" (only ever set by the archive paths),
+    // this fires exactly once per real transition regardless of which entrypoint
+    // archived the session; each archived child cascades to its own children.
+    if (status === "archived") {
+      this.cascadeArchiveToChildren(publicSessionId);
+    }
+
     return true;
+  }
+
+  /**
+   * Archive every child of the given session by calling each child DO's trusted
+   * archive endpoint. Fire-and-forget and best-effort per child (a failing or
+   * evicted child DO is logged, not retried, and never fails the parent's
+   * archive), mirroring notifyParentOfChildUpdate. Children already archived are
+   * skipped so a re-archive doesn't re-walk an already-archived subtree.
+   */
+  private cascadeArchiveToChildren(parentSessionId: string): void {
+    if (!this.env.DB || !this.env.SESSION) return;
+
+    const sessionBinding = this.env.SESSION;
+    const sessionStore = new SessionIndexStore(this.env.DB);
+
+    this.ctx.waitUntil(
+      sessionStore
+        .listByParent(parentSessionId)
+        .then((children) =>
+          Promise.all(
+            children
+              .filter((child) => child.status !== "archived")
+              .map((child) => {
+                const childDoId = sessionBinding.idFromName(child.id);
+                return sessionBinding
+                  .get(childDoId)
+                  .fetch(
+                    new Request(buildSessionInternalUrl(SessionInternalPaths.archiveCascade), {
+                      method: "POST",
+                    })
+                  )
+                  .catch((error) => {
+                    this.log.error("cascade_archive.child_failed", {
+                      parent_id: parentSessionId,
+                      child_id: child.id,
+                      error,
+                    });
+                  });
+              })
+          )
+        )
+        .then(() => undefined)
+        .catch((error) => {
+          this.log.error("cascade_archive.failed", {
+            parent_id: parentSessionId,
+            error,
+          });
+        })
+    );
   }
 
   private applySessionTitleUpdate(

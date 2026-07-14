@@ -24,7 +24,7 @@ import {
   CURRENT_USER_CREATED_BY,
   isUnarchivedSessionListKey,
   mergeUniqueSessions,
-  removeSessionFromList,
+  collectSessionAndDescendantIds,
   type SessionListResponse,
 } from "@/lib/session-list";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
@@ -301,21 +301,29 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
     async (sessionId: string) => {
       if (!sidebarSessionsKey) return;
 
+      // Archiving cascades to child/sub-task sessions on the server, so drop the
+      // whole subtree from the sidebar — not just the archived row — else its
+      // children linger as orphaned "sub-task" entries until the next refetch.
+      const removedIds = collectSessionAndDescendantIds(sessions, sessionId);
+
       await mutate<SessionListResponse>(
         isUnarchivedSessionListKey,
         (current) =>
           current
-            ? { ...current, sessions: removeSessionFromList(current.sessions, sessionId) }
+            ? {
+                ...current,
+                sessions: current.sessions.filter((session) => !removedIds.has(session.id)),
+              }
             : current,
         { revalidate: false, populateCache: true }
       );
-      setExtraSessions((prev) => prev.filter((session) => session.id !== sessionId));
+      setExtraSessions((prev) => prev.filter((session) => !removedIds.has(session.id)));
 
       if (currentSessionId === sessionId) {
         router.push("/");
       }
     },
-    [currentSessionId, router, sidebarSessionsKey]
+    [currentSessionId, router, sidebarSessionsKey, sessions]
   );
 
   const handleNavigationSelect = useCallback(() => {

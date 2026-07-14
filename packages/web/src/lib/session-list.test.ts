@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyTitleUpdate,
   buildSessionsPageKey,
+  collectSessionAndDescendantIds,
   CURRENT_USER_CREATED_BY,
   isArchivedSessionListKey,
   isSessionListKey,
@@ -139,5 +140,50 @@ describe("applyTitleUpdate", () => {
     applyTitleUpdate(before, "a", "Mutated", 9999);
 
     expect(before).toEqual(beforeSnapshot);
+  });
+});
+
+describe("collectSessionAndDescendantIds", () => {
+  it("collects the session plus its children and grandchildren", () => {
+    const sessions = [
+      session("parent"),
+      session("child", { parentSessionId: "parent", spawnSource: "agent" }),
+      session("grandchild", { parentSessionId: "child", spawnSource: "agent" }),
+      session("unrelated"),
+    ];
+
+    const ids = collectSessionAndDescendantIds(sessions, "parent");
+
+    expect(ids).toEqual(new Set(["parent", "child", "grandchild"]));
+  });
+
+  it("follows parent links regardless of list ordering", () => {
+    // grandchild appears before its parent in the list.
+    const sessions = [
+      session("grandchild", { parentSessionId: "child" }),
+      session("child", { parentSessionId: "parent" }),
+      session("parent"),
+    ];
+
+    expect(collectSessionAndDescendantIds(sessions, "parent")).toEqual(
+      new Set(["parent", "child", "grandchild"])
+    );
+  });
+
+  it("does not gate on spawn source", () => {
+    const sessions = [
+      session("parent"),
+      session("child", { parentSessionId: "parent", spawnSource: "user" }),
+    ];
+
+    expect(collectSessionAndDescendantIds(sessions, "parent")).toEqual(
+      new Set(["parent", "child"])
+    );
+  });
+
+  it("returns just the id when it has no descendants", () => {
+    const sessions = [session("a"), session("b", { parentSessionId: "other" })];
+
+    expect(collectSessionAndDescendantIds(sessions, "a")).toEqual(new Set(["a"]));
   });
 });
