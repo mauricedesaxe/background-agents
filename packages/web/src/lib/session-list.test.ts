@@ -186,4 +186,19 @@ describe("collectSessionAndDescendantIds", () => {
 
     expect(collectSessionAndDescendantIds(sessions, "a")).toEqual(new Set(["a"]));
   });
+
+  it("returns just the id for an empty list", () => {
+    // Descendants not currently loaded are reconciled by the next server fetch.
+    expect(collectSessionAndDescendantIds([], "x")).toEqual(new Set(["x"]));
+  });
+
+  it("terminates on a parent-link cycle", () => {
+    // Corrupt data (a→b→a) must not infinite-loop the fixed-point walk.
+    const sessions = [
+      session("a", { parentSessionId: "b" }),
+      session("b", { parentSessionId: "a" }),
+    ];
+
+    expect(collectSessionAndDescendantIds(sessions, "a")).toEqual(new Set(["a", "b"]));
+  });
 });
