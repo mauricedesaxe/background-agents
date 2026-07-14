@@ -3,9 +3,9 @@ import { SessionIndexStore } from "../db/session-index";
 import type { Logger } from "../logger";
 import {
   DEFAULT_MODEL,
-  getDefaultReasoningEffort,
   getValidModelOrDefault,
   isValidModel,
+  resolveReasoningEffort,
 } from "@open-inspect/shared";
 import type {
   ClientInfo,
@@ -209,10 +209,10 @@ export class SessionMessageQueue {
     const author = this.deps.repository.getParticipantById(message.author_id);
     const session = this.deps.getSession();
     const resolvedModel = getValidModelOrDefault(message.model || session?.model);
-    const resolvedEffort =
-      message.reasoning_effort ??
-      session?.reasoning_effort ??
-      getDefaultReasoningEffort(resolvedModel);
+    const resolvedEffort = resolveReasoningEffort(
+      resolvedModel,
+      message.reasoning_effort ?? session?.reasoning_effort
+    );
 
     const command: SandboxCommand = {
       type: "prompt",

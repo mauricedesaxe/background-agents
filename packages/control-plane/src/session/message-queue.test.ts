@@ -119,6 +119,7 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
   const updateLastActivity = vi.fn();
   const scheduleSandboxConnectTimeout = vi.fn(async (_deadlineMs: number) => {});
   const waitUntil = vi.fn();
+  const getSession = vi.fn(() => createSession());
 
   const queue = new SessionMessageQueue({
     env: {} as Env,
@@ -137,7 +138,7 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
     scmProvider: "github",
     getClientInfo: options?.getClientInfo ?? (() => createClientInfo()),
     validateReasoningEffort: vi.fn(() => null),
-    getSession: vi.fn(() => createSession()),
+    getSession,
     updateLastActivity,
     spawnSandbox,
     broadcast,
@@ -151,6 +152,7 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
     repository,
     wsManager,
     participantService,
+    getSession,
     broadcast,
     spawnSandbox,
     setSessionStatus,
@@ -232,6 +234,49 @@ describe("SessionMessageQueue", () => {
       expect.objectContaining({ type: "prompt", messageId: "msg-42" })
     );
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: true });
+  });
+
+  it("drops a stored effort the newly chosen model does not support", async () => {
+    // The session was started on Claude at "max"; the message switches to a Gemini model,
+    // whose efforts stop at "xhigh". Forwarding "max" would send an effort OpenCode cannot map.
+    const h = buildQueue();
+    const sandboxWs = { readyState: WebSocket.OPEN } as WebSocket;
+    h.getSession.mockReturnValue(
+      createSession({ model: "anthropic/claude-haiku-4-5", reasoning_effort: "max" })
+    );
+    h.repository.getNextPendingMessage.mockReturnValue(
+      createMessage({ model: "openrouter/google/gemini-3.1-pro-preview", reasoning_effort: null })
+    );
+    h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
+
+    await h.queue.processMessageQueue();
+
+    expect(h.wsManager.send).toHaveBeenCalledWith(
+      sandboxWs,
+      expect.objectContaining({
+        model: "openrouter/google/gemini-3.1-pro-preview",
+        reasoningEffort: "high",
+      })
+    );
+  });
+
+  it("keeps a stored effort the newly chosen model does support", async () => {
+    const h = buildQueue();
+    const sandboxWs = { readyState: WebSocket.OPEN } as WebSocket;
+    h.getSession.mockReturnValue(
+      createSession({ model: "anthropic/claude-haiku-4-5", reasoning_effort: "low" })
+    );
+    h.repository.getNextPendingMessage.mockReturnValue(
+      createMessage({ model: "openrouter/google/gemini-3.1-pro-preview", reasoning_effort: null })
+    );
+    h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
+
+    await h.queue.processMessageQueue();
+
+    expect(h.wsManager.send).toHaveBeenCalledWith(
+      sandboxWs,
+      expect.objectContaining({ reasoningEffort: "low" })
+    );
   });
 
   it("marks processing message failed and broadcasts synthetic completion on stop", async () => {

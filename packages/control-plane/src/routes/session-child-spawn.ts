@@ -3,7 +3,7 @@ import {
   DEFAULT_MAX_TOTAL_CHILD_SESSIONS,
   getValidModelOrDefault,
   isValidModel,
-  isValidReasoningEffort,
+  resolveReasoningEffort,
   spawnChildSessionRequestSchema,
   spawnContextSchema,
   VALID_MODELS,
@@ -127,9 +127,7 @@ async function handleSpawnChild(
   }
   const model = getValidModelOrDefault(rawModel);
   const reasoningEffort =
-    body.reasoningEffort && isValidReasoningEffort(model, body.reasoningEffort)
-      ? body.reasoningEffort
-      : spawnContext.reasoningEffort;
+    resolveReasoningEffort(model, body.reasoningEffort ?? spawnContext.reasoningEffort) ?? null;
 
   const childDepth = parentDepth + 1;
   const childId = generateId();
