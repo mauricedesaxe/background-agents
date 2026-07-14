@@ -192,6 +192,36 @@ export const MODEL_CATALOG = [
       { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", description: "Most capable" },
     ],
   },
+  // OpenCode maps reasoning-effort variants for OpenRouter Gemini 3 models but not for Grok, so
+  // an effort control on Grok would render in the UI and do nothing. Gemini defaults to "high"
+  // because OpenCode asks for high effort when no effort is sent: the control is there to turn
+  // it down, not to switch reasoning on.
+  {
+    category: "OpenRouter",
+    enabledByDefault: false,
+    models: [
+      {
+        id: "openrouter/google/gemini-3.1-flash-lite",
+        name: "Gemini 3.1 Flash Lite",
+        description: "Google, fast and cheap",
+        reasoning: {
+          efforts: ["none", "low", "medium", "high", "xhigh"],
+          default: "high",
+        },
+      },
+      {
+        id: "openrouter/google/gemini-3.1-pro-preview",
+        name: "Gemini 3.1 Pro",
+        description: "Google, most capable",
+        reasoning: {
+          efforts: ["none", "low", "medium", "high", "xhigh"],
+          default: "high",
+        },
+      },
+      { id: "openrouter/x-ai/grok-4.3", name: "Grok 4.3", description: "xAI, balanced" },
+      { id: "openrouter/x-ai/grok-4.5", name: "Grok 4.5", description: "xAI, most capable" },
+    ],
+  },
 ] as const satisfies readonly ModelCatalogGroup[];
 
 export type ValidModel = (typeof MODEL_CATALOG)[number]["models"][number]["id"];
@@ -315,6 +345,23 @@ export function isValidReasoningEffort(model: string, effort: string): boolean {
 }
 
 /**
+ * Resolve a requested reasoning effort against the model it will actually run on.
+ *
+ * An effort stored on a session (or inherited by a child session) outlives the model it was
+ * chosen for, so it can be one the new model does not support. Falls back to the model's own
+ * default in that case, and to undefined for models with no reasoning controls at all.
+ */
+export function resolveReasoningEffort(
+  model: string,
+  requested: string | null | undefined
+): ReasoningEffort | undefined {
+  if (requested && isValidReasoningEffort(model, requested)) {
+    return requested as ReasoningEffort;
+  }
+  return getDefaultReasoningEffort(model);
+}
+
+/**
  * Extract provider and model from a model ID.
  *
  * Normalizes bare Claude model names first, then splits on "/".
@@ -323,6 +370,7 @@ export function isValidReasoningEffort(model: string, effort: string): boolean {
  * extractProviderAndModel("anthropic/claude-haiku-4-5") // { provider: "anthropic", model: "claude-haiku-4-5" }
  * extractProviderAndModel("claude-haiku-4-5") // { provider: "anthropic", model: "claude-haiku-4-5" }
  * extractProviderAndModel("openai/gpt-5.3-codex") // { provider: "openai", model: "gpt-5.3-codex" }
+ * extractProviderAndModel("openrouter/google/gemini-3.1-pro-preview") // { provider: "openrouter", model: "google/gemini-3.1-pro-preview" }
  */
 export function extractProviderAndModel(modelId: string): { provider: string; model: string } {
   const normalized = normalizeModelId(modelId);

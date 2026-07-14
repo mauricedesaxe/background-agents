@@ -13,6 +13,7 @@ import {
   isValidModel,
   isValidReasoningEffort,
   normalizeModelId,
+  resolveReasoningEffort,
   supportsReasoning,
 } from "./models";
 
@@ -48,6 +49,12 @@ const ZEN_MODELS = [
 
 const DEEPSEEK_MODELS = ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"] as const;
 const ZAI_CODING_PLAN_MODELS = ["zai-coding-plan/glm-5.2"] as const;
+const OPENROUTER_MODELS = [
+  "openrouter/google/gemini-3.1-flash-lite",
+  "openrouter/google/gemini-3.1-pro-preview",
+  "openrouter/x-ai/grok-4.3",
+  "openrouter/x-ai/grok-4.5",
+] as const;
 
 describe("model utilities", () => {
   it("derives every public model view from the authoritative catalog", () => {
@@ -97,6 +104,7 @@ describe("model utilities", () => {
       ...ZEN_MODELS,
       ...ZAI_CODING_PLAN_MODELS,
       ...DEEPSEEK_MODELS,
+      ...OPENROUTER_MODELS,
     ]) {
       expect(isValidModel(model)).toBe(true);
     }
@@ -150,6 +158,10 @@ describe("model utilities", () => {
       provider: "provider",
       model: "model/version",
     });
+    expect(extractProviderAndModel("openrouter/google/gemini-3.1-pro-preview")).toEqual({
+      provider: "openrouter",
+      model: "google/gemini-3.1-pro-preview",
+    });
     expect(extractProviderAndModel("unknown-model")).toEqual({
       provider: "anthropic",
       model: "unknown-model",
@@ -172,6 +184,8 @@ describe("model utilities", () => {
     expect(supportsReasoning("openai/gpt-5.4")).toBe(true);
     expect(supportsReasoning("openai/gpt-5.6-terra")).toBe(true);
     expect(supportsReasoning("deepseek/deepseek-v4-flash")).toBe(false);
+    expect(supportsReasoning("openrouter/google/gemini-3.1-pro-preview")).toBe(true);
+    expect(supportsReasoning("openrouter/x-ai/grok-4.5")).toBe(false);
     expect(supportsReasoning("invalid")).toBe(false);
 
     expect(getDefaultReasoningEffort("anthropic/claude-haiku-4-5")).toBe("max");
@@ -182,6 +196,8 @@ describe("model utilities", () => {
     expect(getDefaultReasoningEffort("openai/gpt-5.5")).toBeUndefined();
     expect(getDefaultReasoningEffort("openai/gpt-5.6-luna")).toBeUndefined();
     expect(getDefaultReasoningEffort("deepseek/deepseek-v4-pro")).toBeUndefined();
+    expect(getDefaultReasoningEffort("openrouter/google/gemini-3.1-flash-lite")).toBe("high");
+    expect(getDefaultReasoningEffort("openrouter/x-ai/grok-4.3")).toBeUndefined();
   });
 
   it("returns reasoning configurations for supported model families", () => {
@@ -210,6 +226,11 @@ describe("model utilities", () => {
       default: "high",
     });
     expect(getReasoningConfig("deepseek/deepseek-v4-flash")).toBeUndefined();
+    expect(getReasoningConfig("openrouter/google/gemini-3.1-pro-preview")).toEqual({
+      efforts: ["none", "low", "medium", "high", "xhigh"],
+      default: "high",
+    });
+    expect(getReasoningConfig("openrouter/x-ai/grok-4.5")).toBeUndefined();
   });
 
   it("validates reasoning efforts per model", () => {
@@ -221,10 +242,34 @@ describe("model utilities", () => {
     expect(isValidReasoningEffort("openai/gpt-5.4", "none")).toBe(true);
     expect(isValidReasoningEffort("openai/gpt-5.6-sol", "xhigh")).toBe(true);
     expect(isValidReasoningEffort("openai/gpt-5.6-sol", "max")).toBe(false);
+    expect(isValidReasoningEffort("openrouter/google/gemini-3.1-flash-lite", "none")).toBe(true);
+    // OpenCode has no "max" variant for OpenRouter Gemini, and no variants at all for Grok.
+    expect(isValidReasoningEffort("openrouter/google/gemini-3.1-flash-lite", "max")).toBe(false);
+    expect(isValidReasoningEffort("openrouter/x-ai/grok-4.3", "high")).toBe(false);
     expect(isValidReasoningEffort("openai/gpt-5.3-codex", "max")).toBe(false);
     expect(isValidReasoningEffort("deepseek/deepseek-v4-pro", "high")).toBe(false);
     expect(isValidReasoningEffort("invalid", "high")).toBe(false);
     expect(isValidReasoningEffort("anthropic/claude-sonnet-4-5", "")).toBe(false);
+  });
+
+  it("resolves a requested effort against the model that will actually run", () => {
+    // Supported requests survive.
+    expect(resolveReasoningEffort("anthropic/claude-opus-4-8", "xhigh")).toBe("xhigh");
+    expect(resolveReasoningEffort("openrouter/google/gemini-3.1-pro-preview", "none")).toBe("none");
+
+    // An effort inherited from another model falls back to the new model's default rather than
+    // being forwarded. "max" is valid on Claude but not on OpenRouter Gemini.
+    expect(resolveReasoningEffort("openrouter/google/gemini-3.1-pro-preview", "max")).toBe("high");
+    expect(resolveReasoningEffort("openai/gpt-5.6-sol", "max")).toBeUndefined();
+
+    // Models with no reasoning controls never carry an effort, whatever was requested.
+    expect(resolveReasoningEffort("openrouter/x-ai/grok-4.5", "high")).toBeUndefined();
+    expect(resolveReasoningEffort("deepseek/deepseek-v4-pro", "high")).toBeUndefined();
+
+    // No request falls back to the default.
+    expect(resolveReasoningEffort("anthropic/claude-haiku-4-5", null)).toBe("max");
+    expect(resolveReasoningEffort("anthropic/claude-haiku-4-5", undefined)).toBe("max");
+    expect(resolveReasoningEffort("openrouter/google/gemini-3.1-flash-lite", null)).toBe("high");
   });
 
   it("groups display options and excludes opt-in providers from default enabled models", () => {
@@ -243,9 +288,17 @@ describe("model utilities", () => {
     expect(
       MODEL_OPTIONS.find((group) => group.category === "DeepSeek")?.models.map((m) => m.id)
     ).toEqual(DEEPSEEK_MODELS);
+    expect(
+      MODEL_OPTIONS.find((group) => group.category === "OpenRouter")?.models.map((m) => m.id)
+    ).toEqual(OPENROUTER_MODELS);
 
     expect(DEFAULT_ENABLED_MODELS).toEqual([...ANTHROPIC_MODELS, ...OPENAI_MODELS]);
-    for (const optInModel of [...ZEN_MODELS, ...ZAI_CODING_PLAN_MODELS, ...DEEPSEEK_MODELS]) {
+    for (const optInModel of [
+      ...ZEN_MODELS,
+      ...ZAI_CODING_PLAN_MODELS,
+      ...DEEPSEEK_MODELS,
+      ...OPENROUTER_MODELS,
+    ]) {
       expect(DEFAULT_ENABLED_MODELS).not.toContain(optInModel);
     }
   });
