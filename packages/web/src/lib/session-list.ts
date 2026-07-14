@@ -101,3 +101,33 @@ export function mergeUniqueSessions(existing: Session[], incoming: Session[]) {
 export function removeSessionFromList(sessions: Session[], sessionId: string) {
   return sessions.filter((session) => session.id !== sessionId);
 }
+
+/**
+ * Collect a session id and all of its descendants (children, grandchildren, …)
+ * from a flat session list, following `parentSessionId` links.
+ *
+ * Archiving a parent cascades to its child/sub-task sessions on the server
+ * (they all become `archived`), so the sidebar must drop the whole subtree, not
+ * just the archived row — otherwise the children linger as orphaned "sub-task"
+ * entries until the next full refetch. Iterates to a fixed point so any nesting
+ * depth and child ordering are handled; descendants not currently loaded are
+ * reconciled by the next server-truth fetch.
+ */
+export function collectSessionAndDescendantIds(
+  sessions: Session[],
+  sessionId: string
+): Set<string> {
+  const ids = new Set<string>([sessionId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const session of sessions) {
+      if (ids.has(session.id)) continue;
+      if (session.parentSessionId && ids.has(session.parentSessionId)) {
+        ids.add(session.id);
+        changed = true;
+      }
+    }
+  }
+  return ids;
+}

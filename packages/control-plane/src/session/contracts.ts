@@ -22,6 +22,11 @@ export const SessionInternalPaths = {
   wsToken: "/internal/ws-token",
   archive: "/internal/archive",
   unarchive: "/internal/unarchive",
+  // Trusted DO-to-DO archive used by the parent→child archive cascade. Unlike
+  // `archive` it runs no participant check (the caller is always another
+  // SessionDO, never a client) and stops any in-flight execution so the
+  // archived status sticks instead of being reconciled back to active/completed.
+  archiveCascade: "/internal/archive-cascade",
   verifySandboxToken: "/internal/verify-sandbox-token",
   openaiTokenRefresh: "/internal/openai-token-refresh",
   scmCredentials: "/internal/scm-credentials",

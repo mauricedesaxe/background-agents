@@ -693,6 +693,61 @@ describe("createSessionLifecycleHandler", () => {
     expect(transitionSessionStatus).toHaveBeenCalledWith("active");
   });
 
+  it("archiveCascade stops a running session then archives it, no participant check", async () => {
+    const { handler, getSession, getParticipantByUserId, stopExecution, transitionSessionStatus } =
+      createHandler();
+    getSession.mockReturnValue(createSession({ status: "active" }));
+    stopExecution.mockResolvedValue(undefined);
+    transitionSessionStatus.mockResolvedValue(true);
+
+    const response = await handler.archiveCascade();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "archived" });
+    // Execution is stopped with reconcile suppressed so the status sticks.
+    expect(stopExecution).toHaveBeenCalledWith({ suppressStatusReconcile: true });
+    expect(transitionSessionStatus).toHaveBeenCalledWith("archived");
+    // Trusted DO-to-DO call: no participant lookup happens.
+    expect(getParticipantByUserId).not.toHaveBeenCalled();
+  });
+
+  it("archiveCascade archives a completed child without stopping execution", async () => {
+    const { handler, getSession, stopExecution, transitionSessionStatus } = createHandler();
+    getSession.mockReturnValue(createSession({ status: "completed" }));
+    transitionSessionStatus.mockResolvedValue(true);
+
+    const response = await handler.archiveCascade();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "archived" });
+    // Nothing is running on a terminal session, so no execution stop.
+    expect(stopExecution).not.toHaveBeenCalled();
+    expect(transitionSessionStatus).toHaveBeenCalledWith("archived");
+  });
+
+  it("archiveCascade is a no-op when the session is already archived", async () => {
+    const { handler, getSession, stopExecution, transitionSessionStatus } = createHandler();
+    getSession.mockReturnValue(createSession({ status: "archived" }));
+
+    const response = await handler.archiveCascade();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "archived" });
+    expect(stopExecution).not.toHaveBeenCalled();
+    expect(transitionSessionStatus).not.toHaveBeenCalled();
+  });
+
+  it("archiveCascade treats a missing session as already archived", async () => {
+    const { handler, getSession, transitionSessionStatus } = createHandler();
+    getSession.mockReturnValue(null);
+
+    const response = await handler.archiveCascade();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "archived" });
+    expect(transitionSessionStatus).not.toHaveBeenCalled();
+  });
+
   it("returns 409 when cancelling terminal session", async () => {
     const { handler, getSession } = createHandler();
     getSession.mockReturnValue(createSession({ status: "completed" }));
