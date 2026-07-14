@@ -241,6 +241,47 @@ class TestBuildPromptRequestBody:
             "outputConfig": {"effort": "high"},
         }
 
+    # "none" is an effort, not the absence of one: OpenCode asks for high effort on Gemini 3
+    # unless told otherwise, so "none" has to survive the wire to reach the model.
+    @pytest.mark.parametrize("effort", ["low", "none"])
+    def test_openrouter_sends_effort_as_top_level_variant(self, bridge: AgentBridge, effort: str):
+        """OpenRouter reasoning rides on the top-level variant, never on model.options.
+
+        OpenCode's prompt route has no options field on the model ref, so an effort placed
+        there is silently dropped.
+        """
+        body = bridge._build_prompt_request_body(
+            "Hello",
+            "openrouter/google/gemini-3.1-pro-preview",
+            reasoning_effort=effort,
+        )
+
+        assert body["model"] == {
+            "providerID": "openrouter",
+            "modelID": "google/gemini-3.1-pro-preview",
+        }
+        assert body["variant"] == effort
+        assert "options" not in body["model"]
+
+    def test_openrouter_without_effort_sends_no_variant(self, bridge: AgentBridge):
+        body = bridge._build_prompt_request_body(
+            "Hello",
+            "openrouter/x-ai/grok-4.5",
+        )
+
+        assert "variant" not in body
+
+    @pytest.mark.parametrize("model", ["anthropic/claude-sonnet-4-6", "openai/gpt-5.4"])
+    def test_other_providers_do_not_send_a_variant(self, bridge: AgentBridge, model: str):
+        """Only OpenRouter uses the variant; the others still write model.options.
+
+        Pins the two shapes apart so a change that unifies them has to be deliberate.
+        """
+        body = bridge._build_prompt_request_body("Hello", model, reasoning_effort="high")
+
+        assert "variant" not in body
+        assert "options" in body["model"]
+
 
 class TestOpenCodeIdentifier:
     """Tests for OpenCode-compatible ascending ID generation."""
