@@ -16,12 +16,13 @@ resource "null_resource" "web_app_cloudflare_build" {
 
     environment = {
       # NEXT_PUBLIC_* vars must be set at build time (inlined into client bundle)
-      NEXT_PUBLIC_WS_URL           = local.ws_url
-      NEXT_PUBLIC_SANDBOX_PROVIDER = var.sandbox_provider
-      NEXT_PUBLIC_APP_NAME         = var.app_name
-      NEXT_PUBLIC_APP_SHORT_NAME   = var.app_short_name
-      NEXT_PUBLIC_APP_ICON_URL     = var.app_icon_url
-      NEXT_PUBLIC_GOOGLE_ENABLED   = tostring(local.google_enabled)
+      NEXT_PUBLIC_WS_URL             = local.ws_url
+      NEXT_PUBLIC_SANDBOX_PROVIDER   = var.sandbox_provider
+      NEXT_PUBLIC_APP_NAME           = var.app_name
+      NEXT_PUBLIC_APP_SHORT_NAME     = var.app_short_name
+      NEXT_PUBLIC_APP_ICON_URL       = var.app_icon_url
+      NEXT_PUBLIC_GOOGLE_ENABLED     = tostring(local.google_enabled)
+      NEXT_PUBLIC_TLDRAW_LICENSE_KEY = var.tldraw_license_key
     }
   }
 }
@@ -84,6 +85,7 @@ resource "local_file" "web_app_wrangler_production" {
     NEXT_PUBLIC_APP_SHORT_NAME = "${var.app_short_name}"
     NEXT_PUBLIC_APP_ICON_URL = "${var.app_icon_url}"
     NEXT_PUBLIC_GOOGLE_ENABLED = "${tostring(local.google_enabled)}"
+    NEXT_PUBLIC_TLDRAW_LICENSE_KEY = "${var.tldraw_license_key}"
     ALLOWED_USERS = "${var.allowed_users}"
     ALLOWED_EMAIL_DOMAINS = "${var.allowed_email_domains}"
     ALLOWED_EMAILS = "${var.allowed_emails}"
