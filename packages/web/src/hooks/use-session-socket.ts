@@ -252,6 +252,9 @@ function toUiArtifact(artifact: SessionArtifact): Artifact {
               : undefined,
           repoOwner: typeof meta.repoOwner === "string" ? meta.repoOwner : undefined,
           repoName: typeof meta.repoName === "string" ? meta.repoName : undefined,
+          // Board artifacts point at a BoardRoom DO; the whiteboard card needs these.
+          boardId: typeof meta.boardId === "string" ? meta.boardId : undefined,
+          title: typeof meta.title === "string" ? meta.title : undefined,
         }
       : undefined,
   };
