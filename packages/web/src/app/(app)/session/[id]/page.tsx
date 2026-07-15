@@ -11,6 +11,7 @@ import { SessionHeader } from "@/components/session-header";
 import { SessionDetailsOverlay } from "@/components/session-details-overlay";
 import { SessionPromptComposer } from "@/components/session-prompt-composer";
 import { SessionRightSidebar } from "@/components/session-right-sidebar";
+import { BoardOverlay, type OpenBoard } from "@/components/board-overlay";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { TerminalPanel } from "@/components/terminal-panel";
 import { archiveSession } from "@/lib/archive-session";
@@ -89,6 +90,7 @@ function SessionPageContent() {
   );
 
   const [selectedMediaArtifactId, setSelectedMediaArtifactId] = useState<string | null>(null);
+  const [openBoard, setOpenBoard] = useState<OpenBoard | null>(null);
 
   const isBelowLg = useMediaQuery("(max-width: 1023px)");
   const isPhone = useMediaQuery("(max-width: 767px)");
@@ -204,6 +206,7 @@ function SessionPageContent() {
           terminalOpen={terminalOpen}
           onToggleTerminal={toggleTerminal}
           onOpenMedia={setSelectedMediaArtifactId}
+          onOpenBoard={setOpenBoard}
         />
       </main>
 
@@ -221,8 +224,18 @@ function SessionPageContent() {
           terminalOpen={terminalOpen}
           onToggleTerminal={toggleTerminal}
           onOpenMedia={setSelectedMediaArtifactId}
+          onOpenBoard={setOpenBoard}
         />
       )}
+
+      <BoardOverlay
+        sessionId={sessionId}
+        board={openBoard}
+        open={openBoard !== null}
+        onOpenChange={(open) => {
+          if (!open) setOpenBoard(null);
+        }}
+      />
 
       <MediaLightbox
         sessionId={sessionId}

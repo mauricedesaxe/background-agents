@@ -8,9 +8,11 @@ import {
   TasksSection,
   FilesChangedSection,
   MediaSection,
+  BoardsSection,
   CodeServerSection,
   TunnelUrlsSection,
 } from "./sidebar";
+import type { OpenBoard } from "./board-overlay";
 import { ChildSessionsSection } from "./sidebar/child-sessions-section";
 import { TerminalIcon, LinkIcon } from "@/components/ui/icons";
 import { buildAuthenticatedUrl } from "@/lib/urls";
@@ -28,6 +30,7 @@ interface SessionRightSidebarProps {
   terminalOpen?: boolean;
   onToggleTerminal?: () => void;
   onOpenMedia: (artifactId: string) => void;
+  onOpenBoard: (board: OpenBoard) => void;
 }
 
 export type SessionRightSidebarContentProps = SessionRightSidebarProps;
@@ -41,6 +44,7 @@ export function SessionRightSidebarContent({
   terminalOpen,
   onToggleTerminal,
   onOpenMedia,
+  onOpenBoard,
 }: SessionRightSidebarContentProps) {
   const tasks = useMemo(() => extractLatestTasks(events), [events]);
   const filesChanged = useMemo(() => extractChangedFiles(events), [events]);
@@ -54,6 +58,10 @@ export function SessionRightSidebarContent({
   const mediaArtifacts = useMemo(
     () =>
       artifacts.filter((artifact) => artifact.type === "screenshot" || artifact.type === "video"),
+    [artifacts]
+  );
+  const boardArtifacts = useMemo(
+    () => artifacts.filter((artifact) => artifact.type === "board"),
     [artifacts]
   );
   const terminalUrl = useMemo(
@@ -167,6 +175,13 @@ export function SessionRightSidebarContent({
         </CollapsibleSection>
       )}
 
+      {/* Boards */}
+      {boardArtifacts.length > 0 && (
+        <CollapsibleSection title={`Whiteboards (${boardArtifacts.length})`} defaultOpen={true}>
+          <BoardsSection boardArtifacts={boardArtifacts} onOpenBoard={onOpenBoard} />
+        </CollapsibleSection>
+      )}
+
       {/* Media */}
       {mediaArtifacts.length > 0 && (
         <CollapsibleSection title={`Media (${mediaArtifacts.length})`} defaultOpen={true}>
@@ -199,6 +214,7 @@ export function SessionRightSidebar({
   terminalOpen,
   onToggleTerminal,
   onOpenMedia,
+  onOpenBoard,
 }: SessionRightSidebarProps) {
   return (
     <aside className="w-80 border-l border-border-muted overflow-y-auto hidden lg:block">
@@ -211,6 +227,7 @@ export function SessionRightSidebar({
         terminalOpen={terminalOpen}
         onToggleTerminal={onToggleTerminal}
         onOpenMedia={onOpenMedia}
+        onOpenBoard={onOpenBoard}
       />
     </aside>
   );
