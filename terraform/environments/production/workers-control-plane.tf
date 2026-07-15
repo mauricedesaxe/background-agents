@@ -148,6 +148,14 @@ module "control_plane_worker" {
   durable_objects = [
     { binding_name = "SESSION", class_name = "SessionDO" },
     { binding_name = "SCHEDULER", class_name = "SchedulerDO" },
+    # BoardRoom hosts one tldraw sync room per board id (SQLite-backed). On a
+    # fresh deploy it rides the initial migration. Adding it to an EXISTING
+    # deployment is a two-phase apply: first with
+    # enable_durable_object_bindings=false, control_plane_new_sqlite_classes=
+    # ["BoardRoom"], control_plane_migration_old_tag=<current>,
+    # control_plane_migration_tag=<next> (registers the SQLite class), then again
+    # with enable_durable_object_bindings=true (adds the runtime binding).
+    { binding_name = "BOARD_ROOM", class_name = "BoardRoom" },
   ]
 
   enable_durable_object_bindings = var.enable_durable_object_bindings
