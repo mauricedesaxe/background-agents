@@ -28,12 +28,17 @@ interface BoardOverlayProps {
 export function BoardOverlay({ sessionId, board, open, onOpenChange }: BoardOverlayProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="h-[92vh] w-[96vw] max-w-[1400px] gap-0 border-border-muted bg-background p-0">
-        <DialogTitle className="px-4 py-3 text-sm">{board?.title ?? "Whiteboard"}</DialogTitle>
+      {/* Override DialogContent's default `grid` with a flex column: tldraw needs
+          the editor container to actually fill the remaining height, and `flex-1`
+          only works in a flex parent. Without this the canvas collapses to 0px. */}
+      <DialogContent className="flex h-[92vh] w-[96vw] max-w-[1400px] flex-col gap-0 border-border-muted bg-background p-0">
+        <DialogTitle className="shrink-0 px-4 py-3 text-sm">
+          {board?.title ?? "Whiteboard"}
+        </DialogTitle>
         <DialogDescription className="sr-only">
           Interactive tldraw whiteboard. Edit live; the agent can pick up your changes.
         </DialogDescription>
-        <div className="relative flex-1 overflow-hidden">
+        <div className="relative min-h-0 flex-1 overflow-hidden">
           {open && board && <BoardEditor sessionId={sessionId} boardId={board.boardId} />}
         </div>
       </DialogContent>
