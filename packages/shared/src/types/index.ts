@@ -54,6 +54,7 @@ export type {
 export { toDisplayStatus } from "./artifacts";
 export type {
   SessionArtifact,
+  BoardArtifactMetadata,
   ManualPullRequestArtifactMetadata,
   ScreenshotArtifactMetadata,
   VideoArtifactMetadata,
@@ -89,6 +90,7 @@ export {
   createSessionRequestSchema,
   createSessionInputSchema,
   createMediaArtifactRequestSchema,
+  createBoardArtifactRequestSchema,
   createSessionResponseSchema,
   sendPromptResponseSchema,
   spawnChildSessionRequestSchema,
@@ -104,6 +106,7 @@ export type {
   CreateSessionRequest,
   CreateSessionInput,
   CreateMediaArtifactRequest,
+  CreateBoardArtifactRequest,
   CreateSessionResponse,
   SendPromptResponse,
   ListSessionsResponse,

@@ -191,6 +191,14 @@ export const createMediaArtifactRequestSchema = z.object({
 
 export type CreateMediaArtifactRequest = z.infer<typeof createMediaArtifactRequestSchema>;
 
+export const createBoardArtifactRequestSchema = z.object({
+  artifactId: z.string().min(1),
+  boardId: z.string().min(1),
+  title: z.string(),
+});
+
+export type CreateBoardArtifactRequest = z.infer<typeof createBoardArtifactRequestSchema>;
+
 export const createSessionResponseSchema = z.object({
   sessionId: z.string().min(1),
   status: sessionStatusSchema,

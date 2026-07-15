@@ -106,6 +106,20 @@ export interface ScreenshotArtifactMetadata {
   caption?: string;
 }
 
+/**
+ * Metadata stored on `board` artifacts. The artifact is the session's pointer to
+ * an interactive tldraw whiteboard; the board document itself lives in the
+ * `BoardRoom` Durable Object keyed by `boardId` and outlives the session's
+ * active status. `url` on the artifact stays null — the board is reached over the
+ * board sync WebSocket, not by fetching bytes.
+ */
+export interface BoardArtifactMetadata {
+  /** Stable id keying the BoardRoom Durable Object. */
+  boardId: string;
+  /** Human-facing board name, rendered on the board card. */
+  title: string;
+}
+
 /** Metadata stored on video recording artifacts. */
 export interface VideoArtifactMetadata {
   /** R2 object key */
