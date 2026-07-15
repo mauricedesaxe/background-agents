@@ -16,6 +16,8 @@
   "dependencies": {
     "@cloudflare/workers-types": "^4.20241230.0",
     "@open-inspect/shared": "file:../shared",
+    "@tldraw/sync-core": "5.2.3",
+    "@tldraw/tlschema": "5.2.3",
     "zod": "^4.1.13"
   },
   "devDependencies": {

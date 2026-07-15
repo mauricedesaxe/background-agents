@@ -39,7 +39,11 @@
   },
   "overrides": {
     "minimatch": "^10.2.5",
-    "undici": "^7.28.0"
+    "undici": "^7.28.0",
+    "tldraw": "5.2.3",
+    "@tldraw/sync": "5.2.3",
+    "@tldraw/sync-core": "5.2.3",
+    "@tldraw/tlschema": "5.2.3"
   },
   "lint-staged": {
     "*.{ts,tsx}": [
