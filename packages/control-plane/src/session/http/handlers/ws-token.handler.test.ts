@@ -31,10 +31,12 @@ function createHandler() {
   };
 
   const getParticipantByUserId = vi.fn<(userId: string) => ParticipantRow | null>();
+  const getParticipantByWsTokenHash = vi.fn<(tokenHash: string) => ParticipantRow | null>();
   const generateId = vi
     .fn<(bytes?: number) => string>()
     .mockImplementation((bytes?: number) => (bytes === 32 ? "plain-token" : "participant-1"));
   const hashToken = vi.fn<(token: string) => Promise<string>>().mockResolvedValue("token-hash");
+  const wsTokenTtlMs = 24 * 60 * 60 * 1000;
   const now = vi.fn(() => 1234);
   const log = {
     debug: vi.fn(),
@@ -47,8 +49,10 @@ function createHandler() {
   const handler = createWsTokenHandler({
     repository,
     getParticipantByUserId,
+    getParticipantByWsTokenHash,
     generateId,
     hashToken,
+    wsTokenTtlMs,
     now,
     getLog: () => log,
   });
@@ -57,8 +61,10 @@ function createHandler() {
     handler,
     repository,
     getParticipantByUserId,
+    getParticipantByWsTokenHash,
     generateId,
     hashToken,
+    wsTokenTtlMs,
     now,
     log,
   };
@@ -312,5 +318,45 @@ describe("createWsTokenHandler", () => {
       "participant-1",
       expect.objectContaining({ authName: "Ada Lovelace" })
     );
+  });
+
+  describe("verifyWsToken", () => {
+    function verifyRequest(body: unknown): Request {
+      return new Request("http://internal/internal/verify-ws-token", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+
+    it("returns 401 when the token is missing", async () => {
+      const { handler } = createHandler();
+      const response = await handler.verifyWsToken(verifyRequest({}));
+      expect(response.status).toBe(401);
+    });
+
+    it("returns 401 when no participant matches the token hash", async () => {
+      const { handler, getParticipantByWsTokenHash } = createHandler();
+      getParticipantByWsTokenHash.mockReturnValue(null);
+      const response = await handler.verifyWsToken(verifyRequest({ token: "nope" }));
+      expect(response.status).toBe(401);
+    });
+
+    it("returns 401 when the token is older than the TTL", async () => {
+      const { handler, getParticipantByWsTokenHash, wsTokenTtlMs } = createHandler();
+      getParticipantByWsTokenHash.mockReturnValue(
+        createParticipant({ ws_token_created_at: 1234 - wsTokenTtlMs - 1 })
+      );
+      const response = await handler.verifyWsToken(verifyRequest({ token: "stale" }));
+      expect(response.status).toBe(401);
+    });
+
+    it("returns 200 with the participant id for a fresh token", async () => {
+      const { handler, getParticipantByWsTokenHash } = createHandler();
+      getParticipantByWsTokenHash.mockReturnValue(createParticipant({ ws_token_created_at: 1234 }));
+      const response = await handler.verifyWsToken(verifyRequest({ token: "fresh" }));
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ participantId: "participant-1" });
+    });
   });
 });
