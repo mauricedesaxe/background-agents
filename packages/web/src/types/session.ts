@@ -9,9 +9,12 @@ import type {
 
 export interface Artifact {
   id: string;
-  type: "pr" | "screenshot" | "video" | "preview" | "branch";
+  type: "pr" | "screenshot" | "video" | "preview" | "branch" | "board";
   url: string | null;
   metadata?: (Partial<ScreenshotArtifactMetadata> | Partial<VideoArtifactMetadata>) & {
+    // Board artifacts (interactive tldraw whiteboards).
+    boardId?: string;
+    title?: string;
     prNumber?: number;
     prState?: PullRequestDisplayStatus;
     mode?: "manual_pr";

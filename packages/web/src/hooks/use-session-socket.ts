@@ -3,6 +3,7 @@
 import { type MutableRefObject, useCallback, useEffect, useRef, useState } from "react";
 import { mutate } from "swr";
 import { isUnarchivedSessionListKey } from "@/lib/session-list";
+import { WS_URL } from "@/lib/ws-url";
 import type { Artifact, SandboxEvent } from "@/types/session";
 import { serverMessageSchema, toDisplayStatus } from "@open-inspect/shared";
 import type {
@@ -15,9 +16,6 @@ import type {
   SessionState as SharedSessionState,
   VideoArtifactMetadata,
 } from "@open-inspect/shared";
-
-// WebSocket URL (should come from env in production)
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8787";
 
 // WebSocket close codes
 const WS_CLOSE_AUTH_REQUIRED = 4001;

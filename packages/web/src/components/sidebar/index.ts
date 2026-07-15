@@ -5,5 +5,6 @@ export { MetadataSection } from "./metadata-section";
 export { TasksSection } from "./tasks-section";
 export { FilesChangedSection } from "./files-changed-section";
 export { MediaSection } from "./media-section";
+export { BoardsSection } from "./boards-section";
 export { CodeServerSection } from "./code-server-section";
 export { TunnelUrlsSection } from "./tunnel-urls-section";

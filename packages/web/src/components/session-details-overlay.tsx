@@ -43,6 +43,7 @@ export function SessionDetailsOverlay({
   terminalOpen,
   onToggleTerminal,
   onOpenMedia,
+  onOpenBoard,
 }: SessionDetailsOverlayProps) {
   const [sheetDragY, setSheetDragY] = useState(0);
   const sheetDragYRef = useRef(0);
@@ -166,6 +167,7 @@ export function SessionDetailsOverlay({
       terminalOpen={terminalOpen}
       onToggleTerminal={onToggleTerminal}
       onOpenMedia={onOpenMedia}
+      onOpenBoard={onOpenBoard}
     />
   );
 
