@@ -39,6 +39,9 @@ export interface Env {
   // Durable Objects
   SESSION: DurableObjectNamespace;
 
+  // BoardRoom Durable Object — one tldraw sync room per board id
+  BOARD_ROOM: DurableObjectNamespace;
+
   // KV Namespaces
   REPOS_CACHE: KVNamespace; // Short-lived cache for /repos listing
 

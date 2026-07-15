@@ -610,4 +610,50 @@ describe("createSandboxHandler", () => {
     expect(await response.json()).toEqual({ error: "Invalid stored tunnel URLs" });
     expect(log.warn).toHaveBeenCalled();
   });
+
+  describe("createBoardArtifact", () => {
+    function boardRequest(body: unknown): Request {
+      return new Request("http://internal/internal/create-board-artifact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+
+    it("returns 400 when artifactId, boardId, or title is missing", async () => {
+      const { handler, repository, broadcast } = createHandler();
+      const response = await handler.createBoardArtifact(
+        boardRequest({ boardId: "b1", title: "x" })
+      );
+      expect(response.status).toBe(400);
+      expect(repository.createArtifact).not.toHaveBeenCalled();
+      expect(broadcast).not.toHaveBeenCalled();
+    });
+
+    it("persists a board artifact and broadcasts artifact_created", async () => {
+      const { handler, repository, broadcast } = createHandler();
+      const response = await handler.createBoardArtifact(
+        boardRequest({ artifactId: "art-1", boardId: "board-1", title: "Arch" })
+      );
+
+      expect(response.status).toBe(200);
+      expect(repository.createArtifact).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: "art-1",
+          type: "board",
+          url: null,
+          metadata: JSON.stringify({ boardId: "board-1", title: "Arch" }),
+        })
+      );
+      expect(broadcast).toHaveBeenCalledWith({
+        type: "artifact_created",
+        artifact: expect.objectContaining({
+          id: "art-1",
+          type: "board",
+          url: null,
+          metadata: { boardId: "board-1", title: "Arch" },
+        }),
+      });
+    });
+  });
 });

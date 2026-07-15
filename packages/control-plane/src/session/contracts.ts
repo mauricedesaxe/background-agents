@@ -20,6 +20,13 @@ export const SessionInternalPaths = {
   pullRequestArtifactSnapshot: "/internal/pull-request-artifact-snapshot",
   pullRequestsRefresh: "/internal/pull-requests-refresh",
   wsToken: "/internal/ws-token",
+  // Verify a browser ws-token for board access. The participant table lives in
+  // this DO, so the board WS handler round-trips here before forwarding the
+  // upgrade to the BoardRoom DO.
+  verifyWsToken: "/internal/verify-ws-token",
+  // Persist a board artifact (and broadcast artifact_created) for a board the
+  // agent created. The board document itself lives in the BoardRoom DO.
+  createBoardArtifact: "/internal/create-board-artifact",
   archive: "/internal/archive",
   unarchive: "/internal/unarchive",
   // Trusted DO-to-DO archive used by the parent→child archive cascade. Unlike

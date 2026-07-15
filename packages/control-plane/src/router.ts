@@ -34,6 +34,7 @@ import { mcpServerRoutes } from "./routes/mcp-servers";
 import { analyticsRoutes } from "./routes/analytics";
 import { providerIdentityRoutes } from "./routes/provider-identities";
 import { sessionRoutes } from "./routes/sessions";
+import { boardRoutes } from "./routes/board";
 import { handleSlackNotify } from "./routes/slack-notify";
 import { webhookRoutes } from "./webhooks";
 
@@ -79,6 +80,9 @@ const SANDBOX_AUTH_ROUTES: RegExp[] = [
   /^\/sessions\/[^/]+\/children\/[^/]+$/, // GET child detail
   /^\/sessions\/[^/]+\/children\/[^/]+\/cancel$/, // POST cancel child
   /^\/sessions\/[^/]+\/slack-notify$/, // Agent-initiated Slack notification
+  /^\/sessions\/[^/]+\/board$/, // Board creation from sandbox
+  /^\/sessions\/[^/]+\/board\/[^/]+\/mutate$/, // Board mutation from sandbox
+  /^\/sessions\/[^/]+\/board\/[^/]+\/snapshot$/, // Board snapshot read from sandbox
 ];
 
 type CachedScmProvider =
@@ -141,7 +145,9 @@ function isScmAgnosticRoute(path: string): boolean {
     // Identity upserts are independent of the SCM provider. Only the known auth
     // providers are agnostic; an unimplemented SCM (e.g. gitlab) still 501s.
     /^\/provider-identities\/(github|slack|linear|google)\/[^/]+$/.test(path) ||
-    /^\/sessions\/[^/]+\/tunnel-urls$/.test(path)
+    /^\/sessions\/[^/]+\/tunnel-urls$/.test(path) ||
+    // Boards are unrelated to the SCM provider.
+    /^\/sessions\/[^/]+\/board(\/[^/]+\/(mutate|snapshot))?$/.test(path)
   );
 }
 
@@ -299,6 +305,10 @@ const routes: Route[] = [
     pattern: parsePattern("/sessions/:id/slack-notify"),
     handler: handleSlackNotify,
   },
+
+  // Interactive tldraw boards (create is session-scoped; mutate/snapshot reach
+  // the BoardRoom DO). All sandbox-authenticated.
+  ...boardRoutes,
 
   // Repository management
   ...reposRoutes,

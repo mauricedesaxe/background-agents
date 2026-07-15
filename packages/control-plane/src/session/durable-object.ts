@@ -200,6 +200,8 @@ export class SessionDO extends DurableObject<Env> {
       this.pullRequestHandler.pullRequestArtifactSnapshot(request, url),
     pullRequestsRefresh: () => this.pullRequestHandler.refreshPullRequests(),
     wsToken: (request) => this.wsTokenHandler.generateWsToken(request),
+    verifyWsToken: (request) => this.wsTokenHandler.verifyWsToken(request),
+    createBoardArtifact: (request) => this.sandboxHandler.createBoardArtifact(request),
     updateTitle: (request) => this.sessionLifecycleHandler.updateTitle(request),
     archive: (request) => this.sessionLifecycleHandler.archive(request),
     unarchive: (request) => this.sessionLifecycleHandler.unarchive(request),
@@ -451,8 +453,10 @@ export class SessionDO extends DurableObject<Env> {
       this._wsTokenHandler = createWsTokenHandler({
         repository: this.repository,
         getParticipantByUserId: (userId) => this.participantService.getByUserId(userId),
+        getParticipantByWsTokenHash: (hash) => this.participantService.getByWsTokenHash(hash),
         generateId: (bytes) => generateId(bytes),
         hashToken: (token) => hashToken(token),
+        wsTokenTtlMs: WS_TOKEN_TTL_MS,
         now: () => Date.now(),
         getLog: () => this.log,
       });
