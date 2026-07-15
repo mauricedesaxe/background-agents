@@ -507,6 +507,12 @@ variable "app_icon_url" {
   default     = ""
 }
 
+variable "tldraw_license_key" {
+  description = "tldraw SDK license key for the interactive whiteboard. tldraw requires a key on any non-localhost (production) deployment; without one the board editor renders briefly then disables. A free key (keeps the 'Made with tldraw' watermark) covers a single-user self-hosted instance. Leave empty only for localhost. Inlined into the client bundle at build time."
+  type        = string
+  default     = ""
+}
+
 variable "enable_durable_object_bindings" {
   description = "Enable DO bindings. For initial deployment: set to false (applies migrations), then set to true (adds bindings)."
   type        = bool
