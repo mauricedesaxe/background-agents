@@ -25,7 +25,7 @@ export type SandboxStatus =
 export type GitSyncStatus = "pending" | "in_progress" | "completed" | "failed";
 export type MessageStatus = "pending" | "processing" | "completed" | "failed";
 export type MessageSource = "web" | "slack" | "linear" | "extension" | "github" | "automation";
-export type ArtifactType = "pr" | "screenshot" | "video" | "preview" | "branch";
+export type ArtifactType = "pr" | "screenshot" | "video" | "preview" | "branch" | "board";
 export type EventType =
   | "heartbeat"
   | "ready"
@@ -66,7 +66,14 @@ export const sandboxStatusSchema = z.enum([
   "failed",
 ]);
 export const gitSyncStatusSchema = z.enum(["pending", "in_progress", "completed", "failed"]);
-export const artifactTypeSchema = z.enum(["pr", "screenshot", "video", "preview", "branch"]);
+export const artifactTypeSchema = z.enum([
+  "pr",
+  "screenshot",
+  "video",
+  "preview",
+  "branch",
+  "board",
+]);
 export const spawnSourceSchema = z.enum([
   "user",
   "agent",
