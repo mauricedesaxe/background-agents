@@ -937,7 +937,7 @@ export class SandboxLifecycleManager {
   /**
    * Trigger a filesystem snapshot of the sandbox.
    */
-  async triggerSnapshot(reason: string): Promise<void> {
+  async triggerSnapshot(reason: string, providerObjectId?: string): Promise<void> {
     if (!this.provider.takeSnapshot) {
       this.log.debug("Provider does not support snapshots");
       return;
@@ -945,8 +945,9 @@ export class SandboxLifecycleManager {
 
     const sandbox = this.storage.getSandbox();
     const session = this.storage.getSession();
+    const targetId = providerObjectId ?? sandbox?.modal_object_id;
 
-    if (!sandbox?.modal_object_id || !session) {
+    if (!sandbox || !targetId || !session) {
       this.log.debug("Cannot snapshot: no modal_object_id or session");
       return;
     }
@@ -974,7 +975,7 @@ export class SandboxLifecycleManager {
       });
 
       const result = await this.provider.takeSnapshot({
-        providerObjectId: sandbox.modal_object_id,
+        providerObjectId: targetId,
         sessionId: session.session_name || session.id,
         reason,
       });
@@ -1044,26 +1045,87 @@ export class SandboxLifecycleManager {
 
   /**
    * Stop a provider-managed sandbox via its API.
+   *
+   * Pass `providerObjectId` to stop a specific sandbox. Without it the caller
+   * gets whatever the row currently points at, which is only safe when nothing
+   * has been awaited since the caller read it.
    */
-  private async stopProviderSandbox(reason: string): Promise<void> {
+  private async stopProviderSandbox(reason: string, providerObjectId?: string): Promise<void> {
     if (!this.provider.stopSandbox) {
       return;
     }
 
-    const sandbox = this.storage.getSandbox();
     const session = this.storage.getSession();
-    if (!sandbox?.modal_object_id || !session) {
+    const targetId = providerObjectId ?? this.storage.getSandbox()?.modal_object_id;
+    if (!targetId || !session) {
       return;
     }
 
     const result = await this.provider.stopSandbox({
-      providerObjectId: sandbox.modal_object_id,
+      providerObjectId: targetId,
       sessionId: session.session_name || session.id,
       reason,
     });
 
     if (!result.success) {
       throw new Error(result.error || "Failed to stop provider sandbox");
+    }
+  }
+
+  /**
+   * Mark the sandbox stopped and make sure the provider sandbox is actually stopped.
+   *
+   * The invariant, for the paths that route through here: a row that says dead
+   * means the VM is stopped. handleAlarm short-circuits on a dead status without
+   * rescheduling, so a path that marks a row dead while the VM is still live
+   * strands it — nothing comes back for it, and it bills until the provider's own
+   * backstop. On Daytona that backstop is the only thing that ever stops it, since
+   * killing the agent process doesn't stop the workspace.
+   *
+   * The spawn, restore and resume failure paths still mark dead without stopping;
+   * they're a different trigger and aren't covered here.
+   *
+   * Idempotent: terminating an already-dead sandbox is a no-op, so the paths that
+   * terminate and then close the socket don't stop the VM twice.
+   */
+  async terminateSandbox(reason: string): Promise<void> {
+    const sandbox = this.storage.getSandbox();
+    if (!sandbox || isDeadSandboxStatus(sandbox.status)) {
+      return;
+    }
+
+    // Claim the termination and pin what we're terminating, both before the
+    // first await. The status check above and this write have to stay in one
+    // synchronous block: a second caller that passes the check while this one
+    // is suspended would stop the VM twice. And the awaits below let a respawn
+    // swap modal_object_id on the row, so rereading it later would stop the
+    // replacement and leave the sandbox we set out to kill running.
+    this.storage.updateSandboxStatus("stopped");
+    const providerObjectId = sandbox.modal_object_id ?? undefined;
+
+    await this.callbacks.onSandboxTerminating?.();
+
+    this.clearSandboxAccessState();
+    this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });
+
+    if (!this.canStopProviderSandbox()) {
+      return;
+    }
+
+    // A provider we stop ourselves loses the filesystem when it goes; one that
+    // resumes keeps it. Snapshot the former before stopping, or cancelling a
+    // Vercel session throws its state away.
+    if (!this.usesProviderManagedStop()) {
+      await this.triggerSnapshot(reason, providerObjectId);
+    }
+
+    try {
+      await this.stopProviderSandbox(reason, providerObjectId);
+    } catch (error) {
+      this.log.error("Provider stop failed", {
+        reason,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 

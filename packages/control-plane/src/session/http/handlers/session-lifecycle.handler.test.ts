@@ -106,7 +106,7 @@ function createHandler() {
   const stopExecution = vi.fn();
   const getSandboxSocket = vi.fn<() => WebSocket | null>();
   const sendToSandbox = vi.fn();
-  const updateSandboxStatus = vi.fn();
+  const terminateSandbox = vi.fn(async () => {});
 
   const handler = createSessionLifecycleHandler({
     repository,
@@ -127,7 +127,7 @@ function createHandler() {
     stopExecution,
     getSandboxSocket,
     sendToSandbox,
-    updateSandboxStatus,
+    terminateSandbox,
   });
 
   return {
@@ -149,7 +149,7 @@ function createHandler() {
     stopExecution,
     getSandboxSocket,
     sendToSandbox,
-    updateSandboxStatus,
+    terminateSandbox,
   };
 }
 
@@ -767,7 +767,7 @@ describe("createSessionLifecycleHandler", () => {
       transitionSessionStatus,
       getSandboxSocket,
       sendToSandbox,
-      updateSandboxStatus,
+      terminateSandbox,
     } = createHandler();
     const ws = {} as WebSocket;
     getSession.mockReturnValue(createSession({ status: "active" }));
@@ -783,6 +783,51 @@ describe("createSessionLifecycleHandler", () => {
     expect(stopExecution).toHaveBeenCalledWith({ suppressStatusReconcile: true });
     expect(transitionSessionStatus).toHaveBeenCalledWith("cancelled");
     expect(sendToSandbox).toHaveBeenCalledWith(ws, { type: "shutdown" });
-    expect(updateSandboxStatus).toHaveBeenCalledWith("stopped");
+    expect(terminateSandbox).toHaveBeenCalledWith("session_cancelled");
+  });
+
+  it("terminates the sandbox on cancel even with no socket to shut down", async () => {
+    // The shutdown message is not what stops the sandbox. On a provider that
+    // bills for the workspace rather than the process, telling the bridge to
+    // exit leaves the VM running, so cancel has to terminate it explicitly.
+    const {
+      handler,
+      getSession,
+      getSandbox,
+      stopExecution,
+      transitionSessionStatus,
+      getSandboxSocket,
+      sendToSandbox,
+      terminateSandbox,
+    } = createHandler();
+    getSession.mockReturnValue(createSession({ status: "active" }));
+    getSandbox.mockReturnValue(createSandbox({ status: "running" }));
+    stopExecution.mockResolvedValue(undefined);
+    transitionSessionStatus.mockResolvedValue(true);
+    getSandboxSocket.mockReturnValue(null);
+
+    await handler.cancel();
+
+    expect(sendToSandbox).not.toHaveBeenCalled();
+    expect(terminateSandbox).toHaveBeenCalledWith("session_cancelled");
+  });
+
+  it("does not terminate a sandbox that is already stopped", async () => {
+    const {
+      handler,
+      getSession,
+      getSandbox,
+      stopExecution,
+      transitionSessionStatus,
+      terminateSandbox,
+    } = createHandler();
+    getSession.mockReturnValue(createSession({ status: "active" }));
+    getSandbox.mockReturnValue(createSandbox({ status: "stopped" }));
+    stopExecution.mockResolvedValue(undefined);
+    transitionSessionStatus.mockResolvedValue(true);
+
+    await handler.cancel();
+
+    expect(terminateSandbox).not.toHaveBeenCalled();
   });
 });

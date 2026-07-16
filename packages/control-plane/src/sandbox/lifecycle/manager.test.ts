@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
+import { isDeadSandboxStatus } from "./decisions";
 import {
   SandboxLifecycleManager,
   DEFAULT_LIFECYCLE_CONFIG,
@@ -321,6 +322,22 @@ function createMockProvider(
     provider.stopSandbox = overrides.stopSandbox;
   }
   return provider;
+}
+
+/** Daytona's shape: stops via its own API, resumes in place, never snapshots. */
+function createProviderManagedStopProvider() {
+  const stopSandbox = vi.fn(async () => ({ success: true }));
+  const provider = createMockProvider({
+    stopSandbox,
+    capabilities: {
+      supportsSnapshots: false,
+      supportsRestore: false,
+      supportsPersistentResume: true,
+      supportsExplicitStop: true,
+    },
+  });
+  delete provider.takeSnapshot;
+  return { provider, stopSandbox };
 }
 
 function createTestConfig(): SandboxLifecycleConfig {
@@ -2705,6 +2722,312 @@ describe("SandboxLifecycleManager", () => {
       expect(provider.restoreFromSnapshot).toHaveBeenCalledWith(
         expect.objectContaining({ agentSlackNotifyEnabled: false })
       );
+    });
+  });
+
+  describe("terminateSandbox", () => {
+    function buildManager(sandbox: ReturnType<typeof createMockSandbox> | null) {
+      const { provider, stopSandbox } = createProviderManagedStopProvider();
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(true),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+      return { manager, storage, stopSandbox };
+    }
+
+    /** Vercel's shape: we stop it ourselves, and the filesystem dies with it. */
+    function createSnapshotBeforeStopProvider() {
+      const stopSandbox = vi.fn(async () => ({ success: true }));
+      const takeSnapshot = vi.fn(async () => ({ success: true, imageId: "img-snap-1" }));
+      const provider = createMockProvider({
+        stopSandbox,
+        takeSnapshot,
+        capabilities: {
+          supportsSnapshots: true,
+          supportsRestore: true,
+          supportsPersistentResume: false,
+          supportsExplicitStop: true,
+        },
+      });
+      return { provider, stopSandbox, takeSnapshot };
+    }
+
+    /** Modal's shape: no explicit stop at all, so the row is all we can touch. */
+    function createNoExplicitStopProvider() {
+      const stopSandbox = vi.fn(async () => ({ success: true }));
+      const provider = createMockProvider({
+        stopSandbox,
+        capabilities: {
+          supportsSnapshots: true,
+          supportsRestore: true,
+          supportsPersistentResume: false,
+          supportsExplicitStop: false,
+        },
+      });
+      return { provider, stopSandbox };
+    }
+
+    it("stops the provider sandbox, not just the row", async () => {
+      const { manager, storage, stopSandbox } = buildManager(
+        createMockSandbox({ status: "ready", modal_object_id: "provider-obj-123" })
+      );
+
+      await manager.terminateSandbox("session_cancelled");
+
+      expect(stopSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerObjectId: "provider-obj-123",
+          reason: "session_cancelled",
+        })
+      );
+      expect(storage.calls).toContain("updateSandboxStatus:stopped");
+    });
+
+    it("is idempotent, so terminating twice does not stop the VM twice", async () => {
+      // The timeout paths terminate and then close the socket, and a normal
+      // close terminates again. Without this guard that's a redundant stop call
+      // against the provider on every session teardown.
+      const { manager, stopSandbox } = buildManager(
+        createMockSandbox({ status: "ready", modal_object_id: "provider-obj-123" })
+      );
+
+      await manager.terminateSandbox("session_cancelled");
+      await manager.terminateSandbox("sandbox_disconnected");
+
+      expect(stopSandbox).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not mark the row dead when there is no sandbox", async () => {
+      const { manager, storage, stopSandbox } = buildManager(null);
+
+      await manager.terminateSandbox("session_cancelled");
+
+      expect(stopSandbox).not.toHaveBeenCalled();
+      expect(storage.calls).not.toContain("updateSandboxStatus:stopped");
+    });
+
+    it("still marks the row dead when the provider stop fails", async () => {
+      // Leaving the row alive would strand the session behind a sandbox we
+      // already tried to kill. A failed stop is the provider's backstop's
+      // problem; the row should reflect our intent either way.
+      const stopSandbox = vi.fn(async (): Promise<StopResult> => {
+        throw new SandboxProviderError("provider exploded", "transient");
+      });
+      const provider = createMockProvider({
+        stopSandbox,
+        capabilities: {
+          supportsSnapshots: false,
+          supportsRestore: false,
+          supportsPersistentResume: true,
+          supportsExplicitStop: true,
+        },
+      });
+      delete provider.takeSnapshot;
+      const storage = createMockStorage(
+        createMockSession(),
+        createMockSandbox({ status: "ready", modal_object_id: "provider-obj-123" })
+      );
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(true),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await expect(manager.terminateSandbox("session_cancelled")).resolves.toBeUndefined();
+
+      expect(storage.calls).toContain("updateSandboxStatus:stopped");
+    });
+
+    it("snapshots before stopping a provider that loses its filesystem on stop", async () => {
+      // Vercel resumes from a snapshot rather than in place, so stopping without
+      // one throws the session's work away.
+      const { provider, stopSandbox, takeSnapshot } = createSnapshotBeforeStopProvider();
+      const storage = createMockStorage(
+        createMockSession(),
+        createMockSandbox({ status: "ready", modal_object_id: "provider-obj-123" })
+      );
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(true),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.terminateSandbox("session_cancelled");
+
+      expect(takeSnapshot).toHaveBeenCalledWith(
+        expect.objectContaining({ providerObjectId: "provider-obj-123" })
+      );
+      expect(takeSnapshot.mock.invocationCallOrder[0]).toBeLessThan(
+        stopSandbox.mock.invocationCallOrder[0]
+      );
+    });
+
+    it("stops the sandbox it set out to kill, not one that replaced it mid-snapshot", async () => {
+      // The snapshot awaits a provider fetch, which doesn't hold the DO input
+      // gate, so a prompt can land and restore from the already-stopped row.
+      // Rereading modal_object_id after that stops the replacement and leaves
+      // the original billing.
+      const { provider, stopSandbox } = createSnapshotBeforeStopProvider();
+      const row = createMockSandbox({ status: "ready", modal_object_id: "original-obj" });
+      const storage = createMockStorage(createMockSession(), row);
+      provider.takeSnapshot = vi.fn(async () => {
+        row.modal_object_id = "replacement-obj";
+        return { success: true, imageId: "img-snap-1" };
+      });
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(true),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.terminateSandbox("session_cancelled");
+
+      expect(stopSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({ providerObjectId: "original-obj" })
+      );
+    });
+
+    it("claims the termination before awaiting, so concurrent callers stop once", async () => {
+      // cancel() sends `shutdown`, whose socket close terminates again. If the
+      // dead-status check and the status write straddle an await, both callers
+      // pass the check and both stop the VM.
+      const { provider, stopSandbox } = createProviderManagedStopProvider();
+      const storage = createMockStorage(
+        createMockSession(),
+        createMockSandbox({ status: "ready", modal_object_id: "provider-obj-123" })
+      );
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(true),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig(),
+        // A terminating hook that actually suspends, which is the window a
+        // second caller would slip through.
+        { onSandboxTerminating: () => new Promise((resolve) => setTimeout(resolve, 0)) }
+      );
+
+      await Promise.all([
+        manager.terminateSandbox("session_cancelled"),
+        manager.terminateSandbox("sandbox_disconnected"),
+      ]);
+
+      expect(stopSandbox).toHaveBeenCalledTimes(1);
+    });
+
+    it("marks the row dead without stopping a provider that has no explicit stop", async () => {
+      // Modal reclaims the sandbox when the process exits, which is why #33
+      // only ever showed up on Daytona.
+      const { provider, stopSandbox } = createNoExplicitStopProvider();
+      const storage = createMockStorage(
+        createMockSession(),
+        createMockSandbox({ status: "ready", modal_object_id: "provider-obj-123" })
+      );
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(true),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.terminateSandbox("session_cancelled");
+
+      expect(stopSandbox).not.toHaveBeenCalled();
+      expect(storage.calls).toContain("updateSandboxStatus:stopped");
+    });
+  });
+
+  /**
+   * #33 happened because four termination paths each hand-rolled "mark the row,
+   * then stop the VM", and two of them forgot the second half. Three still
+   * hand-roll it; they diverge on status, snapshot policy and socket handling,
+   * which is why they aren't routed through terminateSandbox. This table is what
+   * holds them to the invariant instead.
+   *
+   * Deadness is derived from isDeadSandboxStatus rather than compared against a
+   * literal, so adding a status to DEAD_SANDBOX_STATUSES pulls it in here too.
+   */
+  describe("a row that says dead means the VM is stopped", () => {
+    const now = Date.now();
+
+    const paths = [
+      {
+        name: "terminateSandbox",
+        sandbox: () => createMockSandbox({ status: "ready" }),
+        drive: (manager: SandboxLifecycleManager) => manager.terminateSandbox("session_cancelled"),
+      },
+      {
+        name: "connecting timeout",
+        sandbox: () =>
+          createMockSandbox({
+            status: "connecting",
+            created_at: now - DEFAULT_LIFECYCLE_CONFIG.connectingTimeout.timeoutMs - 1000,
+          }),
+        drive: (manager: SandboxLifecycleManager) => manager.handleAlarm(),
+      },
+      {
+        name: "heartbeat timeout",
+        sandbox: () =>
+          createMockSandbox({
+            status: "ready",
+            last_heartbeat: now - DEFAULT_LIFECYCLE_CONFIG.heartbeat.timeoutMs - 1000,
+          }),
+        drive: (manager: SandboxLifecycleManager) => manager.handleAlarm(),
+      },
+      {
+        name: "inactivity timeout",
+        sandbox: () =>
+          createMockSandbox({
+            status: "ready",
+            last_heartbeat: now,
+            last_activity: now - DEFAULT_LIFECYCLE_CONFIG.inactivity.timeoutMs - 1000,
+          }),
+        drive: (manager: SandboxLifecycleManager) => manager.handleAlarm(),
+      },
+    ];
+
+    it.each(paths)("$name stops the provider sandbox", async ({ sandbox, drive }) => {
+      const row = sandbox();
+      const { provider, stopSandbox } = createProviderManagedStopProvider();
+      const storage = createMockStorage(createMockSession(), row);
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        // No connected clients, so the inactivity path times out instead of extending.
+        createMockWebSocketManager(true, 0),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await drive(manager);
+
+      expect(isDeadSandboxStatus(row.status as SandboxStatus)).toBe(true);
+      expect(stopSandbox).toHaveBeenCalledTimes(1);
     });
   });
 });

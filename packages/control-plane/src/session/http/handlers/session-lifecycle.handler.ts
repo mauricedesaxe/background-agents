@@ -6,7 +6,7 @@ import {
   type RepositoryRef,
   type SandboxSettings,
 } from "@open-inspect/shared";
-import type { SandboxStatus, SessionStatus, SpawnSource } from "../../../types";
+import type { SessionStatus, SpawnSource } from "../../../types";
 import type { SessionRepository } from "../../repository";
 import {
   normalizeSessionTitle,
@@ -80,7 +80,8 @@ export interface SessionLifecycleHandlerDeps {
   stopExecution: (options?: { suppressStatusReconcile?: boolean }) => Promise<void>;
   getSandboxSocket: () => WebSocket | null;
   sendToSandbox: (ws: WebSocket, message: string | object) => boolean;
-  updateSandboxStatus: (status: SandboxStatus) => void;
+  /** Mark the sandbox dead and stop the provider sandbox with it. */
+  terminateSandbox: (reason: string) => Promise<void>;
 }
 
 function sessionTitleUpdateStatus(
@@ -435,7 +436,7 @@ export function createSessionLifecycleHandler(
         if (sandboxWs) {
           deps.sendToSandbox(sandboxWs, { type: "shutdown" });
         }
-        deps.updateSandboxStatus("stopped");
+        await deps.terminateSandbox("session_cancelled");
       }
 
       return Response.json({ status: "cancelled" });
