@@ -489,7 +489,7 @@ export class SessionDO extends DurableObject<Env> {
         stopExecution: (options) => this.stopExecution(options),
         getSandboxSocket: () => this.wsManager.getSandboxSocket(),
         sendToSandbox: (ws, message) => this.wsManager.send(ws, message),
-        updateSandboxStatus: (status) => this.updateSandboxStatus(status),
+        terminateSandbox: (reason) => this.lifecycleManager.terminateSandbox(reason),
       });
     }
 
@@ -1050,7 +1050,9 @@ export class SessionDO extends DurableObject<Env> {
 
         const isNormalClose = code === 1000 || code === 1001;
         if (isNormalClose) {
-          this.updateSandboxStatus("stopped");
+          // The bridge exiting doesn't stop the sandbox on a provider that bills
+          // for the workspace rather than the process, so mark and stop together.
+          await this.lifecycleManager.terminateSandbox("sandbox_disconnected");
         } else {
           // Abnormal close (e.g., 1006): leave status unchanged so the bridge can reconnect.
           // Schedule a heartbeat check to detect truly dead sandboxes.
