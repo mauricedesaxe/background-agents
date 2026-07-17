@@ -37,7 +37,7 @@ JJ_SHA256 = "59e5588583ac82b623239929368c65b90735931c0f26b5a16c1f04d5bb97643d"
 # the Jujutsu binary. tldraw-cli is now removed — diagrams are authored as JSON
 # records and posted to the interactive board endpoint (see the whiteboard
 # skill), so nothing renders tldraw in the sandbox.
-SANDBOX_VERSION = "daytona-v8-no-tldraw-cli"
+SANDBOX_VERSION = "daytona-v9-harness-from-installer"
 
 # Resources baked into the base snapshot. Daytona applies these to every sandbox
 # created from it and rejects overriding them at create time. Memory (GiB) is the
@@ -120,6 +120,13 @@ def build_base_image(repo_root: Path) -> Image:
             }
         )
         .add_local_dir(str(sandbox_runtime_dir), "/app/sandbox_runtime")
+        # Install the agent harness by running the harness's own installer, which is the same
+        # script every other provider's image build calls. It runs after add_local_dir because
+        # that is what puts the script on the image; HOME is set explicitly because .env() above
+        # applies to the built image's runtime, not to this build step.
+        .run_commands(
+            "HOME=/root bash /app/sandbox_runtime/scripts/install-harness.sh --install",
+        )
         .workdir("/workspace")
     )
 
