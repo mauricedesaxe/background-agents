@@ -20,6 +20,10 @@ import sandbox_runtime
 # Get the path to the sandbox runtime code (provider-agnostic)
 SANDBOX_RUNTIME_DIR = Path(sandbox_runtime.__file__).parent
 
+# The harness install script, shared by every provider's image build so the harness pin and the
+# `sandbox` surface are stated once rather than open-coded four times.
+HARNESS_INSTALL_SCRIPT = SANDBOX_RUNTIME_DIR / "scripts" / "install-harness.sh"
+
 # OpenCode version to install.
 #
 # Pinned to 1.14.41 — the last release before opencode's Hono → Effect Schema
@@ -47,7 +51,7 @@ TTYD_SHA256 = "8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55"
 
 # Cache buster - change this to force Modal image rebuild
 # v52: bake opencode global deps
-CACHE_BUSTER = "v53-list-native-runtime"
+CACHE_BUSTER = "v54-harness-from-installer"
 
 # Base image with all development tools
 base_image = (
@@ -174,6 +178,20 @@ base_image = (
         f"npm install -g agent-browser@{AGENT_BROWSER_VERSION}",
         "agent-browser install",
         "agent-browser --version",
+    )
+    # Install the agent harness by running the harness's own installer.
+    #
+    # copy=True because the install has to run as a build step, and Modal cannot run commands
+    # after a mounted (copy=False) file. HOME is set explicitly rather than inherited: the .env()
+    # below lands after this layer, so HOME is not yet set when this runs.
+    .add_local_file(
+        str(HARNESS_INSTALL_SCRIPT),
+        remote_path="/tmp/install-harness.sh",
+        copy=True,
+    )
+    .run_commands(
+        "HOME=/root bash /tmp/install-harness.sh --install",
+        "rm /tmp/install-harness.sh",
     )
     # Create working directories
     .run_commands(

@@ -209,6 +209,17 @@ function buildImage(options: Pick<BuildOptions, "repoRoot" | "builderMemoryMb">)
 
   image = addRuntimeDir(image, runtimeDir);
 
+  // Install the agent harness by running the harness's own installer, the same script every
+  // other provider's image build calls. It runs after addRuntimeDir because that is what puts
+  // the script on the image, and before the chown below so the files it writes under
+  // SANDBOX_HOME get re-owned with everything else. HOME and XDG_CONFIG_HOME are passed
+  // explicitly because the .env() below applies to the built image, not to this build step.
+  // `sudo env` rather than `sudo VAR=val`, because sudo's env_reset would otherwise decide
+  // whether these survive.
+  image = image.runCommands(
+    `sudo env HOME=${SANDBOX_HOME} XDG_CONFIG_HOME=${SANDBOX_HOME}/.config bash ${SANDBOX_APP_DIR}/sandbox_runtime/scripts/install-harness.sh --install`,
+  );
+
   // The npm/bun/agent-browser installs above run as root (sudo) and write under the sandbox
   // user's HOME, and addRuntimeDir copies the runtime in as root too. Re-own HOME last so the
   // non-root runtime can read/write its own code and the install caches.
@@ -237,7 +248,7 @@ function buildImage(options: Pick<BuildOptions, "repoRoot" | "builderMemoryMb">)
       OPENINSPECT_BIN_INSTALL_DIR: USER_BIN,
       NO_PROXY: LOCAL_NO_PROXY,
       no_proxy: LOCAL_NO_PROXY,
-      SANDBOX_VERSION: "opencomputer-v2",
+      SANDBOX_VERSION: "opencomputer-v3-harness-from-installer",
     })
     .workdir(`${SANDBOX_HOME}/workspace`)
     .builderMemory(options.builderMemoryMb);

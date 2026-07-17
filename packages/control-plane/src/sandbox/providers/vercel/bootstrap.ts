@@ -64,6 +64,12 @@ sudo cp -a packages/sandbox-runtime/src/sandbox_runtime /app/sandbox_runtime
 sudo chmod -R a+rX /app/sandbox_runtime
 sudo ${VERCEL_PYTHON_BIN} -m pip install --break-system-packages -e packages/sandbox-runtime || sudo ${VERCEL_PYTHON_BIN} -m pip install -e packages/sandbox-runtime
 
+# Install the agent harness by running the harness's own installer, the same script every other
+# provider's image build calls. HOME=/root matches what provider.ts gives the running sandbox, so
+# the harness lands where OpenCode will look for it. \`sudo env\` rather than \`sudo VAR=val\`
+# because sudo's env_reset would otherwise decide whether these survive.
+sudo env HOME=/root bash /app/sandbox_runtime/scripts/install-harness.sh --install
+
 printf '%s\\n' '#!/bin/sh' ${shellQuote(gitCredentialHelperCommand)} | sudo tee /usr/local/bin/oi-git-credentials >/dev/null
 sudo chmod 0755 /usr/local/bin/oi-git-credentials
 sudo git config --system credential.helper /usr/local/bin/oi-git-credentials || true
