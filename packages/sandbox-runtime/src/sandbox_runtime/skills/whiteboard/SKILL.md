@@ -13,12 +13,34 @@ flowchart, wireframe) into the session UI. It is not a static image: the board i
 canvas the user can pan, zoom, and edit, and **you edit the same board** by posting record changes.
 When the user drags a box or you add one, both sides see it immediately.
 
-No tldraw runs in the sandbox. You author tldraw **records as JSON** and post them with the `board`
-bash command; the board document lives in the control plane. This replaces the old
-export-a-`.tldr`-to-PNG flow — there is no `tldraw` CLI anymore.
+No tldraw runs in the sandbox — there is no `tldraw` CLI here and nothing renders a `.tldr`. You
+author tldraw **records as JSON** and post them with the `board` bash command; the board document
+lives in the control plane.
 
 For a screenshot you already have on disk, use `upload-screenshot` instead. This skill is for
 diagrams you construct.
+
+## Ignore `lazar-tldraw` here — and never mix their records
+
+`lazar-tldraw` is also installed and it also draws tldraw, so it will look like an option. It is not
+one: **it cannot run in this sandbox.** Its whole workflow ends in `@kitschpatrol/tldraw-cli`, which
+is deliberately not installed here. Use this skill for every diagram; there is no case in this
+sandbox where `lazar-tldraw` is the right answer.
+
+It still matters what it says, because reading it will mislead you into writing the wrong records.
+The two target **different tldraw schema generations** and nothing is portable between them:
+
+|            | `lazar-tldraw`                                  | this skill                                              |
+| ---------- | ----------------------------------------------- | ------------------------------------------------------- |
+| Consumer   | a `.tldr` file (`tldrawFileFormatVersion: 1`)   | the live board, validated against tldraw 5.2.3          |
+| Labels     | `props.text: "Client"`                          | `props.richText` (a doc node)                           |
+| Arrow ends | `props.start = {type: "binding", boundShapeId}` | standalone `binding:` records; `props.start` is a point |
+| Page id    | `page:page1`                                    | `page:page`                                             |
+
+The board rejects `lazar-tldraw`'s records outright: `props.text` is an unexpected property there,
+`props.richText` and `props.scale` are required, and an arrow needs `kind`/`elbowMidPoint`. So the
+format below is this skill's own and is the one the board validates — do not "simplify" a record
+toward `lazar-tldraw`'s shape, and do not carry a `.tldr` from it into `board mutate`.
 
 ## The `board` command
 
