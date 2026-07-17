@@ -96,7 +96,9 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
     updateParticipantCoalesce: vi.fn(),
     updateMessageCompletion: vi.fn(),
     upsertExecutionCompleteEvent: vi.fn(),
-    getSandbox: vi.fn(() => null as { last_spawn_error: string | null } | null),
+    getSandbox: vi.fn(
+      () => null as { last_spawn_error: string | null; last_spawn_error_at: number | null } | null
+    ),
   };
 
   const wsManager = {
@@ -397,10 +399,11 @@ describe("SessionMessageQueue", () => {
       h.wsManager.getSandboxSocket.mockReturnValue(null);
       h.repository.getProcessingMessage.mockReturnValue(null);
       h.repository.getNextPendingMessage.mockReturnValue(
-        createMessage({ id: "msg-quota", created_at: 0 })
+        createMessage({ id: "msg-quota", created_at: 100 })
       );
       h.repository.getSandbox.mockReturnValue({
         last_spawn_error: "Total disk limit exceeded",
+        last_spawn_error_at: 100,
       });
 
       await h.queue.failStuckPendingMessage();
@@ -412,6 +415,30 @@ describe("SessionMessageQueue", () => {
       );
     });
 
+    it("ignores a spawn error older than the pending message", async () => {
+      const h = buildQueue();
+      h.wsManager.getSandboxSocket.mockReturnValue(null);
+      h.repository.getProcessingMessage.mockReturnValue(null);
+      h.repository.getNextPendingMessage.mockReturnValue(
+        createMessage({ id: "msg-later", created_at: 100 })
+      );
+      // Error recorded before this prompt was queued: a stale cause, not this one.
+      h.repository.getSandbox.mockReturnValue({
+        last_spawn_error: "Total disk limit exceeded",
+        last_spawn_error_at: 50,
+      });
+
+      await h.queue.failStuckPendingMessage();
+
+      expect(h.repository.upsertExecutionCompleteEvent).toHaveBeenCalledWith(
+        "msg-later",
+        expect.objectContaining({
+          error: "Sandbox failed to start (timed out waiting to connect)",
+        }),
+        expect.any(Number)
+      );
+    });
+
     it("falls back to the generic connect-timeout string when no spawn error was recorded", async () => {
       const h = buildQueue();
       h.wsManager.getSandboxSocket.mockReturnValue(null);
@@ -419,7 +446,10 @@ describe("SessionMessageQueue", () => {
       h.repository.getNextPendingMessage.mockReturnValue(
         createMessage({ id: "msg-timeout", created_at: 0 })
       );
-      h.repository.getSandbox.mockReturnValue({ last_spawn_error: null });
+      h.repository.getSandbox.mockReturnValue({
+        last_spawn_error: null,
+        last_spawn_error_at: null,
+      });
 
       await h.queue.failStuckPendingMessage();
 

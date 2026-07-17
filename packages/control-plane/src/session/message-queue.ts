@@ -405,7 +405,13 @@ export class SessionMessageQueue {
     // A failed spawn (e.g. the Daytona disk-quota 400) records the real cause on
     // the sandbox row but only broadcasts it live; surface it here so a
     // reconnecting or autopilot client gets the real reason, not the generic one.
-    const spawnError = this.deps.repository.getSandbox()?.last_spawn_error;
+    // Only when the error is at least as new as this pending message, so a stale
+    // error from an earlier spawn isn't pinned to a later prompt's timeout.
+    const sandbox = this.deps.repository.getSandbox();
+    const spawnError =
+      sandbox?.last_spawn_error && (sandbox.last_spawn_error_at ?? 0) >= pending.created_at
+        ? sandbox.last_spawn_error
+        : undefined;
     const timeoutError = spawnError ?? PENDING_CONNECT_TIMEOUT_ERROR;
     const syntheticEvent: Extract<SandboxEvent, { type: "execution_complete" }> = {
       type: "execution_complete",
