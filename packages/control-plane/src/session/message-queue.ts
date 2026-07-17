@@ -16,6 +16,7 @@ import type {
   SessionStatus,
 } from "../types";
 import type { SourceControlProviderName } from "../source-control";
+import type { SandboxTerminationReason } from "../sandbox/lifecycle/manager";
 import type { SessionRow, ParticipantRow, SandboxCommand } from "./types";
 import type { SessionRepository } from "./repository";
 import type { SessionWebSocketManager } from "./websocket-manager";
@@ -41,6 +42,49 @@ interface PromptMessageData {
  * take a while — and only fires when nothing has started processing.
  */
 export const PENDING_SANDBOX_CONNECT_TIMEOUT_MS = 5 * 60 * 1000;
+
+const MS_PER_MINUTE = 60 * 1000;
+
+/**
+ * Generic connect-timeout message for a pending message whose sandbox never
+ * connected and left no recorded spawn error. When a spawn error was captured
+ * (see {@link SessionMessageQueue.failStuckPendingMessage}), that real cause is
+ * surfaced instead.
+ */
+const PENDING_CONNECT_TIMEOUT_ERROR = "Sandbox failed to start (timed out waiting to connect)";
+
+/**
+ * Why a message failed, threaded to {@link SessionMessageQueue.failStuckProcessingMessage}
+ * so each cause surfaces as its own honest message instead of one laundered
+ * string. `execution_timeout` is the real per-message execution timeout;
+ * `sandbox_terminating` is the sandbox going away mid-prompt (crash, OOM,
+ * heartbeat loss, stop).
+ */
+export type ProcessingFailureCause =
+  | { type: "execution_timeout"; elapsedMs: number }
+  | { type: "sandbox_terminating"; reason: SandboxTerminationReason };
+
+function describeProcessingFailure(cause: ProcessingFailureCause): string {
+  switch (cause.type) {
+    case "execution_timeout":
+      return `Execution timed out after ${Math.round(cause.elapsedMs / MS_PER_MINUTE)}m`;
+    case "sandbox_terminating":
+      return describeSandboxTermination(cause.reason);
+  }
+}
+
+function describeSandboxTermination(reason: SandboxTerminationReason): string {
+  switch (reason) {
+    case "heartbeat_stale":
+      return "Sandbox stopped responding while running your request";
+    case "connecting_timeout":
+      return "Sandbox failed to connect before finishing your request";
+    case "inactivity_timeout":
+      return "Sandbox stopped for inactivity before finishing your request";
+    case "stopped":
+      return "Sandbox stopped before finishing your request";
+  }
+}
 
 interface MessageQueueDeps {
   env: Env;
@@ -295,20 +339,26 @@ export class SessionMessageQueue {
   }
 
   /**
-   * Fail a stuck processing message (defense-in-depth for execution timeout).
+   * Fail a stuck processing message with the real cause it failed for.
+   *
+   * Called from unrelated places (the execution-timeout alarm, and the
+   * sandbox-terminating callback the lifecycle manager fires on heartbeat loss,
+   * connect timeout, inactivity, or an explicit stop), so `cause` carries which
+   * one happened and each surfaces as its own honest error rather than one
+   * laundered string.
    *
    * Only marks the message as failed and broadcasts — does NOT send a stop command
    * to the sandbox or call processMessageQueue(). This avoids races where a new
    * prompt could be dispatched to a sandbox being shut down.
    */
-  async failStuckProcessingMessage(): Promise<void> {
+  async failStuckProcessingMessage(cause: ProcessingFailureCause): Promise<void> {
     const now = Date.now();
     const processingMessage = this.deps.repository.getProcessingMessage();
     if (!processingMessage) return;
 
     this.deps.repository.updateMessageCompletion(processingMessage.id, "failed", now);
 
-    const stuckError = "Execution timed out (stuck processing)";
+    const stuckError = describeProcessingFailure(cause);
     const syntheticEvent: Extract<SandboxEvent, { type: "execution_complete" }> = {
       type: "execution_complete",
       messageId: processingMessage.id,
@@ -352,7 +402,11 @@ export class SessionMessageQueue {
 
     this.deps.repository.updateMessageCompletion(pending.id, "failed", now);
 
-    const timeoutError = "Sandbox failed to start (timed out waiting to connect)";
+    // A failed spawn (e.g. the Daytona disk-quota 400) records the real cause on
+    // the sandbox row but only broadcasts it live; surface it here so a
+    // reconnecting or autopilot client gets the real reason, not the generic one.
+    const spawnError = this.deps.repository.getSandbox()?.last_spawn_error;
+    const timeoutError = spawnError ?? PENDING_CONNECT_TIMEOUT_ERROR;
     const syntheticEvent: Extract<SandboxEvent, { type: "execution_complete" }> = {
       type: "execution_complete",
       messageId: pending.id,

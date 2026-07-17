@@ -6,10 +6,7 @@ import type { SessionRepository } from "../repository";
 
 export interface AlarmHandlerDeps {
   repository: Pick<SessionRepository, "getProcessingMessageWithStartedAt">;
-  messageQueue: Pick<
-    SessionMessageQueue,
-    "failStuckProcessingMessage" | "failStuckPendingMessage"
-  >;
+  messageQueue: Pick<SessionMessageQueue, "failStuckProcessingMessage" | "failStuckPendingMessage">;
   lifecycleManager: Pick<SandboxLifecycleManager, "handleAlarm">;
   executionTimeoutMs: number;
   now: () => number;
@@ -48,7 +45,10 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
             elapsed_ms: result.elapsedMs,
             timeout_ms: deps.executionTimeoutMs,
           });
-          await deps.messageQueue.failStuckProcessingMessage();
+          await deps.messageQueue.failStuckProcessingMessage({
+            type: "execution_timeout",
+            elapsedMs: result.elapsedMs,
+          });
         }
       }
 

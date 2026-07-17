@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Logger } from "../../logger";
+import type { SessionMessageQueue } from "../message-queue";
 import { createAlarmHandler } from "./handler";
 
 function createHandler() {
@@ -7,7 +8,9 @@ function createHandler() {
     getProcessingMessageWithStartedAt: vi.fn(),
   };
   const messageQueue = {
-    failStuckProcessingMessage: vi.fn<() => Promise<void>>().mockResolvedValue(),
+    failStuckProcessingMessage: vi
+      .fn<SessionMessageQueue["failStuckProcessingMessage"]>()
+      .mockResolvedValue(),
     failStuckPendingMessage: vi.fn<() => Promise<void>>().mockResolvedValue(),
   };
   const lifecycleManager = {
@@ -82,7 +85,10 @@ describe("createAlarmHandler", () => {
       elapsed_ms: 1500,
       timeout_ms: 1000,
     });
-    expect(messageQueue.failStuckProcessingMessage).toHaveBeenCalledTimes(1);
+    expect(messageQueue.failStuckProcessingMessage).toHaveBeenCalledWith({
+      type: "execution_timeout",
+      elapsedMs: 1500,
+    });
     expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
   });
 
