@@ -101,7 +101,7 @@ function createDaytonaProviderFromEnv(env: Env): DaytonaSandboxProvider {
     autoArchiveIntervalMinutes: parseNumericEnv(
       "DAYTONA_AUTO_ARCHIVE_INTERVAL_MINUTES",
       env.DAYTONA_AUTO_ARCHIVE_INTERVAL_MINUTES,
-      10080
+      1440
     ),
   });
 

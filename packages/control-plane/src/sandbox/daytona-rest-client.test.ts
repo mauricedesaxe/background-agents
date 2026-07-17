@@ -20,7 +20,7 @@ const defaultConfig: DaytonaRestConfig = {
   apiKey: "test-api-key",
   baseSnapshot: "base-snapshot-v1",
   autoStopIntervalMinutes: 120,
-  autoArchiveIntervalMinutes: 10080,
+  autoArchiveIntervalMinutes: 1440,
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -103,7 +103,7 @@ describe("DaytonaRestClient", () => {
         env: { FOO: "bar" },
         labels: { key: "value" },
         autoStopInterval: 120,
-        autoArchiveInterval: 10080,
+        autoArchiveInterval: 1440,
         public: false,
       };
 
