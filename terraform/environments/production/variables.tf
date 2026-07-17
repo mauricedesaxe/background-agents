@@ -364,12 +364,6 @@ variable "daytona_target" {
   default     = ""
 }
 
-variable "daytona_auto_archive_interval_minutes" {
-  description = "Minutes a Daytona sandbox may sit continuously stopped before it auto-archives and frees its disk. Kept low so stopped sandboxes don't pile up against the org disk cap."
-  type        = number
-  default     = 1440
-}
-
 variable "opencomputer_api_url" {
   description = "Base URL for the OpenComputer REST API (e.g. https://api.opencomputer.dev)"
   type        = string

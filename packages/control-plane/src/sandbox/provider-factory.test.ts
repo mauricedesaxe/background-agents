@@ -1,6 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Env } from "../types";
 import { createSandboxProviderFromEnv } from "./provider-factory";
+import { createDaytonaRestClient } from "./daytona-rest-client";
+import type * as DaytonaRestClientModule from "./daytona-rest-client";
+
+vi.mock("./daytona-rest-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof DaytonaRestClientModule>();
+  return { ...actual, createDaytonaRestClient: vi.fn(actual.createDaytonaRestClient) };
+});
 
 function createEnv(overrides: Partial<Env>): Env {
   return {
@@ -50,6 +57,20 @@ describe("createSandboxProviderFromEnv", () => {
 
     expect(() => createSandboxProviderFromEnv(env, "daytona")).toThrow(
       "DAYTONA_AUTO_ARCHIVE_INTERVAL_MINUTES must be a valid number"
+    );
+  });
+
+  it("defaults the Daytona auto-archive interval to 1440 minutes when unset", () => {
+    const env = createEnv({
+      DAYTONA_API_URL: "https://daytona.test",
+      DAYTONA_API_KEY: "daytona-key",
+      DAYTONA_BASE_SNAPSHOT: "base",
+    });
+
+    createSandboxProviderFromEnv(env, "daytona");
+
+    expect(vi.mocked(createDaytonaRestClient)).toHaveBeenCalledWith(
+      expect.objectContaining({ autoArchiveIntervalMinutes: 1440 })
     );
   });
 });
