@@ -104,7 +104,8 @@ function createMockStorage(
     | (SandboxRow & { spawn_failure_count: number; last_spawn_failure: number })
     | null = createMockSandbox(),
   userEnvVars: Record<string, string> | undefined = undefined,
-  sessionRepositories: SessionRepositoryInfo[] = []
+  sessionRepositories: SessionRepositoryInfo[] = [],
+  hasProcessingMessage = false
 ): SandboxStorage & { calls: string[] } {
   const calls: string[] = [];
 
@@ -125,6 +126,10 @@ function createMockStorage(
     getSessionRepositories: vi.fn(() => {
       calls.push("getSessionRepositories");
       return sessionRepositories;
+    }),
+    hasProcessingMessage: vi.fn(() => {
+      calls.push("hasProcessingMessage");
+      return hasProcessingMessage;
     }),
     getUserEnvVars: vi.fn(async () => {
       calls.push("getUserEnvVars");

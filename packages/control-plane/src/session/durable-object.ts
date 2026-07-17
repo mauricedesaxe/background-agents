@@ -660,6 +660,7 @@ export class SessionDO extends DurableObject<Env> {
           repoName: entry.repoName,
           baseBranch: entry.baseBranch ?? "main",
         })),
+      hasProcessingMessage: () => this.getIsProcessing(),
       getUserEnvVars: () => this.getUserEnvVars(),
       updateSandboxStatus: (status) => this.updateSandboxStatus(status),
       updateSandboxForSpawn: (data) => this.repository.updateSandboxForSpawn(data),

@@ -94,6 +94,8 @@ export interface SandboxStorage {
   getSessionRepositories(): SessionRepositoryInfo[];
   /** Get user env vars for sandbox injection */
   getUserEnvVars(): Promise<Record<string, string> | undefined>;
+  /** Whether a message is currently executing on the sandbox. */
+  hasProcessingMessage(): boolean;
   /** Update sandbox status */
   updateSandboxStatus(status: SandboxStatus): void;
   /** Update sandbox for spawn (status, auth token, sandbox ID, created_at) */
@@ -1184,6 +1186,7 @@ export class SandboxLifecycleManager {
       lastActivity: sandbox.last_activity,
       status: sandbox.status as SandboxStatus,
       connectedClientCount: connectedClients,
+      isProcessing: this.storage.hasProcessingMessage(),
     };
 
     const inactivityDecision = evaluateInactivityTimeout(
@@ -1246,8 +1249,7 @@ export class SandboxLifecycleManager {
         if (inactivityDecision.shouldWarn) {
           this.broadcaster.broadcast({
             type: "sandbox_warning",
-            message:
-              "Sandbox will stop in 5 minutes due to inactivity. Send a message to keep it alive.",
+            message: `Sandbox will stop in ${Math.round(inactivityDecision.extensionMs / 60000)} minutes due to inactivity. Send a message to keep it alive.`,
           });
         }
         await this.alarmScheduler.scheduleAlarm(now + inactivityDecision.extensionMs);

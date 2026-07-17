@@ -300,8 +300,10 @@ export interface InactivityState {
   lastActivity: number | null;
   /** Current sandbox status */
   status: SandboxStatus;
-  /** Number of connected client WebSockets */
+  /** Number of connected client WebSockets (the sandbox's own socket is excluded) */
   connectedClientCount: number;
+  /** Whether a message is currently executing on the sandbox */
+  isProcessing: boolean;
 }
 
 /**
@@ -341,6 +343,9 @@ export type InactivityAction =
  * - Long enough for users to read/think between prompts
  * - Snapshots preserve all state, so resume is instant
  *
+ * Idle time is bounded at timeoutMs + extensionMs. Past that a sandbox stops
+ * even with clients connected, so an open browser tab cannot keep it alive.
+ *
  * @param state - Current inactivity state
  * @param config - Inactivity timeout configuration
  * @param now - Current timestamp
@@ -349,7 +354,7 @@ export type InactivityAction =
  * @example
  * ```typescript
  * const decision = evaluateInactivityTimeout(
- *   { lastActivity: now - 600001, status: "ready", connectedClientCount: 1 },
+ *   { lastActivity: now - 600001, status: "ready", connectedClientCount: 1, isProcessing: false },
  *   DEFAULT_INACTIVITY_CONFIG,
  *   now
  * );
@@ -383,17 +388,33 @@ export function evaluateInactivityTimeout(
 
   // Check if inactivity threshold exceeded
   if (inactiveTime >= config.timeoutMs) {
-    // If clients are still connected, they may be actively reviewing
-    // Grant an extension and warn them
-    if (state.connectedClientCount > 0) {
+    // Silence is not idleness while a message is in flight: a single long tool
+    // call (a test suite, an install) emits nothing that refreshes lastActivity,
+    // because `token` and `tool_result` deliberately don't. Stopping here would
+    // fail a healthy run. A genuinely stuck message is the execution timeout's
+    // job, and once it fails the message this branch releases.
+    if (state.isProcessing) {
+      return { action: "schedule", nextCheckMs: config.minCheckIntervalMs };
+    }
+
+    // If clients are still connected, they may be actively reviewing.
+    // Grant an extension and warn them: bounding by elapsed time rather than
+    // counting extensions keeps this stateless, and keeps a connected client
+    // from holding the sandbox open indefinitely.
+    //
+    // The grant is what's left of the window, not a fresh extensionMs. An alarm
+    // can arrive late, and handing a full extension to a late alarm would push
+    // the deadline out past the bound this branch exists to enforce.
+    const deadline = config.timeoutMs + config.extensionMs;
+    if (state.connectedClientCount > 0 && inactiveTime < deadline) {
       return {
         action: "extend",
-        extensionMs: config.extensionMs,
+        extensionMs: deadline - inactiveTime,
         shouldWarn: true,
       };
     }
 
-    // No clients connected - timeout and snapshot
+    // No clients connected, or the extension is spent - timeout and snapshot
     return { action: "timeout", shouldSnapshot: true };
   }
 
