@@ -261,12 +261,23 @@ export interface SlackAgentNotifyLookup {
 // ==================== Callbacks ====================
 
 /**
+ * Why the sandbox is being torn down. Threaded to {@link LifecycleCallbacks.onSandboxTerminating}
+ * so a message still processing when the sandbox goes away fails with the real
+ * cause rather than a single laundered string.
+ */
+export type SandboxTerminationReason =
+  | "heartbeat_stale"
+  | "connecting_timeout"
+  | "inactivity_timeout"
+  | "stopped";
+
+/**
  * Optional callbacks from the lifecycle manager to the session DO.
  * Lightweight callback interface — the manager doesn't know what the callbacks do.
  */
 export interface LifecycleCallbacks {
-  /** Called when the sandbox is being terminated (heartbeat stale, inactivity timeout). */
-  onSandboxTerminating?: () => Promise<void>;
+  /** Called when the sandbox is being terminated, with the reason it's going away. */
+  onSandboxTerminating?: (reason: SandboxTerminationReason) => Promise<void>;
 }
 
 // ==================== Manager ====================
@@ -1104,7 +1115,7 @@ export class SandboxLifecycleManager {
     this.storage.updateSandboxStatus("stopped");
     const providerObjectId = sandbox.modal_object_id ?? undefined;
 
-    await this.callbacks.onSandboxTerminating?.();
+    await this.callbacks.onSandboxTerminating?.("stopped");
 
     this.clearSandboxAccessState();
     this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });
@@ -1170,7 +1181,7 @@ export class SandboxLifecycleManager {
         elapsed_ms: connectingResult.elapsedMs,
         timeout_ms: this.config.connectingTimeout.timeoutMs,
       });
-      await this.callbacks.onSandboxTerminating?.();
+      await this.callbacks.onSandboxTerminating?.("connecting_timeout");
       this.storage.updateSandboxStatus("failed");
       this.clearSandboxAccessState();
       if (this.canStopProviderSandbox()) {
@@ -1205,7 +1216,7 @@ export class SandboxLifecycleManager {
         threshold_ms: this.config.heartbeat.timeoutMs,
       });
       // Fail any stuck processing message before terminating
-      await this.callbacks.onSandboxTerminating?.();
+      await this.callbacks.onSandboxTerminating?.("heartbeat_stale");
       this.storage.updateSandboxStatus("stale");
       this.clearSandboxAccessState();
       this.broadcaster.broadcast({ type: "sandbox_status", status: "stale" });
@@ -1266,7 +1277,7 @@ export class SandboxLifecycleManager {
           timeout_ms: this.config.inactivity.timeoutMs,
         });
         // Fail any stuck processing message before terminating
-        await this.callbacks.onSandboxTerminating?.();
+        await this.callbacks.onSandboxTerminating?.("inactivity_timeout");
         // Set status to stopped FIRST to block reconnection attempts
         this.storage.updateSandboxStatus("stopped");
         this.clearSandboxAccessState();

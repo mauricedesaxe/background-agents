@@ -96,6 +96,7 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
     updateParticipantCoalesce: vi.fn(),
     updateMessageCompletion: vi.fn(),
     upsertExecutionCompleteEvent: vi.fn(),
+    getSandbox: vi.fn(() => null as { last_spawn_error: string | null } | null),
   };
 
   const wsManager = {
@@ -316,9 +317,50 @@ describe("SessionMessageQueue", () => {
     const h = buildQueue();
     h.repository.getProcessingMessage.mockReturnValue({ id: "msg-timeout" });
 
-    await h.queue.failStuckProcessingMessage();
+    await h.queue.failStuckProcessingMessage({ type: "execution_timeout", elapsedMs: 90 * 60_000 });
 
     expect(h.reconcileSessionStatusAfterExecution).toHaveBeenCalledWith(false);
+  });
+
+  describe("failStuckProcessingMessage cause messages", () => {
+    function errorFor(cause: Parameters<SessionMessageQueue["failStuckProcessingMessage"]>[0]) {
+      const h = buildQueue();
+      h.repository.getProcessingMessage.mockReturnValue({ id: "msg-x" });
+      return h.queue.failStuckProcessingMessage(cause).then(() => {
+        const [, event] = h.repository.upsertExecutionCompleteEvent.mock.calls[0];
+        return (event as { error: string }).error;
+      });
+    }
+
+    it("surfaces the execution timeout duration in minutes", async () => {
+      expect(await errorFor({ type: "execution_timeout", elapsedMs: 90 * 60_000 })).toBe(
+        "Execution timed out after 90m"
+      );
+    });
+
+    it("produces three distinct durable messages across its three callers", async () => {
+      const executionTimeout = await errorFor({
+        type: "execution_timeout",
+        elapsedMs: 90 * 60_000,
+      });
+      const heartbeatStale = await errorFor({
+        type: "sandbox_terminating",
+        reason: "heartbeat_stale",
+      });
+      const connectingTimeout = await errorFor({
+        type: "sandbox_terminating",
+        reason: "connecting_timeout",
+      });
+
+      const messages = [executionTimeout, heartbeatStale, connectingTimeout];
+      expect(new Set(messages).size).toBe(3);
+      expect(heartbeatStale).toContain("stopped responding");
+    });
+
+    it("does not launder the terminating cause into the execution-timeout string", async () => {
+      const message = await errorFor({ type: "sandbox_terminating", reason: "stopped" });
+      expect(message).not.toContain("timed out");
+    });
   });
 
   describe("failStuckPendingMessage", () => {
@@ -348,6 +390,46 @@ describe("SessionMessageQueue", () => {
         isProcessing: false,
       });
       expect(h.reconcileSessionStatusAfterExecution).toHaveBeenCalledWith(false);
+    });
+
+    it("surfaces the recorded spawn error when one is present", async () => {
+      const h = buildQueue();
+      h.wsManager.getSandboxSocket.mockReturnValue(null);
+      h.repository.getProcessingMessage.mockReturnValue(null);
+      h.repository.getNextPendingMessage.mockReturnValue(
+        createMessage({ id: "msg-quota", created_at: 0 })
+      );
+      h.repository.getSandbox.mockReturnValue({
+        last_spawn_error: "Total disk limit exceeded",
+      });
+
+      await h.queue.failStuckPendingMessage();
+
+      expect(h.repository.upsertExecutionCompleteEvent).toHaveBeenCalledWith(
+        "msg-quota",
+        expect.objectContaining({ error: "Total disk limit exceeded" }),
+        expect.any(Number)
+      );
+    });
+
+    it("falls back to the generic connect-timeout string when no spawn error was recorded", async () => {
+      const h = buildQueue();
+      h.wsManager.getSandboxSocket.mockReturnValue(null);
+      h.repository.getProcessingMessage.mockReturnValue(null);
+      h.repository.getNextPendingMessage.mockReturnValue(
+        createMessage({ id: "msg-timeout", created_at: 0 })
+      );
+      h.repository.getSandbox.mockReturnValue({ last_spawn_error: null });
+
+      await h.queue.failStuckPendingMessage();
+
+      expect(h.repository.upsertExecutionCompleteEvent).toHaveBeenCalledWith(
+        "msg-timeout",
+        expect.objectContaining({
+          error: "Sandbox failed to start (timed out waiting to connect)",
+        }),
+        expect.any(Number)
+      );
     });
 
     it("does nothing when a sandbox is connected", async () => {
