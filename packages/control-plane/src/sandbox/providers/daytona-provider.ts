@@ -14,6 +14,8 @@ import { DaytonaApiError, DaytonaNotFoundError } from "../daytona-rest-client";
 import { buildSessionConfig } from "../sandbox-env";
 import {
   SandboxProviderError,
+  type ArchiveConfig,
+  type ArchiveResult,
   type CreateSandboxConfig,
   type CreateSandboxResult,
   type ResumeConfig,
@@ -31,6 +33,15 @@ const log = createLogger("daytona-provider");
 // ---------------------------------------------------------------------------
 
 const DEFAULT_PREVIEW_EXPIRY_SECONDS = 3900;
+
+// stopSandbox returns while the sandbox is still "stopping", and Daytona rejects
+// an archive during that window with 409 "Sandbox state change in progress". The
+// archive is retried across the stop-settle window rather than racing it; stop
+// settles in a few seconds in practice, so these bounds leave ample headroom.
+const ARCHIVE_RETRY_MAX_ATTEMPTS = 8;
+const ARCHIVE_RETRY_DELAY_MS = 1500;
+
+const delayMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ---------------------------------------------------------------------------
 // Provider config
@@ -55,6 +66,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
     supportsRestore: false,
     supportsPersistentResume: true,
     supportsExplicitStop: true,
+    supportsArchive: true,
   };
 
   constructor(
@@ -186,6 +198,62 @@ export class DaytonaSandboxProvider implements SandboxProvider {
     } catch (error) {
       if (error instanceof SandboxProviderError) throw error;
       throw this.classifyError("Failed to stop Daytona sandbox", error);
+    }
+  }
+
+  async archiveSandbox(config: ArchiveConfig): Promise<ArchiveResult> {
+    try {
+      let sandbox;
+      try {
+        sandbox = await this.client.getSandbox(config.providerObjectId);
+      } catch (error) {
+        if (error instanceof DaytonaNotFoundError) {
+          // Already gone — nothing to archive, nothing holding disk.
+          return { success: true };
+        }
+        throw error;
+      }
+
+      // Already archived — no-op so a re-archive doesn't fail.
+      if (sandbox.state === "archived") {
+        return { success: true };
+      }
+
+      // Daytona rejects an archive on a sandbox that isn't stopped, so stop it
+      // first. An already-stopped sandbox skips straight to archive.
+      if (sandbox.state !== "stopped") {
+        await this.client.stopSandbox(config.providerObjectId);
+      }
+
+      await this.archiveAcrossStopSettle(config.providerObjectId);
+      return { success: true };
+    } catch (error) {
+      if (error instanceof SandboxProviderError) throw error;
+      throw this.classifyError("Failed to archive Daytona sandbox", error);
+    }
+  }
+
+  /**
+   * Archive, retrying while Daytona reports a 409 state-change-in-progress.
+   *
+   * stopSandbox returns before the sandbox reaches "stopped", so an archive
+   * fired straight after gets a 409. Retrying across the settle window is what
+   * makes archiving an active session actually free its disk now, rather than
+   * 409ing and leaving it to the auto-archive backstop. Non-409 errors and an
+   * exhausted retry budget propagate to the caller.
+   */
+  private async archiveAcrossStopSettle(providerObjectId: string): Promise<void> {
+    for (let attempt = 1; attempt <= ARCHIVE_RETRY_MAX_ATTEMPTS; attempt++) {
+      try {
+        await this.client.archiveSandbox(providerObjectId);
+        return;
+      } catch (error) {
+        const stateChanging = error instanceof DaytonaApiError && error.status === 409;
+        if (!stateChanging || attempt === ARCHIVE_RETRY_MAX_ATTEMPTS) {
+          throw error;
+        }
+        await delayMs(ARCHIVE_RETRY_DELAY_MS);
+      }
     }
   }
 

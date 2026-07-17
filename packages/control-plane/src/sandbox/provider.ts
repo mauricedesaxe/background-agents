@@ -25,6 +25,12 @@ export interface SandboxProviderCapabilities {
   supportsPersistentResume?: boolean;
   /** Whether the provider can stop a sandbox explicitly via API */
   supportsExplicitStop?: boolean;
+  /**
+   * Whether the provider can archive a stopped sandbox, freeing its disk while
+   * keeping it restorable (resume brings it back). Distinct from stop: a
+   * stopped sandbox still holds disk until it's archived.
+   */
+  supportsArchive?: boolean;
 }
 
 /**
@@ -280,6 +286,30 @@ export interface StopResult {
 }
 
 /**
+ * Configuration for archiving a stopped sandbox.
+ */
+export interface ArchiveConfig {
+  /** Provider's internal object ID (e.g. Daytona sandbox ID) */
+  providerObjectId: string;
+  /** Session ID for context */
+  sessionId: string;
+  /** Reason for the archive operation */
+  reason: string;
+  /** Correlation context for downstream tracing */
+  correlation?: CorrelationContext;
+}
+
+/**
+ * Result of archiving a sandbox.
+ */
+export interface ArchiveResult {
+  /** Whether the archive succeeded */
+  success: boolean;
+  /** Error message if archive failed */
+  error?: string;
+}
+
+/**
  * Error classification for circuit breaker decisions.
  *
  * Only permanent failures should count toward the circuit breaker threshold.
@@ -441,4 +471,12 @@ export interface SandboxProvider {
    * Only available if `capabilities.supportsExplicitStop` is true.
    */
   stopSandbox?(config: StopConfig): Promise<StopResult>;
+
+  /**
+   * Archive a stopped sandbox to free its disk while keeping it restorable.
+   * Stops the sandbox first if the provider requires it.
+   *
+   * Only available if `capabilities.supportsArchive` is true.
+   */
+  archiveSandbox?(config: ArchiveConfig): Promise<ArchiveResult>;
 }

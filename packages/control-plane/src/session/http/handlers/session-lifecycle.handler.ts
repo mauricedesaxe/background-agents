@@ -82,6 +82,11 @@ export interface SessionLifecycleHandlerDeps {
   sendToSandbox: (ws: WebSocket, message: string | object) => boolean;
   /** Mark the sandbox dead and stop the provider sandbox with it. */
   terminateSandbox: (reason: string) => Promise<void>;
+  /**
+   * Archive the sandbox so it stops holding disk while staying restorable.
+   * Best-effort: never throws, so it can't fail the archive request.
+   */
+  archiveSandbox: (reason: string) => Promise<void>;
 }
 
 function sessionTitleUpdateStatus(
@@ -114,6 +119,19 @@ function parseUserIdBody(body: unknown): { userId?: string } {
 export function createSessionLifecycleHandler(
   deps: SessionLifecycleHandlerDeps
 ): SessionLifecycleHandler {
+  // Archiving the sandbox frees disk but is never allowed to fail the archive
+  // request. deps.archiveSandbox swallows provider errors already; this guard
+  // is the second layer so an unexpected throw still can't take the request down.
+  async function archiveSandboxBestEffort(reason: string): Promise<void> {
+    try {
+      await deps.archiveSandbox(reason);
+    } catch (error) {
+      deps.getLog().error("Sandbox archive failed", {
+        error: error instanceof Error ? error : String(error),
+      });
+    }
+  }
+
   return {
     async init(request: Request): Promise<Response> {
       const body = (await request.json()) as InitRequest;
@@ -349,6 +367,10 @@ export function createSessionLifecycleHandler(
 
       await deps.transitionSessionStatus("archived");
 
+      // Free the sandbox's disk now that the session is archived. Best-effort:
+      // a failed archive must still leave the session archived.
+      await archiveSandboxBestEffort("session_archived");
+
       return Response.json({ status: "archived" });
     },
 
@@ -413,6 +435,10 @@ export function createSessionLifecycleHandler(
       }
 
       await deps.transitionSessionStatus("archived");
+
+      // Archive this child's sandbox too, so a cascaded archive frees disk
+      // across the whole subtree, not just the session the user archived.
+      await archiveSandboxBestEffort("session_archived");
 
       return Response.json({ status: "archived" });
     },
