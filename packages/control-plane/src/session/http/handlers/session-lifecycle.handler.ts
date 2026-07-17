@@ -365,6 +365,13 @@ export function createSessionLifecycleHandler(
         return Response.json({ error: "Not authorized to archive this session" }, { status: 403 });
       }
 
+      // Stop an in-flight prompt before archiving stops its sandbox, or the
+      // processing row is left stuck once the sandbox goes away. archiveCascade
+      // guards the same way.
+      if (!TERMINAL_STATUSES.has(session.status)) {
+        await deps.stopExecution({ suppressStatusReconcile: true });
+      }
+
       await deps.transitionSessionStatus("archived");
 
       // Free the sandbox's disk now that the session is archived. Best-effort:

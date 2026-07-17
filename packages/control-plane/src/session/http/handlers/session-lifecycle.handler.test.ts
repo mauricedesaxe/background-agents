@@ -677,6 +677,45 @@ describe("createSessionLifecycleHandler", () => {
     expect(archiveSandbox).toHaveBeenCalledWith("session_archived");
   });
 
+  it("stops an in-flight prompt before archiving an active session", async () => {
+    const { handler, getSession, getParticipantByUserId, transitionSessionStatus, stopExecution } =
+      createHandler();
+    getSession.mockReturnValue(createSession({ status: "active" }));
+    getParticipantByUserId.mockReturnValue(createParticipant());
+    transitionSessionStatus.mockResolvedValue(true);
+
+    await handler.archive(
+      new Request("http://internal/internal/archive", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ userId: "user-1" }),
+      })
+    );
+
+    expect(stopExecution).toHaveBeenCalledWith({ suppressStatusReconcile: true });
+    expect(stopExecution.mock.invocationCallOrder[0]).toBeLessThan(
+      transitionSessionStatus.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("does not stop execution when the session is already terminal", async () => {
+    const { handler, getSession, getParticipantByUserId, transitionSessionStatus, stopExecution } =
+      createHandler();
+    getSession.mockReturnValue(createSession({ status: "completed" }));
+    getParticipantByUserId.mockReturnValue(createParticipant());
+    transitionSessionStatus.mockResolvedValue(true);
+
+    await handler.archive(
+      new Request("http://internal/internal/archive", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ userId: "user-1" }),
+      })
+    );
+
+    expect(stopExecution).not.toHaveBeenCalled();
+  });
+
   it("still archives the session when the sandbox archive fails", async () => {
     const { handler, getSession, getParticipantByUserId, transitionSessionStatus, archiveSandbox } =
       createHandler();
