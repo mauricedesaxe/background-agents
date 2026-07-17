@@ -10,7 +10,7 @@ set -euo pipefail
 # and the surface are stated once. It is a real seam of its own: install.sh's own test covers what
 # install.sh does with a source tree, and nothing there covers fetching the right pin, passing
 # `sandbox`, or refusing to run somewhere it shouldn't.
-HARNESS_REPO="${HARNESS_REPO:-https://github.com/mauricedesaxe/claude-harness-template.git}"
+HARNESS_REPO="${HARNESS_REPO:-https://github.com/mauricedesaxe/lazar-harness.git}"
 
 # Pinned to a commit, not a branch: an image build that tracked main would install whatever the
 # harness happened to be at that minute, and two builds of the same source would diverge. Bump it
