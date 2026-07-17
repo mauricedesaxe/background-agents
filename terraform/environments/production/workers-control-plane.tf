@@ -80,6 +80,10 @@ module "control_plane_worker" {
     local.use_daytona_backend ? [
       { name = "DAYTONA_API_URL", value = var.daytona_api_url },
       { name = "DAYTONA_BASE_SNAPSHOT", value = var.daytona_base_snapshot },
+      {
+        name  = "DAYTONA_AUTO_ARCHIVE_INTERVAL_MINUTES",
+        value = tostring(var.daytona_auto_archive_interval_minutes)
+      },
     ] : [],
     local.use_daytona_backend && var.daytona_target != "" ? [
       { name = "DAYTONA_TARGET", value = var.daytona_target },

@@ -27,7 +27,7 @@ const defaultRestConfig: DaytonaRestConfig = {
   apiKey: "test-api-key",
   baseSnapshot: "base-snapshot-v1",
   autoStopIntervalMinutes: 120,
-  autoArchiveIntervalMinutes: 10080,
+  autoArchiveIntervalMinutes: 1440,
 };
 
 function createMockClient(
@@ -136,7 +136,7 @@ describe("DaytonaSandboxProvider", () => {
       expect(createCall.name).toBe("sandbox-456");
       expect(createCall.snapshot).toBe("base-snapshot-v1");
       expect(createCall.autoStopInterval).toBe(120);
-      expect(createCall.autoArchiveInterval).toBe(10080);
+      expect(createCall.autoArchiveInterval).toBe(1440);
       expect(createCall.public).toBe(false);
       // Daytona rejects a snapshot-based create that specifies resources, so we
       // must not send cpu/memory/disk here (sizing lives on the snapshot).
