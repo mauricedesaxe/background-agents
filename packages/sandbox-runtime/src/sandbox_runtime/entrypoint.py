@@ -708,7 +708,7 @@ class SandboxSupervisor:
                 )
                 lines.append("")
 
-        lines.extend(self._engineering_skills_manifest_lines())
+        lines.extend(self._harness_manifest_lines())
 
         try:
             (self.workspace_path / "AGENTS.md").write_text("\n".join(lines))
@@ -717,28 +717,49 @@ class SandboxSupervisor:
             self.log.warn("workspace.manifest_write_failed", exc=e)
 
     @staticmethod
-    def _engineering_skills_manifest_lines() -> list[str]:
-        """The engineering-skills nudge appended to every workspace AGENTS.md.
+    def installed_philosophy_path() -> Path:
+        """Where install-harness.sh left the philosophy for OpenCode to read.
 
-        The `matt-*` skills are auto-discovered, but auto-discovery only lists them;
-        this points the agent at when to reach for them mid-task.
+        Resolves `${XDG_CONFIG_HOME:-$HOME/.config}/opencode` exactly as the harness's install.sh
+        does, rather than hardcoding /root: the providers disagree on the sandbox's home
+        directory, and opencomputer sets XDG_CONFIG_HOME explicitly. Resolving it differently
+        here would point the agent at a file that isn't there.
         """
+        xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+        config_root = Path(xdg_config_home) if xdg_config_home else Path.home() / ".config"
+        return config_root / "opencode" / "rules" / "PHILOSOPHY.md"
+
+    @classmethod
+    def _harness_manifest_lines(cls) -> list[str]:
+        """The harness pointer appended to every workspace AGENTS.md.
+
+        The image installs the harness with the harness's own install.sh, so the skills, the
+        reviewer agents and the philosophy are the ones a laptop gets. This says where the
+        philosophy landed and little else: OpenCode loads it into the main loop from
+        opencode.json already, but a subagent inherits neither the global AGENTS.md nor the
+        rules, so a subagent handed a `§N` needs a path it can open.
+
+        Deliberately not a list of the installed skills. The previous version named six `matt-*`
+        skills and said when to reach for each, which is a paraphrase of `/matt-ask-matt` — the
+        same paraphrase that produced `iconic-work` and then drifted from its original. The
+        router is the router.
+        """
+        philosophy = cls.installed_philosophy_path()
+        if not philosophy.is_file():
+            return []
+
         return [
-            "## Engineering skills available",
+            "## The harness",
             "",
-            "This sandbox bundles Matt Pocock's `matt-*` engineering skills (invoke as "
-            "`/matt-<name>`) alongside the workflow skills. They are mid-task tools, not "
-            "end-to-end workflows — reach for them when they fit:",
+            "The `lazar-` and `matt-` skills, the reviewer agents, and the philosophy are "
+            "installed globally in this sandbox, so they are the ones a laptop runs.",
             "",
-            "- `/matt-wayfinder` — orient in unfamiliar code before changing it.",
-            "- `/matt-diagnosing-bugs` — find a bug's root cause before fixing it.",
-            "- `/matt-to-spec`, `/matt-to-tickets` — turn a rough ask into a spec / tickets.",
-            "- `/matt-tdd` — build a checkable-contract change test-first.",
-            "- `/matt-code-review` — a standards + spec review of a diff.",
-            "- `/matt-grilling` — stress-test a plan before building.",
+            "**`/matt-ask-matt` is the router.** Ask it which skill fits the situation rather "
+            "than guessing from the skill list.",
             "",
-            "The full set is auto-discovered; run `/matt-setup-matt-pocock-skills` once to "
-            "configure the issue tracker the `matt-` skills read from.",
+            f"The philosophy is at `{philosophy}`. Subagents inherit neither the global "
+            "AGENTS.md nor the rules, so a subagent handed a `§N` opens that file and reads the "
+            "section before acting on it.",
             "",
         ]
 
@@ -867,7 +888,6 @@ class SandboxSupervisor:
         except Exception as e:
             self.log.warn("opencode.global_deps_seed_failed", exc=e)
         self._install_skills(workdir)
-        self._install_agents(workdir)
         self._install_bin_scripts()
 
     def _install_bin_scripts(self) -> None:
@@ -891,7 +911,14 @@ class SandboxSupervisor:
                 self.log.info("bin.installed", script=script.stem)
 
     def _install_skills(self, workdir: Path) -> None:
-        """Copy bundled Skills into the .opencode/skills directory."""
+        """Copy the bundled product Skills into the .opencode/skills directory.
+
+        Only Open-Inspect's own skills ship here now — the ones that drive a session surface
+        (the whiteboard, the browser, artifact upload) and exist nowhere else. The harness
+        skills used to sit alongside them as a hand-copied fork; install-harness.sh installs
+        those globally at image build instead, and OpenCode reads both locations, so the agent
+        still sees one set.
+        """
         skills_dir = Path("/app/sandbox_runtime/skills")
         if not skills_dir.is_dir():
             return
@@ -917,32 +944,6 @@ class SandboxSupervisor:
 
         if installed_any:
             self.log.info("opencode.skills_installed", skills_path=str(skills_dest))
-
-    def _install_agents(self, workdir: Path) -> None:
-        """Copy bundled reviewer agents into the .opencode/agent directory.
-
-        These are OpenCode subagents (frontmatter `mode: subagent`); OpenCode
-        discovers each `<name>.md` from `.opencode/agent/` and makes it invocable
-        by the primary agent's task tool (and via `@<name>`). The `review`/`work`
-        skills spawn them by name.
-        """
-        agents_dir = Path("/app/sandbox_runtime/agents")
-        if not agents_dir.is_dir():
-            return
-
-        agents_dest = workdir / ".opencode" / "agent"
-        agents_dest.mkdir(parents=True, exist_ok=True)
-        installed_any = False
-
-        for agent_file in agents_dir.iterdir():
-            if not agent_file.is_file() or agent_file.suffix != ".md":
-                continue
-
-            shutil.copy(agent_file, agents_dest / agent_file.name)
-            installed_any = True
-
-        if installed_any:
-            self.log.info("opencode.agents_installed", agents_path=str(agents_dest))
 
     def _setup_openai_oauth(self) -> None:
         """Write OpenCode auth.json for ChatGPT OAuth if refresh token is configured."""
