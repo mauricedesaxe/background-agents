@@ -491,6 +491,7 @@ export class SessionDO extends DurableObject<Env> {
         getSandboxSocket: () => this.wsManager.getSandboxSocket(),
         sendToSandbox: (ws, message) => this.wsManager.send(ws, message),
         terminateSandbox: (reason) => this.lifecycleManager.terminateSandbox(reason),
+        archiveSandbox: (reason) => this.lifecycleManager.archiveSandbox(reason),
       });
     }
 

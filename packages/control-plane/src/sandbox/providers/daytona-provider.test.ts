@@ -9,7 +9,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { computeHmacHex } from "@open-inspect/shared";
 import { DaytonaSandboxProvider, type DaytonaProviderConfig } from "./daytona-provider";
 import { SandboxProviderError } from "../provider";
-import type { CreateSandboxConfig, ResumeConfig, StopConfig } from "../provider";
+import type { ArchiveConfig, CreateSandboxConfig, ResumeConfig, StopConfig } from "../provider";
 import {
   DaytonaNotFoundError,
   DaytonaApiError,
@@ -36,6 +36,7 @@ function createMockClient(
     getSandbox: (id: string) => Promise<DaytonaSandboxResponse>;
     startSandbox: (id: string) => Promise<void>;
     stopSandbox: (id: string) => Promise<void>;
+    archiveSandbox: (id: string) => Promise<void>;
     recoverSandbox: (id: string) => Promise<void>;
     getSignedPreviewUrl: (
       id: string,
@@ -61,6 +62,7 @@ function createMockClient(
     ),
     startSandbox: vi.fn(async () => {}),
     stopSandbox: vi.fn(async () => {}),
+    archiveSandbox: vi.fn(async () => {}),
     recoverSandbox: vi.fn(async () => {}),
     getSignedPreviewUrl: vi.fn(
       async (): Promise<DaytonaSignedPreviewUrlResponse> => ({
@@ -99,6 +101,12 @@ const baseStopConfig: StopConfig = {
   reason: "inactivity_timeout",
 };
 
+const baseArchiveConfig: ArchiveConfig = {
+  providerObjectId: "daytona-sandbox-id",
+  sessionId: "session-123",
+  reason: "session_archived",
+};
+
 // ==================== Tests ====================
 
 describe("DaytonaSandboxProvider", () => {
@@ -115,6 +123,7 @@ describe("DaytonaSandboxProvider", () => {
         supportsRestore: false,
         supportsPersistentResume: true,
         supportsExplicitStop: true,
+        supportsArchive: true,
       });
     });
   });
@@ -539,6 +548,104 @@ describe("DaytonaSandboxProvider", () => {
 
       try {
         await provider.stopSandbox(baseStopConfig);
+        expect.unreachable("should have thrown");
+      } catch (e) {
+        expect(e).toBeInstanceOf(SandboxProviderError);
+        expect((e as SandboxProviderError).errorType).toBe("transient");
+      }
+    });
+  });
+
+  describe("archiveSandbox", () => {
+    it("stops a running sandbox before archiving it", async () => {
+      const client = createMockClient({
+        getSandbox: async () => ({ id: "daytona-sandbox-id", state: "started" }),
+      });
+      const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+      const result = await provider.archiveSandbox(baseArchiveConfig);
+
+      expect(result.success).toBe(true);
+      expect(client.stopSandbox).toHaveBeenCalledWith("daytona-sandbox-id");
+      expect(client.archiveSandbox).toHaveBeenCalledWith("daytona-sandbox-id");
+    });
+
+    it("archives a stopped sandbox without stopping it again", async () => {
+      const client = createMockClient({
+        getSandbox: async () => ({ id: "daytona-sandbox-id", state: "stopped" }),
+      });
+      const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+      const result = await provider.archiveSandbox(baseArchiveConfig);
+
+      expect(result.success).toBe(true);
+      expect(client.stopSandbox).not.toHaveBeenCalled();
+      expect(client.archiveSandbox).toHaveBeenCalledWith("daytona-sandbox-id");
+    });
+
+    it("is a no-op when the sandbox is already archived", async () => {
+      const client = createMockClient({
+        getSandbox: async () => ({ id: "daytona-sandbox-id", state: "archived" }),
+      });
+      const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+      const result = await provider.archiveSandbox(baseArchiveConfig);
+
+      expect(result.success).toBe(true);
+      expect(client.stopSandbox).not.toHaveBeenCalled();
+      expect(client.archiveSandbox).not.toHaveBeenCalled();
+    });
+
+    it("returns success when the sandbox is already gone (404)", async () => {
+      const client = createMockClient({
+        getSandbox: async () => {
+          throw new DaytonaNotFoundError("not found");
+        },
+      });
+      const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+      const result = await provider.archiveSandbox(baseArchiveConfig);
+
+      expect(result.success).toBe(true);
+      expect(client.archiveSandbox).not.toHaveBeenCalled();
+    });
+
+    it("retries the archive while the stop is still settling (409)", async () => {
+      vi.useFakeTimers();
+      try {
+        const client = createMockClient({
+          getSandbox: async () => ({ id: "daytona-sandbox-id", state: "started" }),
+          archiveSandbox: vi
+            .fn()
+            .mockRejectedValueOnce(new DaytonaApiError("Sandbox state change in progress", 409))
+            .mockRejectedValueOnce(new DaytonaApiError("Sandbox state change in progress", 409))
+            .mockResolvedValueOnce(undefined),
+        });
+        const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+        const pending = provider.archiveSandbox(baseArchiveConfig);
+        await vi.runAllTimersAsync();
+        const result = await pending;
+
+        expect(result.success).toBe(true);
+        expect(client.stopSandbox).toHaveBeenCalledWith("daytona-sandbox-id");
+        expect(client.archiveSandbox).toHaveBeenCalledTimes(3);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("classifies a failed archive as SandboxProviderError", async () => {
+      const client = createMockClient({
+        getSandbox: async () => ({ id: "daytona-sandbox-id", state: "stopped" }),
+        archiveSandbox: async () => {
+          throw new DaytonaApiError("service unavailable", 503);
+        },
+      });
+      const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+      try {
+        await provider.archiveSandbox(baseArchiveConfig);
         expect.unreachable("should have thrown");
       } catch (e) {
         expect(e).toBeInstanceOf(SandboxProviderError);

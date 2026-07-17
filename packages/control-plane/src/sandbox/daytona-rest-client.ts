@@ -36,6 +36,7 @@ const TIMEOUT_CREATE_MS = 90_000;
 const TIMEOUT_START_MS = 60_000;
 const TIMEOUT_RECOVER_MS = 60_000;
 const TIMEOUT_STOP_MS = 30_000;
+const TIMEOUT_ARCHIVE_MS = 60_000;
 const TIMEOUT_GET_MS = 15_000;
 const TIMEOUT_PREVIEW_URL_MS = 15_000;
 
@@ -143,6 +144,16 @@ export class DaytonaRestClient {
 
   async stopSandbox(id: string): Promise<void> {
     await this.request<void>("POST", `/sandbox/${id}/stop`, TIMEOUT_STOP_MS);
+  }
+
+  /**
+   * Archive a stopped sandbox, moving its filesystem to object storage so it
+   * stops holding local disk while staying restorable via start. Daytona
+   * rejects an archive on a sandbox that isn't stopped, so the caller stops it
+   * first (see DaytonaSandboxProvider.archiveSandbox).
+   */
+  async archiveSandbox(id: string): Promise<void> {
+    await this.request<void>("POST", `/sandbox/${id}/archive`, TIMEOUT_ARCHIVE_MS);
   }
 
   async recoverSandbox(id: string): Promise<void> {

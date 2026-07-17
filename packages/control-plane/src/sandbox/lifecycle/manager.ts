@@ -1029,6 +1029,13 @@ export class SandboxLifecycleManager {
   }
 
   /**
+   * Whether the active provider can archive a stopped sandbox via its API.
+   */
+  private canArchiveProviderSandbox(): boolean {
+    return !!this.provider.capabilities.supportsArchive && !!this.provider.archiveSandbox;
+  }
+
+  /**
    * Whether stopping should preserve provider-owned state for in-place resume.
    */
   private usesProviderManagedStop(): boolean {
@@ -1081,6 +1088,71 @@ export class SandboxLifecycleManager {
 
     if (!result.success) {
       throw new Error(result.error || "Failed to stop provider sandbox");
+    }
+  }
+
+  /**
+   * Archive a provider-managed sandbox via its API. The provider stops it first
+   * if needed. Mirrors stopProviderSandbox; the caller pins providerObjectId
+   * before any await for the same reason.
+   */
+  private async archiveProviderSandbox(reason: string, providerObjectId: string): Promise<void> {
+    if (!this.provider.archiveSandbox) {
+      return;
+    }
+
+    const session = this.storage.getSession();
+    if (!session) {
+      return;
+    }
+
+    const result = await this.provider.archiveSandbox({
+      providerObjectId,
+      sessionId: session.session_name || session.id,
+      reason,
+    });
+
+    if (!result.success) {
+      throw new Error(result.error || "Failed to archive provider sandbox");
+    }
+  }
+
+  /**
+   * Archive the sandbox so it stops holding disk while staying restorable.
+   *
+   * Unlike terminateSandbox this runs even on an already-dead (stopped) row: a
+   * stopped Daytona workspace still holds its 3 GiB of disk, and freeing that
+   * disk is the whole point of archiving. A live row is marked stopped first,
+   * since archiving stops the VM.
+   *
+   * Best-effort: a provider that can't archive, a row with no provider id, or a
+   * failed archive call all leave the session archived without surfacing an
+   * error to the caller.
+   */
+  async archiveSandbox(reason: string): Promise<void> {
+    if (!this.canArchiveProviderSandbox()) {
+      return;
+    }
+
+    const sandbox = this.storage.getSandbox();
+    const providerObjectId = sandbox?.modal_object_id ?? undefined;
+    if (!sandbox || !providerObjectId) {
+      return;
+    }
+
+    if (!isDeadSandboxStatus(sandbox.status)) {
+      this.storage.updateSandboxStatus("stopped");
+      this.clearSandboxAccessState();
+      this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });
+    }
+
+    try {
+      await this.archiveProviderSandbox(reason, providerObjectId);
+    } catch (error) {
+      this.log.error("Provider archive failed", {
+        reason,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 

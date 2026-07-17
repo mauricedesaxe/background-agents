@@ -23,6 +23,8 @@ import type { ImageBuildSpawnRow } from "./image-selection";
 import { computeRepositoriesFingerprint } from "../../image-builds/fingerprint";
 import {
   SandboxProviderError,
+  type ArchiveConfig,
+  type ArchiveResult,
   type SandboxProvider,
   type CreateSandboxConfig,
   type CreateSandboxResult,
@@ -284,6 +286,7 @@ function createMockProvider(
     resumeSandbox: (config: ResumeConfig) => Promise<ResumeResult>;
     takeSnapshot: (config: SnapshotConfig) => Promise<SnapshotResult>;
     stopSandbox: (config: StopConfig) => Promise<StopResult>;
+    archiveSandbox: (config: ArchiveConfig) => Promise<ArchiveResult>;
     capabilities: Partial<SandboxProvider["capabilities"]>;
   }> = {}
 ): SandboxProvider {
@@ -320,6 +323,9 @@ function createMockProvider(
   }
   if (overrides.stopSandbox) {
     provider.stopSandbox = overrides.stopSandbox;
+  }
+  if (overrides.archiveSandbox) {
+    provider.archiveSandbox = overrides.archiveSandbox;
   }
   return provider;
 }
@@ -2956,6 +2962,136 @@ describe("SandboxLifecycleManager", () => {
       await manager.terminateSandbox("session_cancelled");
 
       expect(stopSandbox).not.toHaveBeenCalled();
+      expect(storage.calls).toContain("updateSandboxStatus:stopped");
+    });
+  });
+
+  describe("archiveSandbox", () => {
+    /** Daytona's shape plus archive support. */
+    function createArchiveProvider() {
+      const archiveSandbox = vi.fn(async (): Promise<ArchiveResult> => ({ success: true }));
+      const stopSandbox = vi.fn(async (): Promise<StopResult> => ({ success: true }));
+      const provider = createMockProvider({
+        stopSandbox,
+        archiveSandbox,
+        capabilities: {
+          supportsSnapshots: false,
+          supportsRestore: false,
+          supportsPersistentResume: true,
+          supportsExplicitStop: true,
+          supportsArchive: true,
+        },
+      });
+      delete provider.takeSnapshot;
+      return { provider, archiveSandbox };
+    }
+
+    function buildManager(
+      sandbox: ReturnType<typeof createMockSandbox> | null,
+      provider: SandboxProvider,
+      archiveSandbox: ReturnType<typeof vi.fn>
+    ) {
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(true),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+      return { manager, storage, archiveSandbox };
+    }
+
+    it("marks a live row stopped and archives the provider sandbox", async () => {
+      const { provider, archiveSandbox } = createArchiveProvider();
+      const { manager, storage } = buildManager(
+        createMockSandbox({ status: "ready", modal_object_id: "provider-obj-123" }),
+        provider,
+        archiveSandbox
+      );
+
+      await manager.archiveSandbox("session_archived");
+
+      expect(archiveSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerObjectId: "provider-obj-123",
+          reason: "session_archived",
+        })
+      );
+      expect(storage.calls).toContain("updateSandboxStatus:stopped");
+    });
+
+    it("archives an already-stopped sandbox without re-marking the row", async () => {
+      // A stopped Daytona workspace still holds disk, so archive must run even
+      // though the row is already dead.
+      const { provider, archiveSandbox } = createArchiveProvider();
+      const { manager, storage } = buildManager(
+        createMockSandbox({ status: "stopped", modal_object_id: "provider-obj-123" }),
+        provider,
+        archiveSandbox
+      );
+
+      await manager.archiveSandbox("session_archived");
+
+      expect(archiveSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({ providerObjectId: "provider-obj-123" })
+      );
+      expect(storage.calls).not.toContain("updateSandboxStatus:stopped");
+    });
+
+    it("does nothing when the provider cannot archive", async () => {
+      const { provider, stopSandbox } = createProviderManagedStopProvider();
+      const archiveSpy = vi.fn();
+      const { manager } = buildManager(
+        createMockSandbox({ status: "ready", modal_object_id: "provider-obj-123" }),
+        provider,
+        archiveSpy
+      );
+
+      await manager.archiveSandbox("session_archived");
+
+      expect(archiveSpy).not.toHaveBeenCalled();
+      expect(stopSandbox).not.toHaveBeenCalled();
+    });
+
+    it("does nothing when there is no provider object id", async () => {
+      const { provider, archiveSandbox } = createArchiveProvider();
+      const { manager } = buildManager(
+        createMockSandbox({ status: "ready", modal_object_id: null }),
+        provider,
+        archiveSandbox
+      );
+
+      await manager.archiveSandbox("session_archived");
+
+      expect(archiveSandbox).not.toHaveBeenCalled();
+    });
+
+    it("swallows a failed provider archive so the caller is never rejected", async () => {
+      const archiveSandbox = vi.fn(async (): Promise<ArchiveResult> => {
+        throw new SandboxProviderError("provider exploded", "transient");
+      });
+      const provider = createMockProvider({
+        archiveSandbox,
+        capabilities: {
+          supportsSnapshots: false,
+          supportsRestore: false,
+          supportsPersistentResume: true,
+          supportsExplicitStop: true,
+          supportsArchive: true,
+        },
+      });
+      delete provider.takeSnapshot;
+      const { manager, storage } = buildManager(
+        createMockSandbox({ status: "ready", modal_object_id: "provider-obj-123" }),
+        provider,
+        archiveSandbox
+      );
+
+      await expect(manager.archiveSandbox("session_archived")).resolves.toBeUndefined();
+
       expect(storage.calls).toContain("updateSandboxStatus:stopped");
     });
   });

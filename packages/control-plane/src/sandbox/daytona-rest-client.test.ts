@@ -163,6 +163,20 @@ describe("DaytonaRestClient", () => {
     });
   });
 
+  describe("archiveSandbox", () => {
+    it("sends POST /sandbox/{id}/archive", async () => {
+      const client = new DaytonaRestClient(defaultConfig);
+      fetchSpy.mockResolvedValue(emptyResponse(200));
+
+      await client.archiveSandbox("sb-1");
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "https://daytona.test/api/sandbox/sb-1/archive",
+        expect.objectContaining({ method: "POST" })
+      );
+    });
+  });
+
   describe("recoverSandbox", () => {
     it("sends POST /sandbox/{id}/recover", async () => {
       const client = new DaytonaRestClient(defaultConfig);
