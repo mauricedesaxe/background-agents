@@ -16,6 +16,7 @@ import {
   type SandboxSettings,
 } from "@open-inspect/shared";
 import type { SandboxStatus } from "../../types";
+import { epochMs, nowMs } from "../../time";
 import { sessionHasRepository, type SandboxRow, type SessionRow } from "../../session/types";
 import {
   SandboxProviderError,
@@ -1139,7 +1140,7 @@ export class SandboxLifecycleManager {
       return;
     }
 
-    const now = Date.now();
+    const now = nowMs();
 
     this.log.debug("Alarm fired", {
       sandbox_status: sandbox.status,
@@ -1245,7 +1246,7 @@ export class SandboxLifecycleManager {
     // Evaluate inactivity timeout
     const connectedClients = this.getConnectedClientCount();
     const inactivityState = {
-      lastActivity: sandbox.last_activity,
+      lastActivityMs: sandbox.last_activity === null ? null : epochMs(sandbox.last_activity),
       status: sandbox.status as SandboxStatus,
       connectedClientCount: connectedClients,
       isProcessing: this.storage.hasProcessingMessage(),

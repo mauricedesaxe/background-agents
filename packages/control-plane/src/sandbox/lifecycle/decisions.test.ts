@@ -30,6 +30,7 @@ import {
   type WarmState,
   type ExecutionTimeoutConfig,
 } from "./decisions";
+import { addDuration, durationMs, elapsed, epochMs, nowMs } from "../../time";
 
 // ==================== Circuit Breaker Tests ====================
 
@@ -485,15 +486,15 @@ describe("evaluateSpawnDecision", () => {
 
 describe("evaluateInactivityTimeout", () => {
   const config: InactivityConfig = {
-    timeoutMs: 10 * 60 * 1000, // 10 minutes
-    extensionMs: 5 * 60 * 1000, // 5 minutes
-    minCheckIntervalMs: 30000, // 30 seconds
+    timeoutMs: durationMs(10 * 60 * 1000),
+    extensionMs: durationMs(5 * 60 * 1000),
+    minCheckIntervalMs: durationMs(30 * 1000),
   };
 
   it('returns "schedule" for terminal states (stopped)', () => {
-    const now = Date.now();
+    const now = nowMs();
     const state: InactivityState = {
-      lastActivity: now - config.timeoutMs - 60000, // Well past timeout
+      lastActivityMs: epochMs(now - config.timeoutMs - 60000), // Well past timeout
       status: "stopped",
       connectedClientCount: 0,
       isProcessing: false,
@@ -508,9 +509,9 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it('returns "schedule" for terminal states (failed)', () => {
-    const now = Date.now();
+    const now = nowMs();
     const state: InactivityState = {
-      lastActivity: now - config.timeoutMs - 60000,
+      lastActivityMs: epochMs(now - config.timeoutMs - 60000),
       status: "failed",
       connectedClientCount: 0,
       isProcessing: false,
@@ -522,9 +523,9 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it('returns "schedule" for terminal states (stale)', () => {
-    const now = Date.now();
+    const now = nowMs();
     const state: InactivityState = {
-      lastActivity: now - config.timeoutMs - 60000,
+      lastActivityMs: epochMs(now - config.timeoutMs - 60000),
       status: "stale",
       connectedClientCount: 0,
       isProcessing: false,
@@ -536,9 +537,9 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it('returns "schedule" when no lastActivity', () => {
-    const now = Date.now();
+    const now = nowMs();
     const state: InactivityState = {
-      lastActivity: null,
+      lastActivityMs: null,
       status: "ready",
       connectedClientCount: 0,
       isProcessing: false,
@@ -553,9 +554,9 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it('returns "timeout" when inactivity exceeds threshold with no clients', () => {
-    const now = Date.now();
+    const now = nowMs();
     const state: InactivityState = {
-      lastActivity: now - config.timeoutMs - 1000, // Just past timeout
+      lastActivityMs: epochMs(now - config.timeoutMs - 1000), // Just past timeout
       status: "ready",
       connectedClientCount: 0,
       isProcessing: false,
@@ -570,9 +571,9 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it('returns "extend" when threshold exceeded but clients connected', () => {
-    const now = Date.now();
+    const now = nowMs();
     const state: InactivityState = {
-      lastActivity: now - config.timeoutMs - 1000,
+      lastActivityMs: epochMs(now - config.timeoutMs - 1000),
       status: "ready",
       connectedClientCount: 2,
       isProcessing: false,
@@ -590,10 +591,10 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it('returns "schedule" with correct remaining time', () => {
-    const now = Date.now();
+    const now = nowMs();
     const inactiveTime = 5 * 60 * 1000; // 5 minutes
     const state: InactivityState = {
-      lastActivity: now - inactiveTime,
+      lastActivityMs: epochMs(now - inactiveTime),
       status: "ready",
       connectedClientCount: 0,
       isProcessing: false,
@@ -608,11 +609,11 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it("handles minimum check interval", () => {
-    const now = Date.now();
+    const now = nowMs();
     // 9 minutes 50 seconds - very close to timeout
     const inactiveTime = config.timeoutMs - 10000;
     const state: InactivityState = {
-      lastActivity: now - inactiveTime,
+      lastActivityMs: epochMs(now - inactiveTime),
       status: "ready",
       connectedClientCount: 0,
       isProcessing: false,
@@ -628,9 +629,9 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it("only applies to ready/running status", () => {
-    const now = Date.now();
+    const now = nowMs();
     const state: InactivityState = {
-      lastActivity: now - config.timeoutMs - 60000,
+      lastActivityMs: epochMs(now - config.timeoutMs - 60000),
       status: "spawning", // Not ready or running
       connectedClientCount: 0,
       isProcessing: false,
@@ -642,9 +643,9 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it('returns "timeout" for running status', () => {
-    const now = Date.now();
+    const now = nowMs();
     const state: InactivityState = {
-      lastActivity: now - config.timeoutMs - 1000,
+      lastActivityMs: epochMs(now - config.timeoutMs - 1000),
       status: "running",
       connectedClientCount: 0,
       isProcessing: false,
@@ -657,9 +658,9 @@ describe("evaluateInactivityTimeout", () => {
 
   describe("extension is bounded", () => {
     it('returns "timeout" once the extension is spent, even with clients connected', () => {
-      const now = Date.now();
+      const now = nowMs();
       const state: InactivityState = {
-        lastActivity: now - (config.timeoutMs + config.extensionMs),
+        lastActivityMs: epochMs(now - (config.timeoutMs + config.extensionMs)),
         status: "ready",
         connectedClientCount: 2,
         isProcessing: false,
@@ -674,39 +675,42 @@ describe("evaluateInactivityTimeout", () => {
       // The extension used to be granted on every alarm without touching
       // lastActivity, so a connected client extended forever and the sandbox
       // only ever died at the provider's own backstop.
-      const lastActivity = Date.now();
+      const lastActivityMs = nowMs();
       const state: InactivityState = {
-        lastActivity,
+        lastActivityMs,
         status: "ready",
         connectedClientCount: 1,
         isProcessing: false,
       };
 
       // Walk the alarm chain forward as the manager would: each decision
-      // schedules the next check, and lastActivity never moves because the
+      // schedules the next check, and lastActivityMs never moves because the
       // client is connected but silent.
-      let now = lastActivity + config.timeoutMs;
+      let now = addDuration(lastActivityMs, config.timeoutMs);
       const actions: string[] = [];
       for (let i = 0; i < 10; i++) {
         const decision = evaluateInactivityTimeout(state, config, now);
         actions.push(decision.action);
         if (decision.action === "timeout") break;
-        now += decision.action === "extend" ? decision.extensionMs : decision.nextCheckMs;
+        now = addDuration(
+          now,
+          decision.action === "extend" ? decision.extensionMs : decision.nextCheckMs
+        );
       }
 
       expect(actions).toEqual(["extend", "timeout"]);
-      expect(now - lastActivity).toBe(config.timeoutMs + config.extensionMs);
+      expect(elapsed(lastActivityMs, now)).toBe(config.timeoutMs + config.extensionMs);
     });
 
     it("holds the bound when the alarm arrives late", () => {
       // Alarms are not punctual. A late one used to be granted a fresh full
       // extension, which pushed the deadline out past the bound rather than up
       // to it: at 14 minutes idle, a 5-minute grant meant death at 19.
-      const lastActivity = Date.now();
-      const lateBy = 4 * 60 * 1000;
-      const now = lastActivity + config.timeoutMs + lateBy;
+      const lastActivityMs = nowMs();
+      const lateBy = durationMs(4 * 60 * 1000);
+      const now = addDuration(lastActivityMs, durationMs(config.timeoutMs + lateBy));
       const state: InactivityState = {
-        lastActivity,
+        lastActivityMs,
         status: "ready",
         connectedClientCount: 1,
         isProcessing: false,
@@ -716,16 +720,16 @@ describe("evaluateInactivityTimeout", () => {
 
       expect(decision.action).toBe("extend");
       if (decision.action !== "extend") return;
-      const death = now + decision.extensionMs;
-      expect(death - lastActivity).toBe(config.timeoutMs + config.extensionMs);
+      const death = addDuration(now, decision.extensionMs);
+      expect(elapsed(lastActivityMs, death)).toBe(config.timeoutMs + config.extensionMs);
     });
   });
 
   describe("in-flight runs", () => {
     it('returns "schedule" rather than "timeout" while a message is processing', () => {
-      const now = Date.now();
+      const now = nowMs();
       const state: InactivityState = {
-        lastActivity: now - config.timeoutMs - 1000,
+        lastActivityMs: epochMs(now - config.timeoutMs - 1000),
         status: "ready",
         connectedClientCount: 0,
         isProcessing: true,
@@ -737,9 +741,9 @@ describe("evaluateInactivityTimeout", () => {
     });
 
     it("does not stop a run that has been silent far longer than the timeout", () => {
-      const now = Date.now();
+      const now = nowMs();
       const state: InactivityState = {
-        lastActivity: now - 80 * 60 * 1000,
+        lastActivityMs: epochMs(now - 80 * 60 * 1000),
         status: "ready",
         connectedClientCount: 0,
         isProcessing: true,
@@ -751,9 +755,9 @@ describe("evaluateInactivityTimeout", () => {
     });
 
     it('returns "timeout" once the message is no longer processing', () => {
-      const now = Date.now();
+      const now = nowMs();
       const state: InactivityState = {
-        lastActivity: now - config.timeoutMs - 1000,
+        lastActivityMs: epochMs(now - config.timeoutMs - 1000),
         status: "ready",
         connectedClientCount: 0,
         isProcessing: false,
