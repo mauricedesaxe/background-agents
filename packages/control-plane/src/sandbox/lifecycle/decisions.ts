@@ -10,6 +10,7 @@
  */
 
 import type { SandboxStatus } from "../../types";
+import { durationMs, elapsed, type DurationMs, type EpochMs } from "../../time";
 
 // ==================== Dead-Sandbox Policy ====================
 
@@ -296,8 +297,8 @@ export function evaluateSpawnDecision(
  * State for inactivity timeout evaluation.
  */
 export interface InactivityState {
-  /** Last activity timestamp (null if never active) */
-  lastActivity: number | null;
+  /** When the session last did something (null if never active) */
+  lastActivityMs: EpochMs | null;
   /** Current sandbox status */
   status: SandboxStatus;
   /** Number of connected client WebSockets (the sandbox's own socket is excluded) */
@@ -310,21 +311,21 @@ export interface InactivityState {
  * Inactivity timeout configuration.
  */
 export interface InactivityConfig {
-  /** Time in ms before sandbox stops due to inactivity (default: 10 minutes) */
-  timeoutMs: number;
+  /** Time before sandbox stops due to inactivity (default: 10 minutes) */
+  timeoutMs: DurationMs;
   /** Additional time granted when clients are connected (default: 5 minutes) */
-  extensionMs: number;
+  extensionMs: DurationMs;
   /** Minimum interval between alarm checks (default: 30s) */
-  minCheckIntervalMs: number;
+  minCheckIntervalMs: DurationMs;
 }
 
 /**
  * Default inactivity configuration.
  */
 export const DEFAULT_INACTIVITY_CONFIG: InactivityConfig = {
-  timeoutMs: 10 * 60 * 1000, // 10 minutes
-  extensionMs: 5 * 60 * 1000, // 5 minutes
-  minCheckIntervalMs: 30000, // 30 seconds
+  timeoutMs: durationMs(10 * 60 * 1000),
+  extensionMs: durationMs(5 * 60 * 1000),
+  minCheckIntervalMs: durationMs(30 * 1000),
 };
 
 /**
@@ -332,8 +333,8 @@ export const DEFAULT_INACTIVITY_CONFIG: InactivityConfig = {
  */
 export type InactivityAction =
   | { action: "timeout"; shouldSnapshot: boolean }
-  | { action: "extend"; extensionMs: number; shouldWarn: boolean }
-  | { action: "schedule"; nextCheckMs: number };
+  | { action: "extend"; extensionMs: DurationMs; shouldWarn: boolean }
+  | { action: "schedule"; nextCheckMs: DurationMs };
 
 /**
  * Evaluate what action to take for inactivity timeout.
@@ -354,20 +355,20 @@ export type InactivityAction =
  * @example
  * ```typescript
  * const decision = evaluateInactivityTimeout(
- *   { lastActivity: now - 600001, status: "ready", connectedClientCount: 1, isProcessing: false },
+ *   { lastActivityMs: tenMinutesAgo, status: "ready", connectedClientCount: 1, isProcessing: false },
  *   DEFAULT_INACTIVITY_CONFIG,
- *   now
+ *   nowMs()
  * );
  * if (decision.action === "extend") {
  *   // Warn user and schedule next check
- *   await scheduleAlarm(now + decision.extensionMs);
+ *   await scheduleAlarm(addDuration(now, decision.extensionMs));
  * }
  * ```
  */
 export function evaluateInactivityTimeout(
   state: InactivityState,
   config: InactivityConfig,
-  now: number
+  now: EpochMs
 ): InactivityAction {
   // Skip for terminal states - they don't need inactivity monitoring
   if (isDeadSandboxStatus(state.status)) {
@@ -375,7 +376,7 @@ export function evaluateInactivityTimeout(
   }
 
   // No activity recorded yet - schedule a check
-  if (state.lastActivity == null) {
+  if (state.lastActivityMs == null) {
     return { action: "schedule", nextCheckMs: config.minCheckIntervalMs };
   }
 
@@ -384,7 +385,7 @@ export function evaluateInactivityTimeout(
     return { action: "schedule", nextCheckMs: config.minCheckIntervalMs };
   }
 
-  const inactiveTime = now - state.lastActivity;
+  const inactiveTime = elapsed(state.lastActivityMs, now);
 
   // Check if inactivity threshold exceeded
   if (inactiveTime >= config.timeoutMs) {
@@ -409,7 +410,7 @@ export function evaluateInactivityTimeout(
     if (state.connectedClientCount > 0 && inactiveTime < deadline) {
       return {
         action: "extend",
-        extensionMs: deadline - inactiveTime,
+        extensionMs: durationMs(deadline - inactiveTime),
         shouldWarn: true,
       };
     }
@@ -420,7 +421,7 @@ export function evaluateInactivityTimeout(
 
   // Not yet timed out - schedule next check at remaining time (minimum interval)
   const remainingTime = Math.max(config.timeoutMs - inactiveTime, config.minCheckIntervalMs);
-  return { action: "schedule", nextCheckMs: remainingTime };
+  return { action: "schedule", nextCheckMs: durationMs(remainingTime) };
 }
 
 // ==================== Heartbeat Health ====================

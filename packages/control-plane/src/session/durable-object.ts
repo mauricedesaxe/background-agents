@@ -59,6 +59,7 @@ import type {
   SandboxStatus,
 } from "../types";
 import type { SessionRow, ArtifactRow, SandboxRow } from "./types";
+import { durationMs } from "../time";
 import { SessionRepository } from "./repository";
 import { resolveParticipantName } from "./participant-name";
 import { parseTunnelUrls } from "./tunnel-urls";
@@ -779,7 +780,13 @@ export class SessionDO extends DurableObject<Env> {
       sessionId,
       inactivity: {
         ...DEFAULT_LIFECYCLE_CONFIG.inactivity,
-        timeoutMs: parseInt(this.env.SANDBOX_INACTIVITY_TIMEOUT_MS || "600000", 10),
+        timeoutMs: durationMs(
+          parseInt(
+            this.env.SANDBOX_INACTIVITY_TIMEOUT_MS ||
+              String(DEFAULT_LIFECYCLE_CONFIG.inactivity.timeoutMs),
+            10
+          )
+        ),
       },
       mcpServerLookup,
       slackAgentNotifyLookup,
