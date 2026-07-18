@@ -45,8 +45,9 @@ function isValidPort(value: string): boolean {
   return /^\d+$/.test(value) && Number(value) >= 1 && Number(value) <= 65535;
 }
 
-function isPositiveInteger(value: string): boolean {
-  return /^\d+$/.test(value) && Number(value) >= 1;
+/** Child-session caps allow 0, which disables fan-out for the scope. */
+function isChildSessionCap(value: string): boolean {
+  return /^\d+$/.test(value);
 }
 
 function isValidCpuCores(value: string): boolean {
@@ -307,10 +308,10 @@ export function SandboxSettingsEditor({
     }
 
     if (
-      !isPositiveInteger(resolvedMaxConcurrentChildSessions) ||
-      !isPositiveInteger(resolvedMaxTotalChildSessions)
+      !isChildSessionCap(resolvedMaxConcurrentChildSessions) ||
+      !isChildSessionCap(resolvedMaxTotalChildSessions)
     ) {
-      setError("Child session limits must be positive whole numbers.");
+      setError("Child session limits must be whole numbers, 0 or greater.");
       return;
     }
 

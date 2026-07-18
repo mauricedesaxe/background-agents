@@ -446,15 +446,61 @@ describe("SandboxSettingsPage — tunnel ports editor", () => {
     });
   });
 
-  it("blocks invalid child session limits", async () => {
-    const { fetchMock } = renderWithSWR(globalSettings([]));
+  it("saves a zero child session limit instead of rejecting it", async () => {
+    // Zero is the fan-out kill switch, so the save path has to let it through.
+    // The rendered min attribute alone doesn't prove that; this drives Save.
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "PUT") {
+        return new Response(JSON.stringify({}), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <SWRConfig
+        value={{
+          provider: () => new Map(),
+          fallback: { [SETTINGS_KEY]: globalSettings([], ["acme/app"]) },
+          dedupingInterval: Infinity,
+          revalidateOnFocus: false,
+          revalidateIfStale: false,
+          revalidateOnReconnect: false,
+        }}
+      >
+        <SandboxSettingsPage />
+      </SWRConfig>
+    );
 
     await user.clear(screen.getByLabelText("Max concurrent child sessions"));
     await user.type(screen.getByLabelText("Max concurrent child sessions"), "0");
+    await user.clear(screen.getByLabelText("Max total child sessions"));
+    await user.type(screen.getByLabelText("Max total child sessions"), "0");
+    await user.click(screen.getByText("Save Settings"));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        SETTINGS_KEY,
+        expect.objectContaining({ method: "PUT" })
+      );
+    });
+    const put = fetchMock.mock.calls.find(
+      ([, init]) => (init as RequestInit | undefined)?.method === "PUT"
+    );
+    const sent = JSON.parse(String((put?.[1] as RequestInit).body));
+    expect(sent.settings.defaults.maxConcurrentChildSessions).toBe(0);
+    expect(sent.settings.defaults.maxTotalChildSessions).toBe(0);
+  });
+
+  it("blocks a fractional child session limit", async () => {
+    const { fetchMock } = renderWithSWR(globalSettings([]));
+
+    await user.clear(screen.getByLabelText("Max concurrent child sessions"));
+    await user.type(screen.getByLabelText("Max concurrent child sessions"), "1.5");
     await user.click(screen.getByText("Save Settings"));
 
     expect(
-      screen.getByText("Child session limits must be positive whole numbers.")
+      screen.getByText("Child session limits must be whole numbers, 0 or greater.")
     ).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalledWith(
       SETTINGS_KEY,
