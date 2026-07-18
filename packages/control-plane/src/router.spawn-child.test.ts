@@ -194,7 +194,10 @@ describe("handleSpawnChild prompt enqueue handling", () => {
     );
   });
 
-  it("returns 400 when child specifies an invalid model", async () => {
+  it("inherits the parent's model and ignores one the caller names", async () => {
+    // A spawning agent cannot know which providers this deployment has keys
+    // for, so its choice is dropped rather than validated: every model it
+    // picked from an unconfigured provider cost a sandbox to boot and fail.
     const store = makeStore();
     vi.mocked(SessionIndexStore).mockImplementation(function () {
       return store as never;
@@ -232,10 +235,10 @@ describe("handleSpawnChild prompt enqueue handling", () => {
       env as never
     );
 
-    expect(response.status).toBe(400);
-    const payload = await response.json<{ error: string }>();
-    expect(payload.error).toContain('Invalid model "not-a-real-model"');
-    expect(payload.error).toContain("Valid models:");
+    expect(response.status).not.toBe(400);
+    expect(store.create).toHaveBeenCalledWith(
+      expect.objectContaining({ model: spawnContext.model })
+    );
   });
 
   it("returns 400 for a malformed child spawn request", async () => {
@@ -374,49 +377,6 @@ describe("handleSpawnChild prompt enqueue handling", () => {
     await expect(response.json()).resolves.toMatchObject({
       error: "Maximum total children (4) reached",
     });
-  });
-
-  it("returns 400 when child specifies an empty-string model", async () => {
-    const store = makeStore();
-    vi.mocked(SessionIndexStore).mockImplementation(function () {
-      return store as never;
-    });
-
-    const parentStub: DurableObjectStub = {
-      fetch: vi.fn(async () => Response.json(spawnContext)),
-    } as never;
-
-    const env = {
-      INTERNAL_CALLBACK_SECRET: "test-internal-secret",
-      SCM_PROVIDER: "github",
-      DB: {},
-      SESSION: {
-        idFromName: (name: string) => name,
-        get: () => parentStub,
-      },
-    };
-
-    const token = await generateInternalToken(env.INTERNAL_CALLBACK_SECRET);
-
-    const response = await handleRequest(
-      new Request(`https://test.local/sessions/${parentId}/children`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          title: "Child task",
-          prompt: "Do the thing",
-          model: "",
-        }),
-      }),
-      env as never
-    );
-
-    expect(response.status).toBe(400);
-    const payload = await response.json<{ error: string }>();
-    expect(payload.error).toContain('Invalid model ""');
   });
 
   it("propagates parent spawn-context errors", async () => {

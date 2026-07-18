@@ -219,13 +219,19 @@ export interface ListSessionsResponse {
   hasMore: boolean;
 }
 
-/** Request body for POST /sessions/:parentId/children. */
+/**
+ * Request body for POST /sessions/:parentId/children.
+ *
+ * There is deliberately no `model`: a child inherits the parent's, so a spawning
+ * agent cannot pick a provider this deployment has no credentials for. A caller
+ * that still sends one has it stripped here rather than rejected, so an agent
+ * built against the older shape keeps working.
+ */
 export const spawnChildSessionRequestSchema = z.object({
   title: z.string(),
   prompt: z.string(),
   repoOwner: z.string().optional(),
   repoName: z.string().optional(),
-  model: z.string().optional(),
   reasoningEffort: z.string().optional(),
 });
 
