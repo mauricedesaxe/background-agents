@@ -67,12 +67,12 @@ export function normalizeSandboxSettings(
   const terminalPort = normalizePort(settings.terminalPort, "terminalPort", reject);
   if (terminalPort !== undefined) result.terminalPort = terminalPort;
 
-  let maxConcurrentChildSessions = normalizePositiveIntegerSetting(
+  let maxConcurrentChildSessions = normalizeChildSessionCap(
     settings.maxConcurrentChildSessions,
     "maxConcurrentChildSessions",
     reject
   );
-  const maxTotalChildSessions = normalizePositiveIntegerSetting(
+  const maxTotalChildSessions = normalizeChildSessionCap(
     settings.maxTotalChildSessions,
     "maxTotalChildSessions",
     reject
@@ -234,6 +234,25 @@ function normalizeTunnelPorts(
   if (ports.length > 0) {
     result.tunnelPorts = ports.slice(0, MAX_TUNNEL_PORTS);
   }
+}
+
+/**
+ * Normalize a child-session cap, where 0 is meaningful rather than invalid.
+ *
+ * Setting a cap to 0 is how fan-out gets turned off for one repository without
+ * a deploy: the spawn route reads it and refuses before creating anything.
+ */
+function normalizeChildSessionCap(
+  value: unknown,
+  name: string,
+  reject: (message: string) => false
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    reject(`${name} must be a non-negative integer`);
+    return undefined;
+  }
+  return value;
 }
 
 function normalizePositiveIntegerSetting(

@@ -450,4 +450,49 @@ describe("handleSpawnChild prompt enqueue handling", () => {
     const createdChildId = store.create.mock.calls[0]?.[0]?.id;
     expect(store.updateStatus).toHaveBeenCalledWith(createdChildId, "failed");
   });
+  it("refuses to spawn when the repository's child-session cap is zero", async () => {
+    // Zero is the fan-out kill switch. It has to answer before anything is
+    // created, and answer 403 so the agent reports why instead of backing off
+    // against a limit that will never lift.
+    integrationSettingsMocks.resolveSandboxSettings.mockResolvedValue({
+      maxConcurrentChildSessions: 0,
+      maxTotalChildSessions: 0,
+    });
+    const store = makeStore();
+    vi.mocked(SessionIndexStore).mockImplementation(function () {
+      return store as never;
+    });
+
+    const parentStub: DurableObjectStub = {
+      fetch: vi.fn(async () => Response.json(spawnContext)),
+    } as never;
+
+    const env = {
+      INTERNAL_CALLBACK_SECRET: "test-internal-secret",
+      SCM_PROVIDER: "github",
+      DB: {},
+      SESSION: {
+        idFromName: (name: string) => name,
+        get: () => parentStub,
+      },
+    };
+
+    const token = await generateInternalToken(env.INTERNAL_CALLBACK_SECRET);
+
+    const response = await handleRequest(
+      new Request(`https://test.local/sessions/${parentId}/children`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ title: "Child task", prompt: "Do the thing" }),
+      }),
+      env as never
+    );
+
+    expect(response.status).toBe(403);
+    expect(store.create).not.toHaveBeenCalled();
+    expect(parentStub.fetch).not.toHaveBeenCalled();
+  });
 });

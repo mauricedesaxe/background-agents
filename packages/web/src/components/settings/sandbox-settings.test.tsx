@@ -382,6 +382,19 @@ describe("SandboxSettingsPage — tunnel ports editor", () => {
     expect(screen.getByLabelText("Max total child sessions")).toHaveValue(9);
   });
 
+  it("accepts a zero child session limit as the fan-out kill switch", () => {
+    renderWithSWR(
+      globalSettings([], undefined, {
+        maxConcurrentChildSessions: 0,
+        maxTotalChildSessions: 0,
+      })
+    );
+
+    expect(screen.getByLabelText("Max concurrent child sessions")).toHaveValue(0);
+    expect(screen.getByLabelText("Max total child sessions")).toHaveValue(0);
+    expect(screen.getByLabelText("Max total child sessions")).toHaveAttribute("min", "0");
+  });
+
   it("sends child session limits in the global payload", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === "PUT") {
