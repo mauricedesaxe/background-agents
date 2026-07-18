@@ -34,12 +34,11 @@ const log = createLogger("daytona-provider");
 
 const DEFAULT_PREVIEW_EXPIRY_SECONDS = 3900;
 
-// stopSandbox returns while the sandbox is still "stopping", and Daytona rejects
-// an archive during that window with 409 "Sandbox state change in progress". The
-// archive is retried across the stop-settle window rather than racing it; stop
-// settles in a few seconds in practice, so these bounds leave ample headroom.
-const ARCHIVE_RETRY_MAX_ATTEMPTS = 8;
-const ARCHIVE_RETRY_DELAY_MS = 1500;
+/** How many times a state-changing call is retried while Daytona reports 409. */
+const STATE_SETTLE_RETRY_MAX_ATTEMPTS = 8;
+
+/** Gap between those attempts. A transition settles in a few seconds in practice. */
+const STATE_SETTLE_RETRY_DELAY_MS = 1500;
 
 const delayMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -187,7 +186,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
   async stopSandbox(config: StopConfig): Promise<StopResult> {
     try {
       try {
-        await this.client.stopSandbox(config.providerObjectId);
+        await this.retryAcrossStateSettle(() => this.client.stopSandbox(config.providerObjectId));
       } catch (error) {
         if (error instanceof DaytonaNotFoundError) {
           return { success: true };
@@ -222,10 +221,10 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       // Daytona rejects an archive on a sandbox that isn't stopped, so stop it
       // first. An already-stopped sandbox skips straight to archive.
       if (sandbox.state !== "stopped") {
-        await this.client.stopSandbox(config.providerObjectId);
+        await this.retryAcrossStateSettle(() => this.client.stopSandbox(config.providerObjectId));
       }
 
-      await this.archiveAcrossStopSettle(config.providerObjectId);
+      await this.retryAcrossStateSettle(() => this.client.archiveSandbox(config.providerObjectId));
       return { success: true };
     } catch (error) {
       if (error instanceof SandboxProviderError) throw error;
@@ -234,25 +233,27 @@ export class DaytonaSandboxProvider implements SandboxProvider {
   }
 
   /**
-   * Archive, retrying while Daytona reports a 409 state-change-in-progress.
+   * Run a state-changing Daytona call, retrying while it reports 409
+   * "Sandbox state change in progress".
    *
-   * stopSandbox returns before the sandbox reaches "stopped", so an archive
-   * fired straight after gets a 409. Retrying across the settle window is what
-   * makes archiving an active session actually free its disk now, rather than
-   * 409ing and leaving it to the auto-archive backstop. Non-409 errors and an
-   * exhausted retry budget propagate to the caller.
+   * Stop and archive both return before the sandbox reaches its new state, so a
+   * call fired straight after another gets a 409. So does a stop issued while
+   * creation is still settling, which is what a short-lived child session does.
+   * Retrying across that window is what makes a stop actually stop the VM,
+   * rather than throwing into a caller that has already marked the row dead.
+   * Non-409 errors and an exhausted budget propagate to the caller.
    */
-  private async archiveAcrossStopSettle(providerObjectId: string): Promise<void> {
-    for (let attempt = 1; attempt <= ARCHIVE_RETRY_MAX_ATTEMPTS; attempt++) {
+  private async retryAcrossStateSettle(operation: () => Promise<void>): Promise<void> {
+    for (let attempt = 1; attempt <= STATE_SETTLE_RETRY_MAX_ATTEMPTS; attempt++) {
       try {
-        await this.client.archiveSandbox(providerObjectId);
+        await operation();
         return;
       } catch (error) {
         const stateChanging = error instanceof DaytonaApiError && error.status === 409;
-        if (!stateChanging || attempt === ARCHIVE_RETRY_MAX_ATTEMPTS) {
+        if (!stateChanging || attempt === STATE_SETTLE_RETRY_MAX_ATTEMPTS) {
           throw error;
         }
-        await delayMs(ARCHIVE_RETRY_DELAY_MS);
+        await delayMs(STATE_SETTLE_RETRY_DELAY_MS);
       }
     }
   }
