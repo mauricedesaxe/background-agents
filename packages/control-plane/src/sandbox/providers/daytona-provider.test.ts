@@ -554,6 +554,48 @@ describe("DaytonaSandboxProvider", () => {
         expect((e as SandboxProviderError).errorType).toBe("transient");
       }
     });
+
+    it("retries the stop while the sandbox is still settling (409)", async () => {
+      vi.useFakeTimers();
+      try {
+        const client = createMockClient({
+          stopSandbox: vi
+            .fn()
+            .mockRejectedValueOnce(new DaytonaApiError("Sandbox state change in progress", 409))
+            .mockRejectedValueOnce(new DaytonaApiError("Sandbox state change in progress", 409))
+            .mockResolvedValueOnce(undefined),
+        });
+        const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+        const pending = provider.stopSandbox(baseStopConfig);
+        await vi.runAllTimersAsync();
+        const result = await pending;
+
+        expect(result.success).toBe(true);
+        expect(client.stopSandbox).toHaveBeenCalledTimes(3);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("gives up and reports failure when the sandbox never settles", async () => {
+      vi.useFakeTimers();
+      try {
+        const client = createMockClient({
+          stopSandbox: vi
+            .fn()
+            .mockRejectedValue(new DaytonaApiError("Sandbox state change in progress", 409)),
+        });
+        const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+        const pending = provider.stopSandbox(baseStopConfig);
+        const settled = expect(pending).rejects.toBeInstanceOf(SandboxProviderError);
+        await vi.runAllTimersAsync();
+        await settled;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe("archiveSandbox", () => {
