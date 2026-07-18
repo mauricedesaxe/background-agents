@@ -126,6 +126,8 @@ CREATE TABLE IF NOT EXISTS sandbox (
   last_activity INTEGER,                            -- Last activity timestamp for inactivity-based snapshot
   last_spawn_error TEXT,                            -- Last sandbox spawn error (if any)
   last_spawn_error_at INTEGER,                      -- Timestamp of last spawn error
+  stop_unreconciled_at INTEGER,                     -- Set when a provider stop failed after the row was marked dead, so the VM may still be running; NULL once reconciled
+  stop_unreconciled_provider_id TEXT,               -- The provider object the failed stop targeted, pinned so a respawn can't redirect the retry
   spawn_failure_count INTEGER DEFAULT 0,            -- Circuit breaker: consecutive spawn failures
   last_spawn_failure INTEGER,                       -- Timestamp of last spawn failure
   code_server_url TEXT,                             -- Code-server tunnel URL (rotates on wake/restore)
@@ -440,6 +442,16 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
       runMigration(sql, `ALTER TABLE artifacts ADD COLUMN updated_at INTEGER`);
       sql.exec(`UPDATE artifacts SET updated_at = created_at WHERE updated_at IS NULL`);
     },
+  },
+  {
+    id: 35,
+    description: "Add stop_unreconciled_at to sandbox",
+    run: `ALTER TABLE sandbox ADD COLUMN stop_unreconciled_at INTEGER`,
+  },
+  {
+    id: 36,
+    description: "Add stop_unreconciled_provider_id to sandbox",
+    run: `ALTER TABLE sandbox ADD COLUMN stop_unreconciled_provider_id TEXT`,
   },
 ];
 

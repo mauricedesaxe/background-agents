@@ -16,7 +16,7 @@ import {
   type SandboxSettings,
 } from "@open-inspect/shared";
 import type { SandboxStatus } from "../../types";
-import { epochMs, nowMs } from "../../time";
+import { epochMs, nowMs, type EpochMs } from "../../time";
 import { sessionHasRepository, type SandboxRow, type SessionRow } from "../../session/types";
 import {
   SandboxProviderError,
@@ -99,6 +99,12 @@ export interface SandboxStorage {
   hasProcessingMessage(): boolean;
   /** Update sandbox status */
   updateSandboxStatus(status: SandboxStatus): void;
+  /**
+   * Record, or clear with a pair of nulls, that a provider stop failed after
+   * the row was marked dead, so the VM may still be running. The provider id is
+   * pinned alongside so a later retry targets that VM and not a replacement.
+   */
+  updateSandboxStopUnreconciled(timestamp: EpochMs | null, providerObjectId: string | null): void;
   /** Update sandbox for spawn (status, auth token, sandbox ID, created_at) */
   updateSandboxForSpawn(data: {
     status: SandboxStatus;
@@ -211,6 +217,16 @@ export const DEFAULT_LIFECYCLE_CONFIG: Omit<SandboxLifecycleConfig, "controlPlan
 
 /** Child (agent-spawned) sessions get a shorter sandbox timeout. */
 const CHILD_SANDBOX_TIMEOUT_SECONDS = 3600; // 1 hour (vs default 2 hours)
+
+/**
+ * How long a stop that failed after its row was marked dead keeps being retried.
+ * The window closes well inside a provider's own auto-stop backstop, so a
+ * recoverable stop is recovered before the VM bills its full lifetime.
+ */
+const STOP_RECONCILE_WINDOW_MS = 30 * 60 * 1000;
+
+/** Gap between those retries. */
+const STOP_RECONCILE_INTERVAL_MS = 2 * 60 * 1000;
 
 function buildSandboxIdForSession(session: SessionRow, now: number): string {
   const sandboxName = sessionHasRepository(session)
@@ -1063,6 +1079,90 @@ export class SandboxLifecycleManager {
   }
 
   /**
+   * Note that the VM behind an already-dead row may still be running.
+   *
+   * terminateSandbox and the timeout paths mark the row dead before asking the
+   * provider to stop, so a throw there breaks the invariant they document: a
+   * dead row means a stopped VM. handleAlarm short-circuits on a dead row, so
+   * without this marker nothing ever comes back for it and the VM bills until
+   * the provider's own backstop.
+   */
+  private async recordUnreconciledStop(
+    reason: string,
+    error: unknown,
+    providerObjectId: string | undefined
+  ): Promise<void> {
+    this.log.error("Provider stop failed, leaving the VM unreconciled", {
+      event: "sandbox.stop_unreconciled",
+      reason,
+      provider_object_id: providerObjectId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    this.storage.updateSandboxStopUnreconciled(nowMs(), providerObjectId ?? null);
+    await this.alarmScheduler.scheduleAlarm(nowMs() + STOP_RECONCILE_INTERVAL_MS);
+  }
+
+  /**
+   * Stop the provider sandbox, marking it for reconciliation if that fails.
+   *
+   * Every path that marks a row dead goes through here. Pairing the stop with
+   * the marker in one place is what stops a future caller adding a sixth stop
+   * site that forgets the marker, which is the whole bug this exists to close.
+   */
+  private async stopProviderSandboxOrRecord(
+    reason: string,
+    providerObjectId?: string
+  ): Promise<void> {
+    try {
+      await this.stopProviderSandbox(reason, providerObjectId);
+      this.storage.updateSandboxStopUnreconciled(null, null);
+    } catch (error) {
+      await this.recordUnreconciledStop(reason, error, providerObjectId);
+    }
+  }
+
+  /**
+   * Retry a stop that failed after its row was already marked dead.
+   *
+   * Runs from handleAlarm's dead-row branch, the one place that still sees a
+   * sandbox nothing else will revisit. Bounding by elapsed time rather than by
+   * an attempt count keeps this stateless, the same trade evaluateInactivityTimeout
+   * makes.
+   */
+  private async reconcileUnstoppedSandbox(sandbox: SandboxRow, now: EpochMs): Promise<void> {
+    const unreconciledAt = sandbox.stop_unreconciled_at;
+    if (unreconciledAt == null) {
+      return;
+    }
+
+    if (now - unreconciledAt >= STOP_RECONCILE_WINDOW_MS) {
+      this.storage.updateSandboxStopUnreconciled(null, null);
+      return;
+    }
+
+    try {
+      // The pinned id, never the row's current one: a respawn between the failed
+      // stop and this alarm swaps modal_object_id, and retrying against that
+      // would stop the replacement and leave the VM we set out to kill running.
+      await this.stopProviderSandbox(
+        "stop_reconcile",
+        sandbox.stop_unreconciled_provider_id ?? undefined
+      );
+      this.storage.updateSandboxStopUnreconciled(null, null);
+      this.log.info("Reconciled a sandbox whose stop had failed", {
+        event: "sandbox.stop_reconciled",
+        unreconciled_for_ms: now - unreconciledAt,
+      });
+    } catch (error) {
+      this.log.warn("Stop reconcile failed, will retry", {
+        event: "sandbox.stop_reconcile_failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await this.alarmScheduler.scheduleAlarm(now + STOP_RECONCILE_INTERVAL_MS);
+    }
+  }
+
+  /**
    * Stop a provider-managed sandbox via its API.
    *
    * Pass `providerObjectId` to stop a specific sandbox. Without it the caller
@@ -1203,14 +1303,7 @@ export class SandboxLifecycleManager {
       await this.triggerSnapshot(reason, providerObjectId);
     }
 
-    try {
-      await this.stopProviderSandbox(reason, providerObjectId);
-    } catch (error) {
-      this.log.error("Provider stop failed", {
-        reason,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    await this.stopProviderSandboxOrRecord(reason, providerObjectId);
   }
 
   /**
@@ -1231,11 +1324,14 @@ export class SandboxLifecycleManager {
       last_heartbeat: sandbox.last_heartbeat,
     });
 
-    // Skip if sandbox is already in terminal state
+    // Skip if sandbox is already in terminal state. A dead row whose stop never
+    // landed is the exception: this branch is the only thing that still looks at
+    // it, so reconcile here or the VM runs on unnoticed.
     if (isDeadSandboxStatus(sandbox.status)) {
       this.log.debug("Alarm: sandbox in terminal state, skipping", {
         sandbox_status: sandbox.status,
       });
+      await this.reconcileUnstoppedSandbox(sandbox, now);
       return;
     }
 
@@ -1257,13 +1353,7 @@ export class SandboxLifecycleManager {
       this.storage.updateSandboxStatus("failed");
       this.clearSandboxAccessState();
       if (this.canStopProviderSandbox()) {
-        try {
-          await this.stopProviderSandbox("connecting_timeout");
-        } catch (error) {
-          this.log.warn("Provider stop failed after connecting timeout", {
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
+        await this.stopProviderSandboxOrRecord("connecting_timeout");
       }
       this.broadcaster.broadcast({ type: "sandbox_status", status: "failed" });
       this.broadcaster.broadcast({
@@ -1294,23 +1384,11 @@ export class SandboxLifecycleManager {
       this.broadcaster.broadcast({ type: "sandbox_status", status: "stale" });
 
       if (this.usesProviderManagedStop()) {
-        try {
-          await this.stopProviderSandbox("heartbeat_timeout");
-        } catch (error) {
-          this.log.warn("Provider stop failed after heartbeat timeout", {
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
+        await this.stopProviderSandboxOrRecord("heartbeat_timeout");
       } else {
         if (this.canStopProviderSandbox()) {
           await this.triggerSnapshot("heartbeat_timeout");
-          try {
-            await this.stopProviderSandbox("heartbeat_timeout");
-          } catch (error) {
-            this.log.warn("Provider stop failed after heartbeat timeout", {
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
+          await this.stopProviderSandboxOrRecord("heartbeat_timeout");
         } else {
           // Fire-and-forget snapshot so status broadcast isn't delayed.
           this.triggerSnapshot("heartbeat_timeout").catch((e) =>
@@ -1356,24 +1434,12 @@ export class SandboxLifecycleManager {
         this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });
 
         if (this.usesProviderManagedStop()) {
-          try {
-            await this.stopProviderSandbox("inactivity_timeout");
-          } catch (error) {
-            this.log.error("Provider stop failed after inactivity timeout", {
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
+          await this.stopProviderSandboxOrRecord("inactivity_timeout");
         } else {
           await this.triggerSnapshot("inactivity_timeout");
           this.wsManager.sendToSandbox({ type: "shutdown" });
           if (this.canStopProviderSandbox()) {
-            try {
-              await this.stopProviderSandbox("inactivity_timeout");
-            } catch (error) {
-              this.log.error("Provider stop failed after inactivity timeout", {
-                error: error instanceof Error ? error.message : String(error),
-              });
-            }
+            await this.stopProviderSandboxOrRecord("inactivity_timeout");
           }
         }
 
