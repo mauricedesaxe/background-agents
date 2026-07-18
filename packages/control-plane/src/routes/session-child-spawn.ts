@@ -2,11 +2,9 @@ import {
   DEFAULT_MAX_CONCURRENT_CHILD_SESSIONS,
   DEFAULT_MAX_TOTAL_CHILD_SESSIONS,
   getValidModelOrDefault,
-  isValidModel,
   resolveReasoningEffort,
   spawnChildSessionRequestSchema,
   spawnContextSchema,
-  VALID_MODELS,
 } from "@open-inspect/shared";
 import { generateId } from "../auth/crypto";
 import { SessionIndexStore } from "../db/session-index";
@@ -121,11 +119,9 @@ async function handleSpawnChild(
     }
   }
 
-  const rawModel = body.model ?? spawnContext.model;
-  if (body.model !== undefined && !isValidModel(body.model)) {
-    return error(`Invalid model "${body.model}". Valid models: ${VALID_MODELS.join(", ")}`, 400);
-  }
-  const model = getValidModelOrDefault(rawModel);
+  // Read from the parent's context, never the body; spawnChildSessionRequestSchema
+  // says why.
+  const model = getValidModelOrDefault(spawnContext.model);
   const reasoningEffort =
     resolveReasoningEffort(model, body.reasoningEffort ?? spawnContext.reasoningEffort) ?? null;
 

@@ -19,19 +19,10 @@ export default tool({
       .describe(
         "Detailed instructions for the child agent. Be specific — the child has no context beyond what you provide here."
       ),
-    model: z
-      .string()
-      .optional()
-      .describe(
-        "Override the LLM model for the child. Must use 'provider/model' format (e.g. 'anthropic/claude-sonnet-4-6', 'openai/gpt-5.4'). Defaults to the parent's model."
-      ),
   },
   async execute(args) {
     try {
       const body = { title: args.title, prompt: args.prompt };
-      if (args.model) {
-        body.model = args.model;
-      }
 
       const response = await bridgeFetch("/children", {
         method: "POST",
