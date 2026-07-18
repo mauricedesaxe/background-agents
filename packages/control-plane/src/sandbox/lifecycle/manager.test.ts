@@ -1213,7 +1213,7 @@ describe("SandboxLifecycleManager", () => {
       const sandbox = createMockSandbox({
         status: "ready",
         last_heartbeat: now - 10000,
-        last_activity: now - 11 * 60 * 1000, // Past timeout
+        last_activity: now - 6 * 60 * 1000, // Past timeout, inside the extension window
       });
       const storage = createMockStorage(createMockSession(), sandbox);
       const broadcaster = createMockBroadcaster();
@@ -1246,7 +1246,7 @@ describe("SandboxLifecycleManager", () => {
       const sandbox = createMockSandbox({
         status: "ready",
         last_heartbeat: now - 10000,
-        last_activity: now - 5 * 60 * 1000, // 5 minutes ago, not yet timed out
+        last_activity: now - 2 * 60 * 1000, // Not yet timed out
       });
       const storage = createMockStorage(createMockSession(), sandbox);
       const broadcaster = createMockBroadcaster();
