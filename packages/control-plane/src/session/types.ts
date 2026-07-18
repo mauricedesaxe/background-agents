@@ -118,6 +118,8 @@ export interface SandboxRow {
   last_activity: number | null; // Last activity timestamp for inactivity-based snapshot
   last_spawn_error: string | null;
   last_spawn_error_at: number | null;
+  stop_unreconciled_at: number | null;
+  stop_unreconciled_provider_id: string | null;
   code_server_url: string | null;
   code_server_password: string | null;
   tunnel_urls: string | null; // JSON mapping of port -> tunnel URL

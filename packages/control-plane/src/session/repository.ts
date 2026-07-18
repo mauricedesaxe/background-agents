@@ -381,11 +381,7 @@ export class SessionRepository {
     );
   }
 
-  updateOpencodeSessionId(
-    sessionId: string,
-    opencodeSessionId: string,
-    updatedAt: number
-  ): void {
+  updateOpencodeSessionId(sessionId: string, opencodeSessionId: string, updatedAt: number): void {
     this.sql.exec(
       `UPDATE session SET opencode_session_id = ?, updated_at = ? WHERE id = ?`,
       opencodeSessionId,
@@ -560,6 +556,14 @@ export class SessionRepository {
       `UPDATE sandbox SET last_spawn_error = ?, last_spawn_error_at = ? WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
       error,
       timestamp
+    );
+  }
+
+  updateSandboxStopUnreconciled(timestamp: number | null, providerObjectId: string | null): void {
+    this.sql.exec(
+      `UPDATE sandbox SET stop_unreconciled_at = ?, stop_unreconciled_provider_id = ? WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
+      timestamp,
+      providerObjectId
     );
   }
 

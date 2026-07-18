@@ -665,6 +665,8 @@ export class SessionDO extends DurableObject<Env> {
       hasProcessingMessage: () => this.getIsProcessing(),
       getUserEnvVars: () => this.getUserEnvVars(),
       updateSandboxStatus: (status) => this.updateSandboxStatus(status),
+      updateSandboxStopUnreconciled: (timestamp, providerObjectId) =>
+        this.repository.updateSandboxStopUnreconciled(timestamp, providerObjectId),
       updateSandboxForSpawn: (data) => this.repository.updateSandboxForSpawn(data),
       updateSandboxForResume: (data) => this.repository.updateSandboxForResume(data),
       updateSandboxModalObjectId: (id) => this.repository.updateSandboxModalObjectId(id),
