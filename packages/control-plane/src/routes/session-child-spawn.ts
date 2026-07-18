@@ -61,6 +61,14 @@ async function handleSpawnChild(
   const maxTotalChildren =
     childSandboxSettings.maxTotalChildSessions ?? DEFAULT_MAX_TOTAL_CHILD_SESSIONS;
 
+  // A cap of zero turns fan-out off for this repository. It answers before any
+  // session or sandbox exists, and it answers 403 rather than 429 so a spawning
+  // agent treats it as settled and reports why instead of backing off and
+  // retrying against a limit that will never lift.
+  if (maxConcurrentChildren <= 0 || maxTotalChildren <= 0) {
+    return error("Child sessions are disabled for this repository", 403);
+  }
+
   const parentDepth = await sessionStore.getSpawnDepth(parentId);
   if (parentDepth >= MAX_SPAWN_DEPTH) {
     return error(`Maximum spawn depth (${MAX_SPAWN_DEPTH}) exceeded`, 403);

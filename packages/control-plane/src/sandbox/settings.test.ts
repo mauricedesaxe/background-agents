@@ -51,6 +51,18 @@ describe("normalizeSandboxSettings", () => {
     });
   });
 
+  it("accepts a zero child-session cap as a fan-out kill switch", () => {
+    expect(
+      normalizeSandboxSettings({ maxConcurrentChildSessions: 0, maxTotalChildSessions: 0 })
+    ).toEqual({ maxConcurrentChildSessions: 0, maxTotalChildSessions: 0 });
+  });
+
+  it("rejects a negative child-session cap", () => {
+    expect(() => normalizeSandboxSettings({ maxTotalChildSessions: -1 })).toThrow(
+      SandboxSettingsValidationError
+    );
+  });
+
   it("accepts a valid buildTimeoutSeconds", () => {
     expect(normalizeSandboxSettings({ buildTimeoutSeconds: 2400 })).toEqual({
       buildTimeoutSeconds: 2400,
