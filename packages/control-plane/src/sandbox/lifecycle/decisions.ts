@@ -311,21 +311,37 @@ export interface InactivityState {
  * Inactivity timeout configuration.
  */
 export interface InactivityConfig {
-  /** Time before sandbox stops due to inactivity (default: 10 minutes) */
+  /** Time before sandbox stops due to inactivity */
   timeoutMs: DurationMs;
-  /** Additional time granted when clients are connected (default: 5 minutes) */
+  /** Additional time granted when clients are connected */
   extensionMs: DurationMs;
-  /** Minimum interval between alarm checks (default: 30s) */
+  /** Minimum interval between alarm checks */
   minCheckIntervalMs: DurationMs;
 }
+
+/**
+ * Idle time before a sandbox stops.
+ *
+ * Tuned for a provider that resumes in place: stopping early costs one resume
+ * on the next prompt and loses nothing on disk, so the idle window is short.
+ * A user who steps away mid-conversation is the case this bills for, and they
+ * would rather wait out a resume than pay for an idle VM.
+ */
+export const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** Extra idle time granted while clients are still connected. */
+export const INACTIVITY_EXTENSION_MS = 2 * 60 * 1000;
+
+/** Floor on how often the inactivity alarm re-checks. */
+export const INACTIVITY_MIN_CHECK_INTERVAL_MS = 30 * 1000;
 
 /**
  * Default inactivity configuration.
  */
 export const DEFAULT_INACTIVITY_CONFIG: InactivityConfig = {
-  timeoutMs: durationMs(10 * 60 * 1000),
-  extensionMs: durationMs(5 * 60 * 1000),
-  minCheckIntervalMs: durationMs(30 * 1000),
+  timeoutMs: durationMs(INACTIVITY_TIMEOUT_MS),
+  extensionMs: durationMs(INACTIVITY_EXTENSION_MS),
+  minCheckIntervalMs: durationMs(INACTIVITY_MIN_CHECK_INTERVAL_MS),
 };
 
 /**
