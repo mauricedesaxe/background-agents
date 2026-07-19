@@ -301,6 +301,7 @@ class AgentBridge:
     OPENCODE_REQUEST_TIMEOUT = 30.0
     GIT_PUSH_TIMEOUT_SECONDS = 300.0
     GIT_PUSH_TERMINATE_GRACE_SECONDS = 5.0
+    JJ_COMMAND_TIMEOUT_SECONDS = 30.0
     PROMPT_MAX_DURATION = 5400.0
     GIT_CONFIG_TIMEOUT_SECONDS = 10.0
     MAX_PENDING_PART_EVENTS = 2000
@@ -1798,7 +1799,8 @@ class AgentBridge:
         try:
             self._validate_push_request(request, spec_present=push_spec is not None)
             repo_dir = self._resolve_push_checkout(request)
-            await self._run_git_push(request, repo_dir)
+            refspec = await self._resolve_push_refspec(request, repo_dir)
+            await self._run_git_push(request, repo_dir, refspec)
         except PushRejected as rejection:
             await self._send_push_error(str(rejection), request)
             return
@@ -1897,12 +1899,130 @@ class AgentBridge:
             self._reject_push(reason="no_repo_configured", message="No repository found")
         return repo_dirs[0].parent
 
-    async def _run_git_push(self, request: PushRequest, repo_dir: Path) -> None:
+    async def _resolve_push_refspec(self, request: PushRequest, repo_dir: Path) -> str:
+        """Return the refspec to push, rewritten for a Jujutsu working copy.
+
+        The control plane builds every spec against git `HEAD` because that is
+        the only ref a plain clone is guaranteed to have. A jj-colocated
+        checkout has no branch checked out: jj pins `.git/HEAD` to `@-` and
+        keeps the working-copy commit `@` outside git's view entirely, so
+        `HEAD` lags the session's work by at least one commit and pushing it
+        publishes an empty branch. In that repo the bookmark is the ref that
+        names the work, so we make one and push it instead.
+        """
+        if not (repo_dir / ".jj").exists():
+            return request.refspec
+
+        revision = "@" if await self._jj_working_copy_has_changes(repo_dir) else "@-"
+        await self._reject_if_no_commits_beyond_trunk(request, repo_dir, revision)
+
+        bookmark = request.branch_name
+        await self._run_jj(
+            repo_dir,
+            ["bookmark", "set", bookmark, "--revision", revision, "--allow-backwards"],
+            failure="Push failed - could not point a jj bookmark at the session's work",
+        )
+        self.log.info(
+            "git.push_jj_bookmark",
+            branch_name=request.branch_name,
+            bookmark=bookmark,
+            revision=revision,
+        )
+        # jj exports every bookmark to refs/heads/<name> on each command, so
+        # the bookmark is already a git ref by the time git push reads it.
+        return f"refs/heads/{bookmark}:refs/heads/{request.branch_name}"
+
+    async def _jj_working_copy_has_changes(self, repo_dir: Path) -> bool:
+        """True when `@` carries work of its own rather than sitting empty.
+
+        jj auto-snapshots the working directory into `@`, so unsaved edits live
+        there and nowhere else. An empty `@` is what `jj commit` leaves behind,
+        and then `@-` is the tip.
+        """
+        stdout = await self._run_jj(
+            repo_dir,
+            ["log", "--no-graph", "--revisions", "@", "--template", 'if(empty, "", "changed")'],
+            failure="Push failed - could not read the jj working copy",
+        )
+        return stdout.strip() == "changed"
+
+    async def _reject_if_no_commits_beyond_trunk(
+        self, request: PushRequest, repo_dir: Path, revision: str
+    ) -> None:
+        """Reject a push whose revision adds nothing to trunk.
+
+        Pushing it would succeed and create a branch identical to the base,
+        which reads as a completed push everywhere downstream while delivering
+        none of the session's work. That silent success is the failure this
+        whole path exists to prevent, so it has to be loud.
+        """
+        stdout = await self._run_jj(
+            repo_dir,
+            [
+                "log",
+                "--no-graph",
+                "--revisions",
+                f"trunk()..{revision}",
+                "--template",
+                'change_id.short() ++ "\n"',
+            ],
+            failure="Push failed - could not check the jj revision against trunk",
+        )
+        if stdout.strip():
+            return
+        self._reject_push(
+            reason="jj_revision_empty",
+            message=(
+                f"Push failed - {revision} has no commits beyond trunk(), "
+                "so pushing it would publish an empty branch"
+            ),
+            branch_name=request.branch_name,
+            revision=revision,
+        )
+
+    async def _run_jj(self, repo_dir: Path, args: list[str], *, failure: str) -> str:
+        """Run a jj command in repo_dir and return its stdout.
+
+        A jj command that fails leaves us unable to tell which revision holds
+        the work, and the fallback of pushing `HEAD` anyway is the bug, so
+        every failure raises rather than degrading to git.
+        """
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "jj",
+                *args,
+                cwd=repo_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            raise PushRejected(
+                f"{failure} - the checkout has a .jj directory but jj is not installed"
+            ) from None
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=self.JJ_COMMAND_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            await self._terminate_push_process(process, "jj")
+            raise PushRejected(
+                f"{failure} - jj timed out after {int(self.JJ_COMMAND_TIMEOUT_SECONDS)}s"
+            ) from None
+
+        if process.returncode != 0:
+            stderr_text = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
+            self.log.warn("git.push_jj_failed", args=args, stderr=stderr_text)
+            raise PushRejected(f"{failure}: {stderr_text}" if stderr_text else failure)
+
+        return stdout.decode("utf-8", errors="replace")
+
+    async def _run_git_push(self, request: PushRequest, repo_dir: Path, refspec: str) -> None:
         """Run git push in repo_dir; raises PushRejected on failure or timeout."""
         self.log.info(
             "git.push_command",
             branch_name=request.branch_name,
-            refspec=request.refspec,
+            refspec=refspec,
             force=request.force,
             remote_url=request.redacted_push_url,
         )
@@ -1911,7 +2031,7 @@ class AgentBridge:
             "git",
             "push",
             request.push_url,
-            request.refspec,
+            refspec,
             *(["-f"] if request.force else []),
             cwd=repo_dir,
             stdout=asyncio.subprocess.PIPE,
@@ -1929,7 +2049,7 @@ class AgentBridge:
                 branch_name=request.branch_name,
                 timeout_ms=int(self.GIT_PUSH_TIMEOUT_SECONDS * 1000),
             )
-            await self._terminate_push_process(process, request.branch_name)
+            await self._terminate_push_process(process, "git push")
             raise PushRejected(
                 f"Push failed - git push timed out after {int(self.GIT_PUSH_TIMEOUT_SECONDS)}s"
             ) from None
@@ -1953,9 +2073,9 @@ class AgentBridge:
             )
 
     async def _terminate_push_process(
-        self, process: asyncio.subprocess.Process, branch_name: str
+        self, process: asyncio.subprocess.Process, command: str
     ) -> None:
-        """Terminate a hung git push, escalating to kill after a grace period."""
+        """Terminate a hung push subprocess, escalating to kill after a grace period."""
         with contextlib.suppress(ProcessLookupError):
             process.terminate()
         try:
@@ -1966,7 +2086,7 @@ class AgentBridge:
         except TimeoutError:
             self.log.warn(
                 "git.push_kill",
-                branch_name=branch_name,
+                command=command,
                 timeout_ms=int(self.GIT_PUSH_TERMINATE_GRACE_SECONDS * 1000),
             )
             with contextlib.suppress(ProcessLookupError):
