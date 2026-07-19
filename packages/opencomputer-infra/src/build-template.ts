@@ -217,7 +217,7 @@ function buildImage(options: Pick<BuildOptions, "repoRoot" | "builderMemoryMb">)
   // `sudo env` rather than `sudo VAR=val`, because sudo's env_reset would otherwise decide
   // whether these survive.
   image = image.runCommands(
-    `sudo env HOME=${SANDBOX_HOME} XDG_CONFIG_HOME=${SANDBOX_HOME}/.config bash ${SANDBOX_APP_DIR}/sandbox_runtime/scripts/install-harness.sh --install`,
+    `sudo env HOME=${SANDBOX_HOME} XDG_CONFIG_HOME=${SANDBOX_HOME}/.config bash ${SANDBOX_APP_DIR}/sandbox_runtime/scripts/install-harness.sh --install`
   );
 
   // The npm/bun/agent-browser installs above run as root (sudo) and write under the sandbox
