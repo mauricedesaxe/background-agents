@@ -132,16 +132,16 @@ async function finalizeJujutsuWorkingCopy(repoPath, commitMessage) {
   try {
     // jj needs an identity to author a commit. `--colocate` does not inherit
     // git's, so seed it (repo-local) from git's config. Idempotent.
-    const gitName = (
-      await execFileAsync("git", ["-C", repoPath, "config", "user.name"], { timeout: 5000 })
-        .then((r) => r.stdout.trim())
-        .catch(() => "")
-    );
-    const gitEmail = (
-      await execFileAsync("git", ["-C", repoPath, "config", "user.email"], { timeout: 5000 })
-        .then((r) => r.stdout.trim())
-        .catch(() => "")
-    );
+    const gitName = await execFileAsync("git", ["-C", repoPath, "config", "user.name"], {
+      timeout: 5000,
+    })
+      .then((r) => r.stdout.trim())
+      .catch(() => "");
+    const gitEmail = await execFileAsync("git", ["-C", repoPath, "config", "user.email"], {
+      timeout: 5000,
+    })
+      .then((r) => r.stdout.trim())
+      .catch(() => "");
     if (gitName) {
       await jj(repoPath, ["config", "set", "--repo", "user.name", gitName]);
     }
@@ -151,7 +151,8 @@ async function finalizeJujutsuWorkingCopy(repoPath, commitMessage) {
 
     // Only finalize when `@` actually has changes, so a repo where the agent
     // already committed everything doesn't gain a stray empty commit.
-    const isEmpty = (await jj(repoPath, ["log", "-r", "@", "-T", "empty", "--no-graph"])) === "true";
+    const isEmpty =
+      (await jj(repoPath, ["log", "-r", "@", "-T", "empty", "--no-graph"])) === "true";
     if (!isEmpty) {
       console.log("[create-pull-request] jj @ is non-empty; committing to finalize");
       await jj(repoPath, ["commit", "-m", commitMessage]);
