@@ -1,8 +1,15 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { SELF, env } from "cloudflare:test";
+import { DEFAULT_MODEL, VALID_MODELS } from "@open-inspect/shared";
 import { SessionIndexStore } from "../../src/db/session-index";
 import { cleanD1Tables } from "./cleanup";
 import { initNamedSession, queryDO, seedSandboxAuth } from "./helpers";
+
+/**
+ * A valid model that is not the fallback, so "inherited the parent's model" is
+ * distinguishable from "fell back to DEFAULT_MODEL".
+ */
+const parentModel = VALID_MODELS.find((model) => model !== DEFAULT_MODEL)!;
 
 describe("POST /sessions/:parentId/children — spawn child", () => {
   beforeEach(cleanD1Tables);
@@ -17,6 +24,7 @@ describe("POST /sessions/:parentId/children — spawn child", () => {
     parentSessionId?: string;
     spawnSource?: "user" | "agent";
     environmentId?: string | null;
+    model?: string;
   }) {
     const parentName = `parent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const { stub } = await initNamedSession(parentName, {
@@ -25,6 +33,7 @@ describe("POST /sessions/:parentId/children — spawn child", () => {
       ...(opts?.repoId != null && { repoId: opts.repoId }),
       ...(opts?.userId != null && { userId: opts.userId }),
       ...(opts?.scmLogin != null && { scmLogin: opts.scmLogin }),
+      ...(opts?.model != null && { model: opts.model }),
     });
 
     const sandboxToken = `sb-tok-${Date.now()}`;
@@ -37,7 +46,7 @@ describe("POST /sessions/:parentId/children — spawn child", () => {
       title: "Parent",
       repoOwner: "acme",
       repoName: "web-app",
-      model: "anthropic/claude-sonnet-4-6",
+      model: opts?.model ?? "anthropic/claude-sonnet-4-6",
       reasoningEffort: null,
       baseBranch: null,
       status: "active",
@@ -344,8 +353,12 @@ describe("POST /sessions/:parentId/children — spawn child", () => {
     expect(body.error).toContain("same repository");
   });
 
-  it("rejects invalid model with 400 and helpful message", async () => {
-    const { parentName, sandboxToken } = await setupParent();
+  it("inherits the parent's model and ignores a model the caller names", async () => {
+    // A spawning agent cannot know which providers this deployment holds keys
+    // for, so the model it names is dropped rather than rejected: the parent's
+    // is already running, and every model picked from an unconfigured provider
+    // cost a sandbox to boot and fail.
+    const { parentName, sandboxToken, store } = await setupParent({ model: parentModel });
 
     const res = await SELF.fetch(`https://test.local/sessions/${parentName}/children`, {
       method: "POST",
@@ -354,16 +367,19 @@ describe("POST /sessions/:parentId/children — spawn child", () => {
         Authorization: `Bearer ${sandboxToken}`,
       },
       body: JSON.stringify({
-        title: "Bad model",
-        prompt: "This should fail",
+        title: "Names its own model",
+        prompt: "The model below should be ignored, not rejected",
         model: "not-a-real-model",
       }),
     });
 
-    expect(res.status).toBe(400);
-    const body = await res.json<{ error: string }>();
-    expect(body.error).toContain('Invalid model "not-a-real-model"');
-    expect(body.error).toContain("Valid models:");
+    expect(res.status).toBe(201);
+    const body = await res.json<{ sessionId: string }>();
+
+    // parentModel is deliberately not DEFAULT_MODEL, so this fails if the route
+    // falls back to the default instead of reading the parent's context.
+    const child = await store.get(body.sessionId);
+    expect(child?.model).toBe(parentModel);
   });
 
   it("rejects without auth (401)", async () => {
