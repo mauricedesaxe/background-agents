@@ -425,6 +425,7 @@ export class SandboxLifecycleManager {
    */
   private async doSpawn(): Promise<void> {
     this.isSpawningSandbox = true;
+    let spawnedProviderObjectId: string | undefined;
 
     try {
       const session = this.storage.getSession();
@@ -559,6 +560,8 @@ export class SandboxLifecycleManager {
         });
       }
 
+      spawnedProviderObjectId = result.providerObjectId ?? undefined;
+
       this.log.info("Sandbox spawned", {
         event: "sandbox.spawned",
         sandbox_id: result.sandboxId,
@@ -615,7 +618,7 @@ export class SandboxLifecycleManager {
         this.log.info("Circuit breaker incremented", { error_type: "unknown" });
       }
 
-      this.storage.updateSandboxStatus("failed");
+      await this.failSandboxAndStop("spawn_failed", spawnedProviderObjectId);
       this.broadcaster.broadcast({
         type: "sandbox_error",
         error: errorMessage,
@@ -747,6 +750,7 @@ export class SandboxLifecycleManager {
     }
 
     this.isSpawningSandbox = true;
+    let restoredProviderObjectId: string | undefined;
 
     try {
       const session = this.storage.getSession();
@@ -811,6 +815,8 @@ export class SandboxLifecycleManager {
         ...multiRepoSpawnFields(repositories),
       });
 
+      restoredProviderObjectId = result.providerObjectId ?? undefined;
+
       if (result.success) {
         this.log.info("Sandbox restored", {
           event: "sandbox.restored",
@@ -855,7 +861,7 @@ export class SandboxLifecycleManager {
           result.error || "Failed to restore from snapshot",
           Date.now()
         );
-        this.storage.updateSandboxStatus("failed");
+        await this.failSandboxAndStop("restore_failed", restoredProviderObjectId);
         this.broadcaster.broadcast({
           type: "sandbox_error",
           error: result.error || "Failed to restore from snapshot",
@@ -868,7 +874,7 @@ export class SandboxLifecycleManager {
         error: error instanceof Error ? error : String(error),
         snapshot_image_id: snapshotImageId,
       });
-      this.storage.updateSandboxStatus("failed");
+      await this.failSandboxAndStop("restore_failed", restoredProviderObjectId);
       this.broadcaster.broadcast({
         type: "sandbox_error",
         error: errorMessage,
@@ -888,6 +894,9 @@ export class SandboxLifecycleManager {
     }
 
     this.isSpawningSandbox = true;
+    // A resume works on a VM that already exists, so a failure always has a
+    // concrete id to stop, unlike a spawn that may never have created one.
+    let liveProviderObjectId = providerObjectId;
 
     try {
       const session = this.storage.getSession();
@@ -934,6 +943,7 @@ export class SandboxLifecycleManager {
       }
 
       const finalProviderObjectId = result.providerObjectId ?? providerObjectId;
+      liveProviderObjectId = finalProviderObjectId;
       if (result.providerObjectId && result.providerObjectId !== providerObjectId) {
         this.storeProviderObjectId(result.providerObjectId);
       }
@@ -949,7 +959,7 @@ export class SandboxLifecycleManager {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Failed to resume sandbox";
       this.storage.setLastSpawnError(errorMessage, Date.now());
-      this.storage.updateSandboxStatus("failed");
+      await this.failSandboxAndStop("resume_failed", liveProviderObjectId);
       this.broadcaster.broadcast({
         type: "sandbox_error",
         error: errorMessage,
@@ -1118,6 +1128,27 @@ export class SandboxLifecycleManager {
       this.storage.updateSandboxStopUnreconciled(null, null);
     } catch (error) {
       await this.recordUnreconciledStop(reason, error, providerObjectId);
+    }
+  }
+
+  /**
+   * Mark the row failed and stop whatever VM this attempt is known to have left
+   * running.
+   *
+   * The spawn, restore and resume failure paths mark a row dead without ever
+   * asking the provider to stop, and handleAlarm short-circuits on a dead row,
+   * so a spawn that created a VM and then threw has nothing left to reclaim it.
+   * Only an id this attempt actually produced is passed in: the row's
+   * modal_object_id can still point at a previous incarnation, and stopping that
+   * would kill a VM this failure has nothing to do with.
+   */
+  private async failSandboxAndStop(
+    reason: string,
+    providerObjectId: string | undefined
+  ): Promise<void> {
+    this.storage.updateSandboxStatus("failed");
+    if (providerObjectId && this.canStopProviderSandbox()) {
+      await this.stopProviderSandboxOrRecord(reason, providerObjectId);
     }
   }
 
