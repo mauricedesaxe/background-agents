@@ -167,64 +167,77 @@ async function handleWebhook(
   };
 
   const start = Date.now();
-  let result: HandlerResult;
+  let dispatchFailure: { error: unknown } | null = null;
 
   try {
-    result = await dispatchHandler(env, log, event, p, payload, traceId);
+    const result = await dispatchHandler(env, log, event, p, payload, traceId);
+    const wideEvent: Record<string, unknown> = {
+      ...wideEventBase,
+      outcome: result.outcome,
+      duration_ms: Date.now() - start,
+    };
+    if (result.outcome === "skipped") {
+      wideEvent.skip_reason = result.skip_reason;
+    } else {
+      wideEvent.session_id = result.session_id;
+      wideEvent.message_id = result.message_id;
+      wideEvent.handler_action = result.handler_action;
+    }
+    log.info("webhook.handled", wideEvent);
   } catch (err) {
+    dispatchFailure = { error: err };
     log.info("webhook.handled", {
       ...wideEventBase,
       outcome: "error",
       duration_ms: Date.now() - start,
       error: err instanceof Error ? err : new Error(String(err)),
     });
-    throw err;
   }
 
-  const wideEvent: Record<string, unknown> = {
-    ...wideEventBase,
-    outcome: result.outcome,
-    duration_ms: Date.now() - start,
-  };
-  if (result.outcome === "skipped") {
-    wideEvent.skip_reason = result.skip_reason;
-  } else {
-    wideEvent.session_id = result.session_id;
-    wideEvent.message_id = result.message_id;
-    wideEvent.handler_action = result.handler_action;
-  }
-  log.info("webhook.handled", wideEvent);
+  // The two paths are independent: a throwing built-in handler must not stop
+  // the forward, and a failing forward must not affect bot behavior. GitHub
+  // already got a 200 (the work runs in waitUntil), so a dropped forward here
+  // is never redelivered and the automation silently never fires.
+  await forwardNormalizedEvent(env, log, event, p, traceId, deliveryId);
 
-  // Forward normalized event to control-plane for automation triggering.
-  // This is additive — failures here must not affect existing bot behavior.
-  if (event) {
-    const normalizedEvent = normalizeGitHubEvent(event, p);
-    if (normalizedEvent !== null) {
-      try {
-        const body = JSON.stringify(normalizedEvent);
-        const authHeaders = await buildInternalAuthHeaders(env.INTERNAL_CALLBACK_SECRET, traceId);
-        const response = await env.CONTROL_PLANE.fetch("https://internal/internal/github-event", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...authHeaders },
-          body,
-        });
-        if (!response.ok) {
-          log.warn("webhook.github_event_forward_failed", {
-            trace_id: traceId,
-            delivery_id: deliveryId,
-            event_type: event,
-            status: response.status,
-          });
-        }
-      } catch (err) {
-        log.warn("webhook.github_event_forward_error", {
-          trace_id: traceId,
-          delivery_id: deliveryId,
-          event_type: event,
-          error: err instanceof Error ? err : new Error(String(err)),
-        });
-      }
+  if (dispatchFailure !== null) throw dispatchFailure.error;
+}
+
+async function forwardNormalizedEvent(
+  env: Env,
+  log: Logger,
+  event: string | undefined,
+  p: WebhookSummaryPayload,
+  traceId: string,
+  deliveryId: string | undefined
+): Promise<void> {
+  if (!event) return;
+  const normalizedEvent = normalizeGitHubEvent(event, p);
+  if (normalizedEvent === null) return;
+
+  try {
+    const body = JSON.stringify(normalizedEvent);
+    const authHeaders = await buildInternalAuthHeaders(env.INTERNAL_CALLBACK_SECRET, traceId);
+    const response = await env.CONTROL_PLANE.fetch("https://internal/internal/github-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      body,
+    });
+    if (!response.ok) {
+      log.warn("webhook.github_event_forward_failed", {
+        trace_id: traceId,
+        delivery_id: deliveryId,
+        event_type: event,
+        status: response.status,
+      });
     }
+  } catch (err) {
+    log.warn("webhook.github_event_forward_error", {
+      trace_id: traceId,
+      delivery_id: deliveryId,
+      event_type: event,
+      error: err instanceof Error ? err : new Error(String(err)),
+    });
   }
 }
 
