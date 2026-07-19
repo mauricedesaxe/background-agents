@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -360,3 +361,153 @@ async def test_handle_push_no_repo_error_includes_branch(tmp_path: Path):
     assert event["type"] == "push_error"
     assert event["error"] == "No repository found"
     assert event["branchName"] == "feature/test"
+
+
+def _run_jj(cwd: Path, *args: str) -> str:
+    """Run a real jj command for the jj-colocated fixtures below."""
+    result = subprocess.run(["jj", *args], cwd=cwd, check=True, capture_output=True, text=True)
+    return result.stdout
+
+
+def _jj_colocated_clone(tmp_path: Path) -> Path:
+    """A jj-colocated clone whose trunk() resolves, like a session checkout.
+
+    trunk() falls back to root() without an origin remote, which would make
+    the empty-push guard unfalsifiable, so the fixture clones a real origin.
+    """
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _run_jj(origin, "git", "init", "--colocate", ".")
+    (origin / "a.txt").write_text("base\n")
+    _run_jj(origin, "commit", "-m", "chore: base")
+    _run_jj(origin, "bookmark", "set", "main", "-r", "@-")
+
+    # The clone sits alone under a workspace root the origin is not part of,
+    # because _sole_workspace_checkout picks the first clone it globs there.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    work = workspace / "repo"
+    _run_jj(tmp_path, "git", "clone", "--colocate", str(origin), str(work))
+    return work
+
+
+def _bridge_for_checkout(tmp_path: Path, checkout: Path) -> AgentBridge:
+    bridge = AgentBridge(
+        sandbox_id="test-sandbox",
+        session_id="test-session",
+        control_plane_url="http://localhost:8787",
+        auth_token="test-token",
+    )
+    bridge.repo_path = checkout.parent
+    bridge.repo_manifest_path = tmp_path / "manifest.json"
+    return bridge
+
+
+def _capture_git_push(process):
+    """Let jj run for real and intercept only the git push subprocess."""
+    captured: dict = {}
+    real_exec = asyncio.create_subprocess_exec
+
+    async def fake_exec(*args, **kwargs):
+        if args[0] == "git":
+            captured["argv"] = list(args)
+            return process
+        return await real_exec(*args, **kwargs)
+
+    return captured, fake_exec
+
+
+@pytest.mark.asyncio
+async def test_handle_push_publishes_work_held_in_the_jj_working_copy(tmp_path: Path):
+    """In a jj checkout the push carries `@`, which git HEAD does not contain."""
+    work = _jj_colocated_clone(tmp_path)
+    (work / "a.txt").write_text("base\nthe session's work\n")
+
+    bridge = _bridge_for_checkout(tmp_path, work)
+    bridge._send_event = AsyncMock()
+    captured, fake_exec = _capture_git_push(_fake_process(returncode=0))
+
+    with patch("sandbox_runtime.bridge.asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await bridge._handle_push(_push_command())
+
+    event = bridge._send_event.await_args.args[0]
+    assert event["type"] == "push_complete"
+
+    refspec = captured["argv"][3]
+    assert refspec == "refs/heads/feature/test:refs/heads/feature/test"
+
+    pushed = subprocess.run(
+        ["git", "show", "refs/heads/feature/test:a.txt"],
+        cwd=work,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "the session's work" in pushed
+
+    # The ref git HEAD names is the parent of `@`, and it is exactly the
+    # empty branch the old refspec published.
+    stale = subprocess.run(
+        ["git", "show", "HEAD:a.txt"], cwd=work, check=True, capture_output=True, text=True
+    ).stdout
+    assert "the session's work" not in stale
+
+
+@pytest.mark.asyncio
+async def test_handle_push_publishes_work_committed_with_jj(tmp_path: Path):
+    """After `jj commit` the tip is `@-`, since jj leaves `@` empty."""
+    work = _jj_colocated_clone(tmp_path)
+    (work / "a.txt").write_text("base\ncommitted work\n")
+    _run_jj(work, "commit", "-m", "feat: committed work")
+
+    bridge = _bridge_for_checkout(tmp_path, work)
+    bridge._send_event = AsyncMock()
+    captured, fake_exec = _capture_git_push(_fake_process(returncode=0))
+
+    with patch("sandbox_runtime.bridge.asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await bridge._handle_push(_push_command())
+
+    assert bridge._send_event.await_args.args[0]["type"] == "push_complete"
+    assert captured["argv"][3] == "refs/heads/feature/test:refs/heads/feature/test"
+
+    pushed = subprocess.run(
+        ["git", "show", "refs/heads/feature/test:a.txt"],
+        cwd=work,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "committed work" in pushed
+
+
+@pytest.mark.asyncio
+async def test_handle_push_rejects_a_jj_checkout_with_no_work(tmp_path: Path):
+    """A push that would publish an empty branch fails instead of reporting success."""
+    work = _jj_colocated_clone(tmp_path)
+
+    bridge = _bridge_for_checkout(tmp_path, work)
+    bridge._send_event = AsyncMock()
+    captured, fake_exec = _capture_git_push(_fake_process(returncode=0))
+
+    with patch("sandbox_runtime.bridge.asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await bridge._handle_push(_push_command())
+
+    event = bridge._send_event.await_args.args[0]
+    assert event["type"] == "push_error"
+    assert "no commits beyond trunk()" in event["error"]
+    assert event["branchName"] == "feature/test"
+    assert "argv" not in captured
+
+
+@pytest.mark.asyncio
+async def test_handle_push_leaves_the_refspec_alone_in_a_git_checkout(tmp_path: Path):
+    """A checkout without .jj keeps the control plane's HEAD refspec."""
+    bridge = _create_bridge(tmp_path)
+    bridge._send_event = AsyncMock()
+    captured, fake_exec = _capture_git_push(_fake_process(returncode=0))
+
+    with patch("sandbox_runtime.bridge.asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await bridge._handle_push(_push_command())
+
+    assert bridge._send_event.await_args.args[0]["type"] == "push_complete"
+    assert captured["argv"][3] == "HEAD:refs/heads/feature/test"
