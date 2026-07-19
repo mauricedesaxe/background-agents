@@ -15,7 +15,7 @@ HARNESS_REPO="${HARNESS_REPO:-https://github.com/mauricedesaxe/lazar-harness.git
 # Pinned to a commit, not a branch: an image build that tracked main would install whatever the
 # harness happened to be at that minute, and two builds of the same source would diverge. Bump it
 # deliberately to take harness changes.
-HARNESS_REF="${HARNESS_REF:-c33021de75744bcda44b3a887bd5e6f122f27770}"
+HARNESS_REF="${HARNESS_REF:-61d2d64e455ef295a127e33a15d9949b0b4ac690}"
 
 die() {
   printf 'install-harness.sh: %s\n' "$1" >&2
