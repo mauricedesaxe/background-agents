@@ -139,7 +139,18 @@ under 72 characters. Use the PR body for details, not the commit message.
 
 ## CI/CD
 
-Pushing to `main` auto-deploys changed services:
+**CI runs** lint, typecheck, and tests for all TypeScript and Python packages on every push to
+`main` and every PR. Actions were enabled on this fork on 2026-07-19. Before that they had never run
+once, across any workflow, so a PR reporting `mergeable: MERGEABLE / state: CLEAN` meant nothing had
+been checked rather than that checks had passed. Anything merged before that date was verified only
+by whatever someone ran by hand.
+
+**Deploys do not run yet.** `terraform.yml` and `deploy-web.yml` are active, but both gate `plan`
+and `apply` behind a `check-secrets` job, and this fork has **zero Actions secrets configured**. So
+they validate and then skip with a notice. Until those secrets are populated, deploying is a manual
+local `terraform apply` from the main checkout, and merging to `main` ships nothing to production.
+
+Once the secrets are set, pushing to `main` auto-deploys changed services:
 
 - **Terraform** → control plane + D1 migrations + web app if `web_platform = "cloudflare"`
   (triggers: `terraform/`, `packages/*/`)
@@ -147,7 +158,11 @@ Pushing to `main` auto-deploys changed services:
   `packages/shared/`)
 - **Modal** → data plane (triggers: `packages/modal-infra/`, deployed via Terraform apply)
 
-CI runs lint, typecheck, and tests for all TypeScript and Python packages on every push and PR.
+Two things to settle before turning deploys on. The `apply` job names an `environment: production`
+that does not exist, so it would be created with no protection rule and a merge would deploy
+unattended; a required reviewer there turns it into "merge, then approve". And the workflow
+references 62 distinct secrets against 41 variables in the local tfvars, so the mapping is not 1:1
+and needs a pass rather than a copy.
 
 ## Further Reading
 
