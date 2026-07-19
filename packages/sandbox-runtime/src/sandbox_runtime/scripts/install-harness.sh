@@ -15,7 +15,12 @@ HARNESS_REPO="${HARNESS_REPO:-https://github.com/mauricedesaxe/lazar-harness.git
 # Pinned to a commit, not a branch: an image build that tracked main would install whatever the
 # harness happened to be at that minute, and two builds of the same source would diverge. Bump it
 # deliberately to take harness changes.
-HARNESS_REF="${HARNESS_REF:-61d2d64e455ef295a127e33a15d9949b0b4ac690}"
+#
+# Editing this line is also what *causes* the update to ship. The harness installs at image build
+# time, so terraform's source_hash over sandbox-runtime/src is what rebuilds the snapshot. A branch
+# ref would leave this file unchanged when the harness moves, and the snapshot would keep whatever
+# it was built with.
+HARNESS_REF="${HARNESS_REF:-b15b6b0be084ca4b0e4b994d050f33e520525ea5}"
 
 die() {
   printf 'install-harness.sh: %s\n' "$1" >&2
