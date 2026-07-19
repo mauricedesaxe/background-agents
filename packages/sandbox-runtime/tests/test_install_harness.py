@@ -30,8 +30,8 @@ SCRIPT = (
 def _script_default(name: str) -> str:
     """Read a `NAME="${NAME:-default}"` default out of the script.
 
-    Read rather than restated, so bumping the pin cannot leave a test asserting against a commit
-    nobody installs any more.
+    Read rather than restated, so changing the default ref cannot leave a test asserting against
+    a ref nobody installs any more.
     """
     match = re.search(
         rf'^{name}="\$\{{{name}:-(?P<value>[^}}]+)\}}"$',
@@ -42,8 +42,10 @@ def _script_default(name: str) -> str:
     return match.group("value")
 
 
-PINNED_REPO = _script_default("HARNESS_REPO")
-PINNED_REF = _script_default("HARNESS_REF")
+DEFAULT_REPO = _script_default("HARNESS_REPO")
+DEFAULT_REF = _script_default("HARNESS_REF")
+
+SHA_PATTERN = re.compile(r"\b[0-9a-f]{40}\b")
 
 
 def _run(
@@ -199,12 +201,12 @@ class TestInvocation:
         assert "surface=sandbox" in record
         assert "args=--install" in record
 
-    def test_pinned_ref_is_the_commit_that_installs(self, tmp_path, fake_harness):
-        """The pin has to be the commit that gets installed, not merely the one requested.
+    def test_explicit_sha_is_the_commit_that_installs(self, tmp_path, fake_harness):
+        """An explicit SHA has to be the commit that gets installed, not merely the one requested.
 
-        The fixture's pin is one commit behind the tip, so this fails if the script ever
-        installs the branch tip — which is what an image build tracking main would do, and the
-        whole reason the ref is a SHA.
+        The fixture's pin is one commit behind the tip, so this fails if the script ever installs
+        the branch tip when asked for a commit. That is the guarantee an explicit HARNESS_REF
+        still buys now that the default tracks a branch.
         """
         repo, pinned_sha = fake_harness
         home = tmp_path / "home"
@@ -216,6 +218,46 @@ class TestInvocation:
         record = (home / "install-record.txt").read_text()
         assert "marker=pinned-content" in record
         assert "newer-content" not in record
+
+    def test_branch_ref_installs_the_branch_tip(self, tmp_path, fake_harness):
+        """A branch name installs whatever it points at, which is the point of tracking main.
+
+        The fixture's tip is one commit ahead of its pin, so a script that still refused any ref
+        it could not match against a SHA, or that resolved a branch to the wrong commit, fails
+        here rather than only in an image build.
+        """
+        repo, _ = fake_harness
+        home = tmp_path / "home"
+        home.mkdir()
+
+        result = _run("--install", home=home, repo=repo, ref="main")
+
+        assert result.returncode == 0, result.stderr
+        record = (home / "install-record.txt").read_text()
+        assert "marker=newer-content" in record
+        assert "pinned-content" not in record
+
+    def test_installed_commit_is_logged(self, tmp_path, fake_harness):
+        """With a moving ref the logged SHA is the only record of what an image got.
+
+        So it has to be the resolved commit, not the ref that was asked for. Asserted against the
+        tip rather than merely "some SHA", which `main` alone would satisfy.
+        """
+        repo, pinned_sha = fake_harness
+        home = tmp_path / "home"
+        home.mkdir()
+        tip_sha = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        result = _run("--install", home=home, repo=repo, ref="main")
+
+        assert result.returncode == 0, result.stderr
+        assert tip_sha in result.stdout
+        assert pinned_sha not in result.stdout
 
     def test_ref_that_does_not_exist_fails(self, tmp_path, fake_harness):
         """A bad pin must fail the build rather than install something else."""
@@ -231,15 +273,15 @@ class TestInvocation:
 
 
 def _harness_remote_is_reachable() -> bool:
-    """Whether the harness remote answers at all, independent of the pin.
+    """Whether the harness remote answers at all, independent of the ref.
 
-    Separated from the install so that "the network is down" and "the pinned commit is gone" stay
-    different outcomes. Deciding that from the install's own exit code would let a rewritten or
-    deleted pin skip the test rather than fail it, and a pin that silently stops being installable
-    is exactly what this test is here to catch.
+    Separated from the install so that "the network is down" and "the default ref is gone" stay
+    different outcomes. Deciding that from the install's own exit code would let a deleted branch
+    skip the test rather than fail it, and a default that silently stops being installable is
+    exactly what this test is here to catch.
     """
     probe = subprocess.run(
-        ["git", "ls-remote", "--exit-code", PINNED_REPO, "HEAD"],
+        ["git", "ls-remote", "--exit-code", DEFAULT_REPO, "HEAD"],
         capture_output=True,
         text=True,
         timeout=60,
@@ -247,19 +289,20 @@ def _harness_remote_is_reachable() -> bool:
     return probe.returncode == 0
 
 
-class TestPinnedHarness:
-    """The real pin, against the real harness. Needs network."""
+class TestDefaultHarness:
+    """The script's own default, against the real harness. Needs network."""
 
     @pytest.mark.skipif(
         os.environ.get("OPEN_INSPECT_SKIP_NETWORK_TESTS") == "1",
         reason="network tests disabled",
     )
-    def test_pinned_ref_installs_the_expected_harness(self, tmp_path):
-        """The pinned commit exists upstream and yields the set the sandbox is supposed to get.
+    def test_default_ref_installs_the_expected_harness(self, tmp_path):
+        """The default ref resolves upstream and yields the set the sandbox is supposed to get.
 
-        This is the acceptance criterion's honest proxy, and it is deliberately narrow: it proves
-        the resolved skill/agent/rules set on disk, not that an agent behaves the same. See the
-        PR body.
+        A moving default makes this test do more work than it did against a pin: it is now the
+        only thing standing between a harness change and a sandbox that installs it. It stays
+        deliberately narrow, proving the resolved skill/agent/rules set on disk rather than that
+        an agent behaves the same.
         """
         if not _harness_remote_is_reachable():
             pytest.skip("no network access to the harness remote")
@@ -268,9 +311,14 @@ class TestPinnedHarness:
         home.mkdir()
 
         # No skip past this point: the remote answered, so anything that goes wrong now is the
-        # pin or the harness, and both are this test's subject.
+        # default ref or the harness, and both are this test's subject.
         result = _run("--install", home=home)
         assert result.returncode == 0, result.stderr
+
+        # What the default resolved to, which with a moving ref is the only record of it.
+        logged = SHA_PATTERN.search(result.stdout)
+        assert logged, f"no resolved commit logged in {result.stdout!r}"
+        assert f"({DEFAULT_REF})" in result.stdout
 
         opencode = home / ".config" / "opencode"
         claude = home / ".claude"

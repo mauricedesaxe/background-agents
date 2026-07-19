@@ -12,10 +12,12 @@ set -euo pipefail
 # `sandbox`, or refusing to run somewhere it shouldn't.
 HARNESS_REPO="${HARNESS_REPO:-https://github.com/mauricedesaxe/lazar-harness.git}"
 
-# Pinned to a commit, not a branch: an image build that tracked main would install whatever the
-# harness happened to be at that minute, and two builds of the same source would diverge. Bump it
-# deliberately to take harness changes.
-HARNESS_REF="${HARNESS_REF:-61d2d64e455ef295a127e33a15d9949b0b4ac690}"
+# Tracks the harness's default branch, so a harness change reaches a sandbox on the next image
+# build rather than waiting for someone to bump a SHA here by hand. The cost is that two builds of
+# the same source can install different harnesses; the resolved commit is printed at the end of
+# every run, which is the only record of what a given image actually got. Set HARNESS_REF to a full
+# 40-character commit SHA to pin a build to an exact harness, which is verified below.
+HARNESS_REF="${HARNESS_REF:-main}"
 
 die() {
   printf 'install-harness.sh: %s\n' "$1" >&2
@@ -50,20 +52,24 @@ command -v jq >/dev/null || die "jq is needed by install.sh to merge OpenCode's 
 checkout=$(mktemp -d)
 trap 'rm -rf -- "$checkout"' EXIT
 
-# Fetching the commit directly keeps the clone shallow without pinning to a branch tip the way
-# `clone --depth 1` would.
+# Fetching the ref directly keeps the clone shallow and takes a commit SHA as readily as a branch
+# name, which `clone --depth 1` would not.
 git init -q -- "$checkout"
 git -C "$checkout" fetch --depth 1 -q -- "$HARNESS_REPO" "$HARNESS_REF" ||
   die "could not fetch $HARNESS_REF from $HARNESS_REPO"
 git -C "$checkout" checkout -q FETCH_HEAD
 
 # The fetch resolves the ref server-side, so a ref that is not the commit it claims to be would
-# otherwise install quietly. This is the line that makes the install reproducible rather than
-# merely pinned-looking.
+# otherwise install quietly. A full SHA names one commit and nothing else, so it is still checked
+# and that check is what makes such a build reproducible rather than merely pinned-looking. A
+# branch name names whatever it points at right now, so there is nothing to check it against and
+# the printed commit below is the whole of the record.
 resolved=$(git -C "$checkout" rev-parse HEAD)
-[ "$resolved" = "$HARNESS_REF" ] ||
-  die "asked for $HARNESS_REF but got $resolved"
+if [[ $HARNESS_REF =~ ^[0-9a-f]{40}$ ]]; then
+  [ "$resolved" = "$HARNESS_REF" ] ||
+    die "asked for $HARNESS_REF but got $resolved"
+fi
 
 HARNESS_SURFACE=sandbox "$checkout/install.sh" --install
 
-printf 'install-harness.sh: installed harness %s for the sandbox surface\n' "$HARNESS_REF"
+printf 'install-harness.sh: installed harness %s (%s) for the sandbox surface\n' "$resolved" "$HARNESS_REF"
