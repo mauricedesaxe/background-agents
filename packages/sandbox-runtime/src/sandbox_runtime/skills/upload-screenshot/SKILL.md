@@ -49,7 +49,7 @@ All flags except the file path are optional. Include whichever metadata you know
 
 ## Supported File Types
 
-`.png`, `.jpg` / `.jpeg`, `.webp`
+`.png`, `.jpg` / `.jpeg`, `.webp`, `.svg`
 
 ## Success Criteria
 

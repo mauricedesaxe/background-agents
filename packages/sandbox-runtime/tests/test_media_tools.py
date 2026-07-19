@@ -17,6 +17,7 @@ UPLOAD_MEDIA_SCRIPT = RUNTIME_DIR / "bin" / "upload-media.js"
 BRIDGE_CLIENT_MODULE = RUNTIME_DIR / "tools" / "_bridge-client.js"
 TOOL_SUBPROCESS_TIMEOUT_SECONDS = 10
 MP4_BYTES = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"
+SVG_BYTES = b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>'
 
 
 pytestmark = pytest.mark.skipif(NODE_BINARY is None, reason="node is required for media tool tests")
@@ -117,7 +118,28 @@ def test_upload_media_rejects_unsupported_extensions(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 1
-    assert "only supports .png, .jpg, .jpeg, .webp, and .mp4 files" in result.stderr
+    assert "only supports .png, .jpg, .jpeg, .webp, .svg, and .mp4 files" in result.stderr
+
+
+def test_upload_media_uploads_svg_as_a_screenshot(tmp_path: Path) -> None:
+    diagram = tmp_path / "diagram.svg"
+    diagram.write_bytes(SVG_BYTES)
+
+    with _CaptureServer() as server:
+        result = subprocess.run(
+            [NODE_BINARY, str(UPLOAD_MEDIA_SCRIPT), str(diagram)],
+            capture_output=True,
+            text=True,
+            env=_tool_env({"CONTROL_PLANE_URL": server.url}),
+            check=False,
+            timeout=TOOL_SUBPROCESS_TIMEOUT_SECONDS,
+        )
+
+    assert result.returncode == 0
+    assert len(server.requests) == 1
+    body = _multipart_text(server.requests[0]["body"])
+    assert "Content-Type: image/svg+xml" in body
+    assert 'name="artifactType"\r\n\r\nscreenshot' in body
 
 
 def test_upload_media_requires_explicit_video_artifact_type(tmp_path: Path) -> None:
