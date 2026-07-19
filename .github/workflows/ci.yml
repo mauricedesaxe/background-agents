@@ -317,6 +317,22 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
+      # The push tests build a real jj-colocated repo rather than mocking one, because the bug
+      # they cover only exists in a checkout where git HEAD and the jj working copy disagree.
+      # Without jj on PATH they fail with FileNotFoundError, which is what happened on the first
+      # CI run to reach them.
+      - name: Install jj
+        run: |
+          tmp=$(mktemp -d)
+          curl -sSL "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C "$tmp"
+          sudo install -m 0755 "$tmp/jj" /usr/local/bin/jj
+          rm -rf "$tmp"
+          jj --version
+        working-directory: .
+        env:
+          JJ_VERSION: "0.43.0"
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
