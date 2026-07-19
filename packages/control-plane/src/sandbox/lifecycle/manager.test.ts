@@ -3168,6 +3168,99 @@ describe("SandboxLifecycleManager", () => {
       expect(storage.calls).toContain("updateSandboxStopUnreconciled:cleared");
     });
 
+    it("retries the stop when a cancel lands on a dead row whose stop never did", async () => {
+      // cancel() reaches terminateSandbox on a stale row. Without this it hits
+      // the dead-status early return, the request looks like it worked, and the
+      // VM bills until the provider's own backstop.
+      const stopSandbox = vi.fn(async () => ({ success: true }));
+      const storage = createMockStorage(
+        createMockSession(),
+        createMockSandbox({
+          status: "stale",
+          modal_object_id: "provider-obj-REPLACEMENT",
+          stop_unreconciled_at: Date.now() - 60 * 1000,
+          stop_unreconciled_provider_id: "provider-obj-ORIGINAL",
+        })
+      );
+      const manager = new SandboxLifecycleManager(
+        createMockProvider({
+          stopSandbox,
+          capabilities: { supportsExplicitStop: true, supportsPersistentResume: true },
+        }),
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false, 0),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.terminateSandbox("session_cancelled");
+
+      expect(stopSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({ providerObjectId: "provider-obj-ORIGINAL" })
+      );
+      expect(storage.calls).toContain("updateSandboxStopUnreconciled:cleared");
+    });
+
+    it("keeps the row flagged when that retried cancel fails again", async () => {
+      const stopSandbox = vi.fn(async (): Promise<StopResult> => {
+        throw new SandboxProviderError("still broken", "transient");
+      });
+      const storage = createMockStorage(
+        createMockSession(),
+        createMockSandbox({
+          status: "stale",
+          modal_object_id: "provider-obj-123",
+          stop_unreconciled_at: Date.now() - 60 * 1000,
+          stop_unreconciled_provider_id: "provider-obj-123",
+        })
+      );
+      const alarmScheduler = createMockAlarmScheduler();
+      const manager = new SandboxLifecycleManager(
+        createMockProvider({
+          stopSandbox,
+          capabilities: { supportsExplicitStop: true, supportsPersistentResume: true },
+        }),
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false, 0),
+        alarmScheduler,
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.terminateSandbox("session_cancelled");
+
+      expect(storage.calls).toContain("updateSandboxStopUnreconciled:set");
+      expect(storage.calls).not.toContain("updateSandboxStopUnreconciled:cleared");
+      expect(alarmScheduler.alarms).toHaveLength(1);
+    });
+
+    it("still no-ops a terminate on a dead row whose stop already landed", async () => {
+      const stopSandbox = vi.fn(async () => ({ success: true }));
+      const storage = createMockStorage(
+        createMockSession(),
+        createMockSandbox({ status: "stale", modal_object_id: "provider-obj-123" })
+      );
+      const manager = new SandboxLifecycleManager(
+        createMockProvider({
+          stopSandbox,
+          capabilities: { supportsExplicitStop: true, supportsPersistentResume: true },
+        }),
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false, 0),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.terminateSandbox("session_cancelled");
+
+      expect(stopSandbox).not.toHaveBeenCalled();
+    });
+
     it("leaves an ordinary dead sandbox alone", async () => {
       const stopSandbox = vi.fn(async () => ({ success: true }));
       const storage = createMockStorage(

@@ -1266,15 +1266,31 @@ export class SandboxLifecycleManager {
    * backstop. On Daytona that backstop is the only thing that ever stops it, since
    * killing the agent process doesn't stop the workspace.
    *
-   * The spawn, restore and resume failure paths still mark dead without stopping;
-   * they're a different trigger and aren't covered here.
-   *
-   * Idempotent: terminating an already-dead sandbox is a no-op, so the paths that
-   * terminate and then close the socket don't stop the VM twice.
+   * Idempotent: terminating a dead row whose stop already landed is a no-op, so
+   * the paths that terminate and then close the socket don't stop the VM twice.
+   * A dead row whose stop did *not* land is the one case worth revisiting — a
+   * user cancelling a stale session is asking for that VM to die now, and
+   * without this the request reaches a no-op and the VM bills on.
    */
   async terminateSandbox(reason: string): Promise<void> {
     const sandbox = this.storage.getSandbox();
-    if (!sandbox || isDeadSandboxStatus(sandbox.status)) {
+    if (!sandbox) {
+      return;
+    }
+
+    if (isDeadSandboxStatus(sandbox.status)) {
+      if (sandbox.stop_unreconciled_at == null) {
+        return;
+      }
+      // Prefer the pinned id over the row's current one, for the reason
+      // reconcileUnstoppedSandbox spells out: a respawn since the failed stop
+      // would make us kill the replacement instead. The heartbeat and
+      // inactivity paths don't pin one, so those rows still fall back to
+      // modal_object_id and keep that hazard.
+      await this.stopProviderSandboxOrRecord(
+        reason,
+        sandbox.stop_unreconciled_provider_id ?? undefined
+      );
       return;
     }
 

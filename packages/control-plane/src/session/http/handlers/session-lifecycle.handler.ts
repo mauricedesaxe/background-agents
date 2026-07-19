@@ -8,6 +8,7 @@ import {
 } from "@open-inspect/shared";
 import type { SessionStatus, SpawnSource } from "../../../types";
 import type { SessionRepository } from "../../repository";
+import { isDeadSandboxStatus } from "../../../sandbox/lifecycle/decisions";
 import {
   normalizeSessionTitle,
   type SessionTitleUpdateOptions,
@@ -464,11 +465,16 @@ export function createSessionLifecycleHandler(
       await deps.transitionSessionStatus("cancelled");
 
       const sandbox = deps.getSandbox();
-      if (sandbox && sandbox.status !== "stopped" && sandbox.status !== "failed") {
-        const sandboxWs = deps.getSandboxSocket();
-        if (sandboxWs) {
-          deps.sendToSandbox(sandboxWs, { type: "shutdown" });
+      if (sandbox) {
+        if (!isDeadSandboxStatus(sandbox.status)) {
+          const sandboxWs = deps.getSandboxSocket();
+          if (sandboxWs) {
+            deps.sendToSandbox(sandboxWs, { type: "shutdown" });
+          }
         }
+        // Dead rows go through too. terminateSandbox owns the policy: it no-ops
+        // on a row whose stop already landed, and retries one whose stop didn't.
+        // Filtering them out here is what left a `stale` row's VM running.
         await deps.terminateSandbox("session_cancelled");
       }
 

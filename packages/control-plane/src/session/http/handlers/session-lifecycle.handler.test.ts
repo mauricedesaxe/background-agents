@@ -892,22 +892,49 @@ describe("createSessionLifecycleHandler", () => {
     expect(terminateSandbox).toHaveBeenCalledWith("session_cancelled");
   });
 
-  it("does not terminate a sandbox that is already stopped", async () => {
+  it.each(["stopped", "stale", "failed"] as const)(
+    "still asks to terminate a %s sandbox, whose VM may not be stopped",
+    async (status) => {
+      // A dead row does not mean a stopped VM: a stop that failed leaves the
+      // row dead and the VM live. Filtering dead rows out here reached a no-op
+      // and left the VM billing, so the manager owns the policy instead.
+      const {
+        handler,
+        getSession,
+        getSandbox,
+        stopExecution,
+        transitionSessionStatus,
+        terminateSandbox,
+      } = createHandler();
+      getSession.mockReturnValue(createSession({ status: "active" }));
+      getSandbox.mockReturnValue(createSandbox({ status }));
+      stopExecution.mockResolvedValue(undefined);
+      transitionSessionStatus.mockResolvedValue(true);
+
+      await handler.cancel();
+
+      expect(terminateSandbox).toHaveBeenCalledWith("session_cancelled");
+    }
+  );
+
+  it("does not send shutdown to a sandbox that is already dead", async () => {
     const {
       handler,
       getSession,
       getSandbox,
       stopExecution,
       transitionSessionStatus,
-      terminateSandbox,
+      getSandboxSocket,
+      sendToSandbox,
     } = createHandler();
     getSession.mockReturnValue(createSession({ status: "active" }));
-    getSandbox.mockReturnValue(createSandbox({ status: "stopped" }));
+    getSandbox.mockReturnValue(createSandbox({ status: "stale" }));
     stopExecution.mockResolvedValue(undefined);
     transitionSessionStatus.mockResolvedValue(true);
+    getSandboxSocket.mockReturnValue({} as WebSocket);
 
     await handler.cancel();
 
-    expect(terminateSandbox).not.toHaveBeenCalled();
+    expect(sendToSandbox).not.toHaveBeenCalled();
   });
 });
