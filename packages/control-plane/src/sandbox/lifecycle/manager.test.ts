@@ -3287,6 +3287,217 @@ describe("SandboxLifecycleManager", () => {
     });
   });
 
+  /**
+   * The spawn, restore and resume failure paths mark a row failed. handleAlarm
+   * short-circuits on a failed row, so whatever VM the attempt left behind is
+   * never revisited unless the failure stops it here.
+   */
+  describe("a failed spawn, restore or resume stops the VM it left running", () => {
+    /** Explicit stop, no in-place resume, so a dead row routes to a fresh spawn. */
+    function createStoppableProvider(overrides: Parameters<typeof createMockProvider>[0] = {}): {
+      provider: SandboxProvider;
+      stopSandbox: ReturnType<typeof vi.fn>;
+    } {
+      const stopSandbox = vi.fn(async () => ({ success: true }));
+      const provider = createMockProvider({
+        stopSandbox,
+        ...overrides,
+        capabilities: {
+          supportsSnapshots: false,
+          supportsRestore: true,
+          supportsPersistentResume: false,
+          supportsExplicitStop: true,
+          ...overrides.capabilities,
+        },
+      });
+      delete provider.takeSnapshot;
+      return { provider, stopSandbox };
+    }
+
+    it("stops the VM a spawn created before it failed on a later step", async () => {
+      const { provider, stopSandbox } = createStoppableProvider({
+        createSandbox: vi.fn(async (config: CreateSandboxConfig) => ({
+          sandboxId: config.sandboxId,
+          providerObjectId: "provider-obj-NEW",
+          status: "connecting",
+          createdAt: Date.now(),
+        })),
+      });
+      const storage = createMockStorage(
+        createMockSession(),
+        createMockSandbox({ status: "stopped", modal_object_id: null, snapshot_image_id: null })
+      );
+      // A D1 write that fails after the provider handed back a live VM.
+      storage.updateSandboxModalObjectId = vi.fn(() => {
+        throw new Error("storage unavailable");
+      });
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(storage.calls).toContain("updateSandboxStatus:failed");
+      expect(stopSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({ providerObjectId: "provider-obj-NEW" })
+      );
+    });
+
+    it("stops nothing when the spawn failed before a VM existed", async () => {
+      // The row's modal_object_id can still hold a previous incarnation's id,
+      // and this attempt never created one, so there is nothing of ours to kill.
+      const { provider, stopSandbox } = createStoppableProvider({
+        createSandbox: vi.fn(async () => {
+          throw new SandboxProviderError("quota exhausted", "permanent");
+        }),
+      });
+      const storage = createMockStorage(
+        createMockSession(),
+        createMockSandbox({
+          status: "stopped",
+          modal_object_id: "provider-obj-PREVIOUS",
+          snapshot_image_id: null,
+        })
+      );
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(storage.calls).toContain("updateSandboxStatus:failed");
+      expect(stopSandbox).not.toHaveBeenCalled();
+    });
+
+    it("stops the VM a restore reported alongside its failure", async () => {
+      const { provider, stopSandbox } = createStoppableProvider({
+        restoreFromSnapshot: vi.fn(
+          async (): Promise<RestoreResult> => ({
+            success: false,
+            error: "bridge never came up",
+            providerObjectId: "provider-obj-RESTORED",
+          })
+        ),
+      });
+      const storage = createMockStorage(
+        createMockSession(),
+        createMockSandbox({ status: "stopped", snapshot_image_id: "img-abc123" })
+      );
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(storage.calls).toContain("updateSandboxStatus:failed");
+      expect(stopSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({ providerObjectId: "provider-obj-RESTORED" })
+      );
+    });
+
+    it("stops the VM a resume was working on when the resume threw", async () => {
+      // Resume always has a concrete id: the VM existed before the attempt.
+      const stopSandbox = vi.fn(async () => ({ success: true }));
+      const provider = createMockProvider({
+        stopSandbox,
+        resumeSandbox: vi.fn(async () => {
+          throw new SandboxProviderError("resume timed out", "transient");
+        }),
+        capabilities: {
+          supportsSnapshots: false,
+          supportsRestore: false,
+          supportsPersistentResume: true,
+          supportsExplicitStop: true,
+        },
+      });
+      delete provider.takeSnapshot;
+      const storage = createMockStorage(
+        createMockSession(),
+        createMockSandbox({
+          status: "stopped",
+          modal_object_id: "provider-obj-RESUMED",
+          snapshot_image_id: null,
+        })
+      );
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(storage.calls).toContain("updateSandboxStatus:failed");
+      expect(stopSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({ providerObjectId: "provider-obj-RESUMED" })
+      );
+    });
+
+    it("flags the row for reconcile when that failure stop also fails", async () => {
+      const stopSandbox = vi.fn(async (): Promise<StopResult> => {
+        throw new SandboxProviderError("provider down", "transient");
+      });
+      const provider = createMockProvider({
+        stopSandbox,
+        resumeSandbox: vi.fn(async () => {
+          throw new SandboxProviderError("resume timed out", "transient");
+        }),
+        capabilities: {
+          supportsSnapshots: false,
+          supportsRestore: false,
+          supportsPersistentResume: true,
+          supportsExplicitStop: true,
+        },
+      });
+      delete provider.takeSnapshot;
+      const storage = createMockStorage(
+        createMockSession(),
+        createMockSandbox({
+          status: "stopped",
+          modal_object_id: "provider-obj-RESUMED",
+          snapshot_image_id: null,
+        })
+      );
+      const alarmScheduler = createMockAlarmScheduler();
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false),
+        alarmScheduler,
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(storage.calls).toContain("updateSandboxStopUnreconciled:set");
+      expect(alarmScheduler.alarms).toHaveLength(1);
+    });
+  });
+
   describe("archiveSandbox", () => {
     /** Daytona's shape plus archive support. */
     function createArchiveProvider() {
