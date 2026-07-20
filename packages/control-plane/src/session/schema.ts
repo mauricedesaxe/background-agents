@@ -183,13 +183,22 @@ export interface SchemaMigration {
   readonly run: string | ((sql: SqlStorage) => void);
 }
 
+/** Ids at or above this belong to this fork, so neither side claims the other's. */
+export const FORK_MIGRATION_ID_FLOOR = 9000;
+
+/** Identifiers this fork used before the floor existed. Upstream owns them now. */
+export const RETIRED_LOW_IDS = [35, 36] as const;
+
 /**
  * Ordered list of all schema migrations.
  *
  * To add a new migration:
  * 1. Add the column/table to SCHEMA_SQL above (so new DOs get the full schema)
- * 2. Append an entry here with the next sequential ID
+ * 2. Append an entry here at or above FORK_MIGRATION_ID_FLOOR, or at the next
+ *    sequential ID when the change is going upstream
  * 3. For data transforms, use a function-type `run`
+ * 4. Guard a fork-local change — the runner tracks ids only, and can't see that
+ *    the change already landed under a different one
  */
 export const MIGRATIONS: readonly SchemaMigration[] = [
   {
@@ -444,14 +453,19 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
     },
   },
   {
-    id: 35,
-    description: "Add stop_unreconciled_at to sandbox",
-    run: `ALTER TABLE sandbox ADD COLUMN stop_unreconciled_at INTEGER`,
-  },
-  {
-    id: 36,
-    description: "Add stop_unreconciled_provider_id to sandbox",
-    run: `ALTER TABLE sandbox ADD COLUMN stop_unreconciled_provider_id TEXT`,
+    id: 9001,
+    description: "Add stop-unreconciled tracking to sandbox",
+    run: (sql) => {
+      const columns = sql.exec("PRAGMA table_info(sandbox)").toArray() as Array<{ name: string }>;
+      const names = new Set(columns.map((c) => c.name));
+
+      if (!names.has("stop_unreconciled_at")) {
+        runMigration(sql, `ALTER TABLE sandbox ADD COLUMN stop_unreconciled_at INTEGER`);
+      }
+      if (!names.has("stop_unreconciled_provider_id")) {
+        runMigration(sql, `ALTER TABLE sandbox ADD COLUMN stop_unreconciled_provider_id TEXT`);
+      }
+    },
   },
 ];
 
@@ -481,6 +495,10 @@ export function applyMigrations(sql: SqlStorage): void {
     `CREATE TABLE IF NOT EXISTS _schema_migrations (id INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)`
   );
 
+  // Before the read below, so upstream's versions apply on this wake rather
+  // than the next one.
+  releaseRetiredIdentifiers(sql);
+
   const rows = sql.exec(`SELECT id FROM _schema_migrations`).toArray() as Array<{ id: number }>;
   const applied = new Set(rows.map((r) => r.id));
 
@@ -498,6 +516,23 @@ export function applyMigrations(sql: SqlStorage): void {
       migration.id,
       Date.now()
     );
+  }
+}
+
+/**
+ * Without this, a store that ran 35 and 36 keeps reporting them as applied and
+ * upstream's migrations at those identifiers never run.
+ *
+ * Keyed on what MIGRATIONS claims rather than on a marker row, because a
+ * rollback to code that still defines 35 and 36 re-inserts rows
+ * indistinguishable from upstream's; every roll-forward has to clear them
+ * again. Adding upstream's versions turns this off.
+ */
+function releaseRetiredIdentifiers(sql: SqlStorage): void {
+  const unclaimed = RETIRED_LOW_IDS.filter((id) => !MIGRATIONS.some((m) => m.id === id));
+
+  for (const id of unclaimed) {
+    sql.exec(`DELETE FROM _schema_migrations WHERE id = ?`, id);
   }
 }
 
