@@ -216,8 +216,14 @@ function makeSessionEnv(
 
 function mockSlackFetch(
   order: string[] = [],
-  options: { statusResponse?: Response | Promise<Response>; threadMessages?: unknown[] } = {}
+  options: {
+    statusResponse?: Response | Promise<Response>;
+    threadMessages?: unknown[];
+    /** Successive `conversations.replies` pages, chained via next_cursor. */
+    threadPages?: unknown[][];
+  } = {}
 ) {
+  let threadPageIndex = 0;
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url.includes("assistant.threads.setStatus")) {
@@ -243,10 +249,31 @@ function mockSlackFetch(
     }
 
     if (url.includes("conversations.replies")) {
+      if (options.threadPages) {
+        const page = options.threadPages[threadPageIndex] ?? [];
+        const hasMore = threadPageIndex < options.threadPages.length - 1;
+        threadPageIndex += 1;
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            messages: page,
+            ...(hasMore ? { response_metadata: { next_cursor: `cursor-${threadPageIndex}` } } : {}),
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
       return new Response(JSON.stringify({ ok: true, messages: options.threadMessages ?? [] }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
+    }
+
+    if (url.includes("users.info")) {
+      const userId = new URL(url).searchParams.get("user") ?? "U0";
+      return new Response(
+        JSON.stringify({ ok: true, user: { id: userId, name: `name-${userId}` } }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
     }
 
     if (url.includes("chat.postMessage")) {
@@ -718,6 +745,64 @@ describe("POST /events", () => {
     expect(promptBodies[0].content).toContain("Slack channel context");
     expect(promptBodies[0].content).not.toContain("Context from the Slack thread");
     expect(promptBodies[0].content).not.toContain("The latest commit is");
+
+    slackFetch.mockRestore();
+  });
+
+  it("resolves author names only for the thread messages it keeps", async () => {
+    // Only the last ten messages reach the prompt, so only their authors may
+    // cost a users.info call.
+    const page = (offset: number) =>
+      Array.from({ length: 30 }, (_, idx) => ({
+        type: "message",
+        text: `message ${offset + idx}`,
+        user: `U${offset + idx}`,
+        ts: `1.${offset + idx}`,
+      }));
+    const order: string[] = [];
+    const slackFetch = mockSlackFetch(order, { threadPages: [page(0), page(30)] });
+    const env = makeSessionEnv(order);
+    await (env.SLACK_KV as unknown as { put: (k: string, v: string) => Promise<void> }).put(
+      "thread:C123:111.222",
+      JSON.stringify({
+        sessionId: "session-1",
+        repoId: "acme/app",
+        repoFullName: "acme/app",
+        model: "anthropic/claude-haiku-4-5",
+        reasoningEffort: "max",
+        createdAt: Date.now(),
+      })
+    );
+    const ctx = makeCtx();
+
+    const response = await app.fetch(
+      slackEventRequest({
+        type: "app_mention",
+        text: "<@B123> now add coverage",
+        user: "U123",
+        channel: "C123",
+        ts: "333.444",
+        thread_ts: "111.222",
+      }),
+      env,
+      ctx
+    );
+
+    expect(response.status).toBe(200);
+    await flushWaitUntil(ctx);
+
+    const repliesCalls = slackFetch.mock.calls.filter(([input]) =>
+      String(input).includes("conversations.replies")
+    );
+    expect(repliesCalls).toHaveLength(2);
+
+    const resolvedUserIds = slackFetch.mock.calls
+      .filter(([input]) => String(input).includes("users.info"))
+      .map(([input]) => new URL(String(input)).searchParams.get("user"));
+    expect(resolvedUserIds).toHaveLength(10);
+    expect([...resolvedUserIds].sort()).toEqual(
+      Array.from({ length: 10 }, (_, idx) => `U${50 + idx}`).sort()
+    );
 
     slackFetch.mockRestore();
   });

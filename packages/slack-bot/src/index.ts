@@ -55,6 +55,7 @@ import { slackInteractionPayloadSchema } from "./interaction-payload";
 
 const log = createLogger("handler");
 const THREAD_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
+const THREAD_CONTEXT_MESSAGE_COUNT = 10;
 
 type BackgroundTaskScheduler = (promise: Promise<void>) => void;
 
@@ -844,18 +845,22 @@ async function handleIncomingMessage(params: IncomingMessageParams): Promise<voi
   if (threadTs) {
     try {
       const threadResult = await getThreadMessages(env.SLACK_BOT_TOKEN, channel, threadTs);
-      if (threadResult.ok && threadResult.messages) {
-        const filtered = threadResult.messages.filter((m) => m.ts !== ts);
-        // Resolve unique user IDs to display names for attribution
-        const uniqueUserIds = [...new Set(filtered.map((m) => m.user).filter(Boolean))] as string[];
+      if (threadResult.ok) {
+        if (threadResult.truncated) {
+          log.warn("slack.thread_context.truncated", { channel, thread_ts: threadTs, traceId });
+        }
+        // Retain first, then resolve: a long thread has far more unique authors than
+        // the handful of messages kept, and each unresolved author costs a users.info call.
+        const retained = threadResult.messages
+          .filter((m) => m.ts !== ts)
+          .slice(-THREAD_CONTEXT_MESSAGE_COUNT);
+        const uniqueUserIds = [...new Set(retained.map((m) => m.user).filter(Boolean))] as string[];
         const userNames = await resolveUserNames(env.SLACK_BOT_TOKEN, uniqueUserIds);
-        previousMessages = filtered
-          .map((m) => {
-            if (m.bot_id) return `[Bot]: ${m.text}`;
-            const name = m.user ? userNames.get(m.user) || m.user : "Unknown";
-            return `[${name}]: ${m.text}`;
-          })
-          .slice(-10);
+        previousMessages = retained.map((m) => {
+          if (m.bot_id) return `[Bot]: ${m.text}`;
+          const name = m.user ? userNames.get(m.user) || m.user : "Unknown";
+          return `[${name}]: ${m.text}`;
+        });
       }
     } catch {
       // Thread messages not available
