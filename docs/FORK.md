@@ -220,12 +220,12 @@ The shape matters when sequencing a sync. Ordered by how much diverges, heaviest
 | `control-plane`      | Nearly all of our behaviour. By far the heaviest package. |
 | `sandbox-runtime`    | Bridge, harness install, whiteboard skill                 |
 | `web`                | Board UI, archived-subtree sidebar, settings              |
-| `shared`             | Model catalog and artifact types                          |
+| `shared`             | Model catalog, artifact types, Slack `truncated` flag     |
 | `github-bot`         | Review prompt sources `lazar-review`; forward decoupling  |
 | `daytona-infra`      | Toolchain: jj, sandbox version                            |
 | `modal-infra`        | The harness install call in the image build, nothing else |
 | `opencomputer-infra` | The harness install call in the image build, nothing else |
-| `slack-bot`          | Thread-pagination fan-out fix and its `truncated` warning |
+| `slack-bot`          | Page-cap warning, and a Terraform binding parity guard    |
 | `linear-bot`         | **Nothing.** Take upstream wholesale.                     |
 
 Recompute the counts rather than remembering them, since any commit changes them:
@@ -237,22 +237,40 @@ git diff --name-only "$(git merge-base HEAD upstream/main)"..HEAD | grep '^packa
 `linear-bot` is the last package that can be taken whole without a merge, and that stays true only
 until someone edits it.
 
-`slack-bot` was in the same position until
-[#83](https://github.com/mauricedesaxe/background-agents/issues/83), and how it left is the useful
-part. #83 was written to take both bots wholesale and was sequenced early for exactly that reason,
-but #82 landed a fan-out fix in `slack-bot` first, so by the time #83 ran the window had already
-closed. The wholesale take was correct for `linear-bot`, whose tree hash still matched the merge
-base, and wrong for `slack-bot`, which would have silently dropped the fix. **Prove divergence per
-package at the moment you sync, rather than trusting this table**, which records the last sync and
-not today.
+`slack-bot` was in the same position one issue earlier. A sync was written to take both bots
+wholesale on the strength of a row like the one above, and by the time it ran a fan-out fix had
+landed in `slack-bot`, so the take would have dropped it silently. **Prove divergence per package at
+the moment you sync, rather than trusting this table**, which records the last sync and not today.
 
-What diverges in `slack-bot` is one behaviour in `events/message-handler.ts`. `getThreadMessages`
-pages oldest-first and stops at a page cap, so a long enough thread loses its _newest_ messages,
-which are the ones the history wants. Our `shared` client reports that as `truncated` and the
-handler warns on it; upstream has no such signal and its doc comment asserted the opposite. Author
-resolution is also bounded to the ten retained messages, which upstream now does too, but nothing
-upstream pins it. Both are pinned by tests in `packages/slack-bot/src/index.test.ts` that fail when
-either behaviour is removed.
+The behaviour that diverges is documented on `fetchThreadHistory` in
+`packages/slack-bot/src/events/message-handler.ts` and pinned by
+`warns when the thread came back truncated` in `packages/slack-bot/src/index.test.ts`. It **spans
+two packages**, which is the part a sync gets wrong: the flag is produced by `getThreadMessages` in
+`packages/shared/src/slack/client.ts` and consumed in `slack-bot`, so taking upstream's version of
+_either_ file drops it, and taking the `shared` one breaks the warning from underneath rather than
+at the call site. **Upstream has no such signal and its own doc comment asserts the opposite**,
+claiming the newest messages survive the page cap; they do not, because pagination runs
+oldest-first. That is why this one survives a sync only if someone reads this entry: upstream's
+version is not a conflict and not a red test, just a quieter bot.
+
+The neighbouring behaviour, bounding author resolution to the ten retained messages, **is no longer
+a divergence**. Upstream has since fixed it the same way, so this fork now matches.
+`resolves author names only for the thread messages it keeps` stays as a regression guard, because
+nothing upstream pins it.
+
+### The binding parity guard
+
+`packages/slack-bot/src/types/env-terraform-parity.test.ts` and the `tsconfig.test.json` that lets
+it use Node APIs are fork-local, and they exist because of a whole class of loss this document
+otherwise misses. A Worker binding is declared in two places that no check compares: the `Env`
+interface and the Terraform. `SLACK_COMPLETION_QUEUE` shipped in upstream's code with no
+corresponding queue in ours, because a convergence took `packages/` and left `terraform/` behind.
+Nothing caught it — TypeScript believes `Env`, tests inject their own env, and a plan cannot diff a
+binding that was never declared, so the first symptom would have been every Slack completion
+callback returning 503 in production.
+
+**A convergence scoped to `packages/` is incomplete.** Upstream ships infrastructure alongside code,
+so check `terraform/` for the same commit range whenever a package moves.
 
 ## Test files are merged by hand, never taken wholesale
 
