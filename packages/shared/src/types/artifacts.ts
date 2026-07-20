@@ -191,6 +191,17 @@ export interface ArtifactInfo {
   metadata?: Record<string, unknown> | null;
 }
 
+/**
+ * A media artifact id is carried as a path segment by the protected media
+ * route, so the route and the extraction that publishes ids must agree on the
+ * shape. An id accepted at extraction but rejected by the route would be
+ * surfaced in the UI and then be permanently unfetchable.
+ */
+export const mediaArtifactIdSchema = z
+  .string()
+  .min(1)
+  .regex(/^[A-Za-z0-9-]+$/);
+
 /** Message-scoped media that can be fetched from the protected media endpoint. */
 export interface MediaArtifactInfo {
   id: string;

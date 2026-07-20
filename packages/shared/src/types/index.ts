@@ -71,7 +71,7 @@ export type {
   ClassificationResult,
 } from "./repository-catalog";
 
-export { toDisplayStatus } from "./artifacts";
+export { toDisplayStatus, mediaArtifactIdSchema } from "./artifacts";
 export type {
   SessionArtifact,
   BoardArtifactMetadata,

@@ -6,6 +6,7 @@
  * AgentResponse.
  */
 
+import { mediaArtifactIdSchema } from "../types/artifacts";
 import type {
   ListArtifactsResponse,
   AgentResponse,
@@ -374,7 +375,7 @@ export function toEventMediaArtifactInfo(data: Record<string, unknown>): MediaAr
   if (type !== "screenshot" && type !== "video") return null;
 
   const id = typeof data.artifactId === "string" ? data.artifactId.trim() : "";
-  if (!id) return null;
+  if (!mediaArtifactIdSchema.safeParse(id).success) return null;
 
   const metadata =
     data.metadata && typeof data.metadata === "object" && !Array.isArray(data.metadata)
