@@ -509,6 +509,39 @@ describe("getThreadMessages", () => {
     expect(String(secondUrl)).toContain("oldest=1.0");
   });
 
+  it("reports truncated false when the thread ends before the page cap", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({ ok: true, messages: [{ ts: "1.1", text: "only", user: "U1" }] })
+    );
+
+    const result = await getThreadMessages("xoxb-token", "C123", "1.0");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.truncated).toBe(false);
+    }
+  });
+
+  it("reports truncated when the page cap is hit with a cursor still pending", async () => {
+    // Every page hands back another cursor, so the loop can only stop at the cap.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      jsonResponse({
+        ok: true,
+        messages: [{ ts: "1.1", text: "page", user: "U1" }],
+        response_metadata: { next_cursor: "more" },
+      })
+    );
+
+    const result = await getThreadMessages("xoxb-token", "C123", "1.0");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(25);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.truncated).toBe(true);
+      expect(result.messages).toHaveLength(25);
+    }
+  });
+
   it("returns Slack's error envelope on lookup failure", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       jsonResponse({ ok: false, error: "thread_not_found" })
