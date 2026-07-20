@@ -292,7 +292,7 @@ export const automationTemplates: AutomationTemplate[] = [
   },
   {
     // Fork-local: hardcodes personal audience/ICP sources and exemplar videos,
-    // so it is deliberately not upstreamable. See docs/FORK_NOTES.md.
+    // so it is deliberately not upstreamable. See docs/FORK.md.
     id: "content-ideas",
     title: "Weekly content ideas from your changelog",
     description:
