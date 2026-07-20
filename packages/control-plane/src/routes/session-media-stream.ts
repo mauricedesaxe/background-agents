@@ -1,3 +1,4 @@
+import { mediaArtifactIdSchema } from "@open-inspect/shared";
 import { createLogger } from "../logger";
 import { isSupportedScreenshotMimeType, isSupportedVideoMimeType } from "../media";
 import { createMediaObjectStorage } from "../storage/object-storage";
@@ -51,7 +52,7 @@ async function handleMediaGet(
     return error("Session ID and artifact ID are required", 400);
   }
   const storage = createMediaObjectStorage(env);
-  if (!/^[A-Za-z0-9-]+$/.test(artifactId)) {
+  if (!mediaArtifactIdSchema.safeParse(artifactId).success) {
     return error("Invalid artifact ID", 400);
   }
 

@@ -4,6 +4,7 @@ import {
   extractAgentResponse,
   toArtifactType,
   toEventArtifactInfo,
+  toEventMediaArtifactInfo,
   type ControlPlaneFetcher,
 } from "./extractor";
 
@@ -16,6 +17,23 @@ describe("completion artifact type narrowing", () => {
     expect(toEventArtifactInfo({ artifactType: "video", url: "sessions/s1/media/a1.mp4" })).toBe(
       null
     );
+  });
+
+  it("drops a media artifact whose id the media route would reject", () => {
+    // `image_1` passes a non-empty check but fails the route's path-segment
+    // pattern, so publishing it would surface a permanently unfetchable artifact.
+    expect(toEventMediaArtifactInfo({ artifactType: "screenshot", artifactId: "image_1" })).toBe(
+      null
+    );
+    expect(
+      toEventMediaArtifactInfo({ artifactType: "screenshot", artifactId: "img/../secret" })
+    ).toBe(null);
+  });
+
+  it("keeps a media artifact whose id matches the media route's pattern", () => {
+    expect(
+      toEventMediaArtifactInfo({ artifactType: "screenshot", artifactId: "image-1" })
+    ).toMatchObject({ id: "image-1", type: "screenshot" });
   });
 });
 
@@ -193,14 +211,16 @@ describe("buildAgentResponseFromEvents", () => {
   });
 
   it("omits invalid media sizes from extracted metadata", () => {
-    for (const sizeBytes of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    // The id is indexed rather than interpolated from the size: a size like 1.5
+    // would put a dot in the id, which is not a valid artifact id.
+    for (const [index, sizeBytes] of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1].entries()) {
       const response = buildAgentResponseFromEvents([
         {
           id: `artifact:${sizeBytes}`,
           type: "artifact",
           data: {
             artifactType: "screenshot",
-            artifactId: `image-${sizeBytes}`,
+            artifactId: `image-${index}`,
             url: "sessions/s1/media/image.png",
             metadata: { sizeBytes },
           },
