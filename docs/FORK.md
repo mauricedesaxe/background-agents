@@ -139,6 +139,21 @@ sandbox sends OpenRouter reasoning effort as an OpenCode variant.
 
 **Why.** Several models we want are only reachable through OpenRouter.
 
+### 12. The automation forward is decoupled from bot dispatch
+
+`packages/github-bot/src/index.ts` extracts the control-plane forward into its own
+`forwardNormalizedEvent()`, which runs whether or not the built-in handler threw, where upstream
+runs it inline after a handler that can skip it by throwing. Pinned by the fork-only
+`packages/github-bot/test/webhook-forward.test.ts`.
+
+**Why.** GitHub already has its 200 by then, because the work runs in `waitUntil`. A forward dropped
+here is never redelivered, so the automation silently never fires and nothing records why.
+
+A sync flattening this back inline is the specific risk: upstream keeps editing those same lines,
+and its version of the payload fix (`286a82b2`) reads a local that our extraction moved out of
+scope. That value is threaded in as a parameter instead. Take upstream's _choice of payload_ on that
+line, never its _placement_.
+
 ## The reserved migration range
 
 **Fork-local session-schema migrations use identifiers from `FORK_MIGRATION_ID_FLOOR` (9000) up.
@@ -206,7 +221,7 @@ The shape matters when sequencing a sync. Ordered by how much diverges, heaviest
 | `sandbox-runtime`    | Bridge, harness install, whiteboard skill                 |
 | `web`                | Board UI, archived-subtree sidebar, settings              |
 | `shared`             | Model catalog and artifact types                          |
-| `github-bot`         | Review prompt sources `lazar-review`                      |
+| `github-bot`         | Review prompt sources `lazar-review`; forward decoupling  |
 | `daytona-infra`      | Toolchain: jj, sandbox version                            |
 | `modal-infra`        | The harness install call in the image build, nothing else |
 | `opencomputer-infra` | The harness install call in the image build, nothing else |
