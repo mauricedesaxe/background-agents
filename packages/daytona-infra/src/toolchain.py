@@ -37,7 +37,7 @@ JJ_SHA256 = "59e5588583ac82b623239929368c65b90735931c0f26b5a16c1f04d5bb97643d"
 # the Jujutsu binary. tldraw-cli is now removed — diagrams are authored as JSON
 # records and posted to the interactive board endpoint (see the whiteboard
 # skill), so nothing renders tldraw in the sandbox.
-SANDBOX_VERSION = "daytona-v13-review-description"
+SANDBOX_VERSION = "daytona-v14-code-style"
 
 # Resources baked into the base snapshot. Daytona applies these to every sandbox
 # created from it and rejects overriding them at create time. Memory (GiB) is the
