@@ -275,11 +275,17 @@ class TestPinnedHarness:
         opencode = home / ".config" / "opencode"
         claude = home / ".claude"
 
-        # The philosophy the sandbox's own copy had drifted from: it carried §29, which the
-        # harness dropped, and never got §30, which now holds the felt-outcome gate.
+        # The philosophy the sandbox's own copy had drifted from: it never got §30, which holds
+        # the felt-outcome gate.
+        #
+        # This used to also assert §29 was absent, because the drifted copy carried a §29 the
+        # harness had dropped. The harness has since reused the free number for Narrative order,
+        # so absence stopped being a tell. Asserting the current title is the stronger form of the
+        # same check: it distinguishes the harness's spine from the stale copy by what it says,
+        # not by what it lacks.
         philosophy = (opencode / "rules" / "PHILOSOPHY.md").read_text()
         assert "## §30. Felt outcome and writing" in philosophy
-        assert "## §29." not in philosophy
+        assert "## §29. Narrative order" in philosophy
 
         # The skills the sandbox used to fork under different names.
         assert (opencode / "skills" / "lazar-review" / "SKILL.md").is_file()
