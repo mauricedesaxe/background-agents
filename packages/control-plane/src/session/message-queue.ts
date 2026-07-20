@@ -20,6 +20,7 @@ import type { SourceControlProviderName } from "../source-control";
 import type { SandboxTerminationReason } from "../sandbox/lifecycle/manager";
 import type { SessionRow, ParticipantRow, SandboxCommand } from "./types";
 import type { SessionRepository } from "./repository";
+import type { SessionMessenger } from "./messenger";
 import type { SessionWebSocketManager } from "./websocket-manager";
 import type { ParticipantService } from "./participant-service";
 import type { CallbackNotificationService } from "./callback-notification-service";
@@ -101,7 +102,7 @@ interface MessageQueueDeps {
   getSession: () => SessionRow | null;
   updateLastActivity: (timestamp: number) => void;
   spawnSandbox: () => Promise<void>;
-  broadcast: (message: ServerMessage) => void;
+  messenger: SessionMessenger;
   setSessionStatus: (status: SessionStatus) => Promise<void>;
   reconcileSessionStatusAfterExecution: (success: boolean) => Promise<void>;
   scheduleExecutionTimeout?: (startedAtMs: number) => Promise<void>;
@@ -231,7 +232,7 @@ export class SessionMessageQueue {
         outcome: "deferred",
         reason: "no_sandbox",
       });
-      this.deps.broadcast({ type: "sandbox_spawning" });
+      this.deps.messenger.broadcast({ type: "sandbox_spawning" });
       // Arm the watchdog before spawning so a spawn/resume that never yields a
       // connected sandbox eventually fails the message instead of stalling
       // silently. A successful connect moves the message to `processing`, which
@@ -244,7 +245,7 @@ export class SessionMessageQueue {
     }
 
     this.deps.repository.updateMessageToProcessing(message.id, now);
-    this.deps.broadcast({ type: "processing_status", isProcessing: true });
+    this.deps.messenger.broadcast({ type: "processing_status", isProcessing: true });
     this.deps.updateLastActivity(now);
 
     if (this.deps.scheduleExecutionTimeout) {
@@ -317,7 +318,7 @@ export class SessionMessageQueue {
         now
       );
 
-      this.deps.broadcast({
+      this.deps.messenger.broadcast({
         type: "sandbox_event",
         event: syntheticExecutionComplete,
       });
@@ -331,7 +332,7 @@ export class SessionMessageQueue {
       }
     }
 
-    this.deps.broadcast({ type: "processing_status", isProcessing: false });
+    this.deps.messenger.broadcast({ type: "processing_status", isProcessing: false });
 
     const sandboxWs = this.deps.wsManager.getSandboxSocket();
     if (sandboxWs) {
@@ -369,8 +370,8 @@ export class SessionMessageQueue {
       timestamp: now / 1000,
     };
     this.deps.repository.upsertExecutionCompleteEvent(processingMessage.id, syntheticEvent, now);
-    this.deps.broadcast({ type: "sandbox_event", event: syntheticEvent });
-    this.deps.broadcast({ type: "processing_status", isProcessing: false });
+    this.deps.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });
+    this.deps.messenger.broadcast({ type: "processing_status", isProcessing: false });
     this.deps.ctx.waitUntil(
       this.deps.callbackService.notifyComplete(processingMessage.id, false, stuckError)
     );
@@ -430,8 +431,8 @@ export class SessionMessageQueue {
       waited_ms: now - pending.created_at,
     });
 
-    this.deps.broadcast({ type: "sandbox_event", event: syntheticEvent });
-    this.deps.broadcast({ type: "processing_status", isProcessing: false });
+    this.deps.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });
+    this.deps.messenger.broadcast({ type: "processing_status", isProcessing: false });
     this.deps.ctx.waitUntil(
       this.deps.callbackService.notifyComplete(pending.id, false, timeoutError)
     );
@@ -462,7 +463,7 @@ export class SessionMessageQueue {
       messageId,
       createdAt: now,
     });
-    this.deps.broadcast({ type: "sandbox_event", event: userMessageEvent });
+    this.deps.messenger.broadcast({ type: "sandbox_event", event: userMessageEvent });
   }
 
   async enqueuePromptFromApi(
