@@ -244,9 +244,16 @@ refactor changes. Keep new tests on that side of the line.
 
 ## Fork-only files
 
-**Fork-only files stay under `packages/`.** This document is the single deliberate exception and the
-only one outside it.
+**Fork-only files stay under `packages/`.** There are two deliberate exceptions outside it, and both
+earn it the same way: upstream will never have the file, so it can never conflict during a sync.
 
-Harness configuration is not committed here. Tracker configuration and per-repo conventions live in
-a machine-local note outside the repo. A file upstream does not have can never conflict, but it is
-still a file every future sync has to reason about, so the count stays low on purpose.
+- **This document.** The divergence analysis has been produced and lost twice, so it is committed.
+- **`.claude/agents/`.** Repo-local reviewer agents, auto-discovered by `lazar-review` locally and
+  by the PR review bot. `fork-divergence-reviewer.md` is the one that keeps this document honest by
+  checking its claims against the tree on every PR that touches them.
+
+General harness configuration is still not committed here, and the exception above is narrow: a
+reviewer that encodes _this repo's_ invariants has nowhere else to live, because a global agent
+cannot know them. Tracker configuration and per-repo conventions stay in a machine-local note
+outside the repo. A file upstream does not have can never conflict, but it is still a file every
+future sync has to reason about, so the count stays low on purpose.
