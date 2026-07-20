@@ -1,0 +1,225 @@
+# FORK.md
+
+`mauricedesaxe/background-agents` is a **tracked fork** of
+[`ColeMurray/background-agents`](https://github.com/ColeMurray/background-agents). This file records
+what diverges on purpose, why each divergence exists, and the rules that keep a sync from silently
+dropping one. It exists because that analysis has now been produced and lost twice, and a sync that
+starts by re-deriving it starts by getting it wrong.
+
+**Posture.** Upstream's architecture is adopted wholesale, including refactors that change no
+behaviour on their own, because sharing their file shape is what keeps the next fix cheap.
+Divergence is a listed exception, not an accumulating default. Anything not on the list below is
+either a bug or a sync we have not done yet, and in both cases the answer is to take upstream's
+version.
+
+The convergence effort itself is tracked in
+[#78](https://github.com/mauricedesaxe/background-agents/issues/78). Everything below was verified
+against the tree, not against memory. The merge base is `0a753421` and the upstream pin is
+`3e344bd0`.
+
+## The permanent divergences
+
+Each of these is ours by design. A sync proposes changing one only with a reason that beats the one
+recorded here.
+
+### 1. The agent harness is installed into the sandbox image
+
+Every provider's image build runs
+`packages/sandbox-runtime/src/sandbox_runtime/scripts/install-harness.sh`, which clones
+[`lazar-harness`](https://github.com/mauricedesaxe/lazar-harness) at a pinned commit and runs its
+own `install.sh`. A sandbox agent then reads the same skills, agents, and philosophy a laptop agent
+reads.
+
+**Why.** The harness used to be copied into `sandbox_runtime/` by hand and it drifted: the sandbox's
+philosophy carried a section the harness had already dropped, and its `clarity-reviewer` never got
+the OpenCode dialect. Installing from the harness's own installer makes drift impossible. The pin is
+a commit rather than a branch so two builds of the same source produce the same image.
+
+`github-bot`'s PR review prompt (`packages/github-bot/src/prompts.ts`) invokes `lazar-review` by
+name, which is the same divergence reaching a second package.
+
+### 2. Daytona is the provider we actually run
+
+Upstream ships several providers and we accept all of them untouched. Daytona is the one under load
+here, so it carries fork-local work: sizing applied to the snapshot rather than the create call, 4
+GiB sandboxes with a readable OOM cause, a 24-hour auto-archive default instead of 7 days, and a
+stop that retries across the provider's state-change settle.
+
+**Why.** Each of these was a production incident, not a preference. The 7-day auto-archive plus a
+300 GiB account disk cap produced a recurring "timed out waiting to connect" outage. The 1 GiB
+default OOM-killed OpenCode mid-build and surfaced as an unreadable stream error.
+
+Providers we do not run are kept, not pruned, and their only local change is the one-line call into
+`install-harness.sh` that every image build shares. Pruning them would create divergence to save
+nothing.
+
+### 3. The idle window is 7 minutes, not 15
+
+`INACTIVITY_TIMEOUT_MS` and `INACTIVITY_EXTENSION_MS` in
+`packages/control-plane/src/sandbox/lifecycle/decisions.ts` sum to 7 minutes where upstream's
+`DEFAULT_INACTIVITY_CONFIG` sums to 15. The extension is bounded, so 7 is a hard upper bound rather
+than something a connected client can extend indefinitely.
+
+**Why.** Daytona resumes in place. Stopping early costs one resume on the next prompt and loses
+nothing on disk, so a short window is close to free. Before this, roughly 94% of Daytona spend was
+idle sandboxes.
+
+### 4. Sandboxes can be archived
+
+`supportsArchive`, `ArchiveConfig`, and `ArchiveResult` in
+`packages/control-plane/src/sandbox/provider.ts` have no upstream counterpart at all. Archiving a
+session archives its sandbox, and it cascades to the session's children. Pinned by
+`packages/control-plane/test/integration/archive-cascade.test.ts`.
+
+**Why.** A stopped Daytona sandbox still holds its disk against the account cap. Only archiving
+frees it. Without this the cap is reached and new sandboxes stop booting.
+
+### 5. Child sessions inherit the parent's model, and a zero cap disables fan-out
+
+`packages/control-plane/src/routes/session-child-spawn.ts` resolves the model from the spawn context
+rather than accepting a per-child override. A child-session cap of zero turns fan-out off instead of
+falling back to a default. Pinned by
+`packages/control-plane/test/integration/spawn-children.test.ts`.
+
+**Why.** A fanned-out agent silently running a different model than the one chosen is expensive and
+invisible. Every fanned-out agent also gets its own sandbox, so a zero cap is the only way to cap
+that cost.
+
+### 6. A session reattaches to its OpenCode conversation on resume
+
+`packages/sandbox-runtime/src/sandbox_runtime/bridge.py` takes a control-plane-supplied
+`opencodeSessionId` and reattaches, with a watchdog for messages that arrive before the sandbox is
+ready. Pinned by `packages/sandbox-runtime/tests/test_bridge_session_reattach.py`.
+
+**Why.** Without it, resuming a session starts a fresh conversation and the history is gone from the
+agent's point of view while still being visible in the UI.
+
+### 7. The SSE reader is decoupled from the WebSocket send
+
+The bridge enqueues events onto a pump task rather than sending them inline, salvages partial output
+when the stream drops, and reports OOM as a readable cause. Pinned by
+`packages/sandbox-runtime/tests/test_event_pump.py` and `tests/test_entrypoint_oom.py`.
+
+**Why.** A slow WebSocket send used to back-pressure the SSE reader until the connection died with
+`incomplete chunked read`, losing everything the agent had produced in that turn.
+
+### 8. jj is installed in the sandbox and the PR helper is jj-aware
+
+`packages/daytona-infra/src/toolchain.py` installs a pinned, checksum-verified jj binary, and the
+pull-request helper finalises `@` before pushing rather than pushing a detached git `HEAD`.
+
+**Why.** The repos this fork works on are jj-colocated. Without the helper fix, a session branches
+from a detached HEAD, pushes an empty branch, and opens no PR, with nothing in the output saying
+why.
+
+### 9. The tldraw whiteboard
+
+A `BoardRoom` Durable Object, board routes, a live board editor in the session view, and a
+`whiteboard` skill in the sandbox. Entirely fork-local: `packages/control-plane/src/board/`,
+`packages/control-plane/src/routes/board.ts`, `packages/web/src/components/board-editor.tsx`, and
+`packages/sandbox-runtime/src/sandbox_runtime/skills/whiteboard/`.
+
+**Why.** Agents explain systems faster with a diagram than with prose, and a diagram the agent can
+edit live beats an exported image.
+
+### 10. Epoch and duration values are branded in control-plane
+
+`packages/control-plane/src/time.ts` brands `EpochMs` and `DurationMs`, and time subtraction goes
+through `elapsed()` so the result stays a `DurationMs` all the way to its comparison.
+
+**Why.** `now > config.timeoutMs` compiles exactly as readily as `inactiveTime > config.timeoutMs`,
+and only one of them means anything. An epoch timestamp compared against a 10-minute duration is
+always true, which is a bug that reads correctly.
+
+### 11. OpenRouter models are in the catalog
+
+`packages/shared/src/models.ts` carries OpenRouter entries that upstream does not have, and the
+sandbox sends OpenRouter reasoning effort as an OpenCode variant.
+
+**Why.** Several models we want are only reachable through OpenRouter.
+
+## The reserved migration range
+
+**Fork-local session-schema migrations use identifiers from 1000 up. Upstream owns everything below
+1000, permanently.**
+
+Session Durable Object migrations live in `packages/control-plane/src/session/schema.ts` and are
+applied by identifier. `applyMigrations()` records each applied id in `_schema_migrations` and skips
+any id already recorded. There is no content check and no idempotency guard, so an id is a claim on
+a slot rather than a description of a change.
+
+That makes a collision silent rather than loud. Shared history ends at migration 34. Both sides then
+claimed 35 and 36 for entirely different schema changes:
+
+| id  | ours                              | upstream's                         |
+| --- | --------------------------------- | ---------------------------------- |
+| 35  | `stop_unreconciled_at` on sandbox | create the `attachments` table     |
+| 36  | `stop_unreconciled_provider_id`   | durable latest session diff bundle |
+
+A deployed session store that has already run our 35 and 36 has those ids in `_schema_migrations`.
+Taking upstream's versions would leave the runner skipping both, so `attachments` and the diff table
+would never be created, and the querying code would fail at runtime against a store that reports
+itself fully migrated. Nothing in CI catches this, because a fresh store in a test has no rows to
+skip.
+
+**The move has not happened yet.** Ours still sit at 35 and 36, unguarded, and nothing uses the
+reserved range so far. Doing it is a prerequisite for taking any upstream schema change, tracked in
+[#81](https://github.com/mauricedesaxe/background-agents/issues/81), which will also rewrite each
+fork-local migration as a guarded operation that no-ops where the change is already present, so a
+store carrying the old identifiers ends in the same shape as a fresh one. The rule above is the
+durable half and applies to any migration written from now on.
+
+## Divergence by package
+
+The shape matters when sequencing a sync. Ordered by how much diverges, heaviest first:
+
+| Package              | What diverges                                             |
+| -------------------- | --------------------------------------------------------- |
+| `control-plane`      | Nearly all of our behaviour. By far the heaviest package. |
+| `sandbox-runtime`    | Bridge, harness install, whiteboard skill                 |
+| `web`                | Board UI, archived-subtree sidebar, settings              |
+| `shared`             | Model catalog and artifact types                          |
+| `github-bot`         | Review prompt sources `lazar-review`                      |
+| `daytona-infra`      | Toolchain: jj, sandbox version                            |
+| `modal-infra`        | The harness install call in the image build, nothing else |
+| `opencomputer-infra` | The harness install call in the image build, nothing else |
+| `slack-bot`          | **Nothing.** Take upstream wholesale.                     |
+| `linear-bot`         | **Nothing.** Take upstream wholesale.                     |
+
+Recompute the counts rather than remembering them, since any commit changes them:
+
+```sh
+git diff --name-only "$(git merge-base HEAD upstream/main)"..HEAD | grep '^packages/'
+```
+
+The two bots at zero are the only packages that can be taken whole without a merge, and that stays
+true only until someone edits them. The first local edit to either one ends it permanently, which is
+why [#83](https://github.com/mauricedesaxe/background-agents/issues/83) is sequenced early.
+
+## Test files are merged by hand, never taken wholesale
+
+**This applies to every package, every time.** If a port needs one of our tests edited to go green,
+the port dropped a behaviour. That is the signal, not a stale test.
+
+The failure mode it prevents is the only genuinely silent one in a sync. Upstream's tests pass
+against upstream's behaviour. Replacing one of our test files with theirs therefore goes green at
+the exact moment it deletes the evidence that our behaviour ever existed, and nothing anywhere
+reports a loss. Everything else in a sync fails as a conflict or a red test.
+
+Roughly half of everything we have diverged is a test file, in both `control-plane` and
+`sandbox-runtime`. Those files are where the idle window, the pending-message watchdog, unreconciled
+stops, session reattachment, archive cascade, and child model inheritance are actually pinned. They
+are the divergence, not documentation of it.
+
+Our tests survive upstream's refactors because they are coupled to collaborator interfaces rather
+than to how those collaborators are constructed, and construction is what a dependency-injection
+refactor changes. Keep new tests on that side of the line.
+
+## Fork-only files
+
+**Fork-only files stay under `packages/`.** This document is the single deliberate exception and the
+only one outside it.
+
+Harness configuration is not committed here. Tracker configuration and per-repo conventions live in
+a machine-local note outside the repo. A file upstream does not have can never conflict, but it is
+still a file every future sync has to reason about, so the count stays low on purpose.
