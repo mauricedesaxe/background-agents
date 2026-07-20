@@ -1,4 +1,4 @@
-import type { CallbackContext } from "@open-inspect/shared";
+import { sessionAttachmentReferencesSchema, type CallbackContext } from "@open-inspect/shared";
 import { SessionIndexStore } from "../db/session-index";
 import { UserStore } from "../db/user-store";
 import { createLogger } from "../logger";
@@ -25,12 +25,20 @@ async function handleSessionPrompt(
     source?: string;
     model?: string;
     reasoningEffort?: string;
-    attachments?: Array<{ type: string; name: string; url?: string }>;
+    attachments?: unknown;
     callbackContext?: CallbackContext;
   };
 
   if (!body.content) {
     return error("content is required");
+  }
+
+  const parsedAttachments =
+    body.attachments == null
+      ? undefined
+      : sessionAttachmentReferencesSchema.safeParse(body.attachments);
+  if (parsedAttachments && !parsedAttachments.success) {
+    return error("attachments must be a list of session attachment references");
   }
 
   const authorId = body.authorId || "anonymous";
@@ -61,7 +69,7 @@ async function handleSessionPrompt(
       source: body.source || "web",
       model: body.model,
       reasoningEffort: body.reasoningEffort,
-      attachments: body.attachments,
+      attachments: parsedAttachments?.data,
       callbackContext: body.callbackContext,
       authorDisplayName: enrichment?.displayName,
       authorEmail: enrichment?.email,
