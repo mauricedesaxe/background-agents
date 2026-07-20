@@ -117,6 +117,7 @@ import {
 } from "./http/handlers/participants.handler";
 import { MessageService } from "./services/message.service";
 import { createAlarmHandler, type AlarmHandler } from "./alarm/handler";
+import { SessionMessengerImpl, type SessionMessenger } from "./messenger";
 
 /**
  * Timeout for WebSocket authentication (in milliseconds).
@@ -149,6 +150,8 @@ export class SessionDO extends DurableObject<Env> {
   private log: Logger;
   // WebSocket manager (lazily initialized like lifecycleManager)
   private _wsManager: SessionWebSocketManager | null = null;
+  // Session messenger (constructed in ensureInitialized once the session logger exists)
+  private messenger!: SessionMessenger;
   // Lifecycle manager (lazily initialized)
   private _lifecycleManager: SandboxLifecycleManager | null = null;
   // Source control provider (lazily initialized)
@@ -842,6 +845,10 @@ export class SessionDO extends DurableObject<Env> {
       { session_id: sessionId },
       parseLogLevel(this.env.LOG_LEVEL)
     );
+    // Constructed here rather than in the constructor so it (and the
+    // WebSocket manager it forces) captures the session-scoped logger,
+    // never the request-scoped child installed by fetch().
+    this.messenger = new SessionMessengerImpl(this.wsManager);
     this.wsManager.enableAutoPingPong();
   }
 
@@ -1549,9 +1556,7 @@ export class SessionDO extends DurableObject<Env> {
    * Broadcast message to all authenticated clients.
    */
   private broadcast(message: ServerMessage): void {
-    this.wsManager.forEachClientSocket("authenticated_only", (ws) => {
-      this.wsManager.send(ws, message);
-    });
+    this.messenger.broadcast(message);
   }
 
   /**
