@@ -141,13 +141,21 @@ sandbox sends OpenRouter reasoning effort as an OpenCode variant.
 
 ## The reserved migration range
 
-**Fork-local session-schema migrations use identifiers from 1000 up. Upstream owns everything below
-1000, permanently.**
+**Fork-local session-schema migrations use identifiers from `FORK_MIGRATION_ID_FLOOR` (9000) up.
+Upstream owns everything below it, permanently.**
 
 Session Durable Object migrations live in `packages/control-plane/src/session/schema.ts` and are
 applied by identifier. `applyMigrations()` records each applied id in `_schema_migrations` and skips
 any id already recorded. There is no content check and no idempotency guard, so an id is a claim on
 a slot rather than a description of a change.
+
+**The reserved range is an identity namespace, not an ordering mechanism.** This is the easiest
+thing to misread about it. `applyMigrations()` is a set-membership check —
+`if (applied.has(migration.id)) continue` — with no sort and no high-water mark. Execution order is
+the literal array order of `MIGRATIONS`. So a high id does not mean "runs last", and a fork-local
+migration that depends on an upstream one has to be **positioned after it in the array**; an
+identifier above the floor buys no sequencing on its own. The range exists so the two sides never
+claim the same slot, and it does nothing else.
 
 That makes a collision silent rather than loud. Shared history ends at migration 34. Both sides then
 claimed 35 and 36 for entirely different schema changes:
@@ -163,12 +171,30 @@ would never be created, and the querying code would fail at runtime against a st
 itself fully migrated. Nothing in CI catches this, because a fresh store in a test has no rows to
 skip.
 
-**The move has not happened yet.** Ours still sit at 35 and 36, unguarded, and nothing uses the
-reserved range so far. Doing it is a prerequisite for taking any upstream schema change, tracked in
-[#81](https://github.com/mauricedesaxe/background-agents/issues/81), which will also rewrite each
-fork-local migration as a guarded operation that no-ops where the change is already present, so a
-store carrying the old identifiers ends in the same shape as a fresh one. The rule above is the
-durable half and applies to any migration written from now on.
+**The move is done** ([#81](https://github.com/mauricedesaxe/background-agents/issues/81)). Our two
+migrations were rewritten as one guarded operation at **9001**, which inspects the store and no-ops
+where the change is already present, so a store carrying the old identifiers ends in the same shape
+as a fresh one. Ids 35 and 36 are released back to upstream, and taking upstream's schema changes is
+no longer blocked.
+
+Renumbering the source was only half of it, because deployed stores still carry rows at 35 and 36.
+`releaseRetiredIdentifiers()` deletes those rows, and it runs **before** the runner reads the table,
+so upstream's versions apply on the same wake rather than the next one. A session idle across both
+deploys would otherwise serve an entire Durable Object lifetime without them.
+
+The part worth not re-deriving is what it keys on. It releases the ids in `RETIRED_LOW_IDS` that
+`MIGRATIONS` no longer claims, not a marker row recording that the move ran:
+
+```ts
+RETIRED_LOW_IDS.filter((id) => !MIGRATIONS.some((m) => m.id === id));
+```
+
+That makes it rollback-proof and self-disabling. A marker row was tried first and is wrong: rolling
+back to code that still defines 35 and 36 re-runs them, `runMigration` swallows the resulting
+`duplicate column` error, and the rows come back indistinguishable from upstream's. A marker check
+would then skip upstream's real migrations forever. Keying on what `MIGRATIONS` claims means every
+roll-forward clears the rows again, and adopting upstream's 35 and 36 turns the release off on its
+own, because they are claimed again.
 
 ## Divergence by package
 

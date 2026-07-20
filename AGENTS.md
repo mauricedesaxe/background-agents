@@ -134,9 +134,11 @@ These run inside a real `workerd` runtime with Miniflare, using the `cloudflareT
 Both of these fail quietly rather than loudly, which is why they are here and not only in
 [docs/FORK.md](docs/FORK.md), where the reasoning lives.
 
-- **Fork-local session-schema migrations use identifiers from 1000 up.** Upstream owns everything
-  below 1000. Migrations are applied by id and already-recorded ids are skipped with no content
-  check, so reusing one upstream later claims means upstream's version silently never runs.
+- **Fork-local session-schema migrations use identifiers from `FORK_MIGRATION_ID_FLOOR` (9000) up.**
+  Upstream owns everything below it. Migrations are applied by id and already-recorded ids are
+  skipped with no content check, so reusing one upstream later claims means upstream's version
+  silently never runs. A high id is an identity, not an ordering: execution follows the array order
+  of `MIGRATIONS`, so a migration that depends on an upstream one must sit after it in the array.
 - **Never replace one of our test files with upstream's.** Merge test files by hand. Upstream's
   tests pass against upstream's behaviour, so a wholesale take goes green at the exact moment it
   deletes the evidence that our behaviour existed. A test that needs editing to go green after a
