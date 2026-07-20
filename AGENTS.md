@@ -65,8 +65,9 @@ npm run build                                    # all packages
 npm run build -w @open-inspect/shared            # shared only (build first!)
 
 # Lint & format
-npm run lint:fix                                 # ESLint + Prettier fix
-npm run format                                   # Prettier only
+npm run lint:fix                                 # ESLint only — does NOT run Prettier
+npm run format                                   # Prettier write
+npm run format:check                             # Prettier check — CI runs this separately
 npm run typecheck                                # tsc across all TS packages
 
 # Tests — TypeScript (Vitest)
