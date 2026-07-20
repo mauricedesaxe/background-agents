@@ -1,8 +1,8 @@
 # AGENTS.md
 
 Open-Inspect is a background coding agent system that spawns sandboxed dev environments to work on
-GitHub repositories. Single-tenant design. Stack: Cloudflare Workers (TypeScript), Modal (Python),
-Next.js (React), Terraform.
+GitHub repositories. Single-tenant design. Stack: Cloudflare Workers (TypeScript), Python sandbox
+providers, Next.js (React), Terraform.
 
 This repo is a **tracked fork** of `ColeMurray/background-agents`. Before syncing with upstream, or
 before changing anything that looks like it came from upstream, read [docs/FORK.md](docs/FORK.md).
@@ -18,8 +18,10 @@ Three tiers connected by WebSockets:
 2. **Control Plane** (Cloudflare Workers + Durable Objects) — session lifecycle, WebSocket hub,
    GitHub/auth integration. Each session is a Durable Object with SQLite storage. Uses D1 for the
    session index, repo metadata, environments, and encrypted secrets.
-3. **Data Plane** (Modal, Python) — sandboxed environments running coding agents. Manages sandbox
-   creation, snapshots, and repository/environment image builds.
+3. **Data Plane** (Python) — sandboxed environments running coding agents. Manages sandbox creation,
+   snapshots, and repository/environment image builds. Several providers ship (`daytona-infra`,
+   `modal-infra`, `opencomputer-infra`, Vercel); **this deployment runs Daytona**, and it is the
+   only one carrying fork-local work beyond the shared harness install.
 
 **Bot integrations** — all Cloudflare Workers using Hono:
 
@@ -27,8 +29,8 @@ Three tiers connected by WebSockets:
 - `github-bot` — PR review assignments and @mention commands
 - `linear-bot` — Linear agent webhooks → coding sessions
 
-**Data flow**: User prompt → web client → control plane DO (WebSocket) → Modal sandbox → streaming
-events back through the same WebSocket chain.
+**Data flow**: User prompt → web client → control plane DO (WebSocket) → sandbox → streaming events
+back through the same WebSocket chain.
 
 ### Package Dependency Graph
 
@@ -41,15 +43,18 @@ it at build time.
 
 ## Package Overview
 
-| Package         | Lang / Framework                   | Purpose                                                     |
-| --------------- | ---------------------------------- | ----------------------------------------------------------- |
-| `shared`        | TypeScript                         | Shared types, auth utilities, model definitions             |
-| `control-plane` | TypeScript / CF Workers + DO       | Session management, WebSocket streaming, GitHub integration |
-| `web`           | TypeScript / Next.js 16 + React 19 | User-facing dashboard, OAuth, real-time UI                  |
-| `slack-bot`     | TypeScript / CF Workers + Hono     | Slack event handler, session creation                       |
-| `github-bot`    | TypeScript / CF Workers + Hono     | PR review and @mention webhook handler                      |
-| `linear-bot`    | TypeScript / CF Workers + Hono     | Linear agent webhook handler                                |
-| `modal-infra`   | Python 3.12 / Modal + FastAPI      | Sandbox lifecycle, WebSocket bridge to control plane        |
+| Package              | Lang / Framework                   | Purpose                                                     |
+| -------------------- | ---------------------------------- | ----------------------------------------------------------- |
+| `shared`             | TypeScript                         | Shared types, auth utilities, model definitions             |
+| `control-plane`      | TypeScript / CF Workers + DO       | Session management, WebSocket streaming, GitHub integration |
+| `web`                | TypeScript / Next.js 16 + React 19 | User-facing dashboard, OAuth, real-time UI                  |
+| `slack-bot`          | TypeScript / CF Workers + Hono     | Slack event handler, session creation                       |
+| `github-bot`         | TypeScript / CF Workers + Hono     | PR review and @mention webhook handler                      |
+| `linear-bot`         | TypeScript / CF Workers + Hono     | Linear agent webhook handler                                |
+| `sandbox-runtime`    | Python 3.12 + Node                 | In-sandbox agent bridge, skills, harness install            |
+| `daytona-infra`      | Python 3.12 / Daytona              | **The provider this deployment runs.** Image + lifecycle    |
+| `modal-infra`        | Python 3.12 / Modal + FastAPI      | Modal provider: sandbox lifecycle and image build           |
+| `opencomputer-infra` | TypeScript                         | OpenComputer provider: image build                          |
 
 ## Common Commands
 
@@ -73,6 +78,7 @@ npm test -w @open-inspect/slack-bot
 npm test -w @open-inspect/linear-bot
 
 # Tests — Python (pytest)
+cd packages/sandbox-runtime && pytest tests/ -v      # the bridge; most fork divergence lives here
 cd packages/modal-infra && pytest tests/ -v
 
 # Python linting
@@ -90,6 +96,7 @@ All TypeScript packages use **Vitest**; Python uses **pytest** + pytest-asyncio.
   `@cloudflare/vitest-pool-workers` with real D1 bindings
 - **web, slack-bot, linear-bot**: co-located `src/**/*.test.ts`
 - **github-bot**: separate `test/*.test.ts`
+- **sandbox-runtime**: `tests/test_*.py` and `tests/*.test.mjs`
 - **modal-infra**: `tests/test_*.py`
 
 ### Control-plane integration tests
@@ -163,24 +170,31 @@ once, across any workflow, so a PR reporting `mergeable: MERGEABLE / state: CLEA
 been checked rather than that checks had passed. Anything merged before that date was verified only
 by whatever someone ran by hand.
 
-**Deploys do not run yet.** `terraform.yml` and `deploy-web.yml` are active, but both gate `plan`
-and `apply` behind a `check-secrets` job, and this fork has **zero Actions secrets configured**. So
-they validate and then skip with a notice. Until those secrets are populated, deploying is a manual
-local `terraform apply` from the main checkout, and merging to `main` ships nothing to production.
-
-Once the secrets are set, pushing to `main` auto-deploys changed services:
+**Deploys run.** Actions secrets were populated on 2026-07-19, `check-secrets` passes, and `apply`
+has run to success several times since. Merging to `main` deploys changed services:
 
 - **Terraform** → control plane + D1 migrations + web app if `web_platform = "cloudflare"`
   (triggers: `terraform/`, `packages/*/`)
 - **Vercel** → web app when `web_platform = "vercel"` (triggers: `packages/web/`,
   `packages/shared/`)
-- **Modal** → data plane (triggers: `packages/modal-infra/`, deployed via Terraform apply)
+- **Sandbox providers** → data plane (triggers: `packages/sandbox-runtime/`, `packages/*-infra/`,
+  deployed via Terraform apply; Daytona is the one this deployment runs)
 
-Two things to settle before turning deploys on. The `apply` job names an `environment: production`
-that does not exist, so it would be created with no protection rule and a merge would deploy
-unattended; a required reviewer there turns it into "merge, then approve". And the workflow
-references 62 distinct secrets against 41 variables in the local tfvars, so the mapping is not 1:1
-and needs a pass rather than a copy.
+The `apply` job runs under `environment: production`, which has a required reviewer. So the flow is
+merge, approve, then ship, and nothing reaches production unattended.
+
+Three things that are not obvious from the workflow files:
+
+- **Confirm the merge created a run.** A rebase-merge has been observed producing zero workflow runs
+  at all, which leaves the change sitting on `main` looking deployed with nothing to approve (issue
+  #75). `gh run list --branch main` after merging, and force it with
+  `gh workflow run terraform.yml --ref main` if nothing appeared.
+- **A healthy post-deploy plan is not empty.** `always_run = timestamp()` means every worker always
+  shows as replaced. The signal to look for is that nothing says `will be created`.
+- **A harness pin bump alone ships nothing.** The harness installs at image build time, but no
+  provider's `source_hash` includes `*.sh`, so editing `HARNESS_REF` in `install-harness.sh` does
+  not invalidate the snapshot (issue #94). `SANDBOX_VERSION` has to move too, and an apply has to
+  rebuild the snapshot, before a harness change reaches a sandbox.
 
 ## Further Reading
 
