@@ -7,6 +7,7 @@ import {
   isValidModel,
   resolveReasoningEffort,
 } from "@open-inspect/shared";
+import type { SessionAttachmentReference } from "@open-inspect/shared";
 import type {
   ClientInfo,
   Env,
@@ -30,7 +31,7 @@ interface PromptMessageData {
   content: string;
   model?: string;
   reasoningEffort?: string;
-  attachments?: Array<{ type: string; name: string; url?: string; content?: string }>;
+  attachments?: SessionAttachmentReference[];
 }
 
 /**

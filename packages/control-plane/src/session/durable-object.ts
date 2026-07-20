@@ -18,6 +18,7 @@ import {
   sandboxEventSchema,
   timingSafeEqual,
 } from "@open-inspect/shared";
+import type { SessionAttachmentReference } from "@open-inspect/shared";
 import { generateId, hashToken, encryptToken, decryptToken } from "../auth/crypto";
 import { buildModalSandboxDashboardUrl } from "../sandbox/client";
 import { resolveSandboxBackendName } from "../sandbox/provider-name";
@@ -1430,7 +1431,7 @@ export class SessionDO extends DurableObject<Env> {
       content: string;
       model?: string;
       reasoningEffort?: string;
-      attachments?: Array<{ type: string; name: string; url?: string; content?: string }>;
+      attachments?: SessionAttachmentReference[];
     }
   ): Promise<void> {
     await this.messageQueue.handlePromptMessage(ws, data);

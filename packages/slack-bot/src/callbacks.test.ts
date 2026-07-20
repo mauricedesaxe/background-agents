@@ -349,6 +349,7 @@ describe("POST /callbacks/complete", () => {
       textContent: "All set.",
       toolCalls: [],
       artifacts: [],
+      mediaArtifacts: [],
       success: true,
     });
     const fetchMock = okFetchMock();
@@ -424,6 +425,7 @@ describe("POST /callbacks/automation-complete", () => {
       textContent: "Fixed the bug and opened a PR.",
       toolCalls: [],
       artifacts: [],
+      mediaArtifacts: [],
       success: true,
     });
     const fetchMock = okFetchMock();

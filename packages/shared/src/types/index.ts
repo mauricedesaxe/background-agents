@@ -5,8 +5,24 @@
  * through this barrel. Keep internal schemas out of this export surface.
  */
 
-export { attachmentSchema, clientMessageSchema } from "./websocket";
-export type { Attachment, ClientMessage } from "./websocket";
+export {
+  MAX_SESSION_ATTACHMENTS_PER_MESSAGE,
+  SESSION_ATTACHMENT_IMAGE_MIME_TYPES,
+  sessionAttachmentMimeTypeSchema,
+  sessionAttachmentIdSchema,
+  sessionAttachmentReferenceSchema,
+  sessionAttachmentReferencesSchema,
+  resolvedSessionAttachmentSchema,
+  resolvedSessionAttachmentsSchema,
+} from "./session-attachments";
+export type {
+  SessionAttachmentMimeType,
+  SessionAttachmentReference,
+  ResolvedSessionAttachment,
+} from "./session-attachments";
+
+export { clientMessageSchema } from "./websocket";
+export type { ClientMessage } from "./websocket";
 
 export { sessionStatusSchema } from "./statuses";
 export type {
@@ -31,6 +47,10 @@ export {
   repositoriesInputSchema,
   sessionRepositoriesInputSchema,
   RepositoryPairValidationError,
+  decodeRepositoryPathSegments,
+  encodeRepositoryPathSegments,
+  formatRepositoryFullName,
+  parseRepositoryFullName,
   normalizeOptionalRepositoryPair,
 } from "./repositories";
 export type {
@@ -67,6 +87,7 @@ export type {
   ListArtifactsResponse,
   ToolCallSummary,
   ArtifactInfo,
+  MediaArtifactInfo,
   AgentResponse,
 } from "./artifacts";
 
@@ -86,7 +107,53 @@ export { serverMessageSchema } from "./server-messages";
 export type { ServerMessage } from "./server-messages";
 
 export {
+  SESSION_DIFF_VERSION,
+  SESSION_DIFF_MAX_FILES,
+  SESSION_DIFF_MAX_FILE_PATCH_BYTES,
+  SESSION_DIFF_MAX_TOTAL_PATCH_BYTES,
+  SESSION_DIFF_MAX_BUNDLE_BYTES,
+  SESSION_DIFF_FAILURE_BODY_MAX_BYTES,
+  SESSION_DIFF_MAX_ERROR_LENGTH,
+  SESSION_DIFF_REFRESH_TIMEOUT_MS,
+  SESSION_DIFF_ID_PATTERN,
+  SESSION_DIFF_REVISION_STALE_CODE,
+  SESSION_DIFF_FILE_NOT_FOUND_CODE,
+  SESSION_DIFF_ERROR_CODES,
+  isSessionDiffErrorCode,
+  diffRenderStateSchema,
+  diffFileStatusSchema,
+  sessionDiffBaselineRepositorySchema,
+  sessionDiffFileUploadSchema,
+  sessionDiffFileSchema,
+  sessionDiffRepositoryUploadSchema,
+  sessionDiffRepositorySchema,
+  sessionDiffUploadSchema,
+  storedSessionDiffBundleSchema,
+  sessionDiffManifestSchema,
+  sessionDiffStateSchema,
+  sessionDiffFailureSchema,
+  toSessionDiffManifest,
+} from "./session-diffs";
+export type {
+  SessionDiffErrorCode,
+  DiffRenderState,
+  DiffFileStatus,
+  SessionDiffBaselineRepository,
+  SessionDiffFileUpload,
+  SessionDiffFile,
+  SessionDiffRepositoryUpload,
+  SessionDiffRepository,
+  SessionDiffUpload,
+  StoredSessionDiffBundle,
+  SessionDiffManifest,
+  SessionDiffState,
+  SessionDiffFailure,
+} from "./session-diffs";
+
+export {
   userPreferencesRequestSchema,
+  linearCallbackContextSchema,
+  linearStartCallbackSchema,
   createSessionRequestSchema,
   createSessionInputSchema,
   createMediaArtifactRequestSchema,
@@ -101,6 +168,7 @@ export type {
   UserPreferencesRequest,
   SlackCallbackContext,
   LinearCallbackContext,
+  LinearStartCallback,
   AutomationCallbackContext,
   CallbackContext,
   CreateSessionRequest,
