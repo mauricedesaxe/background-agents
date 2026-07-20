@@ -9,7 +9,6 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { initSchema } from "./schema";
-import { buildSessionInternalUrl, SessionInternalPaths } from "./contracts";
 import {
   DEFAULT_MODEL,
   clientMessageSchema,
@@ -118,6 +117,7 @@ import {
 import { MessageService } from "./services/message.service";
 import { createAlarmHandler, type AlarmHandler } from "./alarm/handler";
 import { SessionMessengerImpl, type SessionMessenger } from "./messenger";
+import { SessionStatusService } from "./session-status-service";
 
 /**
  * Timeout for WebSocket authentication (in milliseconds).
@@ -133,9 +133,6 @@ const WS_AUTH_TIMEOUT_MS = 30000; // 30 seconds
  * the client to fetch a fresh token on reconnect.
  */
 const WS_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-
-/** Statuses that indicate a session is finished — metrics are synced to D1 on these transitions. */
-const TERMINAL_STATUSES: SessionStatus[] = ["completed", "failed", "cancelled"];
 
 type BoundarySchema<T> = {
   safeParse(
@@ -189,6 +186,8 @@ export class SessionDO extends DurableObject<Env> {
   private _alarmHandler: AlarmHandler | null = null;
   // Sandbox event processor (lazily initialized)
   private _sandboxEventProcessor: SessionSandboxEventProcessor | null = null;
+  // Session status service (lazily initialized)
+  private _statusService: SessionStatusService | null = null;
 
   // Internal HTTP route table (transport wiring only; handlers remain on SessionDO).
   private readonly routes = createSessionInternalRoutes({
@@ -490,7 +489,7 @@ export class SessionDO extends DurableObject<Env> {
         getSandbox: () => this.getSandbox(),
         getPublicSessionId: (session) => this.getPublicSessionId(session),
         getParticipantByUserId: (userId) => this.participantService.getByUserId(userId),
-        transitionSessionStatus: (status) => this.transitionSessionStatus(status),
+        statusService: this.statusService,
         applySessionTitleUpdate: (title, options) => this.applySessionTitleUpdate(title, options),
         stopExecution: (options) => this.stopExecution(options),
         getSandboxSocket: () => this.wsManager.getSandboxSocket(),
@@ -610,9 +609,7 @@ export class SessionDO extends DurableObject<Env> {
         this.messenger,
         (title, options) => this.applySessionTitleUpdate(title, options),
         (reason) => this.triggerSnapshot(reason),
-        async (success) => {
-          await this.reconcileSessionStatusAfterExecution(success);
-        },
+        this.statusService,
         (timestamp) => this.updateLastActivity(timestamp),
         () => this.scheduleInactivityCheck(),
         () => this.messageQueue.processMessageQueue()
@@ -620,6 +617,26 @@ export class SessionDO extends DurableObject<Env> {
     }
 
     return this._sandboxEventProcessor;
+  }
+
+  /**
+   * Get the session status service, creating it lazily if needed.
+   * Lazy initialization ensures the session-scoped logger and messenger
+   * (set by ensureInitialized()) exist by the time the service is created.
+   */
+  private get statusService(): SessionStatusService {
+    if (!this._statusService) {
+      this._statusService = new SessionStatusService(
+        this.ctx,
+        this.log,
+        this.repository,
+        this.messenger,
+        this.env.DB ? new SessionIndexStore(this.env.DB) : null,
+        this.env.SESSION ?? null
+      );
+    }
+
+    return this._statusService;
   }
 
   /**
@@ -1558,54 +1575,6 @@ export class SessionDO extends DurableObject<Env> {
     return resolved?.session_name || resolved?.id || this.ctx.id.toString();
   }
 
-  private syncSessionIndexStatus(
-    sessionId: string,
-    status: SessionStatus,
-    updatedAt: number
-  ): void {
-    if (!this.env.DB) return;
-    const sessionStore = new SessionIndexStore(this.env.DB);
-    this.ctx.waitUntil(
-      sessionStore.updateStatus(sessionId, status, updatedAt).catch((error) => {
-        this.log.error("session_index.update_status.background_error", {
-          session_id: sessionId,
-          status,
-          updated_at: updatedAt,
-          error,
-        });
-      })
-    );
-  }
-
-  private syncSessionMetrics(sessionId: string): void {
-    if (!this.env.DB) return;
-
-    const session = this.repository.getSession();
-    if (!session) return;
-
-    const messageCount = this.repository.getMessageCount();
-    const activeDurationMs = this.repository.getActiveDurationMs();
-    const artifacts = this.repository.listArtifacts();
-    const prCount = artifacts.filter((a) => a.type === "pr").length;
-
-    const sessionStore = new SessionIndexStore(this.env.DB);
-    this.ctx.waitUntil(
-      sessionStore
-        .updateMetrics(sessionId, {
-          totalCost: session.total_cost ?? 0,
-          activeDurationMs,
-          messageCount,
-          prCount,
-        })
-        .catch((error) => {
-          this.log.error("session_index.update_metrics.background_error", {
-            session_id: sessionId,
-            error,
-          });
-        })
-    );
-  }
-
   private syncSessionIndexTitle(sessionId: string, title: string, updatedAt: number): void {
     if (!this.env.DB) return;
     const sessionStore = new SessionIndexStore(this.env.DB);
@@ -1622,89 +1591,7 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   private async transitionSessionStatus(status: SessionStatus): Promise<boolean> {
-    const session = this.getSession();
-    if (!session) return false;
-
-    const publicSessionId = this.getPublicSessionId(session);
-    if (session.status === status) {
-      this.syncSessionIndexStatus(publicSessionId, status, session.updated_at);
-      if (TERMINAL_STATUSES.includes(status)) {
-        this.syncSessionMetrics(publicSessionId);
-      }
-      return false;
-    }
-
-    const updatedAt = Math.max(Date.now(), session.updated_at + 1);
-    this.repository.updateSessionStatus(session.id, status, updatedAt);
-    this.syncSessionIndexStatus(publicSessionId, status, updatedAt);
-
-    this.broadcast({ type: "session_status", status });
-
-    if (TERMINAL_STATUSES.includes(status)) {
-      this.syncSessionMetrics(publicSessionId);
-    }
-
-    // Notify parent session (if this is a child) so its UI can refresh
-    this.notifyParentOfStatusChange(session, publicSessionId, status);
-
-    // Archiving a session cascades to its child/sub-task sessions so they leave
-    // the sidebar too. Gated on "archived" (only ever set by the archive paths),
-    // this fires exactly once per real transition regardless of which entrypoint
-    // archived the session; each archived child cascades to its own children.
-    if (status === "archived") {
-      this.cascadeArchiveToChildren(publicSessionId);
-    }
-
-    return true;
-  }
-
-  /**
-   * Archive every child of the given session by calling each child DO's trusted
-   * archive endpoint. Fire-and-forget and best-effort per child (a failing or
-   * evicted child DO is logged, not retried, and never fails the parent's
-   * archive), mirroring notifyParentOfChildUpdate. Children already archived are
-   * skipped so a re-archive doesn't re-walk an already-archived subtree.
-   */
-  private cascadeArchiveToChildren(parentSessionId: string): void {
-    if (!this.env.DB || !this.env.SESSION) return;
-
-    const sessionBinding = this.env.SESSION;
-    const sessionStore = new SessionIndexStore(this.env.DB);
-
-    this.ctx.waitUntil(
-      sessionStore
-        .listByParent(parentSessionId)
-        .then((children) =>
-          Promise.all(
-            children
-              .filter((child) => child.status !== "archived")
-              .map((child) => {
-                const childDoId = sessionBinding.idFromName(child.id);
-                return sessionBinding
-                  .get(childDoId)
-                  .fetch(
-                    new Request(buildSessionInternalUrl(SessionInternalPaths.archiveCascade), {
-                      method: "POST",
-                    })
-                  )
-                  .catch((error) => {
-                    this.log.error("cascade_archive.child_failed", {
-                      parent_id: parentSessionId,
-                      child_id: child.id,
-                      error,
-                    });
-                  });
-              })
-          )
-        )
-        .then(() => undefined)
-        .catch((error) => {
-          this.log.error("cascade_archive.failed", {
-            parent_id: parentSessionId,
-            error,
-          });
-        })
-    );
+    return this.statusService.transition(status);
   }
 
   private applySessionTitleUpdate(
@@ -1737,70 +1624,21 @@ export class SessionDO extends DurableObject<Env> {
     this.broadcast({ type: "session_title", title: titleText });
 
     if (session.parent_session_id) {
-      this.notifyParentOfChildUpdate({ ...session, title: titleText }, publicSessionId, {
-        status: session.status,
-        title: titleText,
-      });
+      this.statusService.notifyParentOfChildUpdate(
+        { ...session, title: titleText },
+        publicSessionId,
+        {
+          status: session.status,
+          title: titleText,
+        }
+      );
     }
 
     return { ok: true, title: titleText };
   }
 
-  /**
-   * Fire-and-forget notification to the parent session so its connected clients
-   * can refresh the child-sessions list in real time.
-   */
-  private notifyParentOfStatusChange(
-    session: Pick<SessionRow, "parent_session_id" | "title">,
-    childSessionId: string,
-    status: SessionStatus
-  ): void {
-    this.notifyParentOfChildUpdate(session, childSessionId, {
-      status,
-      title: session.title,
-    });
-  }
-
-  private notifyParentOfChildUpdate(
-    session: Pick<SessionRow, "parent_session_id" | "title">,
-    childSessionId: string,
-    update: { status: SessionStatus; title: string | null }
-  ): void {
-    const parentId = session.parent_session_id;
-    if (!parentId || !this.env.SESSION) return;
-
-    const parentDoId = this.env.SESSION.idFromName(parentId);
-    const parentStub = this.env.SESSION.get(parentDoId);
-
-    this.ctx.waitUntil(
-      parentStub
-        .fetch(
-          new Request(buildSessionInternalUrl(SessionInternalPaths.childSessionUpdate), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              childSessionId,
-              status: update.status,
-              title: update.title,
-            }),
-          })
-        )
-        .catch((error) => {
-          this.log.error("notify_parent.failed", {
-            parent_id: parentId,
-            child_id: childSessionId,
-            status: update.status,
-            error,
-          });
-        })
-    );
-  }
-
   private async reconcileSessionStatusAfterExecution(success: boolean): Promise<void> {
-    const pendingOrProcessing = this.repository.getPendingOrProcessingCount();
-    const nextStatus: SessionStatus =
-      pendingOrProcessing > 0 ? "active" : success ? "completed" : "failed";
-    await this.transitionSessionStatus(nextStatus);
+    await this.statusService.reconcileAfterExecution(success);
   }
 
   /**

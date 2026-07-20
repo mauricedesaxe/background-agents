@@ -8,6 +8,7 @@ import { assertArtifactType } from "./artifacts";
 import type { SessionRepository } from "./repository";
 import type { CallbackNotificationService } from "./callback-notification-service";
 import type { SessionMessenger } from "./messenger";
+import type { SessionStatusService } from "./session-status-service";
 import type { SessionWebSocketManager } from "./websocket-manager";
 import type { SessionTitleUpdateOptions, SessionTitleUpdateResult } from "./title";
 
@@ -45,7 +46,7 @@ export class SessionSandboxEventProcessor {
       options?: SessionTitleUpdateOptions
     ) => SessionTitleUpdateResult,
     private readonly triggerSnapshot: (reason: string) => Promise<void>,
-    private readonly reconcileSessionStatusAfterExecution: (success: boolean) => Promise<void>,
+    private readonly statusService: SessionStatusService,
     private readonly updateLastActivity: (timestamp: number) => void,
     private readonly scheduleInactivityCheck: () => Promise<void>,
     private readonly processMessageQueue: () => Promise<void>
@@ -224,7 +225,7 @@ export class SessionSandboxEventProcessor {
           this.callbackService.notifyComplete(completionMessageId, event.success, event.error)
         );
 
-        await this.reconcileSessionStatusAfterExecution(event.success);
+        await this.statusService.reconcileAfterExecution(event.success);
       } else {
         this.log.info("prompt.complete", {
           event: "prompt.complete",
