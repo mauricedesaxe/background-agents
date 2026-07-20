@@ -4,6 +4,11 @@ Open-Inspect is a background coding agent system that spawns sandboxed dev envir
 GitHub repositories. Single-tenant design. Stack: Cloudflare Workers (TypeScript), Modal (Python),
 Next.js (React), Terraform.
 
+This repo is a **tracked fork** of `ColeMurray/background-agents`. Before syncing with upstream, or
+before changing anything that looks like it came from upstream, read [docs/FORK.md](docs/FORK.md).
+It records what diverges on purpose, the reserved migration range, and why test files are merged by
+hand rather than replaced.
+
 ## Architecture
 
 Three tiers connected by WebSockets:
@@ -116,6 +121,19 @@ These run inside a real `workerd` runtime with Miniflare, using the `cloudflareT
   (naming, types, units) is correct — don't blindly propagate it. Fix bad names or units in the same
   change rather than spreading the problem.
 
+### Fork rules that bite silently
+
+Both of these fail quietly rather than loudly, which is why they are here and not only in
+[docs/FORK.md](docs/FORK.md), where the reasoning lives.
+
+- **Fork-local session-schema migrations use identifiers from 1000 up.** Upstream owns everything
+  below 1000. Migrations are applied by id and already-recorded ids are skipped with no content
+  check, so reusing one upstream later claims means upstream's version silently never runs.
+- **Never replace one of our test files with upstream's.** Merge test files by hand. Upstream's
+  tests pass against upstream's behaviour, so a wholesale take goes green at the exact moment it
+  deletes the evidence that our behaviour existed. A test that needs editing to go green after a
+  port means the port dropped a behaviour.
+
 ### Commit messages
 
 Use conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `test:`. Keep the subject
@@ -166,6 +184,7 @@ and needs a pass rather than a copy.
 
 ## Further Reading
 
+- [docs/FORK.md](docs/FORK.md) — what diverges from upstream on purpose, and why
 - [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — deploy your own instance
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) — detailed architecture and session lifecycle
 - [CONTRIBUTING.md](CONTRIBUTING.md) — contribution guidelines
