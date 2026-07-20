@@ -351,17 +351,34 @@ export const automationTemplates: AutomationTemplate[] = [
         "is a service area being deliberately built toward without much public proof yet, so " +
         "real work in it is disproportionately worth talking about. Do not skip a change just " +
         "because it landed on a marketing site rather than in application code.\n\n" +
+        "Now apply the maturity test, which is the most important filter and the one you are " +
+        "most likely to get wrong. An idea qualifies only if the thing it is about is finished " +
+        "and can be shown today, or the decision stands on its own without that thing existing. " +
+        "Most of what lands in any week is mid-project work, and a decision taken inside an " +
+        "unfinished project is not a story yet: the outcome is not known and there is nothing to " +
+        "demonstrate. A well-argued decision is not enough on its own. Do not propose it.\n\n" +
+        "When several decisions cluster inside one unfinished project, do not pitch them " +
+        "separately. Collapse them into a single parked idea: say the project is worth a demo " +
+        "and a behind-the-scenes explanation once it ships, and name the decisions that would go " +
+        "into it. One parked idea beats three premature ones.\n\n" +
+        "Propose at most two ideas from any one project, so a single busy area cannot fill the " +
+        "whole list.\n\n" +
         "Each idea must fit one of these formats:\n" +
         "- The take: a decision that was made, argued, ideally against the obvious choice.\n" +
         "- The explainer: a concept compressed for a busy technical person.\n" +
         "- The technique: one tactic, shown applied to real code.\n" +
         "- The build: something shipped, demoed.\n\n" +
+        "Where a finished thing can be shown, prefer the build format over arguing about it. A " +
+        "demo of something working is more convincing to this buyer than a claim, and it is the " +
+        "format most often missed because it needs finished work to point at.\n\n" +
         "For each idea give: the angle in one or two sentences, the format tag, a link to the " +
         "pull request or issue it came from, and one line on why it lands with that buyer. No " +
         "titles, no scripts, no outlines.\n\n" +
         "Post the ideas to the #content Slack channel using the slack-notify tool. Keep it short " +
-        "enough to read on a phone. If the week produced nothing with real reasoning behind it, " +
-        "say so in one line rather than padding to three ideas.",
+        "enough to read on a phone. Return fewer than three ideas whenever fewer than three " +
+        "clear the maturity test, and say plainly that the week was thin. Padding the list with " +
+        "premature or obvious ideas is the fastest way to make this message ignorable, so one " +
+        "good idea is a better result than five weak ones.",
     },
   },
 ];
