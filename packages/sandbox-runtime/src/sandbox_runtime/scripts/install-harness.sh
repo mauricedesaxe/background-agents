@@ -4,7 +4,8 @@ set -euo pipefail
 # Installs the agent harness into a sandbox image by running the harness's own install.sh, so a
 # sandbox agent reads the same skills, agents and philosophy a laptop agent reads. Before this,
 # the harness was copied into sandbox_runtime/ by hand and drifted: the sandbox's philosophy still
-# carried §29, which the harness dropped, and its clarity-reviewer never got the OpenCode dialect.
+# carried a §29 the harness had dropped, and its clarity-reviewer never got the OpenCode dialect.
+# (The harness has since reused §29 for Narrative order, so the number no longer marks the drift.)
 #
 # Every provider's image build calls this one script rather than open-coding the clone, so the pin
 # and the surface are stated once. It is a real seam of its own: install.sh's own test covers what
@@ -20,7 +21,7 @@ HARNESS_REPO="${HARNESS_REPO:-https://github.com/mauricedesaxe/lazar-harness.git
 # time, so terraform's source_hash over sandbox-runtime/src is what rebuilds the snapshot. A branch
 # ref would leave this file unchanged when the harness moves, and the snapshot would keep whatever
 # it was built with.
-HARNESS_REF="${HARNESS_REF:-61efa509a2f76a1b03ebde7cc5ca7e28ea160ba6}"
+HARNESS_REF="${HARNESS_REF:-ac32e9b69c2106f94f462b773427388de4794ea3}"
 
 die() {
   printf 'install-harness.sh: %s\n' "$1" >&2
