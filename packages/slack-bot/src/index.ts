@@ -843,7 +843,7 @@ async function handleIncomingMessage(params: IncomingMessageParams): Promise<voi
   let previousMessages: string[] | undefined;
   if (threadTs) {
     try {
-      const threadResult = await getThreadMessages(env.SLACK_BOT_TOKEN, channel, threadTs, 10);
+      const threadResult = await getThreadMessages(env.SLACK_BOT_TOKEN, channel, threadTs);
       if (threadResult.ok && threadResult.messages) {
         const filtered = threadResult.messages.filter((m) => m.ts !== ts);
         // Resolve unique user IDs to display names for attribution
