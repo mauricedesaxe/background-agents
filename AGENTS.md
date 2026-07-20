@@ -191,10 +191,13 @@ Three things that are not obvious from the workflow files:
   `gh workflow run terraform.yml --ref main` if nothing appeared.
 - **A healthy post-deploy plan is not empty.** `always_run = timestamp()` means every worker always
   shows as replaced. The signal to look for is that nothing says `will be created`.
-- **A harness pin bump alone ships nothing.** The harness installs at image build time, but no
-  provider's `source_hash` includes `*.sh`, so editing `HARNESS_REF` in `install-harness.sh` does
-  not invalidate the snapshot (issue #94). `SANDBOX_VERSION` has to move too, and an apply has to
-  rebuild the snapshot, before a harness change reaches a sandbox.
+- **A harness pin bump alone ships nothing on Daytona.** The harness installs at image build time,
+  but Daytona's `source_hash` matches only `*.py`, `*.js`, and `*.ts`, so editing `HARNESS_REF` in
+  `install-harness.sh` does not invalidate the snapshot (issue #94). `SANDBOX_VERSION` has to move
+  too, and an apply has to rebuild the snapshot, before a harness change reaches a sandbox. Modal
+  and Vercel filter by the same extension list and need the same treatment. OpenComputer is the
+  exception: its hash covers every non-cache file under `packages/sandbox-runtime/src`, so a `.sh`
+  edit invalidates it on its own and bumping `SANDBOX_VERSION` for OpenComputer is unnecessary.
 
 ## Further Reading
 
