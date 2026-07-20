@@ -68,7 +68,6 @@ export interface SessionLifecycleHandlerDeps {
   generateId: (bytes?: number) => string;
   now: () => number;
   scheduleWarmSandbox: () => void;
-  getLog: () => Logger;
   getSession: () => SessionRow | null;
   getSandbox: () => SandboxRow | null;
   getPublicSessionId: (session: SessionRow) => string;
@@ -104,12 +103,12 @@ function sessionTitleUpdateStatus(
 }
 
 export interface SessionLifecycleHandler {
-  init: (request: Request) => Promise<Response>;
+  init: (request: Request, log: Logger) => Promise<Response>;
   getState: () => Response;
   updateTitle: (request: Request) => Promise<Response>;
-  archive: (request: Request) => Promise<Response>;
+  archive: (request: Request, log: Logger) => Promise<Response>;
   unarchive: (request: Request) => Promise<Response>;
-  archiveCascade: () => Promise<Response>;
+  archiveCascade: (request: Request, url: URL, log: Logger) => Promise<Response>;
   cancel: () => Promise<Response>;
 }
 
@@ -123,18 +122,18 @@ export function createSessionLifecycleHandler(
   // Archiving the sandbox frees disk but is never allowed to fail the archive
   // request. deps.archiveSandbox swallows provider errors already; this guard
   // is the second layer so an unexpected throw still can't take the request down.
-  async function archiveSandboxBestEffort(reason: string): Promise<void> {
+  async function archiveSandboxBestEffort(reason: string, log: Logger): Promise<void> {
     try {
       await deps.archiveSandbox(reason);
     } catch (error) {
-      deps.getLog().error("Sandbox archive failed", {
+      log.error("Sandbox archive failed", {
         error: error instanceof Error ? error : String(error),
       });
     }
   }
 
   return {
-    async init(request: Request): Promise<Response> {
+    async init(request: Request, log: Logger): Promise<Response> {
       const body = (await request.json()) as InitRequest;
 
       const sessionId = deps.getDurableObjectId();
@@ -160,9 +159,9 @@ export function createSessionLifecycleHandler(
       if (body.scmToken && deps.tokenEncryptionKey) {
         try {
           encryptedToken = await deps.encryptToken(body.scmToken, deps.tokenEncryptionKey);
-          deps.getLog().debug("Encrypted SCM token for storage");
+          log.debug("Encrypted SCM token for storage");
         } catch (error) {
-          deps.getLog().error("Failed to encrypt SCM token", {
+          log.error("Failed to encrypt SCM token", {
             error: error instanceof Error ? error : String(error),
           });
         }
@@ -170,7 +169,7 @@ export function createSessionLifecycleHandler(
 
       const model = getValidModelOrDefault(body.model);
       if (body.model && !isValidModel(body.model)) {
-        deps.getLog().warn("Invalid model name, using default", {
+        log.warn("Invalid model name, using default", {
           requested_model: body.model,
           default_model: model,
         });
@@ -265,7 +264,7 @@ export function createSessionLifecycleHandler(
         joinedAt: now,
       });
 
-      deps.getLog().info("Triggering sandbox spawn for new session");
+      log.info("Triggering sandbox spawn for new session");
       deps.scheduleWarmSandbox();
 
       return Response.json({ sessionId, status: "created" });
@@ -344,7 +343,7 @@ export function createSessionLifecycleHandler(
       return Response.json({ title: result.title });
     },
 
-    async archive(request: Request): Promise<Response> {
+    async archive(request: Request, log: Logger): Promise<Response> {
       const session = deps.getSession();
       if (!session) {
         return Response.json({ error: "Session not found" }, { status: 404 });
@@ -377,7 +376,7 @@ export function createSessionLifecycleHandler(
 
       // Free the sandbox's disk now that the session is archived. Best-effort:
       // a failed archive must still leave the session archived.
-      await archiveSandboxBestEffort("session_archived");
+      await archiveSandboxBestEffort("session_archived", log);
 
       return Response.json({ status: "archived" });
     },
@@ -422,7 +421,7 @@ export function createSessionLifecycleHandler(
      * transitionSessionStatus("archived") cascades onward to this session's own
      * children, so grandchildren are archived without extra recursion here.
      */
-    async archiveCascade(): Promise<Response> {
+    async archiveCascade(_request: Request, _url: URL, log: Logger): Promise<Response> {
       const session = deps.getSession();
       // Child DO may never have been created (or was already torn down); the
       // cascade is best-effort, so treat a missing session as already done.
@@ -446,7 +445,7 @@ export function createSessionLifecycleHandler(
 
       // Archive this child's sandbox too, so a cascaded archive frees disk
       // across the whole subtree, not just the session the user archived.
-      await archiveSandboxBestEffort("session_archived");
+      await archiveSandboxBestEffort("session_archived", log);
 
       return Response.json({ status: "archived" });
     },
