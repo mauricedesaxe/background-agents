@@ -14,8 +14,8 @@ version.
 
 The convergence effort itself is tracked in
 [#78](https://github.com/mauricedesaxe/background-agents/issues/78). Everything below was verified
-against the tree, not against memory. The merge base is `0a753421` and the upstream pin is
-`3e344bd0`.
+against the tree, not against memory, at merge base `0a753421` and upstream pin `3e344bd0`. Both
+move, so recompute them rather than trusting them: `git merge-base HEAD upstream/main`.
 
 ## The permanent divergences
 

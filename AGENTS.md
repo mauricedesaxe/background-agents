@@ -79,7 +79,7 @@ npm test -w @open-inspect/slack-bot
 npm test -w @open-inspect/linear-bot
 
 # Tests — Python (pytest)
-cd packages/sandbox-runtime && pytest tests/ -v      # the bridge; most fork divergence lives here
+cd packages/sandbox-runtime && pytest tests/ -v      # the bridge
 cd packages/modal-infra && pytest tests/ -v
 
 # Python linting
@@ -186,7 +186,7 @@ has run to success several times since. Merging to `main` deploys changed servic
 The `apply` job runs under `environment: production`, which has a required reviewer. So the flow is
 merge, approve, then ship, and nothing reaches production unattended.
 
-Three things that are not obvious from the workflow files:
+Things that are not obvious from the workflow files:
 
 - **Confirm the merge created a run.** A rebase-merge has been observed producing zero workflow runs
   at all, which leaves the change sitting on `main` looking deployed with nothing to approve (issue
