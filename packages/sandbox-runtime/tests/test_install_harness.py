@@ -286,6 +286,9 @@ class TestPinnedHarness:
         philosophy = (opencode / "rules" / "PHILOSOPHY.md").read_text()
         assert "## §30. Felt outcome and writing" in philosophy
         assert "## §29. Narrative order" in philosophy
+        # §31 is what this pin was last moved to deliver, so asserting it is what makes the bump
+        # verifiable rather than merely plausible.
+        assert "## §31. Code style" in philosophy
 
         # The skills the sandbox used to fork under different names.
         assert (opencode / "skills" / "lazar-review" / "SKILL.md").is_file()
