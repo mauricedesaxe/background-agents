@@ -198,7 +198,14 @@ async function handleWebhook(
   // the forward, and a failing forward must not affect bot behavior. GitHub
   // already got a 200 (the work runs in waitUntil), so a dropped forward here
   // is never redelivered and the automation silently never fires.
-  await forwardNormalizedEvent(env, log, event, p, traceId, deliveryId);
+  //
+  // `p` is deliberately not the payload forwarded here. The summary schema types
+  // `pull_request` as a bare object, and a bare object strips its unknown keys
+  // whatever the outer `.passthrough()` does, so head, base, labels and state
+  // never survive it. The action schema names no nested key, so passthrough
+  // preserves the whole object and automations can match on those fields.
+  const normalizationPayload = actionResult.success ? actionResult.data : {};
+  await forwardNormalizedEvent(env, log, event, normalizationPayload, traceId, deliveryId);
 
   if (dispatchFailure !== null) throw dispatchFailure.error;
 }
@@ -207,12 +214,12 @@ async function forwardNormalizedEvent(
   env: Env,
   log: Logger,
   event: string | undefined,
-  p: WebhookSummaryPayload,
+  normalizationPayload: Record<string, unknown>,
   traceId: string,
   deliveryId: string | undefined
 ): Promise<void> {
   if (!event) return;
-  const normalizedEvent = normalizeGitHubEvent(event, p);
+  const normalizedEvent = normalizeGitHubEvent(event, normalizationPayload);
   if (normalizedEvent === null) return;
 
   try {
