@@ -225,7 +225,7 @@ The shape matters when sequencing a sync. Ordered by how much diverges, heaviest
 | `daytona-infra`      | Toolchain: jj, sandbox version                            |
 | `modal-infra`        | The harness install call in the image build, nothing else |
 | `opencomputer-infra` | The harness install call in the image build, nothing else |
-| `slack-bot`          | **Nothing.** Take upstream wholesale.                     |
+| `slack-bot`          | Thread-pagination fan-out fix and its `truncated` warning |
 | `linear-bot`         | **Nothing.** Take upstream wholesale.                     |
 
 Recompute the counts rather than remembering them, since any commit changes them:
@@ -234,9 +234,25 @@ Recompute the counts rather than remembering them, since any commit changes them
 git diff --name-only "$(git merge-base HEAD upstream/main)"..HEAD | grep '^packages/'
 ```
 
-The two bots at zero are the only packages that can be taken whole without a merge, and that stays
-true only until someone edits them. The first local edit to either one ends it permanently, which is
-why [#83](https://github.com/mauricedesaxe/background-agents/issues/83) is sequenced early.
+`linear-bot` is the last package that can be taken whole without a merge, and that stays true only
+until someone edits it.
+
+`slack-bot` was in the same position until
+[#83](https://github.com/mauricedesaxe/background-agents/issues/83), and how it left is the useful
+part. #83 was written to take both bots wholesale and was sequenced early for exactly that reason,
+but #82 landed a fan-out fix in `slack-bot` first, so by the time #83 ran the window had already
+closed. The wholesale take was correct for `linear-bot`, whose tree hash still matched the merge
+base, and wrong for `slack-bot`, which would have silently dropped the fix. **Prove divergence per
+package at the moment you sync, rather than trusting this table**, which records the last sync and
+not today.
+
+What diverges in `slack-bot` is one behaviour in `events/message-handler.ts`. `getThreadMessages`
+pages oldest-first and stops at a page cap, so a long enough thread loses its _newest_ messages,
+which are the ones the history wants. Our `shared` client reports that as `truncated` and the
+handler warns on it; upstream has no such signal and its doc comment asserted the opposite. Author
+resolution is also bounded to the ten retained messages, which upstream now does too, but nothing
+upstream pins it. Both are pinned by tests in `packages/slack-bot/src/index.test.ts` that fail when
+either behaviour is removed.
 
 ## Test files are merged by hand, never taken wholesale
 
