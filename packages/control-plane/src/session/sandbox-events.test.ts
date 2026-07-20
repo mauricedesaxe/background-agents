@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { SessionSandboxEventProcessor } from "./sandbox-events";
 import type { GitPushSpec } from "../source-control";
 import type { SandboxEvent, ServerMessage } from "../types";
+import type { CallbackNotificationService } from "./callback-notification-service";
+import type { SessionRepository } from "./repository";
+import type { SessionWebSocketManager } from "./websocket-manager";
 
 function createPushSpec(repoOwner: string, repoName: string, targetBranch: string): GitPushSpec {
   return {
@@ -16,15 +19,20 @@ function createPushSpec(repoOwner: string, repoName: string, targetBranch: strin
 }
 
 function createProcessor() {
+  const getProcessingMessage = vi.fn(() => null as { id: string } | null);
   const repository = {
     updateSandboxHeartbeat: vi.fn(),
-    getProcessingMessage: vi.fn(() => null as { id: string } | null),
+    getProcessingMessage,
     upsertTokenEvent: vi.fn(),
     createArtifact: vi.fn(),
     createEvent: vi.fn(),
     addSessionCost: vi.fn(),
     upsertExecutionCompleteEvent: vi.fn(),
-    updateMessageCompletion: vi.fn(),
+    // The real repository stops reporting a processing message once it is
+    // completed; the processing_status broadcast derives from that.
+    updateMessageCompletion: vi.fn(() => {
+      getProcessingMessage.mockReturnValue(null);
+    }),
     getMessageTimestamps: vi.fn(
       () => null as { created_at: number; started_at: number | null } | null
     ),
@@ -43,36 +51,36 @@ function createProcessor() {
   };
 
   const broadcast = vi.fn((_message: ServerMessage) => {});
+  const messenger = { broadcast, sendToSandbox: vi.fn(() => true) };
   const triggerSnapshot = vi.fn(async (_reason: string) => {});
   const reconcileSessionStatusAfterExecution = vi.fn(async (_success: boolean) => {});
   const scheduleInactivityCheck = vi.fn(async () => {});
   const processMessageQueue = vi.fn(async () => {});
   const updateLastActivity = vi.fn();
-  const getIsProcessing = vi.fn(() => false);
   const applySessionTitleUpdate = vi.fn((title: string) => ({ ok: true as const, title }));
   const waitUntil = vi.fn();
+  const log = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    child: vi.fn(),
+  };
 
-  const processor = new SessionSandboxEventProcessor({
-    ctx: { waitUntil } as unknown as DurableObjectState,
-    log: {
-      debug: vi.fn(),
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-      child: vi.fn(),
-    },
-    repository: repository as never,
-    callbackService: callbackService as never,
-    wsManager: wsManager as never,
-    broadcast,
+  const processor = new SessionSandboxEventProcessor(
+    { waitUntil } as unknown as DurableObjectState,
+    () => log,
+    repository as unknown as SessionRepository,
+    callbackService as unknown as CallbackNotificationService,
+    wsManager as unknown as SessionWebSocketManager,
+    messenger,
     applySessionTitleUpdate,
-    getIsProcessing,
     triggerSnapshot,
     reconcileSessionStatusAfterExecution,
     updateLastActivity,
     scheduleInactivityCheck,
-    processMessageQueue,
-  });
+    processMessageQueue
+  );
 
   return {
     processor,
