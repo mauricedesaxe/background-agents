@@ -8,6 +8,7 @@ import {
 } from "@open-inspect/shared";
 import type { SessionStatus, SpawnSource } from "../../../types";
 import type { SessionRepository } from "../../repository";
+import type { SessionStatusService } from "../../session-status-service";
 import { isDeadSandboxStatus } from "../../../sandbox/lifecycle/decisions";
 import {
   normalizeSessionTitle,
@@ -72,7 +73,7 @@ export interface SessionLifecycleHandlerDeps {
   getSandbox: () => SandboxRow | null;
   getPublicSessionId: (session: SessionRow) => string;
   getParticipantByUserId: (userId: string) => ParticipantRow | null;
-  transitionSessionStatus: (status: SessionStatus) => Promise<boolean>;
+  statusService: SessionStatusService;
   applySessionTitleUpdate: (
     title: string,
     options?: SessionTitleUpdateOptions
@@ -372,7 +373,7 @@ export function createSessionLifecycleHandler(
         await deps.stopExecution({ suppressStatusReconcile: true });
       }
 
-      await deps.transitionSessionStatus("archived");
+      await deps.statusService.transition("archived");
 
       // Free the sandbox's disk now that the session is archived. Best-effort:
       // a failed archive must still leave the session archived.
@@ -406,7 +407,7 @@ export function createSessionLifecycleHandler(
         );
       }
 
-      await deps.transitionSessionStatus("active");
+      await deps.statusService.transition("active");
 
       return Response.json({ status: "active" });
     },
@@ -441,7 +442,7 @@ export function createSessionLifecycleHandler(
         await deps.stopExecution({ suppressStatusReconcile: true });
       }
 
-      await deps.transitionSessionStatus("archived");
+      await deps.statusService.transition("archived");
 
       // Archive this child's sandbox too, so a cascaded archive frees disk
       // across the whole subtree, not just the session the user archived.
@@ -461,7 +462,7 @@ export function createSessionLifecycleHandler(
       }
 
       await deps.stopExecution({ suppressStatusReconcile: true });
-      await deps.transitionSessionStatus("cancelled");
+      await deps.statusService.transition("cancelled");
 
       const sandbox = deps.getSandbox();
       if (sandbox) {
