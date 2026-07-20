@@ -154,6 +154,26 @@ and its version of the payload fix (`286a82b2`) reads a local that our extractio
 scope. That value is threaded in as a parameter instead. Take upstream's _choice of payload_ on that
 line, never its _placement_.
 
+### 13. A fork-local `content-ideas` automation template
+
+`packages/web/src/lib/automation-templates.ts` carries a `content-ideas` template that upstream does
+not have and should not receive. It surveys a week of merged pull requests and closed issues and
+proposes content ideas from the decisions behind them, posted to Slack.
+
+**Why.** The prompt hardcodes personal context: `alexlazar.dev` as the source of audience and ICP, a
+fixed list of exemplar videos defining the format, and two weighting rules that only make sense for
+one person's service offering. A generic version would need all of that to come from configuration,
+which is more machinery than one template is worth.
+
+Nothing here is enforced by a test, so three things rot silently. The exemplar video list goes stale
+as new videos publish, and a format that drifts away from it stops being proposed. The `#content`
+Slack channel is named in the prompt, so renaming the channel breaks delivery while the template
+still asserts only that _some_ `#channel` was mentioned. And the prompt needs the sandbox to reach
+`alexlazar.dev` and YouTube, degrading to generic output rather than failing when it cannot.
+
+It is registered under `data-research`, which is not a clean fit. Adding a category for a single
+template was judged not worth the taxonomy change.
+
 ## The reserved migration range
 
 **Fork-local session-schema migrations use identifiers from `FORK_MIGRATION_ID_FLOOR` (9000) up.
@@ -219,7 +239,7 @@ The shape matters when sequencing a sync. Ordered by how much diverges, heaviest
 | -------------------- | --------------------------------------------------------- |
 | `control-plane`      | Nearly all of our behaviour. By far the heaviest package. |
 | `sandbox-runtime`    | Bridge, harness install, whiteboard skill                 |
-| `web`                | Board UI, archived-subtree sidebar, settings              |
+| `web`                | Board UI, archived-subtree sidebar, settings, automations |
 | `shared`             | Model catalog, artifact types, Slack `truncated` flag     |
 | `github-bot`         | Review prompt sources `lazar-review`; forward decoupling  |
 | `daytona-infra`      | Toolchain: jj, sandbox version                            |
