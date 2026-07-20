@@ -116,7 +116,7 @@ const runCompleteBodySchema = z.object({
   automationId: z.string(),
   runId: z.string(),
   sessionId: z.string(),
-  messageId: z.string().optional(),
+  messageId: z.string().min(1),
   success: z.boolean(),
   error: z.string().optional(),
 });
@@ -1079,7 +1079,7 @@ export class SchedulerDO extends DurableObject<Env> {
       const automation = await store.getById(body.automationId);
       await this.notifySlackCompletion(run, slackMeta, {
         sessionId: body.sessionId,
-        messageId: body.messageId ?? "",
+        messageId: body.messageId,
         success: body.success,
         error: body.error,
         repoFullName: formatRunRepositoryLabel(run),
