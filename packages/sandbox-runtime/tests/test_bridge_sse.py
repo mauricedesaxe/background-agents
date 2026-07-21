@@ -2407,6 +2407,124 @@ class TestCompactionHandling:
     """
 
     @pytest.mark.asyncio
+    async def test_context_overflow_recovers_after_compaction(
+        self, bridge: AgentBridge, opencode_message_id: str
+    ):
+        http_client = bridge.http_client
+
+        http_client.sse_events = [
+            create_sse_event("server.connected", {}),
+            create_sse_event(
+                "session.error",
+                {
+                    "sessionID": "oc-session-123",
+                    "error": {
+                        "name": "ContextOverflowError",
+                        "data": {"message": "Input exceeds context window of this model"},
+                    },
+                },
+            ),
+            create_sse_event("session.compacted", {"sessionID": "oc-session-123"}),
+            create_sse_event(
+                "message.updated",
+                {
+                    "info": {
+                        "id": "oc-msg-recovered",
+                        "role": "assistant",
+                        "sessionID": "oc-session-123",
+                        "parentID": "msg_synthetic_continue",
+                    }
+                },
+            ),
+            create_sse_event(
+                "message.part.updated",
+                {
+                    "part": {
+                        "type": "text",
+                        "id": "part-recovered",
+                        "sessionID": "oc-session-123",
+                        "messageID": "oc-msg-recovered",
+                        "text": "Recovered after compaction.",
+                    },
+                    "delta": "Recovered after compaction.",
+                },
+            ),
+            create_sse_event("session.idle", {"sessionID": "oc-session-123"}),
+        ]
+
+        events = []
+        async for event in bridge._stream_opencode_response_sse("cp-msg-1", "Test prompt"):
+            events.append(event)
+
+        assert [event["type"] for event in events] == ["context_compacted", "token"]
+        assert events[0]["messageId"] == "cp-msg-1"
+        assert events[1]["content"] == "Recovered after compaction."
+
+    @pytest.mark.asyncio
+    async def test_repeated_context_overflow_during_recovery_is_terminal(self, bridge: AgentBridge):
+        http_client = bridge.http_client
+        overflow = {
+            "name": "ContextOverflowError",
+            "data": {"message": "Input exceeds context window of this model"},
+        }
+
+        http_client.sse_events = [
+            create_sse_event("server.connected", {}),
+            create_sse_event(
+                "session.error",
+                {"sessionID": "oc-session-123", "error": overflow},
+            ),
+            create_sse_event(
+                "session.error",
+                {"sessionID": "oc-session-123", "error": overflow},
+            ),
+        ]
+
+        events = []
+        async for event in bridge._stream_opencode_response_sse("cp-msg-1", "Test prompt"):
+            events.append(event)
+
+        assert len(events) == 1
+        assert events[0]["type"] == "error"
+        assert events[0]["error"] == "Input exceeds context window of this model"
+
+    @pytest.mark.asyncio
+    async def test_unrelated_error_during_context_recovery_is_terminal(self, bridge: AgentBridge):
+        http_client = bridge.http_client
+
+        http_client.sse_events = [
+            create_sse_event("server.connected", {}),
+            create_sse_event(
+                "session.error",
+                {
+                    "sessionID": "oc-session-123",
+                    "error": {
+                        "name": "ContextOverflowError",
+                        "data": {"message": "Input exceeds context window of this model"},
+                    },
+                },
+            ),
+            create_sse_event(
+                "session.error",
+                {
+                    "sessionID": "oc-session-123",
+                    "error": {
+                        "name": "APIError",
+                        "data": {"message": "Provider unavailable"},
+                    },
+                },
+            ),
+        ]
+
+        events = []
+        async for event in bridge._stream_opencode_response_sse("cp-msg-1", "Test prompt"):
+            events.append(event)
+
+        assert len(events) == 1
+        assert events[0]["type"] == "error"
+        assert events[0]["error"] == "Provider unavailable"
+
+    @pytest.mark.asyncio
     async def test_post_compaction_text_forwarded(
         self, bridge: AgentBridge, opencode_message_id: str
     ):
@@ -2491,9 +2609,12 @@ class TestCompactionHandling:
             events.append(event)
 
         token_events = [e for e in events if e["type"] == "token"]
+        compaction_events = [e for e in events if e["type"] == "context_compacted"]
         assert len(token_events) == 2
         assert token_events[0]["content"] == "Let me check..."
         assert token_events[1]["content"] == "Here is the answer."
+        assert len(compaction_events) == 1
+        assert compaction_events[0]["messageId"] == "cp-msg-1"
 
     @pytest.mark.asyncio
     async def test_compaction_summary_text_not_forwarded(

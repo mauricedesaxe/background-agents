@@ -409,6 +409,16 @@ function GitSyncEvent({ event }: EventRendererProps) {
   );
 }
 
+function ContextCompactedEvent({ event }: EventRendererProps) {
+  if (event.type !== "context_compacted") return null;
+
+  return (
+    <StatusRow tone="muted" time={formatEventTime(event)}>
+      Context compacted
+    </StatusRow>
+  );
+}
+
 function ArtifactEvent({ event, sessionId, onOpenMedia }: EventRendererProps) {
   if (
     event.type !== "artifact" ||
@@ -476,6 +486,7 @@ const eventRenderers: Partial<
   token: AssistantMessageEvent,
   tool_result: ToolResultEvent,
   git_sync: GitSyncEvent,
+  context_compacted: ContextCompactedEvent,
   artifact: ArtifactEvent,
   error: ErrorEvent,
   execution_complete: ExecutionCompleteEvent,

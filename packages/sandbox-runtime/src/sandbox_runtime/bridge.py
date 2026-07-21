@@ -985,6 +985,10 @@ class AgentBridge:
             return str(message) if message else None
         return str(error) if error else None
 
+    @staticmethod
+    def _is_context_overflow_error(error: object) -> bool:
+        return isinstance(error, dict) and error.get("name") == "ContextOverflowError"
+
     def _transform_part_to_event(
         self,
         part: dict[str, Any],
@@ -1209,6 +1213,7 @@ class AgentBridge:
         # Compaction tracking: after compaction, parentID changes so we must
         # accept all non-summary assistant messages from the parent session
         compaction_occurred = False
+        context_overflow_recovery_pending = False
 
         start_time = time.time()
         # Baseline for OOM detection: if this cgroup's oom_kill counter rises
@@ -1516,9 +1521,18 @@ class AgentBridge:
                                 elif event_type == "session.error":
                                     error_session_id = props.get("sessionID")
                                     if error_session_id == self.opencode_session_id:
-                                        error_msg = self._extract_error_message(
-                                            props.get("error", {})
-                                        )
+                                        error = props.get("error", {})
+                                        error_msg = self._extract_error_message(error)
+                                        if (
+                                            self._is_context_overflow_error(error)
+                                            and not context_overflow_recovery_pending
+                                        ):
+                                            context_overflow_recovery_pending = True
+                                            self.log.info(
+                                                "bridge.context_overflow_recovery_pending",
+                                                message_id=message_id,
+                                            )
+                                            continue
                                         self.log.error("bridge.session_error", error_msg=error_msg)
                                         yield {
                                             "type": "error",
@@ -1551,6 +1565,10 @@ class AgentBridge:
                                             "bridge.session_compacted",
                                             message_id=message_id,
                                         )
+                                        yield {
+                                            "type": "context_compacted",
+                                            "messageId": message_id,
+                                        }
 
                         if loop.time() > prompt_start + self.PROMPT_MAX_DURATION:
                             elapsed = time.time() - start_time

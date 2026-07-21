@@ -33,6 +33,7 @@ export type EventType =
   | "tool_call"
   | "step_start"
   | "step_finish"
+  | "context_compacted"
   | "tool_result"
   | "git_sync"
   | "error"
