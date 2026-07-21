@@ -51,7 +51,7 @@ TTYD_SHA256 = "8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55"
 
 # Cache buster - change this to force Modal image rebuild
 # v52: bake opencode global deps
-CACHE_BUSTER = "v55-harness-pin-bump"
+CACHE_BUSTER = "v56-git-backports"
 
 # Base image with all development tools
 base_image = (
@@ -83,6 +83,17 @@ base_image = (
         "libasound2",
         "libpango-1.0-0",
         "libcairo2",
+    )
+    # Upgrade git from backports. jj drives every git operation through the git CLI subprocess
+    # backend and requires >= 2.41, but bookworm ships 2.39.5, so `jj git fetch` fails in the
+    # sandbox with stock git. Backports carries 2.47.
+    .run_commands(
+        "echo 'deb http://deb.debian.org/debian bookworm-backports main'"
+        " > /etc/apt/sources.list.d/backports.list",
+        "apt-get update && apt-get install -y -t bookworm-backports git",
+        # Fail the build here rather than in a sandbox an hour later.
+        "git --version | awk '{split($3,v,\".\"); exit !(v[1]>2 || (v[1]==2 && v[2]>=41))}'",
+        "rm -rf /var/lib/apt/lists/*",
     )
     # Install GitHub CLI (for agent-direct GitHub interaction via gh API)
     .run_commands(
