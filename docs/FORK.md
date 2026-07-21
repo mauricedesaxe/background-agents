@@ -174,6 +174,19 @@ still asserts only that _some_ `#channel` was mentioned. And the prompt needs th
 It is registered under `data-research`, which is not a clean fit. Adding a category for a single
 template was judged not worth the taxonomy change.
 
+### 14. `SessionStatusService` names its DO namespace `sessions`, not `parentSessions`
+
+The sixth constructor parameter of `packages/control-plane/src/session/session-status-service.ts` is
+`sessions` here and `parentSessions` upstream. Same binding, same position, different name.
+
+**Why.** Upstream reaches through that namespace for exactly one thing, notifying the parent of a
+child update, so `parentSessions` describes every use it has. Our archive cascade also reaches
+_children_ through it: `cascadeArchiveToChildren()` resolves each child DO from the same binding. A
+parameter called `parentSessions` holding the stub of a child reads as a bug at the call site.
+
+Expect a conflict on the next sync. Upstream edits this constructor whenever it adds a dependency,
+and the rename touches the same lines. Take upstream's _parameter list_ and keep our _name_.
+
 ## Where we match upstream against our own docs
 
 The list above is where we differ from upstream. This is the inverse: a place where matching
