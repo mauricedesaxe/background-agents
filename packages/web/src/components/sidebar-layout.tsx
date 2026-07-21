@@ -4,7 +4,7 @@ import { createContext, useCallback, useContext, useState } from "react";
 import { useSession, signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import useSWR from "swr";
-import { SessionSidebar } from "./session-sidebar";
+import { NewSessionButton, SearchSessionsButton, SessionSidebar } from "./session-sidebar";
 import { GlobalCommandMenu } from "./global-command-menu";
 import { useSidebar } from "@/hooks/use-sidebar";
 import { useIsMobile } from "@/hooks/use-media-query";
@@ -33,6 +33,23 @@ export function useSidebarContext() {
 
 interface SidebarLayoutProps {
   children: React.ReactNode;
+}
+
+interface CollapsedSidebarActionsProps {
+  onSearchSessions: () => void;
+  onNewSession: () => void;
+}
+
+export function CollapsedSidebarActions({
+  onSearchSessions,
+  onNewSession,
+}: CollapsedSidebarActionsProps) {
+  return (
+    <div className="w-12 flex-shrink-0 border-r border-border-muted bg-background px-2 py-3 flex flex-col items-center gap-2">
+      <SearchSessionsButton onClick={onSearchSessions} />
+      <NewSessionButton onClick={onNewSession} />
+    </div>
+  );
 }
 
 export function SidebarLayout({ children }: SidebarLayoutProps) {
@@ -68,6 +85,10 @@ export function SidebarLayout({ children }: SidebarLayoutProps) {
 
   const handleOpenCommandMenu = useCallback(() => {
     setIsCommandMenuOpen((prev) => !prev);
+  }, []);
+
+  const handleSearchSessions = useCallback(() => {
+    setIsCommandMenuOpen(true);
   }, []);
 
   useGlobalShortcuts({
@@ -142,6 +163,12 @@ export function SidebarLayout({ children }: SidebarLayoutProps) {
             onSessionSelect={sidebar.close}
           />
         </div>
+        {!isMobile && !sidebar.isOpen && (
+          <CollapsedSidebarActions
+            onSearchSessions={handleSearchSessions}
+            onNewSession={handleNewSession}
+          />
+        )}
         <main className="flex-1 overflow-hidden">{children}</main>
       </div>
       <GlobalCommandMenu
