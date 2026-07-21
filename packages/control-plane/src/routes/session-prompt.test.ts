@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { sessionPromptRoutes } from "./session-prompt";
 import type { RequestContext } from "./shared";
+import type { SqlDatabase } from "../db/sql-database";
 import type { Env } from "../types";
 
 const runtimeFetch = vi.fn();
@@ -23,6 +24,7 @@ function createCtx(): RequestContext {
   return {
     trace_id: "trace-1",
     request_id: "req-1",
+    db: {} as SqlDatabase,
     metrics: {
       d1Queries: [],
       spans: {},
