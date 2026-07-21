@@ -158,6 +158,7 @@ function SessionPageContent() {
         <div className="bg-destructive-muted border-b border-destructive-border px-4 py-3 flex items-center justify-between">
           <p className="text-sm text-destructive">{authError || connectionError}</p>
           <button
+            type="button"
             onClick={reconnect}
             className="px-3 py-1.5 text-sm font-medium text-destructive-foreground bg-destructive hover:bg-destructive/90 transition"
           >
