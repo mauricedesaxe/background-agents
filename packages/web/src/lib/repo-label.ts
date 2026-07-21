@@ -64,3 +64,14 @@ export function formatSessionRepositoriesLabel(
   const extra = repositories && repositories.length > 1 ? repositories.length - 1 : 0;
   return extra > 0 ? `${base} +${extra}` : base;
 }
+
+export function formatSessionRepositoriesListLabel(
+  repoOwner: string | null | undefined,
+  repoName: string | null | undefined,
+  repositories?: ReadonlyArray<{ repoOwner: string; repoName: string }>
+): string {
+  if (!repositories || repositories.length <= 1) {
+    return formatSessionRepositoriesLabel(repoOwner, repoName, repositories);
+  }
+  return repositories.map((repo) => formatRepoLabel(repo.repoOwner, repo.repoName)).join(", ");
+}

@@ -17,14 +17,17 @@ import { ArchiveSessionDialog } from "@/components/archive-session-dialog";
 import { archiveSession } from "@/lib/archive-session";
 import { pullRequestSummaryDisplay } from "@/lib/pr-summary";
 import { PullRequestStateIcon } from "@/components/pr-state-icon";
-import { formatRelativeTime, isInactiveSession } from "@/lib/time";
+import { formatRelativeTime } from "@/lib/time";
 import {
   applyTitleUpdate,
+  buildGroupedSessionList,
   buildSessionsPageKey,
   CURRENT_USER_CREATED_BY,
   isUnarchivedSessionListKey,
   mergeUniqueSessions,
   collectSessionAndDescendantIds,
+  type SessionRepositoryGroup,
+  type SessionSourceFilter,
   type SessionListResponse,
 } from "@/lib/session-list";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
@@ -42,7 +45,7 @@ import {
   DataControlsIcon,
 } from "@/components/ui/icons";
 import { APP_SHORT_NAME } from "@/lib/site-config";
-import { formatRepoLabel, formatSessionRepositoriesLabel } from "@/lib/repo-label";
+import { formatSessionRepositoriesListLabel } from "@/lib/repo-label";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useEnvironments } from "@/hooks/use-environments";
@@ -90,6 +93,7 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState("");
   const [sessionCreatorFilter, setSessionCreatorFilter] = useState<SessionCreatorFilter>("all");
+  const [sessionSourceFilter, setSessionSourceFilter] = useState<SessionSourceFilter>("manual");
   const [extraSessions, setExtraSessions] = useState<SessionItem[]>([]);
   const [hasMorePages, setHasMorePages] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -214,71 +218,15 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
     [firstPageSessions, effectiveExtraSessions]
   );
 
-  // Sort sessions by updatedAt (most recent first), filter by search query,
-  // and group children under their parent sessions
-  const { activeSessions, inactiveSessions, childrenMap, hasFilteredSessions } = useMemo(() => {
-    const filtered = sessions
-      .filter((session) => session.status !== "archived")
-      .filter((session) => {
-        if (!searchQuery) return true;
-        const query = searchQuery.toLowerCase();
-        const title = session.title?.toLowerCase() || "";
-        if (title.includes(query)) return true;
-        // Match against every member of the repository set, not just the
-        // primary; scalar fallback covers pre-multi-repo sessions.
-        const repoLabels = session.repositories?.length
-          ? session.repositories.map((repo) => formatRepoLabel(repo.repoOwner, repo.repoName))
-          : [formatRepoLabel(session.repoOwner, session.repoName)];
-        return repoLabels.some((label) => label.toLowerCase().includes(query));
-      });
-
-    // Sort by updatedAt descending
-    const sorted = [...filtered].sort((a, b) => {
-      const aTime = a.updatedAt || a.createdAt;
-      const bTime = b.updatedAt || b.createdAt;
-      return bTime - aTime;
-    });
-
-    // Build set of visible session IDs for orphan detection
-    const visibleIds = new Set(sorted.map((s) => s.id));
-
-    // Group children by parent ID
-    const children = new Map<string, SessionItem[]>();
-    const topLevel: SessionItem[] = [];
-
-    for (const session of sorted) {
-      const parentId = session.parentSessionId;
-      if (parentId && visibleIds.has(parentId)) {
-        // Parent is visible — nest under it
-        const siblings = children.get(parentId) ?? [];
-        siblings.push(session);
-        children.set(parentId, siblings);
-      } else {
-        // Top-level session (or orphan child whose parent is filtered out)
-        topLevel.push(session);
-      }
-    }
-
-    const active: SessionItem[] = [];
-    const inactive: SessionItem[] = [];
-    const now = Date.now();
-
-    for (const session of topLevel) {
-      const timestamp = session.updatedAt || session.createdAt;
-      if (isInactiveSession(timestamp, now)) {
-        inactive.push(session);
-      } else {
-        active.push(session);
-      }
-    }
-
-    return {
-      activeSessions: active,
-      inactiveSessions: inactive,
-      childrenMap: children,
-      hasFilteredSessions: filtered.length > 0,
-    };
-  }, [sessions, searchQuery]);
+  const { groups, childrenMap, hasFilteredSessions } = useMemo(
+    () =>
+      buildGroupedSessionList(sessions, {
+        sourceFilter: sessionSourceFilter,
+        searchQuery,
+        now: Date.now(),
+      }),
+    [sessions, searchQuery, sessionSourceFilter]
+  );
 
   // Environment provenance for the cards, resolved once for the whole list.
   // Names are looked up so a deleted environment (or one still loading)
@@ -296,6 +244,11 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
     : sessionCreatorFilter === "mine"
       ? "No sessions started by you"
       : "No sessions yet";
+  const filteredEmptyMessage = searchQuery.trim()
+    ? "No matching sessions"
+    : sessionSourceFilter === "automatic"
+      ? "No automatic sessions"
+      : "No manual sessions";
 
   const handleSessionArchived = useCallback(
     async (sessionId: string) => {
@@ -423,7 +376,7 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
         </Link>
       </div>
 
-      <div className="px-3 pt-2">
+      <div className="grid grid-cols-2 gap-2 px-3 pt-2">
         <ToggleGroup
           type="single"
           value={sessionCreatorFilter}
@@ -446,6 +399,30 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
             className="h-7 rounded-sm text-xs data-[state=on]:bg-background data-[state=on]:text-foreground"
           >
             Mine
+          </ToggleGroupItem>
+        </ToggleGroup>
+        <ToggleGroup
+          type="single"
+          value={sessionSourceFilter}
+          onValueChange={(value) => {
+            if (value === "manual" || value === "automatic") {
+              setSessionSourceFilter(value);
+            }
+          }}
+          className="grid grid-cols-2 rounded-md border border-border-muted bg-muted p-0.5"
+          aria-label="Session source filter"
+        >
+          <ToggleGroupItem
+            value="manual"
+            className="h-7 rounded-sm px-1 text-xs data-[state=on]:bg-background data-[state=on]:text-foreground"
+          >
+            Manual
+          </ToggleGroupItem>
+          <ToggleGroupItem
+            value="automatic"
+            className="h-7 rounded-sm px-1 text-xs data-[state=on]:bg-background data-[state=on]:text-foreground"
+          >
+            Automatic
           </ToggleGroupItem>
         </ToggleGroup>
       </div>
@@ -472,22 +449,18 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
           </div>
         ) : sessions.length === 0 ? (
           <div className="px-4 py-8 text-center text-sm text-muted-foreground">{emptyMessage}</div>
-        ) : searchQuery && !hasFilteredSessions ? (
+        ) : !hasFilteredSessions ? (
           <div className="px-4 py-8 text-center text-sm text-muted-foreground">
-            No matching sessions
+            {filteredEmptyMessage}
           </div>
         ) : (
           <>
-            {/* Active Sessions */}
-            {activeSessions.map((session) => (
-              <SessionWithChildren
-                key={session.id}
-                session={session}
-                environmentName={
-                  session.environmentId
-                    ? environmentNamesById.get(session.environmentId)
-                    : undefined
-                }
+            {groups.map((group) => (
+              <SessionRepositoryGroupSection
+                key={`${group.key}:${searchQuery.trim().length > 0 ? "search" : "browse"}`}
+                group={group}
+                revealInactive={searchQuery.trim().length > 0}
+                environmentNamesById={environmentNamesById}
                 childrenMap={childrenMap}
                 currentSessionId={currentSessionId}
                 isMobile={isMobile}
@@ -496,34 +469,6 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
                 onSessionRenamed={handleSessionRenamed}
               />
             ))}
-
-            {/* Inactive Divider */}
-            {inactiveSessions.length > 0 && (
-              <>
-                <div className="px-4 py-2 mt-2">
-                  <span className="text-xs font-medium text-secondary-foreground uppercase tracking-wider">
-                    Inactive
-                  </span>
-                </div>
-                {inactiveSessions.map((session) => (
-                  <SessionWithChildren
-                    key={session.id}
-                    session={session}
-                    environmentName={
-                      session.environmentId
-                        ? environmentNamesById.get(session.environmentId)
-                        : undefined
-                    }
-                    childrenMap={childrenMap}
-                    currentSessionId={currentSessionId}
-                    isMobile={isMobile}
-                    onArchive={handleSessionArchived}
-                    onSessionSelect={onSessionSelect}
-                    onSessionRenamed={handleSessionRenamed}
-                  />
-                ))}
-              </>
-            )}
 
             {loadingMore && (
               <div className="flex justify-center py-3">
@@ -534,6 +479,71 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
         )}
       </div>
     </aside>
+  );
+}
+
+function SessionRepositoryGroupSection({
+  group,
+  revealInactive,
+  environmentNamesById,
+  childrenMap,
+  currentSessionId,
+  isMobile,
+  onArchive,
+  onSessionSelect,
+  onSessionRenamed,
+}: {
+  group: SessionRepositoryGroup;
+  revealInactive: boolean;
+  environmentNamesById: Map<string, string>;
+  childrenMap: Map<string, SessionItem[]>;
+  currentSessionId: string | null;
+  isMobile: boolean;
+  onArchive: (sessionId: string) => Promise<void>;
+  onSessionSelect?: () => void;
+  onSessionRenamed: (sessionId: string, title: string) => void;
+}) {
+  const [inactiveOpen, setInactiveOpen] = useState(revealInactive);
+
+  const renderSession = (session: SessionItem) => (
+    <SessionWithChildren
+      key={session.id}
+      session={session}
+      environmentName={
+        session.environmentId ? environmentNamesById.get(session.environmentId) : undefined
+      }
+      childrenMap={childrenMap}
+      currentSessionId={currentSessionId}
+      isMobile={isMobile}
+      onArchive={onArchive}
+      onSessionSelect={onSessionSelect}
+      onSessionRenamed={onSessionRenamed}
+    />
+  );
+
+  return (
+    <section aria-labelledby={`session-group-${group.key}`} className="pb-2">
+      <h2
+        id={`session-group-${group.key}`}
+        className="px-4 py-2 text-xs font-medium uppercase tracking-wider text-secondary-foreground"
+      >
+        {group.label}
+      </h2>
+      {group.activeSessions.map(renderSession)}
+      {group.inactiveSessions.length > 0 && (
+        <>
+          <button
+            type="button"
+            aria-expanded={inactiveOpen}
+            onClick={() => setInactiveOpen((open) => !open)}
+            className="w-full px-4 py-1.5 text-left text-xs text-muted-foreground hover:text-foreground"
+          >
+            Inactive ({group.inactiveSessions.length})
+          </button>
+          {inactiveOpen && group.inactiveSessions.map(renderSession)}
+        </>
+      )}
+    </section>
   );
 }
 
@@ -695,7 +705,7 @@ function SessionListItem({
 }) {
   const timestamp = session.updatedAt || session.createdAt;
   const relativeTime = formatRelativeTime(timestamp);
-  const repoInfo = formatSessionRepositoriesLabel(
+  const repoInfo = formatSessionRepositoriesListLabel(
     session.repoOwner,
     session.repoName,
     session.repositories

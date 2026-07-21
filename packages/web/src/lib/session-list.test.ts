@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyTitleUpdate,
+  buildGroupedSessionList,
   buildSessionsPageKey,
   collectSessionAndDescendantIds,
   CURRENT_USER_CREATED_BY,
@@ -140,6 +141,149 @@ describe("applyTitleUpdate", () => {
     applyTitleUpdate(before, "a", "Mutated", 9999);
 
     expect(before).toEqual(beforeSnapshot);
+  });
+});
+
+describe("buildGroupedSessionList", () => {
+  const now = 10 * 24 * 60 * 60 * 1000;
+  const recent = now - 60_000;
+  const inactive = now - 8 * 24 * 60 * 60 * 1000;
+
+  it("shows manual and automatic root sessions in separate source views", () => {
+    const manual = session("manual", { updatedAt: recent });
+    const automatic = session("automatic", {
+      spawnSource: "automation",
+      updatedAt: recent - 1,
+    });
+    const child = session("child", {
+      parentSessionId: automatic.id,
+      spawnSource: "agent",
+      updatedAt: recent - 2,
+    });
+
+    const manualView = buildGroupedSessionList([manual, automatic, child], {
+      sourceFilter: "manual",
+      searchQuery: "",
+      now,
+    });
+    const automaticView = buildGroupedSessionList([manual, automatic, child], {
+      sourceFilter: "automatic",
+      searchQuery: "",
+      now,
+    });
+
+    expect(manualView.groups[0].activeSessions.map(({ id }) => id)).toEqual([manual.id]);
+    expect(automaticView.groups[0].activeSessions.map(({ id }) => id)).toEqual([automatic.id]);
+    expect(automaticView.childrenMap.get(automatic.id)?.map(({ id }) => id)).toEqual([child.id]);
+  });
+
+  it("groups roots by one, multiple, or no repositories", () => {
+    const grouped = buildGroupedSessionList(
+      [
+        session("single", { updatedAt: recent }),
+        session("multiple", {
+          updatedAt: recent - 1,
+          repositories: [
+            { repoOwner: "acme", repoName: "api", repoId: 1, baseBranch: "main" },
+            { repoOwner: "acme", repoName: "web", repoId: 2, baseBranch: "main" },
+          ],
+        }),
+        session("none", {
+          repoOwner: null,
+          repoName: null,
+          updatedAt: recent - 2,
+        }),
+      ],
+      { sourceFilter: "manual", searchQuery: "", now }
+    );
+
+    expect(grouped.groups.map(({ label }) => label)).toEqual([
+      "open-inspect/background-agents",
+      "Multiple repositories",
+      "No repository",
+    ]);
+  });
+
+  it("orders groups and sessions by active recency", () => {
+    const grouped = buildGroupedSessionList(
+      [
+        session("older-a", { repoName: "a", updatedAt: recent - 30 }),
+        session("newer-a", { repoName: "a", updatedAt: recent - 10 }),
+        session("newest-b", { repoName: "b", updatedAt: recent }),
+      ],
+      { sourceFilter: "manual", searchQuery: "", now }
+    );
+
+    expect(grouped.groups.map(({ label }) => label)).toEqual(["open-inspect/b", "open-inspect/a"]);
+    expect(grouped.groups[1].activeSessions.map(({ id }) => id)).toEqual(["newer-a", "older-a"]);
+  });
+
+  it("keeps inactive roots in active groups and hides inactive-only groups", () => {
+    const grouped = buildGroupedSessionList(
+      [
+        session("active", { repoName: "mixed", updatedAt: recent }),
+        session("old", { repoName: "mixed", updatedAt: inactive }),
+        session("hidden", { repoName: "inactive-only", updatedAt: inactive - 1 }),
+      ],
+      { sourceFilter: "manual", searchQuery: "", now }
+    );
+
+    expect(grouped.groups.map(({ label }) => label)).toEqual(["open-inspect/mixed"]);
+    expect(grouped.groups[0].inactiveSessions.map(({ id }) => id)).toEqual(["old"]);
+  });
+
+  it("reports no visible sessions when every group is inactive", () => {
+    const grouped = buildGroupedSessionList(
+      [session("hidden", { repoName: "inactive-only", updatedAt: inactive })],
+      { sourceFilter: "manual", searchQuery: "", now }
+    );
+
+    expect(grouped.groups).toEqual([]);
+    expect(grouped.hasFilteredSessions).toBe(false);
+  });
+
+  it("reveals a matching inactive-only group without promoting child sessions", () => {
+    const parent = session("parent", {
+      title: "Old parent",
+      repoName: "inactive-only",
+      updatedAt: inactive,
+    });
+    const child = session("child", {
+      title: "Matching child",
+      parentSessionId: parent.id,
+      spawnSource: "agent",
+      repoName: "different-child-repo",
+      updatedAt: inactive + 1,
+    });
+
+    const grouped = buildGroupedSessionList([parent, child], {
+      sourceFilter: "manual",
+      searchQuery: "matching",
+      now,
+    });
+
+    expect(grouped.groups.map(({ label }) => label)).toEqual(["open-inspect/inactive-only"]);
+    expect(grouped.groups[0].inactiveSessions.map(({ id }) => id)).toEqual([parent.id]);
+    expect(grouped.childrenMap.get(parent.id)?.map(({ id }) => id)).toEqual([child.id]);
+  });
+
+  it("matches a root session directly", () => {
+    const grouped = buildGroupedSessionList(
+      [session("matching", { title: "Matching root", updatedAt: recent })],
+      { sourceFilter: "manual", searchQuery: "matching root", now }
+    );
+
+    expect(grouped.groups[0].activeSessions.map(({ id }) => id)).toEqual(["matching"]);
+  });
+
+  it("does not parse the automatic title prefix", () => {
+    const grouped = buildGroupedSessionList(
+      [session("manual", { title: "[Auto] Manual session", updatedAt: recent })],
+      { sourceFilter: "automatic", searchQuery: "", now }
+    );
+
+    expect(grouped.groups).toEqual([]);
+    expect(grouped.hasFilteredSessions).toBe(false);
   });
 });
 
