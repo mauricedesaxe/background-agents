@@ -12,7 +12,6 @@ import { initSchema } from "./schema";
 import {
   DEFAULT_MODEL,
   clientMessageSchema,
-  isValidReasoningEffort,
   resolveAppName,
   sandboxEventSchema,
   timingSafeEqual,
@@ -55,13 +54,13 @@ import type {
   SandboxEvent,
   SessionRepositoryState,
   SessionState,
-  SessionStatus,
   SandboxStatus,
 } from "../types";
 import type { SessionRow, ArtifactRow, SandboxRow } from "./types";
 import { durationMs } from "../time";
 import { SessionRepository } from "./repository";
 import { resolveParticipantName } from "./participant-name";
+import { validateReasoningEffort } from "./reasoning-effort";
 import { parseTunnelUrls } from "./tunnel-urls";
 import { SessionWebSocketManagerImpl, type SessionWebSocketManager } from "./websocket-manager";
 import { SessionPullRequestStore } from "../db/session-pull-request-store";
@@ -339,41 +338,20 @@ export class SessionDO extends DurableObject<Env> {
 
   private get messageQueue(): SessionMessageQueue {
     if (!this._messageQueue) {
-      this._messageQueue = new SessionMessageQueue({
-        env: this.env,
-        ctx: this.ctx,
-        log: this.log,
-        repository: this.repository,
-        wsManager: this.wsManager,
-        participantService: this.participantService,
-        callbackService: this.callbackService,
-        scmProvider: resolveScmProviderFromEnv(this.env.SCM_PROVIDER),
-        getClientInfo: (ws) => this.getClientInfo(ws),
-        validateReasoningEffort: (model, effort) => this.validateReasoningEffort(model, effort),
-        getSession: () => this.getSession(),
-        updateLastActivity: (timestamp) => this.updateLastActivity(timestamp),
-        spawnSandbox: () => this.spawnSandbox(),
-        messenger: this.messenger,
-        setSessionStatus: async (status) => {
-          await this.transitionSessionStatus(status);
-        },
-        reconcileSessionStatusAfterExecution: async (success) => {
-          await this.reconcileSessionStatusAfterExecution(success);
-        },
-        scheduleExecutionTimeout: async (startedAtMs: number) => {
-          const deadline = startedAtMs + this.executionTimeoutMs;
-          const currentAlarm = await this.ctx.storage.getAlarm();
-          if (!currentAlarm || deadline < currentAlarm) {
-            await this.ctx.storage.setAlarm(deadline);
-          }
-        },
-        scheduleSandboxConnectTimeout: async (deadlineMs: number) => {
-          const currentAlarm = await this.ctx.storage.getAlarm();
-          if (!currentAlarm || deadlineMs < currentAlarm) {
-            await this.ctx.storage.setAlarm(deadlineMs);
-          }
-        },
-      });
+      this._messageQueue = new SessionMessageQueue(
+        this.ctx,
+        this.log,
+        this.repository,
+        this.wsManager,
+        this.messenger,
+        this.participantService,
+        this.callbackService,
+        this.statusService,
+        this.lifecycleManager,
+        this.env.DB ? new SessionIndexStore(this.env.DB) : null,
+        resolveScmProviderFromEnv(this.env.SCM_PROVIDER),
+        this.executionTimeoutMs
+      );
     }
 
     return this._messageQueue;
@@ -481,7 +459,8 @@ export class SessionDO extends DurableObject<Env> {
           const { encryptToken } = await import("../auth/crypto");
           return encryptToken(token, encryptionKey);
         },
-        validateReasoningEffort: (model, effort) => this.validateReasoningEffort(model, effort),
+        validateReasoningEffort: (model, effort) =>
+          validateReasoningEffort(model, effort, this.log),
         generateId: (bytes) => generateId(bytes),
         now: () => Date.now(),
         scheduleWarmSandbox: () => this.ctx.waitUntil(this.warmSandbox()),
@@ -1438,7 +1417,17 @@ export class SessionDO extends DurableObject<Env> {
       attachments?: SessionAttachmentReference[];
     }
   ): Promise<void> {
-    await this.messageQueue.handlePromptMessage(ws, data);
+    const client = this.getClientInfo(ws);
+    if (!client) {
+      this.safeSend(ws, {
+        type: "error",
+        code: "NOT_SUBSCRIBED",
+        message: "Must subscribe first",
+      });
+      return;
+    }
+
+    await this.messageQueue.handlePromptMessage(ws, client, data);
   }
 
   /**
@@ -1556,20 +1545,6 @@ export class SessionDO extends DurableObject<Env> {
     this.messenger.broadcast(message);
   }
 
-  /**
-   * Validate reasoning effort against a model's allowed values.
-   * Returns the validated effort string or null if invalid/absent.
-   */
-  private validateReasoningEffort(model: string, effort: string | undefined): string | null {
-    if (!effort) return null;
-    if (isValidReasoningEffort(model, effort)) return effort;
-    this.log.warn("Invalid reasoning effort for model, ignoring", {
-      model,
-      reasoning_effort: effort,
-    });
-    return null;
-  }
-
   private getPublicSessionId(session?: SessionRow | null): string {
     const resolved = session ?? this.getSession();
     return resolved?.session_name || resolved?.id || this.ctx.id.toString();
@@ -1588,10 +1563,6 @@ export class SessionDO extends DurableObject<Env> {
         });
       })
     );
-  }
-
-  private async transitionSessionStatus(status: SessionStatus): Promise<boolean> {
-    return this.statusService.transition(status);
   }
 
   private applySessionTitleUpdate(
@@ -1635,10 +1606,6 @@ export class SessionDO extends DurableObject<Env> {
     }
 
     return { ok: true, title: titleText };
-  }
-
-  private async reconcileSessionStatusAfterExecution(success: boolean): Promise<void> {
-    await this.statusService.reconcileAfterExecution(success);
   }
 
   /**

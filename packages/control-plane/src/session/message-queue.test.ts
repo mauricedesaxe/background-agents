@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { SessionMessageQueue } from "./message-queue";
-import type { ClientInfo, Env, ServerMessage } from "../types";
+import type { ClientInfo, ServerMessage } from "../types";
 import type { MessageRow, ParticipantRow, SessionRow } from "./types";
+
+const EXECUTION_TIMEOUT_MS = 60_000;
 
 function createParticipant(overrides: Partial<ParticipantRow> = {}): ParticipantRow {
   return {
@@ -84,8 +86,10 @@ function createClientInfo(overrides: Partial<ClientInfo> = {}): ClientInfo {
   };
 }
 
-function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | null }) {
+function buildQueue() {
+  const getSession = vi.fn(() => createSession());
   const repository = {
+    getSession,
     createMessage: vi.fn(),
     createEvent: vi.fn(),
     getPendingOrProcessingCount: vi.fn(() => 1),
@@ -117,39 +121,39 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
 
   const broadcast = vi.fn((_message: ServerMessage) => {});
   const messenger = { broadcast, sendToSandbox: vi.fn(() => true) };
+  const sessionStatus = {
+    transition: vi.fn(async (_status: string) => true),
+    reconcileAfterExecution: vi.fn(async (_success: boolean) => {}),
+  };
   const spawnSandbox = vi.fn(async () => {});
-  const setSessionStatus = vi.fn(async (_status: string) => {});
-  const reconcileSessionStatusAfterExecution = vi.fn(async (_success: boolean) => {});
-  const updateLastActivity = vi.fn();
-  const scheduleSandboxConnectTimeout = vi.fn(async (_deadlineMs: number) => {});
+  const sandboxLifecycle = {
+    spawnSandbox,
+    updateLastActivity: vi.fn((_timestamp: number) => {}),
+  };
   const waitUntil = vi.fn();
-  const getSession = vi.fn(() => createSession());
+  const getAlarm = vi.fn(async () => null as number | null);
+  const setAlarm = vi.fn(async (_timestamp: number) => {});
 
-  const queue = new SessionMessageQueue({
-    env: {} as Env,
-    ctx: { waitUntil } as unknown as DurableObjectState,
-    log: {
+  const queue = new SessionMessageQueue(
+    { waitUntil, storage: { getAlarm, setAlarm } } as unknown as DurableObjectState,
+    {
       debug: vi.fn(),
       info: vi.fn(),
       warn: vi.fn(),
       error: vi.fn(),
       child: vi.fn(),
     },
-    repository: repository as never,
-    wsManager: wsManager as never,
-    participantService: participantService as never,
-    callbackService: callbackService as never,
-    scmProvider: "github",
-    getClientInfo: options?.getClientInfo ?? (() => createClientInfo()),
-    validateReasoningEffort: vi.fn(() => null),
-    getSession,
-    updateLastActivity,
-    spawnSandbox,
+    repository as never,
+    wsManager as never,
     messenger,
-    setSessionStatus,
-    reconcileSessionStatusAfterExecution,
-    scheduleSandboxConnectTimeout,
-  });
+    participantService as never,
+    callbackService as never,
+    sessionStatus as never,
+    sandboxLifecycle,
+    null,
+    "github",
+    EXECUTION_TIMEOUT_MS
+  );
 
   return {
     queue,
@@ -159,27 +163,59 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
     getSession,
     broadcast,
     spawnSandbox,
-    setSessionStatus,
-    reconcileSessionStatusAfterExecution,
-    scheduleSandboxConnectTimeout,
+    sessionStatus,
+    sandboxLifecycle,
+    getAlarm,
+    setAlarm,
     waitUntil,
   };
 }
 
 describe("SessionMessageQueue", () => {
-  it("sends NOT_SUBSCRIBED when prompt arrives before subscribe", async () => {
-    const h = buildQueue({ getClientInfo: () => null });
+  describe("execution timeout scheduling", () => {
+    function dispatchPrompt(h: ReturnType<typeof buildQueue>) {
+      h.repository.getNextPendingMessage.mockReturnValue(createMessage());
+      h.wsManager.getSandboxSocket.mockReturnValue({ readyState: 1 } as WebSocket);
+      return h.queue.processMessageQueue();
+    }
 
-    await h.queue.handlePromptMessage({} as WebSocket, { content: "hello" });
+    it("schedules the execution deadline when no alarm is set", async () => {
+      const h = buildQueue();
+      const before = Date.now();
 
-    expect(h.wsManager.send).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ code: "NOT_SUBSCRIBED" })
-    );
-    expect(h.repository.createMessage).not.toHaveBeenCalled();
-    expect(h.setSessionStatus).not.toHaveBeenCalled();
+      await dispatchPrompt(h);
+
+      expect(h.setAlarm).toHaveBeenCalledTimes(1);
+      const deadline = h.setAlarm.mock.calls[0][0];
+      expect(deadline).toBeGreaterThanOrEqual(before + EXECUTION_TIMEOUT_MS);
+      expect(deadline).toBeLessThanOrEqual(Date.now() + EXECUTION_TIMEOUT_MS);
+    });
+
+    it("keeps an earlier existing alarm", async () => {
+      const h = buildQueue();
+      h.getAlarm.mockResolvedValue(Date.now() + 1000);
+
+      await dispatchPrompt(h);
+
+      expect(h.setAlarm).not.toHaveBeenCalled();
+    });
+
+    it("replaces a later existing alarm with the execution deadline", async () => {
+      const h = buildQueue();
+      h.getAlarm.mockResolvedValue(Date.now() + EXECUTION_TIMEOUT_MS * 10);
+      const before = Date.now();
+
+      await dispatchPrompt(h);
+
+      expect(h.setAlarm).toHaveBeenCalledTimes(1);
+      const deadline = h.setAlarm.mock.calls[0][0];
+      expect(deadline).toBeGreaterThanOrEqual(before + EXECUTION_TIMEOUT_MS);
+      expect(deadline).toBeLessThanOrEqual(Date.now() + EXECUTION_TIMEOUT_MS);
+    });
   });
 
+  // Upstream asserts no alarm is armed on this path. We arm the connect
+  // watchdog here instead, so the deferred-spawn case diverges deliberately.
   it("spawns sandbox and arms the connect watchdog when there is work but no sandbox socket", async () => {
     const h = buildQueue();
     h.repository.getNextPendingMessage.mockReturnValue(createMessage());
@@ -188,17 +224,17 @@ describe("SessionMessageQueue", () => {
 
     expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_spawning" });
     expect(h.spawnSandbox).toHaveBeenCalledTimes(1);
-    expect(h.scheduleSandboxConnectTimeout).toHaveBeenCalledTimes(1);
-    expect(h.scheduleSandboxConnectTimeout.mock.calls[0][0]).toBeGreaterThan(Date.now());
+    expect(h.setAlarm).toHaveBeenCalledTimes(1);
+    expect(h.setAlarm.mock.calls[0][0]).toBeGreaterThan(Date.now());
     expect(h.repository.updateMessageToProcessing).not.toHaveBeenCalled();
   });
 
   it("marks session active when a prompt is enqueued", async () => {
     const h = buildQueue();
 
-    await h.queue.handlePromptMessage({} as WebSocket, { content: "hello" });
+    await h.queue.handlePromptMessage({} as WebSocket, createClientInfo(), { content: "hello" });
 
-    expect(h.setSessionStatus).toHaveBeenCalledWith("active");
+    expect(h.sessionStatus.transition).toHaveBeenCalledWith("active");
   });
 
   it("uses the provider-agnostic auth name for user messages without SCM identity", () => {
@@ -304,7 +340,7 @@ describe("SessionMessageQueue", () => {
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
     expect(h.wsManager.send).toHaveBeenCalledWith(sandboxWs, { type: "stop" });
     expect(h.waitUntil).toHaveBeenCalledTimes(1);
-    expect(h.reconcileSessionStatusAfterExecution).toHaveBeenCalledWith(false);
+    expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
   });
 
   it("suppresses session status reconcile when stopExecution is called with suppress flag", async () => {
@@ -313,7 +349,7 @@ describe("SessionMessageQueue", () => {
 
     await h.queue.stopExecution({ suppressStatusReconcile: true });
 
-    expect(h.reconcileSessionStatusAfterExecution).not.toHaveBeenCalled();
+    expect(h.sessionStatus.reconcileAfterExecution).not.toHaveBeenCalled();
   });
 
   it("reconciles session status when failing a stuck processing message", async () => {
@@ -322,7 +358,7 @@ describe("SessionMessageQueue", () => {
 
     await h.queue.failStuckProcessingMessage({ type: "execution_timeout", elapsedMs: 90 * 60_000 });
 
-    expect(h.reconcileSessionStatusAfterExecution).toHaveBeenCalledWith(false);
+    expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
   });
 
   describe("failStuckProcessingMessage cause messages", () => {
@@ -392,7 +428,7 @@ describe("SessionMessageQueue", () => {
         type: "processing_status",
         isProcessing: false,
       });
-      expect(h.reconcileSessionStatusAfterExecution).toHaveBeenCalledWith(false);
+      expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
     });
 
     it("surfaces the recorded spawn error when one is present", async () => {

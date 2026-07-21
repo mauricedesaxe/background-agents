@@ -1,5 +1,5 @@
 import { generateId } from "../auth/crypto";
-import { SessionIndexStore } from "../db/session-index";
+import type { SessionIndexStore } from "../db/session-index";
 import type { Logger } from "../logger";
 import {
   DEFAULT_MODEL,
@@ -8,25 +8,20 @@ import {
   resolveReasoningEffort,
 } from "@open-inspect/shared";
 import type { SessionAttachmentReference } from "@open-inspect/shared";
-import type {
-  ClientInfo,
-  Env,
-  MessageSource,
-  SandboxEvent,
-  ServerMessage,
-  SessionStatus,
-} from "../types";
+import type { ClientInfo, MessageSource, SandboxEvent, ServerMessage } from "../types";
 import type { SourceControlProviderName } from "../source-control";
-import type { SandboxTerminationReason } from "../sandbox/lifecycle/manager";
-import type { SessionRow, ParticipantRow, SandboxCommand } from "./types";
+import type { SandboxLifecycle, SandboxTerminationReason } from "../sandbox/lifecycle/manager";
+import type { ParticipantRow, SandboxCommand } from "./types";
 import type { SessionRepository } from "./repository";
 import type { SessionMessenger } from "./messenger";
 import type { SessionWebSocketManager } from "./websocket-manager";
 import type { ParticipantService } from "./participant-service";
 import type { CallbackNotificationService } from "./callback-notification-service";
+import type { SessionStatusService } from "./session-status-service";
 import type { EnqueuePromptRequest } from "./services/message.service";
 import { getAvatarUrl } from "./participant-service";
 import { resolveParticipantName } from "./participant-name";
+import { validateReasoningEffort } from "./reasoning-effort";
 
 interface PromptMessageData {
   content: string;
@@ -88,56 +83,49 @@ function describeSandboxTermination(reason: SandboxTerminationReason): string {
   }
 }
 
-interface MessageQueueDeps {
-  env: Env;
-  ctx: DurableObjectState;
-  log: Logger;
-  repository: SessionRepository;
-  wsManager: SessionWebSocketManager;
-  participantService: ParticipantService;
-  callbackService: CallbackNotificationService;
-  scmProvider: SourceControlProviderName;
-  getClientInfo: (ws: WebSocket) => ClientInfo | null;
-  validateReasoningEffort: (model: string, effort: string | undefined) => string | null;
-  getSession: () => SessionRow | null;
-  updateLastActivity: (timestamp: number) => void;
-  spawnSandbox: () => Promise<void>;
-  messenger: SessionMessenger;
-  setSessionStatus: (status: SessionStatus) => Promise<void>;
-  reconcileSessionStatusAfterExecution: (success: boolean) => Promise<void>;
-  scheduleExecutionTimeout?: (startedAtMs: number) => Promise<void>;
-  /**
-   * Arm the DO alarm to fire no later than `deadlineMs` so the watchdog can
-   * fail a pending message whose sandbox never connected. Uses the same single
-   * alarm slot as the execution/inactivity timeouts (earliest deadline wins).
-   */
-  scheduleSandboxConnectTimeout?: (deadlineMs: number) => Promise<void>;
-}
-
 interface StopExecutionOptions {
   suppressStatusReconcile?: boolean;
 }
 
 export class SessionMessageQueue {
-  constructor(private readonly deps: MessageQueueDeps) {}
+  constructor(
+    private readonly ctx: DurableObjectState,
+    private readonly log: Logger,
+    private readonly repository: SessionRepository,
+    private readonly wsManager: SessionWebSocketManager,
+    private readonly messenger: SessionMessenger,
+    private readonly participantService: ParticipantService,
+    private readonly callbackService: CallbackNotificationService,
+    private readonly sessionStatus: SessionStatusService,
+    private readonly sandboxLifecycle: SandboxLifecycle,
+    private readonly sessionIndex: SessionIndexStore | null,
+    private readonly scmProvider: SourceControlProviderName,
+    private readonly executionTimeoutMs: number
+  ) {}
 
-  async handlePromptMessage(ws: WebSocket, data: PromptMessageData): Promise<void> {
-    const client = this.deps.getClientInfo(ws);
-    if (!client) {
-      this.deps.wsManager.send(ws, {
-        type: "error",
-        code: "NOT_SUBSCRIBED",
-        message: "Must subscribe first",
-      });
-      return;
+  /**
+   * Arm the DO alarm to fire no later than `deadlineMs`. The DO has a single
+   * alarm slot shared with the execution and inactivity timeouts, so the
+   * earliest deadline always wins.
+   */
+  private async scheduleAlarm(deadlineMs: number): Promise<void> {
+    const currentAlarm = await this.ctx.storage.getAlarm();
+    if (!currentAlarm || deadlineMs < currentAlarm) {
+      await this.ctx.storage.setAlarm(deadlineMs);
     }
+  }
 
+  async handlePromptMessage(
+    ws: WebSocket,
+    client: ClientInfo,
+    data: PromptMessageData
+  ): Promise<void> {
     const messageId = generateId();
     const now = Date.now();
 
-    let participant = this.deps.participantService.getByUserId(client.userId);
+    let participant = this.participantService.getByUserId(client.userId);
     if (!participant) {
-      participant = this.deps.participantService.create(client.userId, client.name);
+      participant = this.participantService.create(client.userId, client.name);
     }
 
     let messageModel: string | null = null;
@@ -145,17 +133,19 @@ export class SessionMessageQueue {
       if (isValidModel(data.model)) {
         messageModel = data.model;
       } else {
-        this.deps.log.warn("Invalid message model, ignoring override", { model: data.model });
+        this.log.warn("Invalid message model, ignoring override", { model: data.model });
       }
     }
 
-    const effectiveModelForEffort = messageModel || this.deps.getSession()?.model || DEFAULT_MODEL;
-    const messageReasoningEffort = this.deps.validateReasoningEffort(
+    const effectiveModelForEffort =
+      messageModel || this.repository.getSession()?.model || DEFAULT_MODEL;
+    const messageReasoningEffort = validateReasoningEffort(
       effectiveModelForEffort,
-      data.reasoningEffort
+      data.reasoningEffort,
+      this.log
     );
 
-    this.deps.repository.createMessage({
+    this.repository.createMessage({
       id: messageId,
       authorId: participant.id,
       content: data.content,
@@ -167,13 +157,13 @@ export class SessionMessageQueue {
       createdAt: now,
     });
 
-    await this.deps.setSessionStatus("active");
+    await this.sessionStatus.transition("active");
 
     this.writeUserMessageEvent(participant, data.content, messageId, now);
 
-    const position = this.deps.repository.getPendingOrProcessingCount();
+    const position = this.repository.getPendingOrProcessingCount();
 
-    this.deps.log.info("prompt.enqueue", {
+    this.log.info("prompt.enqueue", {
       event: "prompt.enqueue",
       message_id: messageId,
       source: "web",
@@ -187,14 +177,14 @@ export class SessionMessageQueue {
       queue_position: position,
     });
 
-    if (this.deps.env.DB) {
-      const store = new SessionIndexStore(this.deps.env.DB);
-      const session = this.deps.getSession();
+    const sessionIndex = this.sessionIndex;
+    if (sessionIndex) {
+      const session = this.repository.getSession();
       const sessionId = session?.session_name || session?.id;
       if (sessionId) {
-        this.deps.ctx.waitUntil(
-          store.touchUpdatedAt(sessionId).catch((error) => {
-            this.deps.log.error("session_index.touch_updated_at.background_error", {
+        this.ctx.waitUntil(
+          sessionIndex.touchUpdatedAt(sessionId).catch((error) => {
+            this.log.error("session_index.touch_updated_at.background_error", {
               session_id: sessionId,
               error,
             });
@@ -203,7 +193,7 @@ export class SessionMessageQueue {
       }
     }
 
-    this.deps.wsManager.send(ws, {
+    this.wsManager.send(ws, {
       type: "prompt_queued",
       messageId,
       position,
@@ -213,47 +203,43 @@ export class SessionMessageQueue {
   }
 
   async processMessageQueue(): Promise<void> {
-    if (this.deps.repository.getProcessingMessage()) {
-      this.deps.log.debug("processMessageQueue: already processing, returning");
+    if (this.repository.getProcessingMessage()) {
+      this.log.debug("processMessageQueue: already processing, returning");
       return;
     }
 
-    const message = this.deps.repository.getNextPendingMessage();
+    const message = this.repository.getNextPendingMessage();
     if (!message) {
       return;
     }
     const now = Date.now();
 
-    const sandboxWs = this.deps.wsManager.getSandboxSocket();
+    const sandboxWs = this.wsManager.getSandboxSocket();
     if (!sandboxWs) {
-      this.deps.log.info("prompt.dispatch", {
+      this.log.info("prompt.dispatch", {
         event: "prompt.dispatch",
         message_id: message.id,
         outcome: "deferred",
         reason: "no_sandbox",
       });
-      this.deps.messenger.broadcast({ type: "sandbox_spawning" });
+      this.messenger.broadcast({ type: "sandbox_spawning" });
       // Arm the watchdog before spawning so a spawn/resume that never yields a
       // connected sandbox eventually fails the message instead of stalling
       // silently. A successful connect moves the message to `processing`, which
       // neutralizes the watchdog (it only acts on a still-pending message).
-      if (this.deps.scheduleSandboxConnectTimeout) {
-        await this.deps.scheduleSandboxConnectTimeout(now + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
-      }
-      await this.deps.spawnSandbox();
+      await this.scheduleAlarm(now + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
+      await this.sandboxLifecycle.spawnSandbox();
       return;
     }
 
-    this.deps.repository.updateMessageToProcessing(message.id, now);
-    this.deps.messenger.broadcast({ type: "processing_status", isProcessing: true });
-    this.deps.updateLastActivity(now);
+    this.repository.updateMessageToProcessing(message.id, now);
+    this.messenger.broadcast({ type: "processing_status", isProcessing: true });
+    this.sandboxLifecycle.updateLastActivity(now);
 
-    if (this.deps.scheduleExecutionTimeout) {
-      await this.deps.scheduleExecutionTimeout(now);
-    }
+    await this.scheduleAlarm(now + this.executionTimeoutMs);
 
-    const author = this.deps.repository.getParticipantById(message.author_id);
-    const session = this.deps.getSession();
+    const author = this.repository.getParticipantById(message.author_id);
+    const session = this.repository.getSession();
     const resolvedModel = getValidModelOrDefault(message.model || session?.model);
     const resolvedEffort = resolveReasoningEffort(
       resolvedModel,
@@ -274,9 +260,9 @@ export class SessionMessageQueue {
       attachments: message.attachments ? JSON.parse(message.attachments) : undefined,
     };
 
-    const sent = this.deps.wsManager.send(sandboxWs, command);
+    const sent = this.wsManager.send(sandboxWs, command);
 
-    this.deps.log.info("prompt.dispatch", {
+    this.log.info("prompt.dispatch", {
       event: "prompt.dispatch",
       message_id: message.id,
       outcome: sent ? "sent" : "send_failed",
@@ -294,11 +280,11 @@ export class SessionMessageQueue {
 
   async stopExecution(options: StopExecutionOptions = {}): Promise<void> {
     const now = Date.now();
-    const processingMessage = this.deps.repository.getProcessingMessage();
+    const processingMessage = this.repository.getProcessingMessage();
 
     if (processingMessage) {
-      this.deps.repository.updateMessageCompletion(processingMessage.id, "failed", now);
-      this.deps.log.info("prompt.stopped", {
+      this.repository.updateMessageCompletion(processingMessage.id, "failed", now);
+      this.log.info("prompt.stopped", {
         event: "prompt.stopped",
         message_id: processingMessage.id,
       });
@@ -312,31 +298,31 @@ export class SessionMessageQueue {
         sandboxId: "",
         timestamp: now / 1000,
       };
-      this.deps.repository.upsertExecutionCompleteEvent(
+      this.repository.upsertExecutionCompleteEvent(
         processingMessage.id,
         syntheticExecutionComplete,
         now
       );
 
-      this.deps.messenger.broadcast({
+      this.messenger.broadcast({
         type: "sandbox_event",
         event: syntheticExecutionComplete,
       });
 
-      this.deps.ctx.waitUntil(
-        this.deps.callbackService.notifyComplete(processingMessage.id, false, stopError)
+      this.ctx.waitUntil(
+        this.callbackService.notifyComplete(processingMessage.id, false, stopError)
       );
 
       if (!options.suppressStatusReconcile) {
-        await this.deps.reconcileSessionStatusAfterExecution(false);
+        await this.sessionStatus.reconcileAfterExecution(false);
       }
     }
 
-    this.deps.messenger.broadcast({ type: "processing_status", isProcessing: false });
+    this.messenger.broadcast({ type: "processing_status", isProcessing: false });
 
-    const sandboxWs = this.deps.wsManager.getSandboxSocket();
+    const sandboxWs = this.wsManager.getSandboxSocket();
     if (sandboxWs) {
-      this.deps.wsManager.send(sandboxWs, { type: "stop" });
+      this.wsManager.send(sandboxWs, { type: "stop" });
     }
   }
 
@@ -355,10 +341,10 @@ export class SessionMessageQueue {
    */
   async failStuckProcessingMessage(cause: ProcessingFailureCause): Promise<void> {
     const now = Date.now();
-    const processingMessage = this.deps.repository.getProcessingMessage();
+    const processingMessage = this.repository.getProcessingMessage();
     if (!processingMessage) return;
 
-    this.deps.repository.updateMessageCompletion(processingMessage.id, "failed", now);
+    this.repository.updateMessageCompletion(processingMessage.id, "failed", now);
 
     const stuckError = describeProcessingFailure(cause);
     const syntheticEvent: Extract<SandboxEvent, { type: "execution_complete" }> = {
@@ -369,13 +355,13 @@ export class SessionMessageQueue {
       sandboxId: "",
       timestamp: now / 1000,
     };
-    this.deps.repository.upsertExecutionCompleteEvent(processingMessage.id, syntheticEvent, now);
-    this.deps.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });
-    this.deps.messenger.broadcast({ type: "processing_status", isProcessing: false });
-    this.deps.ctx.waitUntil(
-      this.deps.callbackService.notifyComplete(processingMessage.id, false, stuckError)
+    this.repository.upsertExecutionCompleteEvent(processingMessage.id, syntheticEvent, now);
+    this.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });
+    this.messenger.broadcast({ type: "processing_status", isProcessing: false });
+    this.ctx.waitUntil(
+      this.callbackService.notifyComplete(processingMessage.id, false, stuckError)
     );
-    await this.deps.reconcileSessionStatusAfterExecution(false);
+    await this.sessionStatus.reconcileAfterExecution(false);
   }
 
   /**
@@ -393,23 +379,23 @@ export class SessionMessageQueue {
   async failStuckPendingMessage(): Promise<void> {
     // A connected sandbox or an in-flight message means dispatch is handling
     // this normally; the watchdog must not interfere.
-    if (this.deps.wsManager.getSandboxSocket()) return;
-    if (this.deps.repository.getProcessingMessage()) return;
+    if (this.wsManager.getSandboxSocket()) return;
+    if (this.repository.getProcessingMessage()) return;
 
-    const pending = this.deps.repository.getNextPendingMessage();
+    const pending = this.repository.getNextPendingMessage();
     if (!pending) return;
 
     const now = Date.now();
     if (now - pending.created_at < PENDING_SANDBOX_CONNECT_TIMEOUT_MS) return;
 
-    this.deps.repository.updateMessageCompletion(pending.id, "failed", now);
+    this.repository.updateMessageCompletion(pending.id, "failed", now);
 
     // A failed spawn (e.g. the Daytona disk-quota 400) records the real cause on
     // the sandbox row but only broadcasts it live; surface it here so a
     // reconnecting or autopilot client gets the real reason, not the generic one.
     // Only when the error is at least as new as this pending message, so a stale
     // error from an earlier spawn isn't pinned to a later prompt's timeout.
-    const sandbox = this.deps.repository.getSandbox();
+    const sandbox = this.repository.getSandbox();
     const spawnError =
       sandbox?.last_spawn_error && (sandbox.last_spawn_error_at ?? 0) >= pending.created_at
         ? sandbox.last_spawn_error
@@ -423,20 +409,18 @@ export class SessionMessageQueue {
       sandboxId: "",
       timestamp: now / 1000,
     };
-    this.deps.repository.upsertExecutionCompleteEvent(pending.id, syntheticEvent, now);
+    this.repository.upsertExecutionCompleteEvent(pending.id, syntheticEvent, now);
 
-    this.deps.log.warn("prompt.pending_timeout", {
+    this.log.warn("prompt.pending_timeout", {
       event: "prompt.pending_timeout",
       message_id: pending.id,
       waited_ms: now - pending.created_at,
     });
 
-    this.deps.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });
-    this.deps.messenger.broadcast({ type: "processing_status", isProcessing: false });
-    this.deps.ctx.waitUntil(
-      this.deps.callbackService.notifyComplete(pending.id, false, timeoutError)
-    );
-    await this.deps.reconcileSessionStatusAfterExecution(false);
+    this.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });
+    this.messenger.broadcast({ type: "processing_status", isProcessing: false });
+    this.ctx.waitUntil(this.callbackService.notifyComplete(pending.id, false, timeoutError));
+    await this.sessionStatus.reconcileAfterExecution(false);
   }
 
   writeUserMessageEvent(
@@ -453,25 +437,25 @@ export class SessionMessageQueue {
       author: {
         participantId: participant.id,
         name: resolveParticipantName(participant),
-        avatar: getAvatarUrl(participant.scm_login, this.deps.scmProvider),
+        avatar: getAvatarUrl(participant.scm_login, this.scmProvider),
       },
     };
-    this.deps.repository.createEvent({
+    this.repository.createEvent({
       id: generateId(),
       type: "user_message",
       data: JSON.stringify(userMessageEvent),
       messageId,
       createdAt: now,
     });
-    this.deps.messenger.broadcast({ type: "sandbox_event", event: userMessageEvent });
+    this.messenger.broadcast({ type: "sandbox_event", event: userMessageEvent });
   }
 
   async enqueuePromptFromApi(
     data: EnqueuePromptRequest
   ): Promise<{ messageId: string; status: "queued" }> {
-    let participant = this.deps.participantService.getByUserId(data.authorId);
+    let participant = this.participantService.getByUserId(data.authorId);
     if (!participant) {
-      participant = this.deps.participantService.create(
+      participant = this.participantService.create(
         data.authorId,
         data.authorDisplayName || data.authorId
       );
@@ -485,7 +469,7 @@ export class SessionMessageQueue {
       data.scmUserId ||
       data.scmAccessTokenEncrypted;
     if (hasEnrichment) {
-      this.deps.repository.updateParticipantCoalesce(participant.id, {
+      this.repository.updateParticipantCoalesce(participant.id, {
         scmName: data.authorDisplayName ?? null,
         scmEmail: data.authorEmail ?? null,
         scmLogin: data.authorLogin ?? null,
@@ -494,7 +478,7 @@ export class SessionMessageQueue {
         scmRefreshTokenEncrypted: data.scmRefreshTokenEncrypted ?? null,
         scmTokenExpiresAt: data.scmTokenExpiresAt ?? null,
       });
-      participant = this.deps.repository.getParticipantById(participant.id) ?? participant;
+      participant = this.repository.getParticipantById(participant.id) ?? participant;
     }
 
     const messageId = generateId();
@@ -505,17 +489,19 @@ export class SessionMessageQueue {
       if (isValidModel(data.model)) {
         messageModel = data.model;
       } else {
-        this.deps.log.warn("Invalid message model in enqueue, ignoring", { model: data.model });
+        this.log.warn("Invalid message model in enqueue, ignoring", { model: data.model });
       }
     }
 
-    const effectiveModelForEffort = messageModel || this.deps.getSession()?.model || DEFAULT_MODEL;
-    const messageReasoningEffort = this.deps.validateReasoningEffort(
+    const effectiveModelForEffort =
+      messageModel || this.repository.getSession()?.model || DEFAULT_MODEL;
+    const messageReasoningEffort = validateReasoningEffort(
       effectiveModelForEffort,
-      data.reasoningEffort
+      data.reasoningEffort,
+      this.log
     );
 
-    this.deps.repository.createMessage({
+    this.repository.createMessage({
       id: messageId,
       authorId: participant.id,
       content: data.content,
@@ -528,13 +514,13 @@ export class SessionMessageQueue {
       createdAt: now,
     });
 
-    await this.deps.setSessionStatus("active");
+    await this.sessionStatus.transition("active");
 
     this.writeUserMessageEvent(participant, data.content, messageId, now);
 
-    const queuePosition = this.deps.repository.getPendingOrProcessingCount();
+    const queuePosition = this.repository.getPendingOrProcessingCount();
 
-    this.deps.log.info("prompt.enqueue", {
+    this.log.info("prompt.enqueue", {
       event: "prompt.enqueue",
       message_id: messageId,
       source: data.source,
