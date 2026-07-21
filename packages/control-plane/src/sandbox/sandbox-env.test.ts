@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildSessionConfig } from "./sandbox-env";
+import { buildSessionConfig, scmCloneIdentity } from "./sandbox-env";
 
 const baseInput = {
   sessionId: "session-123",
@@ -68,5 +68,31 @@ describe("buildSessionConfig", () => {
       model: "anthropic/claude-sonnet-4-5",
     });
     expect(parsed).not.toHaveProperty("mcp_servers");
+  });
+});
+
+describe("scmCloneIdentity", () => {
+  it("resolves the GitHub clone identity", () => {
+    expect(scmCloneIdentity("github")).toEqual({
+      host: "github.com",
+      cloneUsername: "x-access-token",
+      secretHosts: ["github.com", "api.github.com"],
+    });
+  });
+
+  it("resolves the GitLab clone identity", () => {
+    expect(scmCloneIdentity("gitlab")).toEqual({
+      host: "gitlab.com",
+      cloneUsername: "oauth2",
+      secretHosts: ["gitlab.com", "api.gitlab.com"],
+    });
+  });
+
+  it("resolves the Bitbucket clone identity rather than falling back to GitHub", () => {
+    expect(scmCloneIdentity("bitbucket")).toEqual({
+      host: "bitbucket.org",
+      cloneUsername: "x-token-auth",
+      secretHosts: ["bitbucket.org", "api.bitbucket.org"],
+    });
   });
 });

@@ -267,6 +267,51 @@ describe("OpenComputerSandboxProvider", () => {
     });
   });
 
+  it("scopes clone secrets to Bitbucket hosts for Bitbucket sessions", async () => {
+    const client = createMockClient();
+    const provider = new OpenComputerSandboxProvider(client, {
+      scmProvider: "bitbucket",
+      codeServerPasswordSecret: "secret",
+    });
+
+    await provider.createSandbox({
+      ...baseConfig,
+      userEnvVars: { VCS_CLONE_TOKEN: "bb-token" },
+    });
+
+    const createCall = vi.mocked(client.createSandbox).mock.calls[0][0];
+    expect(createCall.env).toMatchObject({
+      VCS_HOST: "bitbucket.org",
+      VCS_CLONE_USERNAME: "x-token-auth",
+    });
+    expect(client.setSecret).toHaveBeenCalledWith({
+      storeId: "secret-store-1",
+      name: "VCS_CLONE_TOKEN",
+      value: "bb-token",
+      allowedHosts: ["bitbucket.org", "api.bitbucket.org"],
+    });
+  });
+
+  it("scopes a GITHUB-named secret to GitHub hosts even on a GitLab session", async () => {
+    const client = createMockClient();
+    const provider = new OpenComputerSandboxProvider(client, {
+      scmProvider: "gitlab",
+      codeServerPasswordSecret: "secret",
+    });
+
+    await provider.createSandbox({
+      ...baseConfig,
+      userEnvVars: { GITHUB_TOKEN: "gh-token" },
+    });
+
+    expect(client.setSecret).toHaveBeenCalledWith({
+      storeId: "secret-store-1",
+      name: "GITHUB_TOKEN",
+      value: "gh-token",
+      allowedHosts: ["github.com", "api.github.com"],
+    });
+  });
+
   it("cleans up a created sandbox when runtime startup fails", async () => {
     const client = createMockClient({
       startRuntime: vi.fn(async () => {
@@ -674,6 +719,31 @@ describe("OpenComputerSandboxProvider", () => {
     expect(onProviderSessionCreated).toHaveBeenCalledWith("oc-sandbox-1");
     expect(client.startRuntime).toHaveBeenCalledWith("oc-sandbox-1", {
       OI_REPO_IMAGE_PROVIDER_SESSION_ID: "oc-sandbox-1",
+    });
+  });
+
+  it("resolves the Bitbucket clone identity for image builds", async () => {
+    const client = createMockClient();
+    const provider = new OpenComputerSandboxProvider(client, {
+      scmProvider: "bitbucket",
+      codeServerPasswordSecret: "secret",
+    });
+
+    await provider.triggerEnvironmentImageBuild({
+      buildId: "envimg-1",
+      environmentId: "env_flagship",
+      repositories: [{ repoOwner: "acme", repoName: "web", baseBranch: "main" }],
+      callbackUrl: "https://control.example/environment-images/build-complete",
+      failureCallbackUrl: "https://control.example/environment-images/build-failed",
+      callbackToken: "callback-token",
+      cloneToken: "clone-token",
+      onProviderSessionCreated: vi.fn(async () => undefined),
+    });
+
+    const createCall = vi.mocked(client.createSandbox).mock.calls[0][0];
+    expect(createCall.env).toMatchObject({
+      VCS_HOST: "bitbucket.org",
+      VCS_CLONE_USERNAME: "x-token-auth",
     });
   });
 

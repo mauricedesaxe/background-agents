@@ -24,7 +24,7 @@ import {
   type OpenComputerSandboxResponse,
   type OpenComputerSecretStoreResponse,
 } from "../opencomputer-rest-client";
-import { buildSessionConfig, toRepositoryConfigPayload } from "../sandbox-env";
+import { buildSessionConfig, scmCloneIdentity, toRepositoryConfigPayload } from "../sandbox-env";
 import {
   SandboxProviderError,
   type CreateSandboxConfig,
@@ -509,13 +509,9 @@ export class OpenComputerSandboxProvider implements SandboxProvider {
     envVars.IMAGE_BUILD_MODE = "false";
     for (const key of RESERVED_REPO_IMAGE_CALLBACK_ENV_KEYS) envVars[key] = "";
 
-    if (this.providerConfig.scmProvider === "gitlab") {
-      envVars.VCS_HOST = "gitlab.com";
-      envVars.VCS_CLONE_USERNAME = "oauth2";
-    } else {
-      envVars.VCS_HOST = "github.com";
-      envVars.VCS_CLONE_USERNAME = "x-access-token";
-    }
+    const scmIdentity = scmCloneIdentity(this.providerConfig.scmProvider);
+    envVars.VCS_HOST = scmIdentity.host;
+    envVars.VCS_CLONE_USERNAME = scmIdentity.cloneUsername;
 
     return environment;
   }
@@ -551,13 +547,9 @@ export class OpenComputerSandboxProvider implements SandboxProvider {
       [REPO_IMAGE_CALLBACK_ENV_KEYS[4]]: config.failureCallbackUrl,
     });
 
-    if (this.providerConfig.scmProvider === "gitlab") {
-      envVars.VCS_HOST = "gitlab.com";
-      envVars.VCS_CLONE_USERNAME = "oauth2";
-    } else {
-      envVars.VCS_HOST = "github.com";
-      envVars.VCS_CLONE_USERNAME = "x-access-token";
-    }
+    const scmIdentity = scmCloneIdentity(this.providerConfig.scmProvider);
+    envVars.VCS_HOST = scmIdentity.host;
+    envVars.VCS_CLONE_USERNAME = scmIdentity.cloneUsername;
     if (config.cloneToken) {
       envVars.VCS_CLONE_TOKEN = config.cloneToken;
     }
@@ -645,10 +637,14 @@ export class OpenComputerSandboxProvider implements SandboxProvider {
     const normalized = name.toUpperCase();
     if (normalized.includes("ANTHROPIC")) return ["api.anthropic.com"];
     if (normalized.includes("OPENAI")) return ["api.openai.com"];
-    if (normalized.includes("GITHUB") || normalized.includes("VCS_CLONE")) {
-      return this.providerConfig.scmProvider === "gitlab"
-        ? ["gitlab.com", "api.gitlab.com"]
-        : ["github.com", "api.github.com"];
+    // VCS_CLONE_* is the provider-generic clone credential, so it follows the
+    // configured SCM provider; GITHUB-named secrets are GitHub credentials no
+    // matter which provider the deployment clones from.
+    if (normalized.includes("VCS_CLONE")) {
+      return [...scmCloneIdentity(this.providerConfig.scmProvider).secretHosts];
+    }
+    if (normalized.includes("GITHUB")) {
+      return [...scmCloneIdentity("github").secretHosts];
     }
     return undefined;
   }

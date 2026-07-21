@@ -11,7 +11,7 @@ import { createLogger } from "../../logger";
 import type { SourceControlProviderName } from "../../source-control";
 import type { DaytonaRestClient, DaytonaCreateSandboxParams } from "../daytona-rest-client";
 import { DaytonaApiError, DaytonaNotFoundError } from "../daytona-rest-client";
-import { buildSessionConfig } from "../sandbox-env";
+import { buildSessionConfig, scmCloneIdentity } from "../sandbox-env";
 import {
   SandboxProviderError,
   type ArchiveConfig,
@@ -293,13 +293,9 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       envVars.AGENT_SLACK_NOTIFY_ENABLED = "true";
     }
 
-    if (this.providerConfig.scmProvider === "gitlab") {
-      envVars.VCS_HOST = "gitlab.com";
-      envVars.VCS_CLONE_USERNAME = "oauth2";
-    } else {
-      envVars.VCS_HOST = "github.com";
-      envVars.VCS_CLONE_USERNAME = "x-access-token";
-    }
+    const scmIdentity = scmCloneIdentity(this.providerConfig.scmProvider);
+    envVars.VCS_HOST = scmIdentity.host;
+    envVars.VCS_CLONE_USERNAME = scmIdentity.cloneUsername;
 
     // Note: no VCS_CLONE_TOKEN / GITHUB_TOKEN / GITHUB_APP_TOKEN. Git
     // operations in the sandbox authenticate per-request via the system git

@@ -11,7 +11,7 @@ import { resolveServicePorts, resolveTunnelPorts } from "../port-resolution";
 import { createLogger } from "../../../logger";
 import type { CorrelationContext } from "../../../logger";
 import type { SourceControlProviderName } from "../../../source-control";
-import { buildSessionConfig, toRepositoryConfigPayload } from "../../sandbox-env";
+import { buildSessionConfig, scmCloneIdentity, toRepositoryConfigPayload } from "../../sandbox-env";
 import {
   DEFAULT_SANDBOX_TIMEOUT_SECONDS,
   SandboxProviderError,
@@ -443,16 +443,9 @@ export class VercelSandboxProvider implements SandboxProvider {
   }
 
   private injectScmEnvVars(envVars: Record<string, string>, cloneToken?: string): void {
-    if (this.providerConfig.scmProvider === "gitlab") {
-      envVars.VCS_HOST = "gitlab.com";
-      envVars.VCS_CLONE_USERNAME = "oauth2";
-    } else if (this.providerConfig.scmProvider === "bitbucket") {
-      envVars.VCS_HOST = "bitbucket.org";
-      envVars.VCS_CLONE_USERNAME = "x-token-auth";
-    } else {
-      envVars.VCS_HOST = "github.com";
-      envVars.VCS_CLONE_USERNAME = "x-access-token";
-    }
+    const scmIdentity = scmCloneIdentity(this.providerConfig.scmProvider);
+    envVars.VCS_HOST = scmIdentity.host;
+    envVars.VCS_CLONE_USERNAME = scmIdentity.cloneUsername;
 
     if (cloneToken) {
       envVars.VCS_CLONE_TOKEN = cloneToken;
