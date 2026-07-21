@@ -69,6 +69,7 @@ afterEach(() => {
 });
 
 function createSession(index: number, overrides: Record<string, unknown> = {}) {
+  const updatedAt = Date.now() - index;
   return {
     id: `session-${index}`,
     title: `Session ${index}`,
@@ -78,8 +79,8 @@ function createSession(index: number, overrides: Record<string, unknown> = {}) {
     spawnSource: "user",
     spawnDepth: 0,
     status: "active",
-    createdAt: 1000 + index,
-    updatedAt: 2000 + index,
+    createdAt: updatedAt - 1000,
+    updatedAt,
     ...overrides,
   };
 }
@@ -93,15 +94,16 @@ function jsonResponse(body: unknown) {
 
 describe("SessionSidebar", () => {
   it("renders the PR status summary on session rows", async () => {
+    const now = Date.now();
     const single = createSession(1, {
-      updatedAt: 4000,
+      updatedAt: now,
       pullRequestSummary: { total: 1, open: 0, draft: 0, merged: 1, closed: 0 },
     });
     const multi = createSession(2, {
-      updatedAt: 3000,
+      updatedAt: now - 1,
       pullRequestSummary: { total: 3, open: 1, draft: 1, merged: 1, closed: 0 },
     });
-    const none = createSession(3, { updatedAt: 2000 });
+    const none = createSession(3, { updatedAt: now - 2 });
 
     render(
       <SWRConfig
@@ -140,20 +142,21 @@ describe("SessionSidebar", () => {
   });
 
   it("renders nested child sessions under their immediate parent", async () => {
-    const parent = createSession(1, { updatedAt: 4000 });
+    const now = Date.now();
+    const parent = createSession(1, { updatedAt: now });
     const child = createSession(2, {
       title: "Child session",
       parentSessionId: parent.id,
       spawnSource: "agent",
       spawnDepth: 1,
-      updatedAt: 3000,
+      updatedAt: now - 1,
     });
     const grandchild = createSession(3, {
       title: "Grandchild session",
       parentSessionId: child.id,
       spawnSource: "agent",
       spawnDepth: 2,
-      updatedAt: 2000,
+      updatedAt: now - 2,
     });
 
     render(
@@ -176,6 +179,151 @@ describe("SessionSidebar", () => {
     expect(await screen.findByText("Session 1")).toBeInTheDocument();
     expect(screen.getByText("Child session")).toBeInTheDocument();
     expect(screen.getByText("Grandchild session")).toBeInTheDocument();
+  });
+
+  it("defaults to manual sessions and switches to automatic roots with their children", async () => {
+    const manual = createSession(1, { title: "Manual session" });
+    const automatic = createSession(2, {
+      title: "Scheduled session",
+      spawnSource: "automation",
+    });
+    const child = createSession(3, {
+      title: "Automatic child",
+      parentSessionId: automatic.id,
+      spawnSource: "agent",
+    });
+
+    render(
+      <SWRConfig
+        value={{
+          fallback: {
+            [SIDEBAR_SESSIONS_KEY]: { sessions: [manual, automatic, child], hasMore: false },
+          },
+          dedupingInterval: 0,
+          revalidateOnFocus: false,
+        }}
+      >
+        <SessionSidebar />
+      </SWRConfig>
+    );
+
+    expect(await screen.findByText("Manual session")).toBeInTheDocument();
+    expect(screen.queryByText("Scheduled session")).not.toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Manual" })).toHaveAttribute("data-state", "on");
+
+    fireEvent.click(screen.getByRole("radio", { name: "Automatic" }));
+
+    expect(screen.getByText("Scheduled session")).toBeInTheDocument();
+    expect(screen.getByText("Automatic child")).toBeInTheDocument();
+    expect(screen.queryByText("Manual session")).not.toBeInTheDocument();
+  });
+
+  it("groups top-level sessions by repository context", async () => {
+    const sessions = [
+      createSession(1, { title: "Single repository" }),
+      createSession(2, {
+        title: "Multiple repositories session",
+        repositories: [
+          { repoOwner: "acme", repoName: "api", repoId: 1, baseBranch: "main" },
+          { repoOwner: "acme", repoName: "web", repoId: 2, baseBranch: "main" },
+        ],
+      }),
+      createSession(3, {
+        title: "Repository-less session",
+        repoOwner: null,
+        repoName: null,
+      }),
+    ];
+
+    render(
+      <SWRConfig
+        value={{
+          fallback: { [SIDEBAR_SESSIONS_KEY]: { sessions, hasMore: false } },
+          dedupingInterval: 0,
+          revalidateOnFocus: false,
+        }}
+      >
+        <SessionSidebar />
+      </SWRConfig>
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "open-inspect/background-agents" })
+    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Multiple repositories" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "No repository" })).toBeInTheDocument();
+    expect(screen.getByText("acme/api, acme/web")).toBeInTheDocument();
+  });
+
+  it("collapses inactive sessions and hides inactive-only groups until search matches", async () => {
+    const eightDaysAgo = Date.now() - 8 * 24 * 60 * 60 * 1000;
+    const sessions = [
+      createSession(1, { title: "Active session", repoName: "mixed" }),
+      createSession(2, {
+        title: "Old mixed session",
+        repoName: "mixed",
+        updatedAt: eightDaysAgo,
+      }),
+      createSession(3, {
+        title: "Dormant only",
+        repoName: "dormant",
+        updatedAt: eightDaysAgo - 1,
+      }),
+    ];
+
+    render(
+      <SWRConfig
+        value={{
+          fallback: { [SIDEBAR_SESSIONS_KEY]: { sessions, hasMore: false } },
+          dedupingInterval: 0,
+          revalidateOnFocus: false,
+        }}
+      >
+        <SessionSidebar />
+      </SWRConfig>
+    );
+
+    expect(await screen.findByText("Active session")).toBeInTheDocument();
+    expect(screen.queryByText("Old mixed session")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "open-inspect/dormant" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Inactive (1)" }));
+    expect(screen.getByText("Old mixed session")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Search sessions..."), {
+      target: { value: "Dormant only" },
+    });
+
+    expect(screen.getByRole("heading", { name: "open-inspect/dormant" })).toBeInTheDocument();
+    expect(screen.getByText("Dormant only")).toBeInTheDocument();
+  });
+
+  it("keeps the source filter active while searching inactive sessions", async () => {
+    const automatic = createSession(1, {
+      title: "Dormant automation",
+      spawnSource: "automation",
+      updatedAt: Date.now() - 8 * 24 * 60 * 60 * 1000,
+    });
+
+    render(
+      <SWRConfig
+        value={{
+          fallback: { [SIDEBAR_SESSIONS_KEY]: { sessions: [automatic], hasMore: false } },
+          dedupingInterval: 0,
+          revalidateOnFocus: false,
+        }}
+      >
+        <SessionSidebar />
+      </SWRConfig>
+    );
+
+    fireEvent.change(screen.getByPlaceholderText("Search sessions..."), {
+      target: { value: "Dormant automation" },
+    });
+    expect(screen.getByText("No matching sessions")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "Automatic" }));
+    expect(await screen.findByText("Dormant automation")).toBeInTheDocument();
   });
 
   it("shows an empty state for an unmatched search and restores sessions when cleared", async () => {
@@ -336,7 +484,10 @@ describe("SessionSidebar", () => {
 
       if (url === mineKey) {
         return jsonResponse({
-          sessions: [createSession(2, { title: "Mine only" })],
+          sessions: [
+            createSession(2, { title: "Mine only" }),
+            createSession(3, { title: "Mine automation", spawnSource: "automation" }),
+          ],
           hasMore: false,
         });
       }
@@ -371,6 +522,10 @@ describe("SessionSidebar", () => {
       expect(fetchMock).toHaveBeenCalledWith(mineKey);
     });
     expect(screen.queryByText("Session 1")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "Automatic" }));
+    expect(screen.getByText("Mine automation")).toBeInTheDocument();
+    expect(screen.queryByText("Mine only")).not.toBeInTheDocument();
   });
 
   it("matches non-primary repository members in the sidebar search", async () => {
