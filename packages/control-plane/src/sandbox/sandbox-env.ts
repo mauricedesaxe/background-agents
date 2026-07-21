@@ -1,5 +1,6 @@
 import type { McpServerConfig } from "@open-inspect/shared";
 import type { SessionRepositoryInfo } from "./provider";
+import type { SourceControlProviderName } from "../source-control/types";
 
 /**
  * Shared assembly for the sandbox environment contract.
@@ -85,4 +86,40 @@ export function toRepositoryConfigPayload(
     repo_name: repository.repoName,
     branch: repository.baseBranch,
   };
+}
+
+/** Host/username pair git pairs with the brokered clone token in the sandbox. */
+export interface ScmCloneIdentity {
+  /** `VCS_HOST` — hostname the credential helper and clone URLs target. */
+  readonly host: string;
+  /** `VCS_CLONE_USERNAME` — username git sends alongside the brokered token. */
+  readonly cloneUsername: string;
+  /** Hosts an SCM credential secret may be released to (clone host + API host). */
+  readonly secretHosts: readonly string[];
+}
+
+const SCM_CLONE_IDENTITIES: Record<SourceControlProviderName, ScmCloneIdentity> = {
+  github: {
+    host: "github.com",
+    cloneUsername: "x-access-token",
+    secretHosts: ["github.com", "api.github.com"],
+  },
+  gitlab: {
+    host: "gitlab.com",
+    cloneUsername: "oauth2",
+    secretHosts: ["gitlab.com", "api.gitlab.com"],
+  },
+  bitbucket: {
+    host: "bitbucket.org",
+    cloneUsername: "x-token-auth",
+    secretHosts: ["bitbucket.org", "api.bitbucket.org"],
+  },
+};
+
+/**
+ * Keyed exhaustively by provider so adding one is a compile error here rather
+ * than a silent fallback in each caller.
+ */
+export function scmCloneIdentity(scmProvider: SourceControlProviderName): ScmCloneIdentity {
+  return SCM_CLONE_IDENTITIES[scmProvider];
 }
