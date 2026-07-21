@@ -174,6 +174,33 @@ still asserts only that _some_ `#channel` was mentioned. And the prompt needs th
 It is registered under `data-research`, which is not a clean fit. Adding a category for a single
 template was judged not worth the taxonomy change.
 
+## Where we match upstream against our own docs
+
+The list above is where we differ from upstream. This is the inverse: a place where matching
+upstream puts us at odds with a document in this repo, and matching upstream still wins.
+
+**The sandbox clone identity lives in `packages/control-plane/src/sandbox/sandbox-env.ts`, not under
+`source-control/`.** `scmCloneIdentity` maps an SCM provider to the `VCS_HOST` and
+`VCS_CLONE_USERNAME` the in-sandbox credential helper uses, plus the hosts its clone-token secret
+may be released to. [ADR 0001](adr/0001-single-provider-scm-boundaries.md) says sandbox
+credential-helper auth belongs in provider implementations, and the
+[provider contribution checklist](provider-contribution-checklist.md) says no provider-specific
+token logic outside provider/auth modules. Read literally, both point away from where this sits.
+
+**Why it stays.** Upstream ships that ADR and puts the identity in `sandbox-env.ts` anyway. Moving
+it would put us deliberately out of step in a file upstream actively edits, which costs the next
+sync the exact thing the posture above buys. The ADR is upstream's to reconcile with its own code.
+
+**What it costs, and what to watch.** Authentication policy now has two owners: this map hardcodes
+`x-access-token`, and `source-control/providers/github-provider.ts` independently returns the same
+string as the credential broker's username. Nothing fails if they drift, and a drift means the
+sandbox authenticates as one identity while the broker vends another. If a third caller appears, or
+if either side gains a provider the other lacks, that is the point to collapse them onto one owner
+rather than add to the duplication.
+
+Expect a reviewer to flag the placement; upstream's `#1059` (`ef820591`) is the commit that would
+re-site it, and taking that is the moment to revisit this note rather than before.
+
 ## The reserved migration range
 
 **Fork-local session-schema migrations use identifiers from `FORK_MIGRATION_ID_FLOOR` (9000) up.
