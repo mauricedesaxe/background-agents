@@ -103,6 +103,7 @@ export function SessionHeader({
             {isRenaming ? (
               <input
                 autoFocus
+                aria-label="Session title"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 onFocus={(e) => e.currentTarget.select()}
