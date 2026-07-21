@@ -192,6 +192,28 @@ describe("SessionStatusService.transition", () => {
     expect(h.broadcast).toHaveBeenCalledWith({ type: "session_status", status: "active" });
   });
 
+  it("broadcasts the new status only after the index write resolves", async () => {
+    const h = harness({ session: createSession({ status: "created" }) });
+
+    let releaseIndexWrite!: () => void;
+    h.sessionIndex!.updateStatus.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        releaseIndexWrite = () => resolve(true);
+      })
+    );
+
+    const transition = h.service.transition("active");
+    await Promise.resolve();
+
+    expect(h.sessionIndex!.updateStatus).toHaveBeenCalled();
+    expect(h.broadcast).not.toHaveBeenCalled();
+
+    releaseIndexWrite();
+    await transition;
+
+    expect(h.broadcast).toHaveBeenCalledWith({ type: "session_status", status: "active" });
+  });
+
   it("skips index and metrics writes when no session index is bound", async () => {
     const h = harness({ session: createSession({ status: "active" }), sessionIndex: null });
 
