@@ -139,7 +139,11 @@ export function SessionRightSidebarContent({
                 <LinkIcon className="h-3.5 w-3.5" />
               </a>
               {onToggleTerminal && (
-                <button onClick={onToggleTerminal} className="text-xs text-accent hover:underline">
+                <button
+                  type="button"
+                  onClick={onToggleTerminal}
+                  className="text-xs text-accent hover:underline"
+                >
                   {terminalOpen ? "Hide" : "Show"}
                 </button>
               )}

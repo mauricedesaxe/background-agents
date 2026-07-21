@@ -123,7 +123,10 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState("");
   const [sessionCreatorFilter, setSessionCreatorFilter] = useState<SessionCreatorFilter>("all");
-  const [extraSessions, setExtraSessions] = useState<SessionItem[]>([]);
+  const [extraSessionsState, setExtraSessionsState] = useState<{
+    source: SessionListResponse | undefined;
+    sessions: SessionItem[];
+  }>({ source: undefined, sessions: [] });
   const [hasMorePages, setHasMorePages] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -150,18 +153,15 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
   const loading = sessionsLoading;
   const firstPageSessions = useMemo(() => data?.sessions ?? [], [data?.sessions]);
 
-  // Track data reference to clear extraSessions synchronously during render,
-  // preventing one frame of stale extra sessions after SWR revalidation.
-  const prevDataRef = useRef(data);
-  let effectiveExtraSessions = extraSessions;
-  if (prevDataRef.current !== data) {
-    prevDataRef.current = data;
-    effectiveExtraSessions = [];
-  }
+  // Hide paginated rows synchronously when SWR replaces their source page.
+  const extraSessions = useMemo(
+    () => (extraSessionsState.source === data ? extraSessionsState.sessions : []),
+    [data, extraSessionsState]
+  );
 
   useEffect(() => {
     sessionListVersionRef.current += 1;
-    setExtraSessions([]);
+    setExtraSessionsState({ source: data, sessions: [] });
     setLoadingMore(false);
     loadingMoreRef.current = false;
 
@@ -202,7 +202,10 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
         return;
       }
 
-      setExtraSessions((prev) => mergeUniqueSessions(prev, fetched));
+      setExtraSessionsState((previous) => ({
+        source: data,
+        sessions: mergeUniqueSessions(previous.source === data ? previous.sessions : [], fetched),
+      }));
       setHasMorePages(page.hasMore);
       offsetRef.current += fetched.length;
       hasMoreRef.current = page.hasMore;
@@ -214,7 +217,7 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
         setLoadingMore(false);
       }
     }
-  }, [authSession, sessionCreatorFilter, sidebarSessionsKey]);
+  }, [authSession, data, sessionCreatorFilter, sidebarSessionsKey]);
 
   const maybeLoadMoreSessions = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -243,8 +246,8 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
   ]);
 
   const sessions = useMemo(
-    () => mergeUniqueSessions(firstPageSessions, effectiveExtraSessions),
-    [firstPageSessions, effectiveExtraSessions]
+    () => mergeUniqueSessions(firstPageSessions, extraSessions),
+    [firstPageSessions, extraSessions]
   );
 
   // Sort sessions by updatedAt (most recent first), filter by search query,
@@ -350,7 +353,10 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
             : current,
         { revalidate: false, populateCache: true }
       );
-      setExtraSessions((prev) => prev.filter((session) => !removedIds.has(session.id)));
+      setExtraSessionsState((previous) => ({
+        ...previous,
+        sessions: previous.sessions.filter((session) => !removedIds.has(session.id)),
+      }));
 
       if (currentSessionId === sessionId) {
         router.push("/");
@@ -368,11 +374,12 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
   const handleSessionRenamed = useCallback(
     (sessionId: string, title: string) => {
       const updatedAt = Date.now();
-      setExtraSessions((prev) =>
-        prev.map((session) =>
+      setExtraSessionsState((previous) => ({
+        ...previous,
+        sessions: previous.sessions.map((session) =>
           session.id === sessionId ? { ...session, title, updatedAt } : session
-        )
-      );
+        ),
+      }));
       if (!sidebarSessionsKey) return;
 
       void mutate<SessionListResponse>(
@@ -567,6 +574,7 @@ function UserMenu({ user }: { user?: { name?: string | null; image?: string | nu
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
+          type="button"
           className="w-7 h-7 rounded-full overflow-hidden focus:outline-none focus:ring-2 focus:ring-primary"
           aria-label={`Signed in as ${user?.name || "User"}`}
           title={`Signed in as ${user?.name || "User"}`}

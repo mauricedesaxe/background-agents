@@ -641,6 +641,93 @@ describe("SessionSidebar", () => {
     });
   });
 
+  it("drops a child loaded on a later page when its parent is archived", async () => {
+    mockUseIsMobile.mockReturnValue(true);
+    const parent = createSession(1);
+    const firstPage = [
+      parent,
+      ...Array.from({ length: 49 }, (_, index) => createSession(index + 2)),
+    ];
+    const child = createSession(51, {
+      title: "Child session",
+      parentSessionId: parent.id,
+      spawnSource: "agent",
+      spawnDepth: 1,
+    });
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url === "/api/sessions/session-1/archive" && init?.method === "POST") {
+        return jsonResponse({ ok: true });
+      }
+      if (url === SIDEBAR_SESSIONS_KEY) {
+        return jsonResponse({ sessions: firstPage, hasMore: true });
+      }
+      if (url === buildSessionsPageKey({ excludeStatus: "archived", offset: 50 })) {
+        return jsonResponse({ sessions: [child], hasMore: false });
+      }
+
+      throw new Error(`Unexpected fetch for ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { container } = render(
+      <SWRConfig
+        value={{
+          provider: () => new Map(),
+          dedupingInterval: 0,
+          revalidateOnFocus: false,
+          fetcher: async (url: string) => {
+            const response = await fetch(url);
+            return response.json();
+          },
+        }}
+      >
+        <SessionSidebar />
+      </SWRConfig>
+    );
+
+    expect(await screen.findByText("Session 1")).toBeInTheDocument();
+
+    const scrollContainer = container.querySelector(".overflow-y-auto") as HTMLDivElement;
+    let scrollTop = 0;
+    Object.defineProperty(scrollContainer, "scrollHeight", { configurable: true, value: 2000 });
+    Object.defineProperty(scrollContainer, "clientHeight", { configurable: true, value: 400 });
+    Object.defineProperty(scrollContainer, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value) => {
+        scrollTop = value;
+      },
+    });
+
+    scrollTop = 1705;
+    fireEvent.scroll(scrollContainer);
+
+    expect(await screen.findByText("Child session")).toBeInTheDocument();
+
+    const parentLink = screen.getByText("Session 1").closest("a") as HTMLAnchorElement;
+    vi.useFakeTimers();
+    fireEvent.touchStart(parentLink, { touches: [{ clientX: 20, clientY: 20 }] });
+    act(() => {
+      vi.advanceTimersByTime(MOBILE_LONG_PRESS_MS);
+    });
+    vi.useRealTimers();
+
+    fireEvent.click(screen.getByText("Archive"));
+    fireEvent.click(await screen.findByRole("button", { name: "Archive" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/sessions/session-1/archive", { method: "POST" });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText("Child session")).not.toBeInTheDocument();
+    });
+  });
+
   it("keeps the session in the sidebar when archiving fails", async () => {
     mockUseIsMobile.mockReturnValue(true);
 
