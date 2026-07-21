@@ -194,6 +194,21 @@ parameter called `parentSessions` holding the stub of a child reads as a bug at 
 Expect a conflict on the next sync. Upstream edits this constructor whenever it adds a dependency,
 and the rename touches the same lines. Take upstream's _parameter list_ and keep our _name_.
 
+### 15. The terminal toggle keeps its functional state updater
+
+`packages/web/src/app/(app)/session/[id]/page.tsx` toggles the terminal panel with
+`setTerminalOpen((prev) => …)`. Upstream `0273a0e5` rewrote it to read `terminalOpen` from the
+closure and added the value to the callback's dependency list. We declined that hunk and took the
+rest of the commit.
+
+**Why.** The rewrite was made to satisfy a lint rule, and it reintroduces the stale read the
+functional form exists to avoid: two toggles in one tick both see the same `terminalOpen`, so the
+panel and the `terminal-visible` localStorage key disagree until the next toggle. Nothing in the
+suite covers it, because the race needs two clicks inside one render pass.
+
+Re-proposing it is the specific risk. Upstream's version is the one a wholesale take of this file
+brings back, and it goes green.
+
 ## Where we match upstream against our own docs
 
 The list above is where we differ from upstream. This is the inverse: a place where matching
