@@ -47,6 +47,7 @@ import { generateId } from "../auth/crypto";
 import { createLogger, parseLogLevel } from "../logger";
 import type { Logger } from "../logger";
 import type { Env } from "../types";
+import type { SqlDatabase } from "../db/sql-database";
 import { initializeSession } from "../session/initialize";
 import { resolveSessionScopedSettings } from "../session/integration-settings-resolution";
 import { resolveAutomationRepositories } from "../automation/repository";
@@ -158,10 +159,14 @@ type StartInvocationResult =
 
 export class SchedulerDO extends DurableObject<Env> {
   private readonly log: Logger;
+  /** The DO's database handle — the single point where env.DB is read. */
+  private readonly db: SqlDatabase;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.log = createLogger("scheduler-do", {}, parseLogLevel(env.LOG_LEVEL));
+    // eslint-disable-next-line no-restricted-syntax -- composition root: the DO's one env.DB read
+    this.db = env.DB;
   }
 
   /**
@@ -492,7 +497,7 @@ export class SchedulerDO extends DurableObject<Env> {
   // ─── Tick handler ────────────────────────────────────────────────────────
 
   private async handleTick(): Promise<Response> {
-    const store = new AutomationStore(this.env.DB);
+    const store = new AutomationStore(this.db);
     const now = Date.now();
     let processed = 0;
     let skipped = 0;
@@ -793,7 +798,7 @@ export class SchedulerDO extends DurableObject<Env> {
     }
 
     const event = parsedEvent.data;
-    const store = new AutomationStore(this.env.DB);
+    const store = new AutomationStore(this.db);
 
     // 1. Find matching automations
     let candidates: AutomationRow[];
@@ -825,7 +830,7 @@ export class SchedulerDO extends DurableObject<Env> {
         );
         break;
       case "slack":
-        candidates = await new SlackChannelStore(this.env.DB).getSlackAutomationsForChannel(
+        candidates = await new SlackChannelStore(this.db).getSlackAutomationsForChannel(
           event.channelId
         );
         break;
@@ -937,7 +942,7 @@ export class SchedulerDO extends DurableObject<Env> {
 
     const { automationId } = parsedBody.data;
 
-    const store = new AutomationStore(this.env.DB);
+    const store = new AutomationStore(this.db);
     const automation = await store.getById(automationId);
     if (!automation) {
       return new Response(JSON.stringify({ error: "Automation not found" }), {
@@ -998,7 +1003,7 @@ export class SchedulerDO extends DurableObject<Env> {
 
     const body = parsedBody.data;
 
-    const store = new AutomationStore(this.env.DB);
+    const store = new AutomationStore(this.db);
 
     const run = await store.getRunById(body.automationId, body.runId);
     if (!run) {
@@ -1182,7 +1187,7 @@ export class SchedulerDO extends DurableObject<Env> {
   // ─── Health check ────────────────────────────────────────────────────────
 
   private async handleHealth(): Promise<Response> {
-    const store = new AutomationStore(this.env.DB);
+    const store = new AutomationStore(this.db);
     const overdueCount = await store.countOverdue(Date.now());
 
     return new Response(
@@ -1212,7 +1217,7 @@ export class SchedulerDO extends DurableObject<Env> {
     let userId = automation.user_id;
     if (!userId && automation.created_by && automation.created_by !== "anonymous") {
       try {
-        const userStore = new UserStore(this.env.DB);
+        const userStore = new UserStore(this.db);
         const identity = await userStore.getIdentity("github", automation.created_by);
         if (identity) {
           userId = identity.userId;
@@ -1226,6 +1231,7 @@ export class SchedulerDO extends DurableObject<Env> {
       trace_id: `automation:${automation.id}`,
       request_id: run.id,
       metrics: createRequestMetrics(),
+      db: this.db,
     };
 
     // What the session opens — the run's repository snapshot or, for
@@ -1243,7 +1249,7 @@ export class SchedulerDO extends DurableObject<Env> {
         ? [{ repoOwner: target.repoOwner, repoName: target.repoName }]
         : []);
     const { codeServerEnabled, sandboxSettings } = await resolveSessionScopedSettings(
-      this.env.DB,
+      this.db,
       scopeMembers,
       target.environmentId
     );

@@ -129,14 +129,15 @@ function createWorkflow(options: {
     });
   const createCallbackAuth =
     options.createCallbackAuth ?? vi.fn().mockResolvedValue({ kind: "none" });
+  const provider = options.provider === undefined ? "modal" : options.provider;
+  const planner = { planBuild, resolveTarget, createCallbackAuth } as unknown as NonNullable<
+    ConstructorParameters<typeof ImageBuildWorkflow>[3]
+  >["planner"];
   const workflow = new ImageBuildWorkflow(
     options.env ?? createEnv(),
     store as unknown as ImageBuildStore,
     factory,
-    options.provider === undefined ? "modal" : options.provider,
-    { planBuild, resolveTarget, createCallbackAuth } as unknown as ConstructorParameters<
-      typeof ImageBuildWorkflow
-    >[4]
+    provider ? { provider, planner } : null
   );
   return { workflow, store, adapter, factory, planBuild, resolveTarget, createCallbackAuth };
 }
@@ -247,15 +248,19 @@ describe("ImageBuildWorkflow", () => {
         createEnv(),
         store as unknown as ImageBuildStore,
         { create: factoryError },
-        "modal",
         {
-          planBuild: vi.fn(),
-          resolveTarget: vi.fn().mockResolvedValue({
-            repositories: [{ repoOwner: "acme", repoName: "web", baseBranch: "main" }],
-            repositoriesFingerprint: "fp-1",
-          }),
-          createCallbackAuth: vi.fn().mockResolvedValue({ kind: "none" }),
-        } as unknown as ConstructorParameters<typeof ImageBuildWorkflow>[4]
+          provider: "modal",
+          planner: {
+            planBuild: vi.fn(),
+            resolveTarget: vi.fn().mockResolvedValue({
+              repositories: [{ repoOwner: "acme", repoName: "web", baseBranch: "main" }],
+              repositoriesFingerprint: "fp-1",
+            }),
+            createCallbackAuth: vi.fn().mockResolvedValue({ kind: "none" }),
+          } as unknown as NonNullable<
+            ConstructorParameters<typeof ImageBuildWorkflow>[3]
+          >["planner"],
+        }
       );
 
       await expect(workflow.triggerBuild(ENV_SCOPE, ctx)).rejects.toMatchObject({

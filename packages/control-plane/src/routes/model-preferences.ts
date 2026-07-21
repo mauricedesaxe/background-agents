@@ -23,11 +23,11 @@ async function handleGetModelPreferences(
   _match: RegExpMatchArray,
   ctx: RequestContext
 ): Promise<Response> {
-  if (!env.DB) {
+  if (!ctx.db) {
     return json({ enabledModels: DEFAULT_ENABLED_MODELS });
   }
 
-  const store = new ModelPreferencesStore(env.DB);
+  const store = new ModelPreferencesStore(ctx.db);
 
   try {
     const enabledModels = await store.getEnabledModels();
@@ -49,7 +49,7 @@ async function handleSetModelPreferences(
   _match: RegExpMatchArray,
   ctx: RequestContext
 ): Promise<Response> {
-  if (!env.DB) {
+  if (!ctx.db) {
     return error("Model preferences storage is not configured", 503);
   }
 
@@ -60,7 +60,7 @@ async function handleSetModelPreferences(
     return error("Request body must include enabledModels array", 400);
   }
 
-  const store = new ModelPreferencesStore(env.DB);
+  const store = new ModelPreferencesStore(ctx.db);
 
   try {
     const deduplicated = [...new Set(body.enabledModels)];
