@@ -86,14 +86,21 @@ falling back to a default. Pinned by
 invisible. Every fanned-out agent also gets its own sandbox, so a zero cap is the only way to cap
 that cost.
 
-### 6. A session reattaches to its OpenCode conversation on resume
+### 6. A session reattaches to its OpenCode conversation and survives compaction
 
 `packages/sandbox-runtime/src/sandbox_runtime/bridge.py` takes a control-plane-supplied
 `opencodeSessionId` and reattaches, with a watchdog for messages that arrive before the sandbox is
-ready. Pinned by `packages/sandbox-runtime/tests/test_bridge_session_reattach.py`.
+ready. The same bridge keeps its SSE stream attached after OpenCode emits the first typed
+`ContextOverflowError`, allowing OpenCode's native compaction and replay to finish. Repeated or
+unrelated errors remain terminal. A completed compaction is persisted as a message-scoped
+`context_compacted` event and rendered as a neutral timeline status through `shared` and `web`.
+Pinned by `packages/sandbox-runtime/tests/test_bridge_session_reattach.py`, the compaction cases in
+`test_bridge_sse.py`, and `packages/sandbox-runtime/scripts/reproduce_context_overflow.py`.
 
-**Why.** Without it, resuming a session starts a fresh conversation and the history is gone from the
-agent's point of view while still being visible in the UI.
+**Why.** Without reattachment, resuming starts a fresh conversation and the history is gone from the
+agent's point of view while still being visible in the UI. Without overflow deferral, the bridge
+reports failure and disconnects while OpenCode successfully compacts and recovers in the same
+session, so the recovered response never reaches the user.
 
 ### 7. The SSE reader is decoupled from the WebSocket send
 
@@ -275,18 +282,18 @@ own, because they are claimed again.
 
 The shape matters when sequencing a sync. Ordered by how much diverges, heaviest first:
 
-| Package              | What diverges                                             |
-| -------------------- | --------------------------------------------------------- |
-| `control-plane`      | Nearly all of our behaviour. By far the heaviest package. |
-| `sandbox-runtime`    | Bridge, harness install, whiteboard skill                 |
-| `web`                | Board UI, archived-subtree sidebar, settings, automations |
-| `shared`             | Model catalog, artifact types, Slack `truncated` flag     |
-| `github-bot`         | Review prompt sources `lazar-review`; forward decoupling  |
-| `daytona-infra`      | Toolchain: jj, sandbox version                            |
-| `modal-infra`        | The harness install call in the image build, nothing else |
-| `opencomputer-infra` | The harness install call in the image build, nothing else |
-| `slack-bot`          | Page-cap warning, and a Terraform binding parity guard    |
-| `linear-bot`         | **Nothing.** Take upstream wholesale.                     |
+| Package              | What diverges                                               |
+| -------------------- | ----------------------------------------------------------- |
+| `control-plane`      | Nearly all of our behaviour. By far the heaviest package.   |
+| `sandbox-runtime`    | Bridge recovery/reattachment, harness install, whiteboard   |
+| `web`                | Board UI, compaction status, sidebar, settings, automations |
+| `shared`             | Models, artifacts, compaction event, Slack `truncated`      |
+| `github-bot`         | Review prompt sources `lazar-review`; forward decoupling    |
+| `daytona-infra`      | Toolchain: jj, sandbox version                              |
+| `modal-infra`        | The harness install call in the image build, nothing else   |
+| `opencomputer-infra` | The harness install call in the image build, nothing else   |
+| `slack-bot`          | Page-cap warning, and a Terraform binding parity guard      |
+| `linear-bot`         | **Nothing.** Take upstream wholesale.                       |
 
 Recompute the counts rather than remembering them, since any commit changes them:
 
