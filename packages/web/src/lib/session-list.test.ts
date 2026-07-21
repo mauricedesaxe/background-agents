@@ -285,6 +285,22 @@ describe("buildGroupedSessionList", () => {
     expect(grouped.groups).toEqual([]);
     expect(grouped.hasFilteredSessions).toBe(false);
   });
+
+  it("keeps a child visible when its parent has not loaded yet", () => {
+    const orphan = session("orphan", {
+      parentSessionId: "parent-on-later-page",
+      spawnSource: "agent",
+      updatedAt: recent,
+    });
+
+    const grouped = buildGroupedSessionList([orphan], {
+      sourceFilter: "manual",
+      searchQuery: "",
+      now,
+    });
+
+    expect(grouped.groups[0].activeSessions.map(({ id }) => id)).toEqual([orphan.id]);
+  });
 });
 
 describe("collectSessionAndDescendantIds", () => {

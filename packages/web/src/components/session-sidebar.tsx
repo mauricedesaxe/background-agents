@@ -211,6 +211,8 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
     loadMoreSessions,
     firstPageSessions.length,
     extraSessions.length,
+    searchQuery,
+    sessionSourceFilter,
   ]);
 
   const sessions = useMemo(

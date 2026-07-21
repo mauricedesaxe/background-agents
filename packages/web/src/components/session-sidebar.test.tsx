@@ -22,15 +22,17 @@ const { mockPush } = vi.hoisted(() => ({
   mockPush: vi.fn(),
 }));
 
-vi.mock("next-auth/react", () => ({
-  useSession: () => ({
-    data: {
-      user: {
-        name: "Test User",
-        email: "test@example.com",
-      },
+const { mockAuthSession } = vi.hoisted(() => ({
+  mockAuthSession: {
+    user: {
+      name: "Test User",
+      email: "test@example.com",
     },
-  }),
+  },
+}));
+
+vi.mock("next-auth/react", () => ({
+  useSession: () => ({ data: mockAuthSession }),
   signOut: vi.fn(),
 }));
 
@@ -467,6 +469,73 @@ describe("SessionSidebar", () => {
         buildSessionsPageKey({ excludeStatus: "archived", offset: 50 })
       );
     });
+  });
+
+  it("loads another page when the selected source leaves the viewport empty", async () => {
+    const firstPage = Array.from({ length: 50 }, (_, index) => createSession(index + 1));
+    const secondPageKey = buildSessionsPageKey({ excludeStatus: "archived", offset: 50 });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url === SIDEBAR_SESSIONS_KEY) {
+        return jsonResponse({ sessions: firstPage, hasMore: true });
+      }
+
+      if (url === secondPageKey) {
+        return jsonResponse({
+          sessions: [
+            createSession(51, {
+              title: "Automatic on page two",
+              spawnSource: "automation",
+            }),
+          ],
+          hasMore: false,
+        });
+      }
+
+      throw new Error(`Unexpected fetch for ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { container } = render(
+      <SWRConfig
+        value={{
+          provider: () => new Map(),
+          dedupingInterval: 0,
+          revalidateOnFocus: false,
+          fetcher: async (url: string) => {
+            const response = await fetch(url);
+            return response.json();
+          },
+        }}
+      >
+        <SessionSidebar />
+      </SWRConfig>
+    );
+    const scrollContainer = container.querySelector(".overflow-y-auto") as HTMLDivElement;
+    let scrollHeight = 800;
+    Object.defineProperty(scrollContainer, "scrollHeight", {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(scrollContainer, "clientHeight", {
+      configurable: true,
+      value: 400,
+    });
+
+    expect(await screen.findByText("Session 1")).toBeInTheDocument();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(fetchMock).not.toHaveBeenCalledWith(secondPageKey);
+
+    scrollHeight = 400;
+
+    fireEvent.click(screen.getByRole("radio", { name: "Automatic" }));
+
+    expect(await screen.findByText("Automatic on page two")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(secondPageKey);
   });
 
   it("filters sessions to the current user when Mine is selected", async () => {
