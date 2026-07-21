@@ -1018,6 +1018,7 @@ function ChildSessionListItem({
 }) {
   const timestamp = session.updatedAt || session.createdAt;
   const relativeTime = formatRelativeTime(timestamp);
+  const prDisplay = pullRequestSummaryDisplay(session.pullRequestSummary);
   const displayTitle = session.title || "Sub-task";
   const paddingLeftRem = 1.75 + Math.max(depth - 1, 0) * 1;
   return (
@@ -1035,6 +1036,7 @@ function ChildSessionListItem({
     >
       <div className="flex items-center gap-1.5 text-xs">
         <span className="shrink-0 text-muted-foreground">{relativeTime}</span>
+        {prDisplay && <PullRequestStateIcon state={prDisplay.state} label={prDisplay.label} />}
         <span className="truncate font-medium text-foreground">{displayTitle}</span>
       </div>
     </Link>
