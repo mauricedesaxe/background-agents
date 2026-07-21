@@ -110,7 +110,8 @@ export interface Env {
   VERCEL_SNAPSHOT_EXPIRATION_MS?: string; // Snapshot expiration in ms; 0 means no expiration
 
   // Sandbox lifecycle configuration
-  SANDBOX_INACTIVITY_TIMEOUT_MS?: string; // Overrides the control-plane inactivity default when set
+  /** Overrides the control-plane inactivity default when set. */
+  SANDBOX_INACTIVITY_TIMEOUT_MS?: string;
   EXECUTION_TIMEOUT_MS?: string; // Max processing time before auto-fail (default: 5400000 = 90 min)
   SECRETS_CAP_ENFORCEMENT?: string; // "enforce" (default) fails spawn/build on oversized secret payloads; set "warn" to only log
 

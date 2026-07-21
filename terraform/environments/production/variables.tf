@@ -467,12 +467,6 @@ variable "sandbox_provider" {
   }
 }
 
-variable "sandbox_inactivity_timeout_ms" {
-  description = "Base idle window in milliseconds before OpenInspect snapshots and stops the sandbox. Connected clients receive the bounded extension defined by the control plane."
-  type        = number
-  default     = 300000
-}
-
 variable "web_platform" {
   description = "Platform for the web app deployment: 'vercel' or 'cloudflare' (OpenNext)"
   type        = string
