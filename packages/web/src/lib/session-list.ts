@@ -51,12 +51,11 @@ export function buildGroupedSessionList(
   const roots: Session[] = [];
 
   for (const session of sorted) {
-    if (!session.parentSessionId) {
+    if (!session.parentSessionId || !sessionsById.has(session.parentSessionId)) {
       roots.push(session);
       continue;
     }
 
-    if (!sessionsById.has(session.parentSessionId)) continue;
     const siblings = allChildren.get(session.parentSessionId) ?? [];
     siblings.push(session);
     allChildren.set(session.parentSessionId, siblings);
