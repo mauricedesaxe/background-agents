@@ -43,6 +43,21 @@ class TestAckIdGeneration:
         ack_id = AgentBridge._make_ack_id(event)
         assert ack_id == "execution_complete:msg-1"
 
+    def test_step_finish_ack_id_uses_step_identity(self):
+        event = {
+            "type": "step_finish",
+            "messageId": "msg-1",
+            "stepId": "step-1",
+            "timestamp": 123,
+        }
+        ack_id = AgentBridge._make_ack_id(event)
+        assert ack_id == "step_finish:step-1"
+
+    def test_step_finish_ack_id_falls_back_to_observed_event_identity(self):
+        event = {"type": "step_finish", "messageId": "msg-1", "timestamp": 123}
+        ack_id = AgentBridge._make_ack_id(event)
+        assert ack_id == "step_finish:msg-1:123"
+
     def test_random_ack_id_without_message_id(self):
         event = {"type": "snapshot_ready"}
         ack_id = AgentBridge._make_ack_id(event)

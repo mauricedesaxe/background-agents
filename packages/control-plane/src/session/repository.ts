@@ -400,6 +400,16 @@ export class SessionRepository {
     );
   }
 
+  setSessionCost(totalCost: number, updatedAt: number): void {
+    this.sql.exec(
+      `UPDATE session
+       SET total_cost = MAX(total_cost, ?), updated_at = ?
+       WHERE id = (SELECT id FROM session LIMIT 1)`,
+      totalCost,
+      updatedAt
+    );
+  }
+
   // === SESSION REPOSITORIES ===
 
   /**

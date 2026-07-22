@@ -322,7 +322,7 @@ describe("D1 SessionIndexStore", () => {
     expect(after!.prCount).toBe(1);
   });
 
-  it("updateMetrics overwrites on repeated calls (last write wins)", async () => {
+  it("updateMetrics keeps cost monotonic while refreshing other metrics", async () => {
     const store = new SessionIndexStore(env.DB);
     const now = Date.now();
 
@@ -353,11 +353,18 @@ describe("D1 SessionIndexStore", () => {
       prCount: 2,
     });
 
+    await store.updateMetrics("session-metrics-overwrite", {
+      totalCost: 1,
+      activeDurationMs: 240000,
+      messageCount: 9,
+      prCount: 3,
+    });
+
     const session = await store.get("session-metrics-overwrite");
     expect(session!.totalCost).toBe(1.75);
-    expect(session!.activeDurationMs).toBe(180000);
-    expect(session!.messageCount).toBe(8);
-    expect(session!.prCount).toBe(2);
+    expect(session!.activeDurationMs).toBe(240000);
+    expect(session!.messageCount).toBe(9);
+    expect(session!.prCount).toBe(3);
   });
 
   it("updateMetrics returns false for non-existent session", async () => {

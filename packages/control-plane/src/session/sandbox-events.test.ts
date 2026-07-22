@@ -6,6 +6,7 @@ import type { CallbackNotificationService } from "./callback-notification-servic
 import type { SessionRepository } from "./repository";
 import type { SessionStatusService } from "./session-status-service";
 import type { SessionWebSocketManager } from "./websocket-manager";
+import type { SessionUsageFact, SessionUsageStore } from "../db/session-usage-store";
 
 function createPushSpec(repoOwner: string, repoName: string, targetBranch: string): GitPushSpec {
   return {
@@ -28,6 +29,8 @@ function createProcessor() {
     createArtifact: vi.fn(),
     createEvent: vi.fn(),
     addSessionCost: vi.fn(),
+    setSessionCost: vi.fn(),
+    getSession: vi.fn(() => ({ id: "do-session-1", session_name: "session-1" })),
     upsertExecutionCompleteEvent: vi.fn(),
     // The real repository stops reporting a processing message once it is
     // completed; the processing_status broadcast derives from that.
@@ -44,6 +47,16 @@ function createProcessor() {
   const callbackService = {
     notifyToolCall: vi.fn(async () => {}),
     notifyComplete: vi.fn(async () => {}),
+  };
+  const usageStore = {
+    record: vi.fn(async (fact: SessionUsageFact) => ({
+      totalCost: fact.costEstimate,
+      totalTokens: fact.totalTokens,
+      inputTokens: fact.inputTokens,
+      outputTokens: fact.outputTokens,
+      cacheReadTokens: fact.cacheReadTokens,
+      cacheWriteTokens: fact.cacheWriteTokens,
+    })),
   };
 
   const wsManager = {
@@ -72,6 +85,7 @@ function createProcessor() {
     { waitUntil } as unknown as DurableObjectState,
     () => log,
     repository as unknown as SessionRepository,
+    usageStore as unknown as SessionUsageStore,
     callbackService as unknown as CallbackNotificationService,
     wsManager as unknown as SessionWebSocketManager,
     messenger,
@@ -86,6 +100,7 @@ function createProcessor() {
   return {
     processor,
     repository,
+    usageStore,
     wsManager,
     callbackService,
     broadcast,
@@ -213,21 +228,63 @@ describe("SessionSandboxEventProcessor", () => {
     });
   });
 
-  it("adds step_finish cost to session aggregate and broadcasts event", async () => {
+  it("records structured step_finish usage and updates the local cost total", async () => {
     const h = createProcessor();
     const event: SandboxEvent = {
       type: "step_finish",
       messageId: "msg-1",
       sandboxId: "sb-1",
       timestamp: 1000,
+      stepId: "step-1",
       cost: 0.0123,
+      tokens: {
+        total: 223,
+        input: 219,
+        output: 4,
+        cache: { read: 5, write: 6 },
+      },
     };
 
     await h.processor.processSandboxEvent(event);
 
-    expect(h.repository.addSessionCost).toHaveBeenCalledWith(0.0123, expect.any(Number));
+    expect(h.usageStore.record).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      eventId: "step-1",
+      observedAt: expect.any(Number),
+      costEstimate: 0.0123,
+      totalTokens: 223,
+      inputTokens: 219,
+      outputTokens: 4,
+      cacheReadTokens: 5,
+      cacheWriteTokens: 6,
+    });
+    expect(h.repository.setSessionCost).toHaveBeenCalledWith(0.0123, expect.any(Number));
     expect(h.repository.createEvent).not.toHaveBeenCalled();
     expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
+  });
+
+  it("preserves flat token usage as an unsplit total", async () => {
+    const h = createProcessor();
+    const event: SandboxEvent = {
+      type: "step_finish",
+      messageId: "msg-1",
+      stepId: "step-1",
+      sandboxId: "sb-1",
+      timestamp: 1000,
+      tokens: 150,
+    };
+
+    await h.processor.processSandboxEvent(event);
+
+    expect(h.usageStore.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        totalTokens: 150,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      })
+    );
   });
 
   it("does not add session cost for step_finish with NaN cost", async () => {
@@ -242,7 +299,7 @@ describe("SessionSandboxEventProcessor", () => {
 
     await h.processor.processSandboxEvent(event);
 
-    expect(h.repository.addSessionCost).not.toHaveBeenCalled();
+    expect(h.usageStore.record).toHaveBeenCalledWith(expect.objectContaining({ costEstimate: 0 }));
     expect(h.repository.createEvent).not.toHaveBeenCalled();
     expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
   });
@@ -259,7 +316,7 @@ describe("SessionSandboxEventProcessor", () => {
 
     await h.processor.processSandboxEvent(event);
 
-    expect(h.repository.addSessionCost).not.toHaveBeenCalled();
+    expect(h.usageStore.record).toHaveBeenCalledWith(expect.objectContaining({ costEstimate: 0 }));
     expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
   });
 
@@ -275,7 +332,7 @@ describe("SessionSandboxEventProcessor", () => {
 
     await h.processor.processSandboxEvent(event);
 
-    expect(h.repository.addSessionCost).not.toHaveBeenCalled();
+    expect(h.usageStore.record).toHaveBeenCalledWith(expect.objectContaining({ costEstimate: 0 }));
     expect(h.repository.createEvent).not.toHaveBeenCalled();
     expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
   });

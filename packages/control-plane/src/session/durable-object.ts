@@ -40,6 +40,7 @@ import {
 import { McpServerStore } from "../db/mcp-servers";
 import { IntegrationSettingsStore, resolveSlackSettings } from "../db/integration-settings";
 import { SessionIndexStore } from "../db/session-index";
+import { SessionUsageStore } from "../db/session-usage-store";
 import { DEFAULT_EXECUTION_TIMEOUT_MS } from "../sandbox/lifecycle/decisions";
 import {
   createSourceControlProviderFromEnv,
@@ -587,10 +588,12 @@ export class SessionDO extends DurableObject<Env> {
 
   private get sandboxEventProcessor(): SessionSandboxEventProcessor {
     if (!this._sandboxEventProcessor) {
+      if (!this.db) throw new Error("D1 binding is required to persist session usage");
       this._sandboxEventProcessor = new SessionSandboxEventProcessor(
         this.ctx,
         () => this.log,
         this.repository,
+        new SessionUsageStore(this.db),
         this.callbackService,
         this.wsManager,
         this.messenger,
