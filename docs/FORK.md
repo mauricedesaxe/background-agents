@@ -92,14 +92,16 @@ that cost.
 `opencodeSessionId` and reattaches, with a watchdog for messages that arrive before the sandbox is
 ready. The same bridge keeps its SSE stream attached after OpenCode emits the first typed
 `ContextOverflowError`, allowing OpenCode's native compaction and replay to finish. Repeated or
-unrelated errors remain terminal. Compaction start and completion are persisted as timeline events
-and rendered as neutral statuses through `shared` and `web`. The session UI also exposes idle-only
-manual compaction. Its dedicated protocol command subscribes to OpenCode events before calling
-`POST /session/:id/summarize` with the selected model's flat, case-sensitive `providerID` and
-`modelID`. Only `session.compacted` is success. `session.error` is a failure even when the HTTP
-response is `200`, and a five-minute deadline aborts OpenCode before the bridge reports a timeout.
-The operation stays attached to the existing OpenCode session and is stored outside the prompt
-transcript. The native endpoint behavior and later message lineage were
+unrelated errors remain terminal. Automatic overflow recovery persists and renders only its
+message-scoped `context_compacted` completion. Manual compaction persists its start and terminal
+outcome as timeline events: starts and completions render neutrally, while failures render
+destructively. The session UI exposes manual compaction only while idle. Its dedicated protocol
+command subscribes to OpenCode events before calling `POST /session/:id/summarize` with the selected
+model's flat, case-sensitive `providerID` and `modelID`. Only `session.compacted` is success.
+`session.error` is a failure even when the HTTP response is `200`, and a five-minute deadline aborts
+OpenCode before the bridge reports a timeout. The operation stays attached to the existing OpenCode
+session and is stored outside the prompt transcript. The native endpoint behavior and later message
+lineage were
 [probed against pinned OpenCode 1.14.41](https://github.com/mauricedesaxe/background-agents/issues/129#issuecomment-5044195365).
 
 Automatic overflow recovery is pinned by
