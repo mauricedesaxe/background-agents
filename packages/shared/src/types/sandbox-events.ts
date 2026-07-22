@@ -88,6 +88,10 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
     isSubtask: z.boolean().optional(),
   }),
   sandboxEventBaseSchema.extend({
+    type: z.literal("context_compaction_started"),
+    requestId: z.string(),
+  }),
+  sandboxEventBaseSchema.extend({
     type: z.literal("context_compacted"),
     messageId: z.string().optional(),
     requestId: z.string().optional(),

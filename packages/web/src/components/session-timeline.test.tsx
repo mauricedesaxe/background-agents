@@ -14,6 +14,26 @@ afterEach(() => {
 });
 
 describe("EventItem", () => {
+  it("renders the start of context compaction in the timeline", () => {
+    const event: SandboxEvent = {
+      type: "context_compaction_started",
+      requestId: "compact-1",
+      sandboxId: "sandbox-1",
+      timestamp: 1_700_000_000,
+    };
+
+    render(
+      <EventItem
+        event={event}
+        sessionId="session-1"
+        currentParticipantId={null}
+        onOpenMedia={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("Context compaction started")).toBeInTheDocument();
+  });
+
   it("renders context compaction as a neutral timeline status", () => {
     const event: SandboxEvent = {
       type: "context_compacted",

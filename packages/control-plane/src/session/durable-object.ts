@@ -1540,6 +1540,21 @@ export class SessionDO extends DurableObject<Env> {
       return;
     }
 
+    const sandboxIdentity = this.wsManager.classify(sandboxWs);
+    const startedEvent: Extract<SandboxEvent, { type: "context_compaction_started" }> = {
+      type: "context_compaction_started",
+      requestId: data.requestId,
+      sandboxId: sandboxIdentity.kind === "sandbox" ? (sandboxIdentity.sandboxId ?? "") : "",
+      timestamp: now / 1000,
+    };
+    this.repository.createEvent({
+      id: generateId(),
+      type: startedEvent.type,
+      data: JSON.stringify(startedEvent),
+      messageId: null,
+      createdAt: now,
+    });
+    this.broadcast({ type: "sandbox_event", event: startedEvent });
     this.broadcast({
       type: "compaction_status",
       requestId: data.requestId,

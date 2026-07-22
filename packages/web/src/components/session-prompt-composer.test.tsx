@@ -42,4 +42,5 @@ it("offers cancellation while context compaction is active", () => {
   );
 
   expect(screen.getByRole("button", { name: "Cancel context compaction" })).toBeInTheDocument();
+  expect(screen.getByPlaceholderText("Ask or build anything")).toBeInTheDocument();
 });

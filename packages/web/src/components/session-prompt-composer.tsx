@@ -68,11 +68,7 @@ export function SessionPromptComposer({ session, prompt, model }: SessionPromptC
               onChange={prompt.onChange}
               onKeyDown={prompt.onKeyDown}
               placeholder={
-                prompt.isCompacting
-                  ? "Compacting context..."
-                  : prompt.isProcessing
-                    ? "Type your next message..."
-                    : "Ask or build anything"
+                prompt.isProcessing ? "Type your next message..." : "Ask or build anything"
               }
               className="w-full resize-none bg-transparent px-4 pt-4 pb-12 focus:outline-none text-foreground placeholder:text-secondary-foreground"
               rows={3}

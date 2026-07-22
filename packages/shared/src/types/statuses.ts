@@ -33,6 +33,7 @@ export type EventType =
   | "tool_call"
   | "step_start"
   | "step_finish"
+  | "context_compaction_started"
   | "context_compacted"
   | "context_compaction_failed"
   | "tool_result"
