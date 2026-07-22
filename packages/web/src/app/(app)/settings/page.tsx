@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { useSidebarContext } from "@/components/sidebar-layout";
+import { CollapsedSidebarControls, useSidebarContext } from "@/components/sidebar-layout";
 import { SettingsNav, type SettingsCategory } from "@/components/settings/settings-nav";
 import { SecretsSettings } from "@/components/settings/secrets-settings";
 import { EnvironmentsSettings } from "@/components/settings/environments-settings";
@@ -14,8 +14,7 @@ import { SandboxSettingsPage } from "@/components/settings/sandbox-settings";
 import { ImagesSettings } from "@/components/settings/images-settings";
 import { McpServersSettings } from "@/components/settings/mcp-servers-settings";
 import { AppearanceSettings } from "@/components/settings/appearance-settings";
-import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
-import { SidebarIcon, BackIcon } from "@/components/ui/icons";
+import { BackIcon } from "@/components/ui/icons";
 import { useIsMobile } from "@/hooks/use-media-query";
 import { supportsRepoImages } from "@/lib/sandbox-provider";
 
@@ -50,7 +49,7 @@ function isValidCategory(tab: string | null): tab is SettingsCategory {
 }
 
 export default function SettingsPage() {
-  const { isOpen, toggle } = useSidebarContext();
+  const { isOpen } = useSidebarContext();
   const searchParams = useSearchParams();
   const tabParam = searchParams.get("tab");
   const repoImagesEnabled = supportsRepoImages();
@@ -103,14 +102,7 @@ export default function SettingsPage() {
           <>
             <header className="border-b border-border-muted flex-shrink-0">
               <div className="px-4 py-3">
-                <button
-                  onClick={toggle}
-                  className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition"
-                  title={`Open sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
-                  aria-label={`Open sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
-                >
-                  <SidebarIcon className="w-4 h-4" />
-                </button>
+                <CollapsedSidebarControls />
               </div>
             </header>
             <div className="flex-1 overflow-y-auto">
@@ -125,14 +117,7 @@ export default function SettingsPage() {
           <>
             <header className="border-b border-border-muted flex-shrink-0">
               <div className="px-4 py-3 flex items-center gap-2">
-                <button
-                  onClick={toggle}
-                  className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition"
-                  title={`Open sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
-                  aria-label={`Open sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
-                >
-                  <SidebarIcon className="w-4 h-4" />
-                </button>
+                <CollapsedSidebarControls />
                 <button
                   onClick={() => setMobileView("list")}
                   className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition"
@@ -159,14 +144,7 @@ export default function SettingsPage() {
       {!isOpen && (
         <header className="border-b border-border-muted flex-shrink-0">
           <div className="px-4 py-3">
-            <button
-              onClick={toggle}
-              className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition"
-              title={`Open sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
-              aria-label={`Open sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
-            >
-              <SidebarIcon className="w-4 h-4" />
-            </button>
+            <CollapsedSidebarControls />
           </div>
         </header>
       )}
