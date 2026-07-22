@@ -306,6 +306,7 @@ class AgentBridge:
     GIT_CONFIG_TIMEOUT_SECONDS = 10.0
     MAX_PENDING_PART_EVENTS = 2000
     MAX_EVENT_BUFFER_SIZE = 1000
+    ACK_RETRY_INTERVAL_SECONDS = 5.0
     # Cap on events buffered between the SSE reader and the WebSocket sender
     # while a prompt streams. Sized generously since it only fills when the
     # send genuinely can't keep up; overflow evicts superseded events first.
@@ -541,6 +542,7 @@ class AgentBridge:
                 await self._flush_pending_acks(skip_ack_ids=just_flushed)
 
                 heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+                ack_retry_task = asyncio.create_task(self._ack_retry_loop())
                 background_tasks: set[asyncio.Task[None]] = set()
 
                 try:
@@ -561,6 +563,7 @@ class AgentBridge:
 
                 finally:
                     heartbeat_task.cancel()
+                    ack_retry_task.cancel()
                     for task in background_tasks:
                         task.cancel()
                     self.ws = None
@@ -587,6 +590,12 @@ class AgentBridge:
                         "timestamp": time.time(),
                     }
                 )
+
+    async def _ack_retry_loop(self) -> None:
+        """Retry critical events while the current WebSocket stays connected."""
+        while not self.shutdown_event.is_set():
+            await asyncio.sleep(self.ACK_RETRY_INTERVAL_SECONDS)
+            await self._flush_pending_acks()
 
     async def _drain_boot_warnings(self) -> None:
         """Forward supervisor boot warnings queued before the bridge existed.
@@ -715,7 +724,7 @@ class AgentBridge:
         return f"{event_type}:{secrets.token_hex(8)}"
 
     async def _flush_pending_acks(self, skip_ack_ids: set[str] | None = None) -> None:
-        """Re-send unacknowledged critical events on a new WS connection.
+        """Re-send unacknowledged critical events on the current WebSocket.
 
         Events stay in _pending_acks until the DO sends an ACK command.
 

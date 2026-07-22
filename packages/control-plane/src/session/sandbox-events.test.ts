@@ -287,6 +287,80 @@ describe("SessionSandboxEventProcessor", () => {
     );
   });
 
+  it("retries a failed usage write without acknowledging or double-applying it", async () => {
+    const h = createProcessor();
+    const sandboxWs = { readyState: WebSocket.OPEN } as WebSocket;
+    h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
+    h.usageStore.record.mockRejectedValueOnce(new Error("D1 unavailable")).mockResolvedValueOnce({
+      totalCost: 0.0123,
+      totalTokens: 10,
+      inputTokens: 8,
+      outputTokens: 2,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    });
+    const event: SandboxEvent & { ackId: string } = {
+      type: "step_finish",
+      messageId: "msg-1",
+      stepId: "step-1",
+      sandboxId: "sb-1",
+      timestamp: 1_750_000_000,
+      ackId: "step_finish:step-1",
+      cost: 0.0123,
+      tokens: { total: 10, input: 8, output: 2 },
+    };
+
+    await expect(h.processor.processSandboxEvent(event)).rejects.toThrow("D1 unavailable");
+    expect(h.wsManager.send).not.toHaveBeenCalled();
+    expect(h.repository.setSessionCost).not.toHaveBeenCalled();
+
+    await h.processor.processSandboxEvent(event);
+
+    expect(h.usageStore.record).toHaveBeenCalledTimes(2);
+    expect(h.repository.setSessionCost).toHaveBeenCalledTimes(1);
+    expect(h.wsManager.send).toHaveBeenCalledWith(sandboxWs, {
+      type: "ack",
+      ackId: "step_finish:step-1",
+    });
+  });
+
+  it("converts bridge timestamps to epoch milliseconds", async () => {
+    const h = createProcessor();
+    const event: SandboxEvent = {
+      type: "step_finish",
+      messageId: "msg-1",
+      stepId: "step-1",
+      sandboxId: "sb-1",
+      timestamp: 1_750_000_000.123,
+    };
+
+    await h.processor.processSandboxEvent(event);
+
+    expect(h.usageStore.record).toHaveBeenCalledWith(
+      expect.objectContaining({ observedAt: 1_750_000_000_123 })
+    );
+  });
+
+  it("uses receipt time when the bridge timestamp is invalid", async () => {
+    const h = createProcessor();
+    const receivedAt = 1_800_000_000_000;
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(receivedAt);
+    const event: SandboxEvent = {
+      type: "step_finish",
+      messageId: "msg-1",
+      stepId: "step-1",
+      sandboxId: "sb-1",
+      timestamp: (receivedAt + 10 * 60 * 1000) / 1000,
+    };
+
+    await h.processor.processSandboxEvent(event);
+
+    expect(h.usageStore.record).toHaveBeenCalledWith(
+      expect.objectContaining({ observedAt: receivedAt })
+    );
+    dateNow.mockRestore();
+  });
+
   it("does not add session cost for step_finish with NaN cost", async () => {
     const h = createProcessor();
     const event: SandboxEvent = {

@@ -245,6 +245,23 @@ class TestFlushPendingAcks:
         assert len(bridge._pending_acks) == 2
 
 
+class TestAckRetryLoop:
+    """Tests that pending critical events retry without a reconnect."""
+
+    @pytest.mark.asyncio
+    async def test_retry_loop_flushes_pending_acks_on_the_current_socket(self, bridge: AgentBridge):
+        bridge._flush_pending_acks = AsyncMock()
+
+        async def stop_after_first_interval(_seconds: float) -> None:
+            bridge.shutdown_event.set()
+
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr("sandbox_runtime.bridge.asyncio.sleep", stop_after_first_interval)
+            await bridge._ack_retry_loop()
+
+        bridge._flush_pending_acks.assert_awaited_once_with()
+
+
 class TestBufferFlushAddsToPending:
     """Tests that flushing buffer events adds critical ones to _pending_acks."""
 
