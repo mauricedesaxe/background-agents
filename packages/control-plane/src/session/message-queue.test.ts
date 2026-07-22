@@ -1,9 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
-import { SessionMessageQueue } from "./message-queue";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { SessionMessageQueue, STOP_CONFIRMATION_TIMEOUT_MS } from "./message-queue";
 import type { ClientInfo, ServerMessage } from "../types";
 import type { MessageRow, ParticipantRow, SessionRow } from "./types";
 
 const EXECUTION_TIMEOUT_MS = 60_000;
+
+afterEach(() => vi.useRealTimers());
 
 function createParticipant(overrides: Partial<ParticipantRow> = {}): ParticipantRow {
   return {
@@ -93,6 +95,8 @@ function buildQueue() {
     createMessage: vi.fn(),
     createEvent: vi.fn(),
     getPendingOrProcessingCount: vi.fn(() => 1),
+    getMessageById: vi.fn(() => null as MessageRow | null),
+    getPendingMessages: vi.fn(() => [] as MessageRow[]),
     getProcessingMessage: vi.fn(() => null as { id: string } | null),
     getNextPendingMessage: vi.fn(() => null as MessageRow | null),
     updateMessageToProcessing: vi.fn(),
@@ -108,6 +112,8 @@ function buildQueue() {
   const wsManager = {
     getSandboxSocket: vi.fn(() => null as WebSocket | null),
     send: vi.fn(() => true),
+    close: vi.fn(),
+    clearSandboxSocketIfMatch: vi.fn(() => true),
   };
 
   const participantService = {
@@ -237,6 +243,139 @@ describe("SessionMessageQueue", () => {
     expect(h.sessionStatus.transition).toHaveBeenCalledWith("active");
   });
 
+  it("broadcasts the persisted prompt queue after enqueue", async () => {
+    const h = buildQueue();
+    h.repository.getProcessingMessage.mockReturnValue({ id: "msg-active" });
+    h.repository.getPendingMessages.mockReturnValue([
+      createMessage({ id: "msg-follow-up", created_at: 2000 }),
+    ]);
+
+    await h.queue.handlePromptMessage({} as WebSocket, createClientInfo(), {
+      content: "follow up",
+    });
+
+    expect(h.broadcast).toHaveBeenCalledWith({
+      type: "prompt_queue",
+      prompts: [
+        expect.objectContaining({
+          messageId: "msg-follow-up",
+          position: 2,
+          content: "hello",
+          timestamp: 2,
+        }),
+      ],
+    });
+  });
+
+  it("acknowledges a retried request without persisting it twice", async () => {
+    const h = buildQueue();
+    h.repository.getMessageById.mockReturnValue(
+      createMessage({ id: "request-1", content: "follow up", status: "pending" })
+    );
+    h.repository.getPendingMessages.mockReturnValue([
+      createMessage({ id: "request-1", content: "follow up", status: "pending" }),
+    ]);
+
+    await h.queue.handlePromptMessage({} as WebSocket, createClientInfo(), {
+      requestId: "request-1",
+      content: "follow up",
+    });
+
+    expect(h.repository.createMessage).not.toHaveBeenCalled();
+    expect(h.wsManager.send).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ type: "prompt_queued", messageId: "request-1", status: "pending" })
+    );
+  });
+
+  it("acknowledges a completed retry without putting it back in the queue", async () => {
+    const h = buildQueue();
+    h.repository.getMessageById.mockReturnValue(
+      createMessage({ id: "request-1", content: "follow up", status: "completed" })
+    );
+
+    await h.queue.handlePromptMessage({} as WebSocket, createClientInfo(), {
+      requestId: "request-1",
+      content: "follow up",
+    });
+
+    expect(h.wsManager.send).toHaveBeenCalledWith(expect.anything(), {
+      type: "prompt_queued",
+      messageId: "request-1",
+      status: "completed",
+    });
+    expect(h.broadcast).toHaveBeenCalledWith({ type: "prompt_queue", prompts: [] });
+  });
+
+  it("returns the active prompt for reconnect hydration", () => {
+    const h = buildQueue();
+    h.repository.getProcessingMessage.mockReturnValue({ id: "message-active" });
+    h.repository.getMessageById.mockReturnValue(
+      createMessage({ id: "message-active", content: "active", status: "processing" })
+    );
+
+    expect(h.queue.getActivePrompt()).toEqual(
+      expect.objectContaining({ messageId: "message-active", position: 1, content: "active" })
+    );
+  });
+
+  it("rejects reuse of a request ID for different content", async () => {
+    const h = buildQueue();
+    h.repository.getMessageById.mockReturnValue(
+      createMessage({ id: "request-1", content: "original" })
+    );
+
+    await h.queue.handlePromptMessage({} as WebSocket, createClientInfo(), {
+      requestId: "request-1",
+      content: "different",
+    });
+
+    expect(h.repository.createMessage).not.toHaveBeenCalled();
+    expect(h.wsManager.send).toHaveBeenCalledWith(expect.anything(), {
+      type: "prompt_rejected",
+      requestId: "request-1",
+      message: "Request ID belongs to another prompt",
+    });
+  });
+
+  it.each([
+    {
+      field: "model",
+      existing: { model: "anthropic/claude-sonnet-4-6" },
+      retry: { model: "openai/gpt-5.6-sol" },
+    },
+    {
+      field: "reasoning effort",
+      existing: { model: "openai/gpt-5.6-sol", reasoning_effort: "low" },
+      retry: { model: "openai/gpt-5.6-sol", reasoningEffort: "high" },
+    },
+    {
+      field: "attachments",
+      existing: {
+        attachments: JSON.stringify([{ attachmentId: "attachment-1", name: "first.png" }]),
+      },
+      retry: { attachments: [{ attachmentId: "attachment-2", name: "second.png" }] },
+    },
+  ])("rejects reuse of a request ID for different $field", async ({ existing, retry }) => {
+    const h = buildQueue();
+    h.repository.getMessageById.mockReturnValue(
+      createMessage({ id: "request-1", content: "same content", ...existing })
+    );
+
+    await h.queue.handlePromptMessage({} as WebSocket, createClientInfo(), {
+      requestId: "request-1",
+      content: "same content",
+      ...retry,
+    });
+
+    expect(h.repository.createMessage).not.toHaveBeenCalled();
+    expect(h.wsManager.send).toHaveBeenCalledWith(expect.anything(), {
+      type: "prompt_rejected",
+      requestId: "request-1",
+      message: "Request ID belongs to another prompt",
+    });
+  });
+
   it("uses the provider-agnostic auth name for user messages without SCM identity", () => {
     const h = buildQueue();
     const participant = createParticipant({
@@ -274,6 +413,7 @@ describe("SessionMessageQueue", () => {
       expect.objectContaining({ type: "prompt", messageId: "msg-42" })
     );
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: true });
+    expect(h.broadcast).toHaveBeenCalledWith({ type: "prompt_queue", prompts: [] });
   });
 
   it("drops a stored effort the newly chosen model does not support", async () => {
@@ -319,13 +459,20 @@ describe("SessionMessageQueue", () => {
     );
   });
 
-  it("marks processing message failed and broadcasts synthetic completion on stop", async () => {
+  it("waits for stop confirmation before falling back to synthetic completion", async () => {
+    vi.useFakeTimers();
     const h = buildQueue();
     const sandboxWs = { readyState: WebSocket.OPEN } as WebSocket;
     h.repository.getProcessingMessage.mockReturnValue({ id: "msg-9" });
     h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
 
     await h.queue.stopExecution();
+
+    expect(h.repository.updateMessageCompletion).not.toHaveBeenCalled();
+    expect(h.wsManager.send).toHaveBeenCalledWith(sandboxWs, { type: "stop" });
+
+    await vi.advanceTimersByTimeAsync(STOP_CONFIRMATION_TIMEOUT_MS);
+    await h.waitUntil.mock.calls[0][0];
 
     expect(h.repository.updateMessageCompletion).toHaveBeenCalledWith(
       "msg-9",
@@ -338,9 +485,21 @@ describe("SessionMessageQueue", () => {
       expect.any(Number)
     );
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
-    expect(h.wsManager.send).toHaveBeenCalledWith(sandboxWs, { type: "stop" });
-    expect(h.waitUntil).toHaveBeenCalledTimes(1);
+    expect(h.wsManager.close).toHaveBeenCalledWith(sandboxWs, 1012, "Stop confirmation timed out");
     expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
+    vi.useRealTimers();
+  });
+
+  it("forwards stop without a processing message so compaction can cancel", async () => {
+    const h = buildQueue();
+    const sandboxWs = { readyState: WebSocket.OPEN } as WebSocket;
+    h.repository.getProcessingMessage.mockReturnValue(null);
+    h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
+
+    await h.queue.stopExecution();
+
+    expect(h.wsManager.send).toHaveBeenCalledWith(sandboxWs, { type: "stop" });
+    expect(h.repository.updateMessageCompletion).not.toHaveBeenCalled();
   });
 
   it("suppresses session status reconcile when stopExecution is called with suppress flag", async () => {

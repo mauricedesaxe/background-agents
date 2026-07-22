@@ -11,6 +11,13 @@ const participantSummarySchema = z.object({
 });
 
 const historyCursorSchema = z.object({ timestamp: z.number(), id: z.string() });
+const promptSnapshotItemSchema = z.object({
+  messageId: z.string(),
+  position: z.number().int().positive(),
+  content: z.string(),
+  timestamp: z.number(),
+  author: participantSummarySchema.optional(),
+});
 
 export const serverMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("pong"), timestamp: z.number() }),
@@ -21,6 +28,8 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
     artifacts: z.array(sessionArtifactSchema),
     participantId: z.string(),
     participant: participantSummarySchema.optional(),
+    promptQueue: z.array(promptSnapshotItemSchema).optional(),
+    activePrompt: promptSnapshotItemSchema.optional(),
     replay: z
       .object({
         events: tolerantSandboxEventsSchema,
@@ -30,7 +39,14 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
       .optional(),
     spawnError: z.string().nullable().optional(),
   }),
-  z.object({ type: z.literal("prompt_queued"), messageId: z.string(), position: z.number() }),
+  z.object({
+    type: z.literal("prompt_queued"),
+    messageId: z.string(),
+    position: z.number().optional(),
+    status: z.enum(["pending", "processing", "completed", "failed"]).optional(),
+  }),
+  z.object({ type: z.literal("prompt_rejected"), requestId: z.string(), message: z.string() }),
+  z.object({ type: z.literal("prompt_queue"), prompts: z.array(promptSnapshotItemSchema) }),
   z.object({ type: z.literal("sandbox_event"), event: sandboxEventSchema }),
   z.object({ type: z.literal("presence_sync"), participants: z.array(participantPresenceSchema) }),
   z.object({
@@ -99,3 +115,4 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
 ]);
 
 export type ServerMessage = z.infer<typeof serverMessageSchema>;
+export type PromptSnapshotItem = z.infer<typeof promptSnapshotItemSchema>;

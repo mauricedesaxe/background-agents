@@ -20,6 +20,8 @@ type SessionPromptComposerProps = {
   prompt: {
     value: string;
     isProcessing: boolean;
+    isSubmitting: boolean;
+    submissionError: string | null;
     inputRef: React.RefObject<HTMLTextAreaElement | null>;
     onSubmit: (e: React.FormEvent) => void;
     onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
@@ -38,7 +40,7 @@ type SessionPromptComposerProps = {
 };
 
 export function SessionPromptComposer({ session, prompt, model }: SessionPromptComposerProps) {
-  const isBusy = prompt.isProcessing || prompt.isCompacting;
+  const isChoosingModelDisabled = prompt.isCompacting || prompt.isSubmitting;
 
   return (
     <footer className="border-t border-border-muted flex-shrink-0">
@@ -75,8 +77,10 @@ export function SessionPromptComposer({ session, prompt, model }: SessionPromptC
             />
             {/* Floating action buttons */}
             <div className="absolute bottom-3 right-3 flex items-center gap-2">
-              {prompt.isProcessing && prompt.value.trim() && (
-                <span className="text-xs text-warning">Waiting...</span>
+              {prompt.isSubmitting && (
+                <span className="text-xs text-warning">
+                  {prompt.isProcessing ? "Queueing..." : "Sending..."}
+                </span>
               )}
               {(prompt.isProcessing || prompt.isCompacting) && (
                 <button
@@ -91,16 +95,16 @@ export function SessionPromptComposer({ session, prompt, model }: SessionPromptC
               )}
               <button
                 type="submit"
-                disabled={!prompt.value.trim() || isBusy}
+                disabled={!prompt.value.trim() || prompt.isCompacting || prompt.isSubmitting}
                 className="p-2 text-secondary-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition"
                 title={
-                  prompt.isProcessing && prompt.value.trim()
-                    ? "Wait for execution to complete"
+                  prompt.isProcessing
+                    ? `Queue (${SHORTCUT_LABELS.SEND_PROMPT})`
                     : `Send (${SHORTCUT_LABELS.SEND_PROMPT})`
                 }
                 aria-label={
-                  prompt.isProcessing && prompt.value.trim()
-                    ? "Wait for execution to complete"
+                  prompt.isProcessing
+                    ? `Queue (${SHORTCUT_LABELS.SEND_PROMPT})`
                     : `Send (${SHORTCUT_LABELS.SEND_PROMPT})`
                 }
               >
@@ -119,7 +123,7 @@ export function SessionPromptComposer({ session, prompt, model }: SessionPromptC
                 items={model.items}
                 direction="up"
                 dropdownWidth="w-56"
-                disabled={isBusy}
+                disabled={isChoosingModelDisabled}
                 triggerClassName="flex max-w-full items-center gap-1 text-sm text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed transition"
               >
                 <ModelIcon className="w-3.5 h-3.5" />
@@ -133,13 +137,18 @@ export function SessionPromptComposer({ session, prompt, model }: SessionPromptC
                 selectedModel={model.selectedModel}
                 reasoningEffort={model.reasoningEffort}
                 onSelect={model.onReasoningEffortChange}
-                disabled={isBusy}
+                disabled={isChoosingModelDisabled}
               />
             </div>
 
             {/* Right side - Agent label */}
             <span className="hidden sm:inline text-sm text-muted-foreground">build agent</span>
           </div>
+          {prompt.submissionError && (
+            <p className="border-t border-destructive-border px-4 py-2 text-sm text-destructive">
+              {prompt.submissionError}
+            </p>
+          )}
         </div>
       </form>
     </footer>

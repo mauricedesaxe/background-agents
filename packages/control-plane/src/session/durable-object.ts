@@ -1387,6 +1387,8 @@ export class SessionDO extends DurableObject<Env> {
           resolveScmProviderFromEnv(this.env.SCM_PROVIDER)
         ),
       },
+      promptQueue: this.messageQueue.getPromptQueue(),
+      activePrompt: this.messageQueue.getActivePrompt(),
       replay,
       spawnError: sandbox?.last_spawn_error ?? null,
     } as ServerMessage);
@@ -1442,6 +1444,7 @@ export class SessionDO extends DurableObject<Env> {
   private async handlePromptMessage(
     ws: WebSocket,
     data: {
+      requestId?: string;
       content: string;
       model?: string;
       reasoningEffort?: string;
@@ -1460,6 +1463,14 @@ export class SessionDO extends DurableObject<Env> {
 
     const activeCompaction = await this.getActiveCompaction();
     if (activeCompaction) {
+      if (data.requestId) {
+        this.safeSend(ws, {
+          type: "prompt_rejected",
+          requestId: data.requestId,
+          message: "Wait for context compaction to finish before sending a prompt",
+        });
+        return;
+      }
       this.safeSend(ws, {
         type: "error",
         code: "COMPACTION_IN_PROGRESS",

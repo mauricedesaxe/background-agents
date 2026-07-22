@@ -135,6 +135,93 @@ describe("sessionSocketReducer", () => {
       expect(state.sessionState?.isProcessing).toBe(true);
       expect(state.sessionState?.totalCost).toBe(1.25);
     });
+
+    it("restores a pending user message outside the capped replay", () => {
+      const replayEvents = Array.from({ length: 500 }, (_, index) => ({
+        type: "git_sync" as const,
+        status: "completed" as const,
+        sandboxId: "sb-1",
+        timestamp: index + 2,
+      }));
+      const state = subscribedState({
+        replay: { events: replayEvents, hasMore: true, cursor: null },
+        promptQueue: [
+          {
+            messageId: "queued-1",
+            position: 2,
+            content: "Run the tests next",
+            timestamp: 1,
+            author: { participantId: "participant-1", name: "Test User" },
+          },
+        ],
+      });
+
+      expect(state.events).toHaveLength(501);
+      expect(state.events[0]).toEqual(
+        expect.objectContaining({
+          type: "user_message",
+          messageId: "queued-1",
+          content: "Run the tests next",
+        })
+      );
+    });
+
+    it("restores the active user message outside the capped replay", () => {
+      const replayEvents = Array.from({ length: 500 }, (_, index) => ({
+        type: "git_sync" as const,
+        status: "completed" as const,
+        sandboxId: "sb-1",
+        timestamp: index + 2,
+      }));
+      const state = subscribedState({
+        replay: { events: replayEvents, hasMore: true, cursor: null },
+        activePrompt: {
+          messageId: "active-1",
+          position: 1,
+          content: "Keep working",
+          timestamp: 1,
+        },
+      });
+
+      expect(state.events).toHaveLength(501);
+      expect(state.events[0]).toEqual(
+        expect.objectContaining({
+          type: "user_message",
+          messageId: "active-1",
+          content: "Keep working",
+        })
+      );
+    });
+
+    it("restores an active user message when replay only has later events for it", () => {
+      const state = subscribedState({
+        replay: {
+          events: [
+            {
+              type: "token",
+              messageId: "active-1",
+              content: "Working",
+              sandboxId: "sb-1",
+              timestamp: 2,
+            },
+          ],
+          hasMore: true,
+          cursor: null,
+        },
+        activePrompt: {
+          messageId: "active-1",
+          position: 1,
+          content: "Keep working",
+          timestamp: 1,
+        },
+      });
+
+      expect(
+        state.events.filter(
+          (event) => event.type === "user_message" && event.messageId === "active-1"
+        )
+      ).toHaveLength(1);
+    });
   });
 
   describe("events_appended", () => {
@@ -223,6 +310,39 @@ describe("sessionSocketReducer", () => {
       expect(state.hasMoreHistory).toBe(false);
       expect(state.cursor).toBeNull();
       expect(state.events.map((event) => event.timestamp)).toEqual([5, 10]);
+    });
+
+    it("replaces a synthetic queued message when older history contains the persisted event", () => {
+      const queued = {
+        messageId: "queued-1",
+        position: 2,
+        content: "Run the tests",
+        timestamp: 10,
+      };
+      const base = subscribedState({ promptQueue: [queued] });
+
+      const state = reduce(
+        base,
+        serverMessage({
+          type: "history_page",
+          items: [
+            {
+              type: "user_message",
+              messageId: "queued-1",
+              content: "Run the tests",
+              timestamp: 1,
+            },
+          ],
+          hasMore: false,
+          cursor: null,
+        })
+      );
+
+      expect(
+        state.events.filter(
+          (event) => event.type === "user_message" && event.messageId === "queued-1"
+        )
+      ).toEqual([expect.objectContaining({ timestamp: 1 })]);
     });
 
     it("clears a stuck loadingHistory when a new subscribed snapshot arrives", () => {

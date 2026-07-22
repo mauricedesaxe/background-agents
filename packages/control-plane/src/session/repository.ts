@@ -775,12 +775,25 @@ export class SessionRepository {
     return rows[0] ?? null;
   }
 
+  getMessageById(messageId: string): MessageRow | null {
+    const result = this.sql.exec(`SELECT * FROM messages WHERE id = ?`, messageId);
+    const rows = this.rows<MessageRow>(result);
+    return rows[0] ?? null;
+  }
+
   getNextPendingMessage(): MessageRow | null {
     const result = this.sql.exec(
-      `SELECT * FROM messages WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1`
+      `SELECT * FROM messages WHERE status = 'pending' ORDER BY created_at ASC, rowid ASC LIMIT 1`
     );
     const rows = this.rows<MessageRow>(result);
     return rows[0] ?? null;
+  }
+
+  getPendingMessages(): MessageRow[] {
+    const result = this.sql.exec(
+      `SELECT * FROM messages WHERE status = 'pending' ORDER BY created_at ASC, rowid ASC`
+    );
+    return this.rows<MessageRow>(result);
   }
 
   getMessageCallbackContext(

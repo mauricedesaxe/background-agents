@@ -104,7 +104,7 @@ export type {
 } from "./sessions";
 
 export { serverMessageSchema } from "./server-messages";
-export type { ServerMessage } from "./server-messages";
+export type { PromptSnapshotItem, ServerMessage } from "./server-messages";
 
 export {
   SESSION_DIFF_VERSION,

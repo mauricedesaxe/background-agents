@@ -1,5 +1,10 @@
 import type { Artifact, SandboxEvent } from "@/types/session";
-import type { ParticipantPresence, ServerMessage, SessionState } from "@open-inspect/shared";
+import type {
+  ParticipantPresence,
+  PromptSnapshotItem,
+  ServerMessage,
+  SessionState,
+} from "@open-inspect/shared";
 import { toUiArtifact } from "./artifact-metadata";
 import { collapseReplayTokenEvents, toUiSandboxEvent } from "./event-log";
 
@@ -137,6 +142,55 @@ function updateSessionState(
   return { ...state, sessionState: update(state.sessionState) };
 }
 
+function mergePromptSnapshotEvents(
+  events: SandboxEvent[],
+  prompts: PromptSnapshotItem[] | undefined
+): SandboxEvent[] {
+  if (!prompts?.length) return events;
+
+  const messageIds = new Set(
+    events.flatMap((event) =>
+      event.type === "user_message" && event.messageId ? [event.messageId] : []
+    )
+  );
+  const queuedEvents: SandboxEvent[] = prompts
+    .filter((prompt) => !messageIds.has(prompt.messageId))
+    .map((prompt) => ({
+      type: "user_message",
+      messageId: prompt.messageId,
+      content: prompt.content,
+      timestamp: prompt.timestamp,
+      author: prompt.author,
+    }));
+
+  for (const queuedEvent of queuedEvents) {
+    const insertionIndex = events.findIndex((event) => event.timestamp > queuedEvent.timestamp);
+    if (insertionIndex === -1) {
+      events.push(queuedEvent);
+    } else {
+      events.splice(insertionIndex, 0, queuedEvent);
+    }
+  }
+  return events;
+}
+
+function prependHistoryEvents(events: SandboxEvent[], olderEvents: SandboxEvent[]): SandboxEvent[] {
+  const persistedUserMessageIds = new Set(
+    olderEvents.flatMap((event) =>
+      event.type === "user_message" && event.messageId ? [event.messageId] : []
+    )
+  );
+  return [
+    ...olderEvents,
+    ...events.filter(
+      (event) =>
+        event.type !== "user_message" ||
+        !event.messageId ||
+        !persistedUserMessageIds.has(event.messageId)
+    ),
+  ];
+}
+
 function reduceServerMessage(
   state: SessionSocketState,
   message: Exclude<ServerMessage, { type: "sandbox_event" }>
@@ -158,9 +212,12 @@ function reduceServerMessage(
         },
         artifacts: message.artifacts.map(toUiArtifact),
         currentParticipantId: message.participantId || state.currentParticipantId,
-        events: message.replay
-          ? collapseReplayTokenEvents(message.replay.events.map(toUiSandboxEvent))
-          : [],
+        events: mergePromptSnapshotEvents(
+          message.replay
+            ? collapseReplayTokenEvents(message.replay.events.map(toUiSandboxEvent))
+            : [],
+          [...(message.promptQueue ?? []), ...(message.activePrompt ? [message.activePrompt] : [])]
+        ),
         hasMoreHistory: message.replay?.hasMore ?? false,
         cursor: message.replay?.cursor ?? null,
         // A fetch_history dropped by a disconnect would otherwise leave this
@@ -172,7 +229,7 @@ function reduceServerMessage(
       // Prepend older events to the beginning.
       return {
         ...state,
-        events: [...message.items.map(toUiSandboxEvent), ...state.events],
+        events: prependHistoryEvents(state.events, message.items.map(toUiSandboxEvent)),
         hasMoreHistory: message.hasMore ?? false,
         cursor: message.cursor ?? null,
         loadingHistory: false,

@@ -622,11 +622,30 @@ describe("SessionRepository", () => {
       const message = { id: "msg-1", created_at: 1000 };
       // The query is dynamic, so we match by result
       mock.setData(
-        `SELECT * FROM messages WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1`,
+        `SELECT * FROM messages WHERE status = 'pending' ORDER BY created_at ASC, rowid ASC LIMIT 1`,
         [message]
       );
       expect(repo.getNextPendingMessage()).toEqual(message);
       expect(mock.calls[0].query).toContain("ORDER BY created_at ASC");
+    });
+  });
+
+  describe("getMessageById", () => {
+    it("returns the durable message for idempotency checks", () => {
+      const message = { id: "request-1", content: "follow up" };
+      mock.setData(`SELECT * FROM messages WHERE id = ?`, [message]);
+
+      expect(repo.getMessageById("request-1")).toEqual(message);
+      expect(mock.calls[0].params).toEqual(["request-1"]);
+    });
+  });
+
+  describe("getPendingMessages", () => {
+    it("returns pending prompts in insertion order when timestamps tie", () => {
+      repo.getPendingMessages();
+
+      expect(mock.calls[0].query).toContain("WHERE status = 'pending'");
+      expect(mock.calls[0].query).toContain("ORDER BY created_at ASC, rowid ASC");
     });
   });
 

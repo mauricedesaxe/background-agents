@@ -55,6 +55,7 @@ function SessionPageContent() {
     currentParticipantId,
     isProcessing,
     isCompacting,
+    promptQueue,
     loadingHistory,
     sendPrompt,
     compactContext,
@@ -82,8 +83,16 @@ function SessionPageContent() {
     modelItems,
     loadingEnabledModels,
   } = useModelSelection(sessionState);
-  const { prompt, inputRef, handleSubmit, handleInputChange, handleKeyDown } = usePromptInput(
-    isProcessing || isCompacting,
+  const {
+    prompt,
+    isSubmitting,
+    submissionError,
+    inputRef,
+    handleSubmit,
+    handleInputChange,
+    handleKeyDown,
+  } = usePromptInput(
+    isCompacting,
     sendPrompt,
     sendTyping,
     selectedModel,
@@ -179,6 +188,7 @@ function SessionPageContent() {
                 sessionId={sessionId}
                 currentParticipantId={currentParticipantId}
                 isProcessing={isProcessing}
+                promptQueue={promptQueue}
                 loadingHistory={loadingHistory}
                 showSkeleton={showTimelineSkeleton}
                 onLoadOlder={loadOlderEvents}
@@ -266,6 +276,8 @@ function SessionPageContent() {
         prompt={{
           value: prompt,
           isProcessing,
+          isSubmitting,
+          submissionError,
           inputRef,
           onSubmit: handleSubmit,
           onChange: handleInputChange,
@@ -439,7 +451,7 @@ function useModelSelection(sessionState: SessionState) {
  * debounced typing indicator.
  */
 function usePromptInput(
-  isProcessing: boolean,
+  isCompacting: boolean,
   sendPrompt: ReturnType<typeof useSessionSocket>["sendPrompt"],
   sendTyping: ReturnType<typeof useSessionSocket>["sendTyping"],
   selectedModel: string,
@@ -447,6 +459,8 @@ function usePromptInput(
   loadingEnabledModels: boolean
 ) {
   const [prompt, setPrompt] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submissionError, setSubmissionError] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -459,15 +473,22 @@ function usePromptInput(
 
   useEffect(() => clearTypingTimeout, [clearTypingTimeout]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!prompt.trim() || isProcessing || loadingEnabledModels) return;
+    const submittedPrompt = prompt;
+    if (!submittedPrompt.trim() || isCompacting || isSubmitting || loadingEnabledModels) return;
 
-    // Drop any queued typing indicator — the prompt supersedes it
     clearTypingTimeout();
-    sendPrompt(prompt, selectedModel, reasoningEffort);
-    setPrompt("");
-    // Revalidate sidebar so this session bubbles to the top
+    setSubmissionError(null);
+    setIsSubmitting(true);
+    const result = await sendPrompt(submittedPrompt, selectedModel, reasoningEffort);
+    setIsSubmitting(false);
+    if (!result.ok) {
+      setSubmissionError(result.error);
+      return;
+    }
+
+    setPrompt((current) => (current === submittedPrompt ? "" : current));
     mutate(isUnarchivedSessionListKey);
   };
 
@@ -482,6 +503,7 @@ function usePromptInput(
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setPrompt(e.target.value);
+    setSubmissionError(null);
 
     // Send typing indicator (debounced)
     clearTypingTimeout();
@@ -490,5 +512,13 @@ function usePromptInput(
     }, 300);
   };
 
-  return { prompt, inputRef, handleSubmit, handleInputChange, handleKeyDown };
+  return {
+    prompt,
+    isSubmitting,
+    submissionError,
+    inputRef,
+    handleSubmit,
+    handleInputChange,
+    handleKeyDown,
+  };
 }

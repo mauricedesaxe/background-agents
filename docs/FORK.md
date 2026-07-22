@@ -206,6 +206,14 @@ parameter called `parentSessions` holding the stub of a child reads as a bug at 
 Expect a conflict on the next sync. Upstream edits this constructor whenever it adds a dependency,
 and the rename touches the same lines. Take upstream's _parameter list_ and keep our _name_.
 
+### 15. Follow-up prompts remain usable while a session runs
+
+**Why.** The control plane already persisted and drained pending prompts in order, but the web
+client disabled delivery while processing and ignored the acknowledgement. Users had to hold
+complete work in an unsubmitted textarea until the active run ended, and a disconnected send cleared
+that work. The Durable Object's message table remains the only queue; the browser only renders its
+snapshot.
+
 ## Where we match upstream against our own docs
 
 The list above is where we differ from upstream. This is the inverse: a place where matching

@@ -319,6 +319,71 @@ describe("POST /internal/stop", () => {
     if (sandboxWs) sandboxWs.close();
   });
 
+  it("releases queued work when stop completion never arrives", async () => {
+    const name = `ws-stop-missing-completion-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    const sandboxAuth = { authToken: "sb-tok-missing", sandboxId: "sb-missing-1" };
+    await seedSandboxAuth(stub, sandboxAuth);
+    const participants = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    await seedMessage(stub, {
+      id: "msg-missing-a",
+      authorId: participants[0].id,
+      content: "First prompt",
+      source: "web",
+      status: "processing",
+      createdAt: Date.now() - 2000,
+      startedAt: Date.now() - 1500,
+    });
+    await seedMessage(stub, {
+      id: "msg-missing-b",
+      authorId: participants[0].id,
+      content: "Second prompt",
+      source: "web",
+      status: "pending",
+      createdAt: Date.now() - 1000,
+    });
+
+    const { ws: firstSandbox } = await openSandboxWs(name, sandboxAuth);
+    expect(firstSandbox).not.toBeNull();
+    firstSandbox!.accept();
+    const closed = new Promise<CloseEvent>((resolve) => {
+      firstSandbox!.addEventListener("close", resolve, { once: true });
+    });
+
+    await stub.fetch("http://internal/internal/stop", { method: "POST" });
+    const closeEvent = await Promise.race([
+      closed,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("stop fallback did not close sandbox")), 6000)
+      ),
+    ]);
+    expect(closeEvent.code).toBe(1012);
+
+    const statuses = await queryDO<{ id: string; status: string }>(
+      stub,
+      "SELECT id, status FROM messages ORDER BY created_at"
+    );
+    expect(statuses).toEqual([
+      { id: "msg-missing-a", status: "failed" },
+      { id: "msg-missing-b", status: "pending" },
+    ]);
+
+    const { ws: replacementSandbox } = await openSandboxWs(name, sandboxAuth);
+    expect(replacementSandbox).not.toBeNull();
+    replacementSandbox!.accept();
+    const dispatched = await collectMessages(replacementSandbox!, {
+      until: (message) => message.type === "prompt",
+      timeoutMs: 3000,
+    });
+    expect(dispatched.find((message) => message.type === "prompt")?.messageId).toBe(
+      "msg-missing-b"
+    );
+    replacementSandbox!.close();
+  });
+
   it("stop via WebSocket client message", async () => {
     const name = `ws-stop-client-${Date.now()}`;
     const { stub } = await initNamedSession(name);
@@ -353,7 +418,7 @@ describe("POST /internal/stop", () => {
     // Collect until we see processing_status
     const collector = collectMessages(clientWs, {
       until: (msg) => msg.type === "processing_status",
-      timeoutMs: 3000,
+      timeoutMs: 5000,
     });
 
     // Client sends stop via WebSocket

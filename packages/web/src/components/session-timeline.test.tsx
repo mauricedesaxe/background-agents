@@ -48,6 +48,7 @@ describe("EventItem", () => {
         sessionId="session-1"
         currentParticipantId={null}
         onOpenMedia={vi.fn()}
+        queuePosition={undefined}
       />
     );
 
@@ -75,5 +76,26 @@ describe("EventItem", () => {
     expect(
       screen.getByText("Context compaction failed: Provider rejected summary")
     ).toBeInTheDocument();
+  });
+
+  it("shows the persisted queue position on a pending user message", () => {
+    const event: SandboxEvent = {
+      type: "user_message",
+      content: "Run the tests next",
+      messageId: "message-2",
+      timestamp: 1_700_000_000,
+    };
+
+    render(
+      <EventItem
+        event={event}
+        sessionId="session-1"
+        currentParticipantId={null}
+        onOpenMedia={vi.fn()}
+        queuePosition={2}
+      />
+    );
+
+    expect(screen.getByText("Queued #2")).toBeInTheDocument();
   });
 });
