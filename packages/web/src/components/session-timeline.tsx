@@ -409,6 +409,16 @@ function GitSyncEvent({ event }: EventRendererProps) {
   );
 }
 
+function ContextCompactionStartedEvent({ event }: EventRendererProps) {
+  if (event.type !== "context_compaction_started") return null;
+
+  return (
+    <StatusRow tone="muted" time={formatEventTime(event)}>
+      Context compaction started
+    </StatusRow>
+  );
+}
+
 function ContextCompactedEvent({ event }: EventRendererProps) {
   if (event.type !== "context_compacted") return null;
 
@@ -496,6 +506,7 @@ const eventRenderers: Partial<
   token: AssistantMessageEvent,
   tool_result: ToolResultEvent,
   git_sync: GitSyncEvent,
+  context_compaction_started: ContextCompactionStartedEvent,
   context_compacted: ContextCompactedEvent,
   context_compaction_failed: ContextCompactionFailedEvent,
   artifact: ArtifactEvent,

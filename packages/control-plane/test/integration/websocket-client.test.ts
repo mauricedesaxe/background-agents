@@ -369,6 +369,10 @@ describe("Client WebSocket (via SELF.fetch)", () => {
     const sandboxMessages = collectMessages(sandboxWs!, {
       until: (message) => message.type === "compact_context",
     });
+    const started = collectMessages(clientWs, {
+      until: (message) =>
+        message.type === "sandbox_event" && message.event.type === "context_compaction_started",
+    });
     clientWs.send(
       JSON.stringify({
         type: "compact_context",
@@ -382,6 +386,21 @@ describe("Client WebSocket (via SELF.fetch)", () => {
       requestId: "compact-request-1",
       model: "openai/gpt-5.6-sol",
     });
+    expect(await started).toContainEqual({
+      type: "sandbox_event",
+      event: expect.objectContaining({
+        type: "context_compaction_started",
+        requestId: "compact-request-1",
+        sandboxId: SANDBOX_ID,
+      }),
+    });
+
+    const startedEvents = await queryDO<{ count: number }>(
+      stub,
+      "SELECT COUNT(*) AS count FROM events WHERE type = ?",
+      "context_compaction_started"
+    );
+    expect(startedEvents[0].count).toBe(1);
 
     const completed = collectMessages(clientWs, {
       until: (message) => message.type === "compaction_status" && message.state === "completed",

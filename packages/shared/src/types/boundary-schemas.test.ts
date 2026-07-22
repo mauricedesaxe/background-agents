@@ -198,6 +198,17 @@ describe("boundary schemas", () => {
       expect(result.success).toBe(true);
     });
 
+    it("parses a manual context compaction start event", () => {
+      const result = sandboxEventSchema.safeParse({
+        type: "context_compaction_started",
+        requestId: "compact-1",
+        sandboxId: "sandbox-1",
+        timestamp: 123,
+      });
+
+      expect(result.success).toBe(true);
+    });
+
     it("parses step finish events with structured token usage", () => {
       const tokenUsage = {
         total: 223,
