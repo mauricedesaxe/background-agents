@@ -99,10 +99,13 @@ OpenCode events before calling `POST /session/:id/summarize` with the selected m
 case-sensitive `providerID` and `modelID`. Only `session.compacted` is success. `session.error` is a
 failure even when the HTTP response is `200`, and a five-minute deadline aborts OpenCode before the
 bridge reports a timeout. The operation stays attached to the existing OpenCode session and is
-stored outside the prompt transcript. Pinned by
-`packages/sandbox-runtime/tests/test_bridge_session_reattach.py`, the compaction cases in
-`test_bridge_sse.py`, `test_bridge_compaction.py`, and
-`packages/sandbox-runtime/scripts/reproduce_context_overflow.py`.
+stored outside the prompt transcript. The native endpoint behavior and later message lineage were
+[probed against pinned OpenCode 1.14.41](https://github.com/mauricedesaxe/background-agents/issues/129#issuecomment-5044195365).
+
+Automatic overflow recovery is pinned by
+`packages/sandbox-runtime/scripts/reproduce_context_overflow.py` and the compaction cases in
+`test_bridge_sse.py`. Manual compaction is pinned by `test_bridge_compaction.py` and the
+control-plane WebSocket integration tests.
 
 **Why.** Without reattachment, resuming starts a fresh conversation and the history is gone from the
 agent's point of view while still being visible in the UI. Without overflow deferral, the bridge

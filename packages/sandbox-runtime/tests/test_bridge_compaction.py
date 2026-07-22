@@ -89,6 +89,43 @@ async def test_native_compaction_uses_selected_model_and_reports_success(
 
 
 @pytest.mark.asyncio
+async def test_prompt_continues_in_same_opencode_session_after_compaction(
+    bridge: AgentBridge,
+) -> None:
+    bridge.http_client = MockHttpClient(
+        [sse_event("session.compacted", {"sessionID": "oc-session-123"})]
+    )
+    sent: list[dict[str, Any]] = []
+    observed_session_ids: list[str | None] = []
+
+    async def capture(event: dict[str, Any]) -> None:
+        sent.append(event)
+
+    async def no_git_identity(_user: object) -> None:
+        return None
+
+    async def stream_prompt(*_args: object, **_kwargs: object) -> AsyncIterator[dict[str, Any]]:
+        observed_session_ids.append(bridge.opencode_session_id)
+        yield {"type": "token", "content": "Continued", "messageId": "msg-after"}
+
+    bridge._send_event = capture  # type: ignore[method-assign]
+    bridge._configure_git_identity = no_git_identity  # type: ignore[method-assign]
+    bridge._stream_opencode_response_sse = stream_prompt  # type: ignore[method-assign]
+
+    await bridge._handle_context_compaction(
+        {"requestId": "compact-continued", "model": "openai/gpt-5.6-sol"}
+    )
+    await bridge._handle_prompt({"messageId": "msg-after", "content": "Continue"})
+
+    assert observed_session_ids == ["oc-session-123"]
+    assert sent[-1] == {
+        "type": "execution_complete",
+        "messageId": "msg-after",
+        "success": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_session_error_reports_specific_compaction_failure(bridge: AgentBridge) -> None:
     bridge.http_client = MockHttpClient(
         [
@@ -164,3 +201,42 @@ async def test_bridge_rejects_compaction_while_prompt_is_active(bridge: AgentBri
     assert sent[0]["type"] == "context_compaction_failed"
     assert "idle" in sent[0]["error"]
     bridge._current_prompt_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_compaction_and_aborts_opencode(bridge: AgentBridge) -> None:
+    class HangingResponse(MockSSEResponse):
+        async def aiter_text(self) -> AsyncIterator[str]:
+            await asyncio.sleep(60)
+            if False:
+                yield ""
+
+    client = MockHttpClient([])
+    client.stream = lambda *args, **kwargs: HangingResponse([])  # type: ignore[method-assign]
+    bridge.http_client = client
+    sent: list[dict[str, Any]] = []
+
+    async def capture(event: dict[str, Any]) -> None:
+        sent.append(event)
+
+    bridge._send_event = capture  # type: ignore[method-assign]
+    await bridge._handle_command(
+        {"type": "compact_context", "requestId": "compact-5", "model": "openai/gpt-5.6-sol"}
+    )
+    await asyncio.sleep(0)
+
+    await bridge._handle_stop()
+    task = bridge._current_compaction_task
+    if task:
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    await asyncio.sleep(0)
+
+    assert any(url.endswith("/abort") for url, _body in client.posts)
+    assert sent == [
+        {
+            "type": "context_compaction_failed",
+            "requestId": "compact-5",
+            "error": "Context compaction was cancelled",
+        }
+    ]

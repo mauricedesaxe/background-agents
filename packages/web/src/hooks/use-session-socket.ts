@@ -17,6 +17,12 @@ import type { ParticipantPresence, ServerMessage, SessionState } from "@open-ins
 
 const PROMPT_SUBSCRIPTION_RETRY_DELAY_MS = 500;
 const HISTORY_PAGE_SIZE = 200;
+const COMPACTION_REQUEST_ERROR_CODES = new Set([
+  "SESSION_BUSY",
+  "INVALID_MODEL",
+  "SANDBOX_UNAVAILABLE",
+  "COMPACTION_DISPATCH_FAILED",
+]);
 
 interface Message {
   id: string;
@@ -99,13 +105,31 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
       } else if (message.type === "compaction_status") {
         activeCompactionRequestRef.current =
           message.state === "in_progress" ? message.requestId : null;
-        if (message.state !== "in_progress") {
+        if (pendingCompactionRequestRef.current === message.requestId) {
           pendingCompactionRequestRef.current = null;
         }
       } else if (message.type === "sandbox_error") {
         console.error("Sandbox error:", message.error);
       } else if (message.type === "error") {
         console.error("Session error:", message);
+        if (message.code === "COMPACTION_IN_PROGRESS") {
+          dispatch({ type: "prompt_rejected" });
+          if (message.activeRequestId) {
+            activeCompactionRequestRef.current = message.activeRequestId;
+            dispatch({ type: "compaction_active" });
+          }
+        } else if (
+          COMPACTION_REQUEST_ERROR_CODES.has(message.code) &&
+          message.requestId === pendingCompactionRequestRef.current
+        ) {
+          pendingCompactionRequestRef.current = null;
+          if (message.activeRequestId) {
+            activeCompactionRequestRef.current = message.activeRequestId;
+            dispatch({ type: "compaction_active" });
+          } else if (!activeCompactionRequestRef.current) {
+            dispatch({ type: "compaction_rejected" });
+          }
+        }
         toast.error(message.message);
       }
 

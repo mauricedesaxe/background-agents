@@ -137,6 +137,12 @@ const WS_AUTH_TIMEOUT_MS = 30000; // 30 seconds
  */
 const WS_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const ACTIVE_COMPACTION_STORAGE_KEY = "activeCompactionRequestId";
+const COMPACTION_TIMEOUT_MS = 5 * 60 * 1000;
+
+interface ActiveCompaction {
+  requestId: string;
+  deadlineAt: number;
+}
 
 type BoundarySchema<T> = {
   safeParse(
@@ -198,7 +204,7 @@ export class SessionDO extends DurableObject<Env> {
   private _sandboxEventProcessor: SessionSandboxEventProcessor | null = null;
   // Session status service (lazily initialized)
   private _statusService: SessionStatusService | null = null;
-  private activeCompactionRequestId: string | null = null;
+  private activeCompaction: ActiveCompaction | null = null;
 
   // Internal HTTP route table (transport wiring only; handlers remain on SessionDO).
   private readonly routes = createSessionInternalRoutes({
@@ -720,7 +726,7 @@ export class SessionDO extends DurableObject<Env> {
     // Alarm scheduler adapter
     const alarmScheduler: AlarmScheduler = {
       scheduleAlarm: async (timestamp) => {
-        await this.ctx.storage.setAlarm(timestamp);
+        await this.scheduleAlarmNoLaterThan(timestamp);
       },
     };
 
@@ -810,8 +816,13 @@ export class SessionDO extends DurableObject<Env> {
       idGenerator,
       config,
       {
-        onSandboxTerminating: (reason) =>
-          this.messageQueue.failStuckProcessingMessage({ type: "sandbox_terminating", reason }),
+        onSandboxTerminating: async (reason) => {
+          await this.messageQueue.failStuckProcessingMessage({
+            type: "sandbox_terminating",
+            reason,
+          });
+          await this.failActiveCompaction("Sandbox stopped before context compaction completed");
+        },
       },
       imageBuildLookup
     );
@@ -1114,6 +1125,7 @@ export class SessionDO extends DurableObject<Env> {
    */
   async alarm(): Promise<void> {
     this.ensureInitialized();
+    await this.expireActiveCompaction();
     await this.alarmHandler.handle();
   }
 
@@ -1446,11 +1458,13 @@ export class SessionDO extends DurableObject<Env> {
       return;
     }
 
-    if (await this.getActiveCompactionRequestId()) {
+    const activeCompaction = await this.getActiveCompaction();
+    if (activeCompaction) {
       this.safeSend(ws, {
         type: "error",
         code: "COMPACTION_IN_PROGRESS",
         message: "Wait for context compaction to finish before sending a prompt",
+        activeRequestId: activeCompaction.requestId,
       });
       return;
     }
@@ -1471,11 +1485,14 @@ export class SessionDO extends DurableObject<Env> {
       return;
     }
 
-    if (this.repository.getProcessingMessage() || (await this.getActiveCompactionRequestId())) {
+    const activeCompaction = await this.getActiveCompaction();
+    if (this.repository.getProcessingMessage() || activeCompaction) {
       this.safeSend(ws, {
         type: "error",
         code: "SESSION_BUSY",
         message: "Context can only be compacted while the session is idle",
+        requestId: data.requestId,
+        ...(activeCompaction && { activeRequestId: activeCompaction.requestId }),
       });
       return;
     }
@@ -1485,6 +1502,7 @@ export class SessionDO extends DurableObject<Env> {
         type: "error",
         code: "INVALID_MODEL",
         message: "The selected model cannot compact this session",
+        requestId: data.requestId,
       });
       return;
     }
@@ -1495,25 +1513,29 @@ export class SessionDO extends DurableObject<Env> {
         type: "error",
         code: "SANDBOX_UNAVAILABLE",
         message: "The sandbox must be running to compact context",
+        requestId: data.requestId,
       });
       return;
     }
 
-    await this.setActiveCompactionRequestId(data.requestId);
     const now = Date.now();
+    const deadlineAt = now + COMPACTION_TIMEOUT_MS;
+    await this.setActiveCompaction({ requestId: data.requestId, deadlineAt });
     this.updateLastActivity(now);
     await this.scheduleInactivityCheck();
+    await this.scheduleAlarmNoLaterThan(deadlineAt);
     const command = {
       type: "compact_context" as const,
       requestId: data.requestId,
       model: getValidModelOrDefault(data.model),
     };
     if (!this.wsManager.send(sandboxWs, command)) {
-      await this.setActiveCompactionRequestId(null);
+      await this.setActiveCompaction(null);
       this.safeSend(ws, {
         type: "error",
         code: "COMPACTION_DISPATCH_FAILED",
         message: "Failed to send context compaction to the sandbox",
+        requestId: data.requestId,
       });
       return;
     }
@@ -1595,9 +1617,9 @@ export class SessionDO extends DurableObject<Env> {
     if (
       (event.type === "context_compacted" || event.type === "context_compaction_failed") &&
       event.requestId &&
-      event.requestId === (await this.getActiveCompactionRequestId())
+      event.requestId === (await this.getActiveCompaction())?.requestId
     ) {
-      await this.setActiveCompactionRequestId(null);
+      await this.setActiveCompaction(null);
       const failed = event.type === "context_compaction_failed";
       this.broadcast({
         type: "compaction_status",
@@ -1657,6 +1679,7 @@ export class SessionDO extends DurableObject<Env> {
    */
   private async stopExecution(options?: { suppressStatusReconcile?: boolean }): Promise<void> {
     await this.messageQueue.stopExecution(options);
+    await this.failActiveCompaction("Context compaction was cancelled");
   }
 
   /**
@@ -1738,7 +1761,7 @@ export class SessionDO extends DurableObject<Env> {
     sandbox ??= this.getSandbox();
     const messageCount = this.repository.getMessageCount();
     const isProcessing = this.getIsProcessing();
-    const isCompacting = (await this.getActiveCompactionRequestId()) !== null;
+    const isCompacting = (await this.getActiveCompaction()) !== null;
 
     // Decrypt code-server password if stored encrypted
     let codeServerPassword: string | null = sandbox?.code_server_password ?? null;
@@ -1872,21 +1895,56 @@ export class SessionDO extends DurableObject<Env> {
     return this.repository.getProcessingMessage() !== null;
   }
 
-  private async getActiveCompactionRequestId(): Promise<string | null> {
-    if (this.activeCompactionRequestId) return this.activeCompactionRequestId;
+  private async getActiveCompaction(): Promise<ActiveCompaction | null> {
+    if (this.activeCompaction) return this.activeCompaction;
 
-    const stored = await this.ctx.storage.get<string>(ACTIVE_COMPACTION_STORAGE_KEY);
-    this.activeCompactionRequestId = stored ?? null;
-    return this.activeCompactionRequestId;
+    const stored = await this.ctx.storage.get<ActiveCompaction>(ACTIVE_COMPACTION_STORAGE_KEY);
+    this.activeCompaction = stored ?? null;
+    return this.activeCompaction;
   }
 
-  private async setActiveCompactionRequestId(requestId: string | null): Promise<void> {
-    this.activeCompactionRequestId = requestId;
-    if (requestId) {
-      await this.ctx.storage.put(ACTIVE_COMPACTION_STORAGE_KEY, requestId);
+  private async setActiveCompaction(compaction: ActiveCompaction | null): Promise<void> {
+    this.activeCompaction = compaction;
+    if (compaction) {
+      await this.ctx.storage.put(ACTIVE_COMPACTION_STORAGE_KEY, compaction);
     } else {
       await this.ctx.storage.delete(ACTIVE_COMPACTION_STORAGE_KEY);
     }
+  }
+
+  private async scheduleAlarmNoLaterThan(deadlineAt: number): Promise<void> {
+    const current = await this.ctx.storage.getAlarm();
+    if (!current || deadlineAt < current) {
+      await this.ctx.storage.setAlarm(deadlineAt);
+    }
+  }
+
+  private async expireActiveCompaction(): Promise<void> {
+    const active = await this.getActiveCompaction();
+    if (!active) return;
+
+    const now = Date.now();
+    if (now < active.deadlineAt) {
+      await this.scheduleAlarmNoLaterThan(active.deadlineAt);
+      return;
+    }
+    await this.failActiveCompaction(
+      `Context compaction timed out after ${COMPACTION_TIMEOUT_MS / 1000}s`
+    );
+  }
+
+  private async failActiveCompaction(error: string): Promise<void> {
+    const active = await this.getActiveCompaction();
+    if (!active) return;
+
+    await this.processSandboxEvent({
+      type: "context_compaction_failed",
+      requestId: active.requestId,
+      error,
+      ackId: `context_compaction_failed:${active.requestId}`,
+      sandboxId: this.getSandbox()?.id ?? "",
+      timestamp: Date.now() / 1000,
+    });
   }
 
   private safeParseTunnelUrls(raw: string): Record<string, string> | null {

@@ -48,6 +48,12 @@ export type SessionSocketAction =
   | { type: "prompt_sent" }
   /** A manual compaction request was sent. */
   | { type: "compaction_sent" }
+  /** A compaction is active, including one started by another client. */
+  | { type: "compaction_active" }
+  /** This client's compaction request was rejected with no active operation. */
+  | { type: "compaction_rejected" }
+  /** An optimistic prompt was rejected before it entered the queue. */
+  | { type: "prompt_rejected" }
   /** The socket closed (clean or not). */
   | { type: "socket_closed" };
 
@@ -320,7 +326,14 @@ export function sessionSocketReducer(
       return updateSessionState(state, (prev) => ({ ...prev, isProcessing: true }));
 
     case "compaction_sent":
+    case "compaction_active":
       return updateSessionState(state, (prev) => ({ ...prev, isCompacting: true }));
+
+    case "compaction_rejected":
+      return updateSessionState(state, (prev) => ({ ...prev, isCompacting: false }));
+
+    case "prompt_rejected":
+      return updateSessionState(state, (prev) => ({ ...prev, isProcessing: false }));
 
     case "socket_closed":
       return { ...state, replaying: false };

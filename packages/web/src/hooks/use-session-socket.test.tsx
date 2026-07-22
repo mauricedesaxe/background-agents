@@ -129,6 +129,64 @@ describe("useSessionSocket", () => {
     vi.restoreAllMocks();
   });
 
+  it("keeps another tab's accepted compaction active when its own request is rejected", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1"));
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const socket = FakeWebSocket.instances[0];
+    act(() => socket.open());
+    act(() => socket.receive(createSubscribedMessage()));
+    vi.mocked(globalThis.crypto.randomUUID).mockReturnValue("compact-request-2");
+
+    act(() => result.current.compactContext("openai/gpt-5.6-sol"));
+    expect(result.current.isCompacting).toBe(true);
+
+    act(() => {
+      socket.receive({
+        type: "compaction_status",
+        requestId: "compact-request-1",
+        state: "in_progress",
+      });
+      socket.receive({
+        type: "error",
+        code: "SESSION_BUSY",
+        message: "Context can only be compacted while the session is idle",
+        requestId: "compact-request-2",
+        activeRequestId: "compact-request-1",
+      });
+    });
+
+    expect(result.current.isCompacting).toBe(true);
+    expect(result.current.isProcessing).toBe(false);
+  });
+
+  it("reverts an optimistic prompt when another tab starts compaction", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1"));
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const socket = FakeWebSocket.instances[0];
+    act(() => socket.open());
+    act(() => socket.receive(createSubscribedMessage()));
+
+    act(() => result.current.sendPrompt("Race compaction"));
+    expect(result.current.isProcessing).toBe(true);
+
+    act(() => {
+      socket.receive({
+        type: "compaction_status",
+        requestId: "compact-request-1",
+        state: "in_progress",
+      });
+      socket.receive({
+        type: "error",
+        code: "COMPACTION_IN_PROGRESS",
+        message: "Wait for context compaction to finish before sending a prompt",
+        activeRequestId: "compact-request-1",
+      });
+    });
+
+    expect(result.current.isProcessing).toBe(false);
+    expect(result.current.isCompacting).toBe(true);
+  });
+
   it("hydrates artifacts from the subscribed payload", async () => {
     const { result } = renderHook(() => useSessionSocket("session-1"));
 
