@@ -10,6 +10,14 @@ import { useSessionSocket } from "./use-session-socket";
 
 type SubscribedMessage = Extract<ServerMessage, { type: "subscribed" }>;
 
+const queuedPrompt = {
+  messageId: "client-id",
+  position: 2,
+  content: "Run the tests next",
+  timestamp: 2,
+  author: { participantId: "participant-1", name: "Test User" },
+};
+
 const { mutateMock } = vi.hoisted(() => ({
   mutateMock: vi.fn(),
 }));
@@ -97,6 +105,20 @@ function createSubscribedMessage(artifacts: SessionArtifact[] = []): SubscribedM
   };
 }
 
+async function openSubscribedHook(state: Partial<SessionState> = {}) {
+  const hook = renderHook(() => useSessionSocket("session-1"));
+  await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+  const socket = FakeWebSocket.instances[0];
+  act(() => {
+    socket.open();
+    const subscribed = createSubscribedMessage();
+    subscribed.state = createSessionState(state);
+    socket.receive(subscribed);
+  });
+  await waitFor(() => expect(hook.result.current.replaying).toBe(false));
+  return { ...hook, socket };
+}
+
 function sendSandboxAccessMessages(socket: FakeWebSocket, sandboxId: string) {
   socket.receive({
     type: "code_server_info",
@@ -126,6 +148,7 @@ describe("useSessionSocket", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -166,7 +189,10 @@ describe("useSessionSocket", () => {
     act(() => socket.open());
     act(() => socket.receive(createSubscribedMessage()));
 
-    act(() => result.current.sendPrompt("Race compaction"));
+    let delivery: ReturnType<typeof result.current.sendPrompt>;
+    act(() => {
+      delivery = result.current.sendPrompt("Race compaction");
+    });
     expect(result.current.isProcessing).toBe(true);
 
     act(() => {
@@ -185,6 +211,304 @@ describe("useSessionSocket", () => {
 
     expect(result.current.isProcessing).toBe(false);
     expect(result.current.isCompacting).toBe(true);
+    await expect(delivery!).resolves.toEqual({
+      ok: false,
+      error: "Wait for context compaction to finish before sending a prompt",
+    });
+  });
+
+  it("accepts a follow-up while processing and resolves after server acknowledgement", async () => {
+    const { result, socket } = await openSubscribedHook({ isProcessing: true });
+
+    let delivery: ReturnType<typeof result.current.sendPrompt>;
+    act(() => {
+      delivery = result.current.sendPrompt("Run the tests next", "anthropic/claude-sonnet-4-6");
+    });
+
+    expect(socket.sentMessages).toContainEqual({
+      type: "prompt",
+      requestId: "client-id",
+      content: "Run the tests next",
+      model: "anthropic/claude-sonnet-4-6",
+    });
+
+    act(() => {
+      socket.receive({ type: "prompt_queued", messageId: "client-id", position: 2 });
+    });
+    expect(result.current.promptQueue).toEqual([
+      expect.objectContaining({
+        messageId: "client-id",
+        position: 2,
+        content: "Run the tests next",
+      }),
+    ]);
+
+    act(() => {
+      socket.receive({
+        type: "prompt_queue",
+        prompts: [queuedPrompt],
+      });
+    });
+
+    await expect(delivery!).resolves.toEqual({ ok: true });
+    expect(result.current.promptQueue).toEqual([queuedPrompt]);
+  });
+
+  it("restores queued prompt state from subscription", async () => {
+    const { result, socket } = await openSubscribedHook({ isProcessing: true });
+    const subscribed = createSubscribedMessage();
+    subscribed.promptQueue = [queuedPrompt];
+
+    act(() => socket.receive(subscribed));
+
+    expect(result.current.promptQueue).toEqual([queuedPrompt]);
+  });
+
+  it("confirms a pending delivery from the queue snapshot after reconnect", async () => {
+    const { result, socket } = await openSubscribedHook({ isProcessing: true });
+    const delivery = result.current.sendPrompt("Run the tests next");
+
+    act(() => socket.close());
+    act(() => result.current.reconnect());
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
+    const reconnected = FakeWebSocket.instances[1];
+    const subscribed = createSubscribedMessage();
+    subscribed.promptQueue = [queuedPrompt];
+    act(() => {
+      reconnected.open();
+      reconnected.receive(subscribed);
+    });
+
+    await expect(delivery).resolves.toEqual({ ok: true });
+  });
+
+  it("confirms a pending delivery from replay after it starts before reconnect", async () => {
+    const { result, socket } = await openSubscribedHook({ isProcessing: true });
+    const delivery = result.current.sendPrompt("Run the tests next");
+
+    act(() => socket.close());
+    act(() => result.current.reconnect());
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
+    const reconnected = FakeWebSocket.instances[1];
+    const subscribed = createSubscribedMessage();
+    subscribed.replay = {
+      events: [
+        {
+          type: "user_message",
+          messageId: "client-id",
+          content: "Run the tests next",
+          timestamp: 1_700_000_000,
+        },
+      ],
+      hasMore: false,
+      cursor: null,
+    };
+    act(() => {
+      reconnected.open();
+      reconnected.receive(subscribed);
+    });
+
+    await expect(delivery).resolves.toEqual({ ok: true });
+  });
+
+  it("confirms a pending delivery from the active prompt after reconnect", async () => {
+    const { result, socket } = await openSubscribedHook({ isProcessing: true });
+    const delivery = result.current.sendPrompt("Run the tests next");
+
+    act(() => socket.close());
+    act(() => result.current.reconnect());
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
+    const reconnected = FakeWebSocket.instances[1];
+    const subscribed = createSubscribedMessage();
+    subscribed.activePrompt = { ...queuedPrompt, position: 1 };
+    act(() => {
+      reconnected.open();
+      reconnected.receive(subscribed);
+    });
+
+    await expect(delivery).resolves.toEqual({ ok: true });
+    expect(result.current.events).toContainEqual(
+      expect.objectContaining({ type: "user_message", messageId: "client-id" })
+    );
+  });
+
+  it("does not reject prompt delivery for an unrelated server error", async () => {
+    const { result, socket } = await openSubscribedHook({ isProcessing: true });
+    const delivery = result.current.sendPrompt("Run the tests next");
+    let settled = false;
+    void delivery.then(() => {
+      settled = true;
+    });
+
+    act(() => {
+      socket.receive({ type: "error", code: "HISTORY_FAILED", message: "History failed" });
+    });
+    await act(async () => Promise.resolve());
+    expect(settled).toBe(false);
+
+    act(() => {
+      socket.receive({ type: "prompt_queued", messageId: "client-id", position: 2 });
+    });
+    await expect(delivery).resolves.toEqual({ ok: true });
+  });
+
+  it("does not queue a duplicate acknowledgement for completed work", async () => {
+    const { result, socket } = await openSubscribedHook({ isProcessing: true });
+    const delivery = result.current.sendPrompt("Run the tests next");
+
+    act(() => {
+      socket.receive({ type: "prompt_queued", messageId: "client-id", status: "completed" });
+    });
+
+    await expect(delivery).resolves.toEqual({ ok: true });
+    expect(result.current.promptQueue).toEqual([]);
+  });
+
+  it("rolls back optimistic processing when admission is rejected", async () => {
+    const { result, socket } = await openSubscribedHook();
+    let delivery: ReturnType<typeof result.current.sendPrompt>;
+    act(() => {
+      delivery = result.current.sendPrompt("Run the tests next");
+    });
+    expect(result.current.isProcessing).toBe(true);
+
+    act(() => {
+      socket.receive({
+        type: "prompt_rejected",
+        requestId: "client-id",
+        message: "Wait for context compaction to finish before sending a prompt",
+      });
+    });
+
+    await expect(delivery!).resolves.toEqual({
+      ok: false,
+      error: "Wait for context compaction to finish before sending a prompt",
+    });
+    expect(result.current.isProcessing).toBe(false);
+  });
+
+  it("preserves authoritative processing when a different run starts before rejection", async () => {
+    const { result, socket } = await openSubscribedHook();
+    let delivery: ReturnType<typeof result.current.sendPrompt>;
+    act(() => {
+      delivery = result.current.sendPrompt("Run the tests next");
+    });
+
+    act(() => {
+      socket.receive({ type: "processing_status", isProcessing: true });
+      socket.receive({
+        type: "prompt_rejected",
+        requestId: "client-id",
+        message: "Request ID belongs to another prompt",
+      });
+    });
+
+    await expect(delivery!).resolves.toEqual({
+      ok: false,
+      error: "Request ID belongs to another prompt",
+    });
+    expect(result.current.isProcessing).toBe(true);
+  });
+
+  it("rolls back optimistic processing when admission times out", async () => {
+    const { result } = await openSubscribedHook();
+    vi.useFakeTimers();
+    let delivery: ReturnType<typeof result.current.sendPrompt>;
+    act(() => {
+      delivery = result.current.sendPrompt("Run the tests next");
+    });
+    expect(result.current.isProcessing).toBe(true);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    await expect(delivery!).resolves.toEqual({
+      ok: false,
+      error: "The server did not confirm the message. Retry is safe.",
+    });
+    expect(result.current.isProcessing).toBe(false);
+  });
+
+  it("reuses the request ID when an accepted prompt loses its acknowledgement", async () => {
+    const { result, socket } = await openSubscribedHook({ isProcessing: true });
+    vi.useFakeTimers();
+    const firstDelivery = result.current.sendPrompt("Run the tests next");
+
+    act(() => {
+      socket.receive({ type: "prompt_queue", prompts: [queuedPrompt] });
+      socket.close();
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(firstDelivery).resolves.toEqual({
+      ok: false,
+      error: "The server did not confirm the message. Retry is safe.",
+    });
+    expect(result.current.isProcessing).toBe(true);
+
+    vi.useRealTimers();
+    act(() => result.current.reconnect());
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
+    const reconnected = FakeWebSocket.instances[1];
+    act(() => {
+      reconnected.open();
+      reconnected.receive(createSubscribedMessage());
+    });
+    await waitFor(() => expect(result.current.connected).toBe(true));
+
+    const retry = result.current.sendPrompt("Run the tests next");
+    const firstPrompt = socket.sentMessages.find((message) => message.type === "prompt");
+    const retriedPrompt = reconnected.sentMessages.find((message) => message.type === "prompt");
+    expect(retriedPrompt?.requestId).toBe(firstPrompt?.requestId);
+
+    act(() => {
+      reconnected.receive({ type: "prompt_queued", messageId: "client-id", position: 2 });
+    });
+    await expect(retry).resolves.toEqual({ ok: true });
+  });
+
+  it("reuses the request ID when acknowledgement arrives after the timeout", async () => {
+    const { result, socket } = await openSubscribedHook({ isProcessing: true });
+    vi.useFakeTimers();
+    const firstDelivery = result.current.sendPrompt("Run the tests next");
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(firstDelivery).resolves.toEqual({
+      ok: false,
+      error: "The server did not confirm the message. Retry is safe.",
+    });
+    act(() => {
+      socket.receive({
+        type: "prompt_queued",
+        messageId: "client-id",
+        position: 2,
+        status: "pending",
+      });
+    });
+
+    const retry = result.current.sendPrompt("Run the tests next");
+    const prompts = socket.sentMessages.filter((message) => message.type === "prompt");
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1].requestId).toBe(prompts[0].requestId);
+
+    act(() => {
+      socket.receive({
+        type: "prompt_queued",
+        messageId: "client-id",
+        position: 2,
+        status: "pending",
+      });
+    });
+    await expect(retry).resolves.toEqual({ ok: true });
+  });
+
+  it("rejects delivery while disconnected so the draft can be retried", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1"));
+
+    await expect(result.current.sendPrompt("Keep this draft")).resolves.toEqual({
+      ok: false,
+      error: "Not connected. Reconnect and try again.",
+    });
   });
 
   it("hydrates artifacts from the subscribed payload", async () => {

@@ -6,6 +6,7 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("subscribe"), token: z.string(), clientId: z.string() }),
   z.object({
     type: z.literal("prompt"),
+    requestId: z.string().min(1).max(128).optional(),
     content: z.string(),
     model: z.string().optional(),
     reasoningEffort: z.string().optional(),

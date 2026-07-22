@@ -7,11 +7,11 @@ import {
   isValidModel,
   resolveReasoningEffort,
 } from "@open-inspect/shared";
-import type { SessionAttachmentReference } from "@open-inspect/shared";
+import type { PromptSnapshotItem, SessionAttachmentReference } from "@open-inspect/shared";
 import type { ClientInfo, MessageSource, SandboxEvent, ServerMessage } from "../types";
 import type { SourceControlProviderName } from "../source-control";
 import type { SandboxLifecycle, SandboxTerminationReason } from "../sandbox/lifecycle/manager";
-import type { ParticipantRow, SandboxCommand } from "./types";
+import type { MessageRow, ParticipantRow, SandboxCommand } from "./types";
 import type { SessionRepository } from "./repository";
 import type { SessionMessenger } from "./messenger";
 import type { SessionWebSocketManager } from "./websocket-manager";
@@ -24,6 +24,7 @@ import { resolveParticipantName } from "./participant-name";
 import { validateReasoningEffort } from "./reasoning-effort";
 
 interface PromptMessageData {
+  requestId?: string;
   content: string;
   model?: string;
   reasoningEffort?: string;
@@ -39,6 +40,7 @@ interface PromptMessageData {
  * take a while — and only fires when nothing has started processing.
  */
 export const PENDING_SANDBOX_CONNECT_TIMEOUT_MS = 5 * 60 * 1000;
+export const STOP_CONFIRMATION_TIMEOUT_MS = 3_000;
 
 const MS_PER_MINUTE = 60 * 1000;
 
@@ -120,7 +122,7 @@ export class SessionMessageQueue {
     client: ClientInfo,
     data: PromptMessageData
   ): Promise<void> {
-    const messageId = generateId();
+    const messageId = data.requestId ?? generateId();
     const now = Date.now();
 
     let participant = this.participantService.getByUserId(client.userId);
@@ -144,6 +146,38 @@ export class SessionMessageQueue {
       data.reasoningEffort,
       this.log
     );
+    const messageAttachments = data.attachments ? JSON.stringify(data.attachments) : null;
+
+    const existing = this.repository.getMessageById(messageId);
+    if (existing) {
+      if (
+        existing.source !== "web" ||
+        existing.author_id !== participant.id ||
+        existing.content !== data.content ||
+        existing.model !== messageModel ||
+        existing.reasoning_effort !== messageReasoningEffort ||
+        existing.attachments !== messageAttachments
+      ) {
+        this.wsManager.send(ws, {
+          type: "prompt_rejected",
+          requestId: messageId,
+          message: "Request ID belongs to another prompt",
+        } as ServerMessage);
+        return;
+      }
+
+      const position = this.getPromptQueue().find(
+        (prompt) => prompt.messageId === messageId
+      )?.position;
+      this.wsManager.send(ws, {
+        type: "prompt_queued",
+        messageId,
+        status: existing.status,
+        ...(position !== undefined && { position }),
+      } as ServerMessage);
+      this.broadcastPromptQueue();
+      return;
+    }
 
     this.repository.createMessage({
       id: messageId,
@@ -152,7 +186,7 @@ export class SessionMessageQueue {
       source: "web",
       model: messageModel,
       reasoningEffort: messageReasoningEffort,
-      attachments: data.attachments ? JSON.stringify(data.attachments) : null,
+      attachments: messageAttachments,
       status: "pending",
       createdAt: now,
     });
@@ -197,9 +231,41 @@ export class SessionMessageQueue {
       type: "prompt_queued",
       messageId,
       position,
+      status: "pending",
     } as ServerMessage);
 
+    this.broadcastPromptQueue();
     await this.processMessageQueue();
+  }
+
+  getPromptQueue(): PromptSnapshotItem[] {
+    const positionOffset = this.repository.getProcessingMessage() ? 1 : 0;
+    return this.repository
+      .getPendingMessages()
+      .map((message, index) => this.toPromptSnapshotItem(message, positionOffset + index + 1));
+  }
+
+  getActivePrompt(): PromptSnapshotItem | undefined {
+    const processing = this.repository.getProcessingMessage();
+    const message = processing ? this.repository.getMessageById(processing.id) : null;
+    return message ? this.toPromptSnapshotItem(message, 1) : undefined;
+  }
+
+  private toPromptSnapshotItem(message: MessageRow, position: number): PromptSnapshotItem {
+    const participant = this.repository.getParticipantById(message.author_id);
+    return {
+      messageId: message.id,
+      position,
+      content: message.content,
+      timestamp: message.created_at / 1000,
+      author: participant
+        ? {
+            participantId: participant.id,
+            name: resolveParticipantName(participant),
+            avatar: getAvatarUrl(participant.scm_login, this.scmProvider),
+          }
+        : undefined,
+    };
   }
 
   async processMessageQueue(): Promise<void> {
@@ -234,6 +300,7 @@ export class SessionMessageQueue {
 
     this.repository.updateMessageToProcessing(message.id, now);
     this.messenger.broadcast({ type: "processing_status", isProcessing: true });
+    this.broadcastPromptQueue();
     this.sandboxLifecycle.updateLastActivity(now);
 
     await this.scheduleAlarm(now + this.executionTimeoutMs);
@@ -279,50 +346,74 @@ export class SessionMessageQueue {
   }
 
   async stopExecution(options: StopExecutionOptions = {}): Promise<void> {
-    const now = Date.now();
     const processingMessage = this.repository.getProcessingMessage();
-
-    if (processingMessage) {
-      this.repository.updateMessageCompletion(processingMessage.id, "failed", now);
-      this.log.info("prompt.stopped", {
-        event: "prompt.stopped",
-        message_id: processingMessage.id,
-      });
-
-      const stopError = "Execution was stopped";
-      const syntheticExecutionComplete: Extract<SandboxEvent, { type: "execution_complete" }> = {
-        type: "execution_complete",
-        messageId: processingMessage.id,
-        success: false,
-        error: stopError,
-        sandboxId: "",
-        timestamp: now / 1000,
-      };
-      this.repository.upsertExecutionCompleteEvent(
+    const sandboxWs = this.wsManager.getSandboxSocket();
+    if (!processingMessage) {
+      if (sandboxWs) this.wsManager.send(sandboxWs, { type: "stop" });
+      return;
+    }
+    const sent = sandboxWs ? this.wsManager.send(sandboxWs, { type: "stop" }) : false;
+    if (options.suppressStatusReconcile || !sent) {
+      await this.completeUnconfirmedStop(
         processingMessage.id,
-        syntheticExecutionComplete,
-        now
+        options,
+        sandboxWs,
+        options.suppressStatusReconcile ? "forced" : "send_failed"
       );
-
-      this.messenger.broadcast({
-        type: "sandbox_event",
-        event: syntheticExecutionComplete,
-      });
-
-      this.ctx.waitUntil(
-        this.callbackService.notifyComplete(processingMessage.id, false, stopError)
-      );
-
-      if (!options.suppressStatusReconcile) {
-        await this.sessionStatus.reconcileAfterExecution(false);
-      }
+      return;
     }
 
-    this.messenger.broadcast({ type: "processing_status", isProcessing: false });
+    this.ctx.waitUntil(
+      new Promise<void>((resolve) => setTimeout(resolve, STOP_CONFIRMATION_TIMEOUT_MS)).then(() =>
+        this.completeUnconfirmedStop(
+          processingMessage.id,
+          options,
+          sandboxWs,
+          "confirmation_timeout"
+        )
+      )
+    );
+  }
 
-    const sandboxWs = this.wsManager.getSandboxSocket();
+  private async completeUnconfirmedStop(
+    messageId: string,
+    options: StopExecutionOptions,
+    sandboxWs: WebSocket | null,
+    outcome: "forced" | "send_failed" | "confirmation_timeout"
+  ): Promise<void> {
+    if (this.repository.getProcessingMessage()?.id !== messageId) return;
+
+    const now = Date.now();
+    this.repository.updateMessageCompletion(messageId, "failed", now);
+    this.log.info("prompt.stopped", {
+      event: "prompt.stopped",
+      message_id: messageId,
+      outcome,
+    });
+
+    const stopError = "Execution was stopped";
+    const syntheticExecutionComplete: Extract<SandboxEvent, { type: "execution_complete" }> = {
+      type: "execution_complete",
+      messageId,
+      success: false,
+      error: stopError,
+      sandboxId: "",
+      timestamp: now / 1000,
+    };
+    this.repository.upsertExecutionCompleteEvent(messageId, syntheticExecutionComplete, now);
+    this.messenger.broadcast({ type: "sandbox_event", event: syntheticExecutionComplete });
+    this.messenger.broadcast({ type: "processing_status", isProcessing: false });
+    this.broadcastPromptQueue();
+    this.ctx.waitUntil(this.callbackService.notifyComplete(messageId, false, stopError));
+
     if (sandboxWs) {
-      this.wsManager.send(sandboxWs, { type: "stop" });
+      this.wsManager.close(sandboxWs, 1012, "Stop confirmation timed out");
+      this.wsManager.clearSandboxSocketIfMatch(sandboxWs);
+    }
+
+    if (!options.suppressStatusReconcile) {
+      await this.sessionStatus.reconcileAfterExecution(false);
+      await this.processMessageQueue();
     }
   }
 
@@ -358,6 +449,7 @@ export class SessionMessageQueue {
     this.repository.upsertExecutionCompleteEvent(processingMessage.id, syntheticEvent, now);
     this.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });
     this.messenger.broadcast({ type: "processing_status", isProcessing: false });
+    this.broadcastPromptQueue();
     this.ctx.waitUntil(
       this.callbackService.notifyComplete(processingMessage.id, false, stuckError)
     );
@@ -419,6 +511,7 @@ export class SessionMessageQueue {
 
     this.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });
     this.messenger.broadcast({ type: "processing_status", isProcessing: false });
+    this.broadcastPromptQueue();
     this.ctx.waitUntil(this.callbackService.notifyComplete(pending.id, false, timeoutError));
     await this.sessionStatus.reconcileAfterExecution(false);
   }
@@ -448,6 +541,10 @@ export class SessionMessageQueue {
       createdAt: now,
     });
     this.messenger.broadcast({ type: "sandbox_event", event: userMessageEvent });
+  }
+
+  private broadcastPromptQueue(): void {
+    this.messenger.broadcast({ type: "prompt_queue", prompts: this.getPromptQueue() });
   }
 
   async enqueuePromptFromApi(
@@ -535,6 +632,7 @@ export class SessionMessageQueue {
       queue_position: queuePosition,
     });
 
+    this.broadcastPromptQueue();
     await this.processMessageQueue();
 
     return { messageId, status: "queued" };

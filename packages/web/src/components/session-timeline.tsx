@@ -15,6 +15,7 @@ import { ScreenshotArtifactCard } from "@/components/screenshot-artifact-card";
 import { ToolCallGroup } from "@/components/tool-call-group";
 import { copyToClipboard } from "@/lib/format";
 import type { Artifact, SandboxEvent } from "@/types/session";
+import type { PromptSnapshotItem } from "@open-inspect/shared";
 import { CheckIcon, CopyIcon, ErrorIcon } from "@/components/ui/icons";
 
 type ToolCallEvent = Extract<SandboxEvent, { type: "tool_call" }>;
@@ -102,6 +103,7 @@ export function SessionTimeline({
   sessionId,
   currentParticipantId,
   isProcessing,
+  promptQueue,
   loadingHistory,
   showSkeleton,
   onLoadOlder,
@@ -111,12 +113,17 @@ export function SessionTimeline({
   sessionId: string;
   currentParticipantId: string | null;
   isProcessing: boolean;
+  promptQueue: PromptSnapshotItem[];
   loadingHistory: boolean;
   showSkeleton: boolean;
   onLoadOlder: () => void;
   onOpenMedia: (artifactId: string) => void;
 }) {
   const groupedEvents = useMemo(() => dedupeAndGroupEvents(events), [events]);
+  const queuePositions = useMemo(
+    () => new Map(promptQueue.map((prompt) => [prompt.messageId, prompt.position])),
+    [promptQueue]
+  );
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const topSentinelRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -195,6 +202,11 @@ export function SessionTimeline({
                 sessionId={sessionId}
                 currentParticipantId={currentParticipantId}
                 onOpenMedia={onOpenMedia}
+                queuePosition={
+                  "messageId" in group.event && group.event.messageId
+                    ? queuePositions.get(group.event.messageId)
+                    : undefined
+                }
               />
             )
           )
@@ -243,6 +255,7 @@ type EventRendererProps = {
   copied: boolean;
   onCopyContent: (content: string) => void;
   onOpenMedia: (artifactId: string) => void;
+  queuePosition?: number;
 };
 
 type MessageFrameProps = {
@@ -338,6 +351,7 @@ function UserMessageEvent({
   currentParticipantId,
   copied,
   onCopyContent,
+  queuePosition,
 }: EventRendererProps) {
   if (event.type !== "user_message" || !event.content) return null;
 
@@ -355,6 +369,9 @@ function UserMessageEvent({
             <img src={event.author.avatar} alt={authorName} className="w-5 h-5 rounded-full" />
           )}
           <span className="text-xs text-accent">{authorName}</span>
+          {queuePosition !== undefined && (
+            <span className="text-xs text-warning">Queued #{queuePosition}</span>
+          )}
         </div>
       }
       time={formatEventTime(event)}
@@ -519,11 +536,13 @@ export const EventItem = memo(function EventItem({
   sessionId,
   currentParticipantId,
   onOpenMedia,
+  queuePosition,
 }: {
   event: SandboxEvent;
   sessionId: string;
   currentParticipantId: string | null;
   onOpenMedia: (artifactId: string) => void;
+  queuePosition?: number;
 }) {
   const [copied, setCopied] = useState(false);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -560,5 +579,6 @@ export const EventItem = memo(function EventItem({
     copied,
     onCopyContent: handleCopyContent,
     onOpenMedia,
+    queuePosition,
   });
 });

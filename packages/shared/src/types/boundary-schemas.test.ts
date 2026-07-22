@@ -252,6 +252,7 @@ describe("boundary schemas", () => {
     it("parses a valid prompt with attachments", () => {
       const result = clientMessageSchema.safeParse({
         type: "prompt",
+        requestId: "request-1",
         content: "Investigate the failing build",
         model: "anthropic/claude-sonnet-4-6",
         reasoningEffort: "high",
@@ -336,6 +337,77 @@ describe("boundary schemas", () => {
   });
 
   describe("serverMessageSchema", () => {
+    it("parses persisted and live prompt queue snapshots", () => {
+      const promptQueue = [
+        {
+          messageId: "message-2",
+          position: 2,
+          content: "second",
+          timestamp: 123,
+          author: { participantId: "participant-1", name: "Pat" },
+        },
+        { messageId: "message-3", position: 3, content: "third", timestamp: 124 },
+      ];
+
+      expect(
+        serverMessageSchema.safeParse({
+          type: "prompt_queue",
+          prompts: promptQueue,
+        }).success
+      ).toBe(true);
+
+      const subscribed = serverMessageSchema.safeParse({
+        type: "subscribed",
+        sessionId: "session-1",
+        state: {
+          id: "session-1",
+          title: null,
+          repoOwner: null,
+          repoName: null,
+          baseBranch: null,
+          branchName: null,
+          status: "active",
+          sandboxStatus: "ready",
+          messageCount: 3,
+          createdAt: 123,
+        },
+        artifacts: [],
+        participantId: "participant-1",
+        promptQueue,
+        activePrompt: { ...promptQueue[0], messageId: "message-active", position: 1 },
+      });
+
+      expect(subscribed.success).toBe(true);
+      if (subscribed.success && subscribed.data.type === "subscribed") {
+        expect(subscribed.data.promptQueue).toEqual(promptQueue);
+        expect(subscribed.data.activePrompt).toEqual({
+          ...promptQueue[0],
+          messageId: "message-active",
+          position: 1,
+        });
+      }
+    });
+
+    it("parses acknowledgement status without a queue position", () => {
+      expect(
+        serverMessageSchema.safeParse({
+          type: "prompt_queued",
+          messageId: "request-1",
+          status: "completed",
+        }).success
+      ).toBe(true);
+    });
+
+    it("parses prompt-specific rejection messages", () => {
+      expect(
+        serverMessageSchema.safeParse({
+          type: "prompt_rejected",
+          requestId: "request-1",
+          message: "Request ID belongs to another prompt",
+        }).success
+      ).toBe(true);
+    });
+
     it("parses a valid subscribed message with nullable fields", () => {
       const result = serverMessageSchema.safeParse({
         type: "subscribed",

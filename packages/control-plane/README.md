@@ -202,14 +202,14 @@ any child starting/running → `starting`/`running`; all terminal → `completed
 
 ### Client → Server Messages
 
-| Type        | Description        | Payload                     |
-| ----------- | ------------------ | --------------------------- |
-| `ping`      | Health check       | `{}`                        |
-| `subscribe` | Join session       | `{ token, clientId }`       |
-| `prompt`    | Send prompt        | `{ content, attachments? }` |
-| `stop`      | Stop execution     | `{}`                        |
-| `typing`    | User typing (warm) | `{}`                        |
-| `presence`  | Update presence    | `{ status, cursor? }`       |
+| Type        | Description        | Payload                                                           |
+| ----------- | ------------------ | ----------------------------------------------------------------- |
+| `ping`      | Health check       | `{}`                                                              |
+| `subscribe` | Join session       | `{ token, clientId }`                                             |
+| `prompt`    | Send prompt        | `{ requestId?, content, model?, reasoningEffort?, attachments? }` |
+| `stop`      | Stop execution     | `{}`                                                              |
+| `typing`    | User typing (warm) | `{}`                                                              |
+| `presence`  | Update presence    | `{ status, cursor? }`                                             |
 
 ### Server → Client Messages
 
@@ -218,6 +218,8 @@ any child starting/running → `starting`/`running`; all terminal → `completed
 | `pong`             | Health check response         |
 | `subscribed`       | Confirm subscription          |
 | `prompt_queued`    | Confirm prompt queued         |
+| `prompt_rejected`  | Reject a correlated prompt    |
+| `prompt_queue`     | Synchronize persisted prompts |
 | `sandbox_event`    | Event from sandbox            |
 | `presence_sync`    | Full presence state           |
 | `presence_update`  | Presence change               |
@@ -233,6 +235,11 @@ any child starting/running → `starting`/`running`; all terminal → `completed
 | `snapshot_saved`   | Filesystem snapshot saved     |
 | `session_status`   | Session status change         |
 | `error`            | Error occurred                |
+
+`subscribed.promptQueue` restores pending prompts and their queue positions after reconnect, while
+`subscribed.activePrompt` identifies the prompt currently running. Clients should reuse a prompt
+`requestId` after an acknowledgement timeout; duplicate IDs return `prompt_queued` with the
+persisted message status without creating another message.
 
 ## Development
 

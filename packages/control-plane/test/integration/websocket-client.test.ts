@@ -7,9 +7,10 @@ import {
   collectMessages,
   seedEvents,
   queryDO,
-  waitForSandboxStatus,
+  seedMessage,
   openSandboxWs,
   seedSandboxAuth,
+  waitForSandboxStatus,
 } from "./helpers";
 
 const SANDBOX_TOKEN = "test-sandbox-token";
@@ -223,6 +224,65 @@ describe("Client WebSocket (via SELF.fetch)", () => {
     expect(replay.cursor).toBeNull();
     expect(replay.events).toHaveLength(0);
 
+    ws.close();
+  });
+
+  it("subscribe restores pending prompt positions", async () => {
+    const name = `ws-client-prompt-queue-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    const participants = await queryDO<{ id: string }>(stub, "SELECT id FROM participants LIMIT 1");
+    const now = Date.now();
+    await seedMessage(stub, {
+      id: "message-active",
+      authorId: participants[0].id,
+      content: "active",
+      source: "web",
+      status: "processing",
+      createdAt: now,
+      startedAt: now,
+    });
+    await seedMessage(stub, {
+      id: "message-next",
+      authorId: participants[0].id,
+      content: "next",
+      source: "web",
+      status: "pending",
+      createdAt: now,
+    });
+    await seedMessage(stub, {
+      id: "message-later",
+      authorId: participants[0].id,
+      content: "later",
+      source: "web",
+      status: "pending",
+      createdAt: now,
+    });
+
+    const { ws, messages } = await openClientWs(name, { subscribe: true });
+    const subscribed = messages!.find((message) => message.type === "subscribed");
+
+    expect(subscribed?.promptQueue).toEqual([
+      expect.objectContaining({
+        messageId: "message-next",
+        position: 2,
+        content: "next",
+        timestamp: now / 1000,
+      }),
+      expect.objectContaining({
+        messageId: "message-later",
+        position: 3,
+        content: "later",
+        timestamp: now / 1000,
+      }),
+    ]);
+    expect(subscribed?.activePrompt).toEqual(
+      expect.objectContaining({
+        messageId: "message-active",
+        position: 1,
+        content: "active",
+        timestamp: now / 1000,
+      })
+    );
     ws.close();
   });
 
@@ -537,6 +597,22 @@ describe("Client WebSocket (via SELF.fetch)", () => {
     );
     await dispatched;
 
+    const promptRejected = collectMessages(second.ws, {
+      until: (message) => message.type === "prompt_rejected",
+    });
+    second.ws.send(
+      JSON.stringify({
+        type: "prompt",
+        requestId: "prompt-during-compaction",
+        content: "Queue after compaction",
+      })
+    );
+    expect(await promptRejected).toContainEqual({
+      type: "prompt_rejected",
+      requestId: "prompt-during-compaction",
+      message: "Wait for context compaction to finish before sending a prompt",
+    });
+
     const rejected = collectMessages(second.ws, {
       until: (message) => message.type === "error" && message.code === "SESSION_BUSY",
     });
@@ -704,6 +780,99 @@ describe("Client WebSocket (via SELF.fetch)", () => {
       state: "failed",
       error: "Context compaction was cancelled",
     });
+
+    sandboxWs!.close();
+    clientWs.close();
+  });
+
+  it("acknowledges a retried request without creating duplicate work", async () => {
+    const name = `ws-client-idempotent-prompt-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    const { ws } = await openClientWs(name, { subscribe: true });
+    const requestId = "request-idempotent-1";
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const collector = collectMessages(ws, {
+        until: (message) => message.type === "prompt_queued" && message.messageId === requestId,
+      });
+      ws.send(
+        JSON.stringify({
+          type: "prompt",
+          requestId,
+          content: "Run this once",
+        })
+      );
+      await collector;
+    }
+
+    const rows = await queryDO<{ count: number }>(
+      stub,
+      "SELECT COUNT(*) AS count FROM messages WHERE id = ?",
+      requestId
+    );
+    expect(rows[0].count).toBe(1);
+    ws.close();
+  });
+
+  it("dispatches queued follow-ups in submission order after each completion", async () => {
+    const name = `ws-client-follow-ups-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    const sandboxAuth = { authToken: "follow-up-token", sandboxId: "follow-up-sandbox" };
+    await seedSandboxAuth(stub, sandboxAuth);
+
+    const { ws: sandboxWs } = await openSandboxWs(name, sandboxAuth);
+    expect(sandboxWs).not.toBeNull();
+    sandboxWs!.accept();
+    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
+
+    const firstDispatch = collectMessages(sandboxWs!, {
+      until: (message) => message.type === "prompt",
+    });
+    clientWs.send(JSON.stringify({ type: "prompt", content: "first" }));
+    const first = (await firstDispatch).find((message) => message.type === "prompt")!;
+
+    const queued = collectMessages(clientWs, {
+      until: (message) =>
+        message.type === "prompt_queue" &&
+        Array.isArray(message.prompts) &&
+        message.prompts.length === 2,
+    });
+    clientWs.send(JSON.stringify({ type: "prompt", content: "second" }));
+    clientWs.send(JSON.stringify({ type: "prompt", content: "third" }));
+    await queued;
+
+    const earlyDispatches = await collectMessages(sandboxWs!, { timeoutMs: 100 });
+    expect(earlyDispatches.filter((message) => message.type === "prompt")).toEqual([]);
+
+    const secondDispatch = collectMessages(sandboxWs!, {
+      until: (message) => message.type === "prompt",
+    });
+    sandboxWs!.send(
+      JSON.stringify({
+        type: "execution_complete",
+        messageId: first.messageId,
+        success: true,
+        sandboxId: sandboxAuth.sandboxId,
+        timestamp: Date.now() / 1000,
+      })
+    );
+    const second = (await secondDispatch).find((message) => message.type === "prompt")!;
+    expect(second.content).toBe("second");
+
+    const thirdDispatch = collectMessages(sandboxWs!, {
+      until: (message) => message.type === "prompt",
+    });
+    sandboxWs!.send(
+      JSON.stringify({
+        type: "execution_complete",
+        messageId: second.messageId,
+        success: true,
+        sandboxId: sandboxAuth.sandboxId,
+        timestamp: Date.now() / 1000,
+      })
+    );
+    const third = (await thirdDispatch).find((message) => message.type === "prompt")!;
+    expect(third.content).toBe("third");
 
     sandboxWs!.close();
     clientWs.close();

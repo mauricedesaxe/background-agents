@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useReducer, useRef } from "react";
+import { useCallback, useReducer, useRef, useState } from "react";
 import { mutate } from "swr";
 import { toast } from "sonner";
 import { useSessionTransport } from "@/hooks/use-session-transport";
@@ -13,9 +13,14 @@ import {
 import { initialSessionSocketState, sessionSocketReducer } from "@/lib/session-socket/reducer";
 import { swrKeysToRevalidate } from "@/lib/session-socket/swr-revalidation";
 import type { Artifact, SandboxEvent } from "@/types/session";
-import type { ParticipantPresence, ServerMessage, SessionState } from "@open-inspect/shared";
+import type {
+  ParticipantPresence,
+  PromptSnapshotItem,
+  ServerMessage,
+  SessionState,
+} from "@open-inspect/shared";
 
-const PROMPT_SUBSCRIPTION_RETRY_DELAY_MS = 500;
+const PROMPT_ACK_TIMEOUT_MS = 10_000;
 const HISTORY_PAGE_SIZE = 200;
 const COMPACTION_REQUEST_ERROR_CODES = new Set([
   "SESSION_BUSY",
@@ -49,14 +54,36 @@ interface UseSessionSocketReturn {
   currentParticipantId: string | null;
   isProcessing: boolean;
   isCompacting: boolean;
+  promptQueue: PromptSnapshotItem[];
   hasMoreHistory: boolean;
   loadingHistory: boolean;
-  sendPrompt: (content: string, model?: string, reasoningEffort?: string) => void;
+  sendPrompt: (
+    content: string,
+    model?: string,
+    reasoningEffort?: string
+  ) => Promise<PromptDeliveryResult>;
   compactContext: (model: string) => void;
   stopExecution: () => void;
   sendTyping: () => void;
   reconnect: () => void;
   loadOlderEvents: () => void;
+}
+
+type PromptDeliveryResult = { ok: true } | { ok: false; error: string };
+
+interface PendingPromptDelivery {
+  requestId: string;
+  optimisticProcessing: boolean;
+  processingStatusVersion: number;
+  resolve: (result: PromptDeliveryResult) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
+interface RetryablePrompt {
+  requestId: string;
+  content: string;
+  model?: string;
+  reasoningEffort?: string;
 }
 
 /**
@@ -70,12 +97,38 @@ interface UseSessionSocketReturn {
  */
 export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
   const [state, dispatch] = useReducer(sessionSocketReducer, initialSessionSocketState);
+  const [promptQueue, setPromptQueue] = useState<PromptSnapshotItem[]>([]);
   const subscribedRef = useRef(false);
   const pendingCompactionRequestRef = useRef<string | null>(null);
   const activeCompactionRequestRef = useRef<string | null>(null);
+  const processingStatusVersionRef = useRef(0);
+  const pendingPromptDeliveryRef = useRef<PendingPromptDelivery | null>(null);
+  const retryablePromptRef = useRef<RetryablePrompt | null>(null);
   // Buffers streamed assistant text in a ref so token events (which arrive at
   // high frequency) don't re-render; the text is appended on completion.
   const pendingTextRef = useRef<PendingAssistantText | null>(null);
+
+  const finishPromptDelivery = useCallback(
+    (requestId: string, result: PromptDeliveryResult, clearRetry: boolean) => {
+      const pending = pendingPromptDeliveryRef.current;
+      if (pending?.requestId === requestId) {
+        clearTimeout(pending.timeout);
+        pendingPromptDeliveryRef.current = null;
+        if (
+          !result.ok &&
+          pending.optimisticProcessing &&
+          pending.processingStatusVersion === processingStatusVersionRef.current
+        ) {
+          dispatch({ type: "prompt_rejected" });
+        }
+        pending.resolve(result);
+        if (clearRetry && retryablePromptRef.current?.requestId === requestId) {
+          retryablePromptRef.current = null;
+        }
+      }
+    },
+    []
+  );
 
   const handleMessage = useCallback(
     (message: ServerMessage) => {
@@ -98,6 +151,19 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
       if (message.type === "subscribed") {
         console.log("WebSocket subscribed to session");
         subscribedRef.current = true;
+        processingStatusVersionRef.current += 1;
+        setPromptQueue(message.promptQueue ?? []);
+        const pendingDelivery = pendingPromptDeliveryRef.current;
+        if (
+          pendingDelivery &&
+          (message.promptQueue?.some((prompt) => prompt.messageId === pendingDelivery.requestId) ||
+            message.activePrompt?.messageId === pendingDelivery.requestId ||
+            message.replay?.events.some(
+              (event) => "messageId" in event && event.messageId === pendingDelivery.requestId
+            ))
+        ) {
+          finishPromptDelivery(pendingDelivery.requestId, { ok: true }, true);
+        }
         pendingTextRef.current = null;
         if (message.spawnError && message.state.sandboxStatus === "failed") {
           console.error("Sandbox spawn error:", message.spawnError);
@@ -110,10 +176,15 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
         }
       } else if (message.type === "sandbox_error") {
         console.error("Sandbox error:", message.error);
+      } else if (message.type === "processing_status") {
+        processingStatusVersionRef.current += 1;
       } else if (message.type === "error") {
         console.error("Session error:", message);
         if (message.code === "COMPACTION_IN_PROGRESS") {
-          dispatch({ type: "prompt_rejected" });
+          const pending = pendingPromptDeliveryRef.current;
+          if (pending) {
+            finishPromptDelivery(pending.requestId, { ok: false, error: message.message }, true);
+          }
           if (message.activeRequestId) {
             activeCompactionRequestRef.current = message.activeRequestId;
             dispatch({ type: "compaction_active" });
@@ -131,6 +202,30 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
           }
         }
         toast.error(message.message);
+      } else if (message.type === "prompt_queued") {
+        const retryable = retryablePromptRef.current;
+        setPromptQueue((current) => {
+          if (message.status && message.status !== "pending") {
+            return current.filter((prompt) => prompt.messageId !== message.messageId);
+          }
+          const existing = current.find((prompt) => prompt.messageId === message.messageId);
+          if (!existing && retryable?.requestId !== message.messageId) return current;
+          const accepted = existing ?? {
+            messageId: message.messageId,
+            content: retryable!.content,
+            timestamp: Date.now() / 1000,
+            position: message.position ?? 1,
+          };
+          return [
+            ...current.filter((prompt) => prompt.messageId !== message.messageId),
+            { ...accepted, position: message.position ?? accepted.position },
+          ].sort((left, right) => left.position - right.position);
+        });
+        finishPromptDelivery(message.messageId, { ok: true }, true);
+      } else if (message.type === "prompt_rejected") {
+        finishPromptDelivery(message.requestId, { ok: false, error: message.message }, true);
+      } else if (message.type === "prompt_queue") {
+        setPromptQueue(message.prompts);
       }
 
       dispatch({ type: "server_message", message });
@@ -138,7 +233,7 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
         mutate(key);
       }
     },
-    [sessionId]
+    [finishPromptDelivery, sessionId]
   );
 
   const handleClose = useCallback(() => {
@@ -153,19 +248,17 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
   const { isOpen, send } = transport;
 
   const sendPrompt = useCallback(
-    (content: string, model?: string, reasoningEffort?: string) => {
+    (content: string, model?: string, reasoningEffort?: string): Promise<PromptDeliveryResult> => {
       if (!isOpen()) {
-        console.error("WebSocket not connected");
-        return;
+        return Promise.resolve({ ok: false, error: "Not connected. Reconnect and try again." });
       }
 
       if (!subscribedRef.current) {
-        console.error("Not subscribed yet, waiting...");
-        setTimeout(
-          () => sendPrompt(content, model, reasoningEffort),
-          PROMPT_SUBSCRIPTION_RETRY_DELAY_MS
-        );
-        return;
+        return Promise.resolve({ ok: false, error: "Still connecting. Try again shortly." });
+      }
+
+      if (pendingPromptDeliveryRef.current) {
+        return Promise.resolve({ ok: false, error: "Another message is still being queued." });
       }
 
       console.log("Sending prompt", {
@@ -173,15 +266,48 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
         model,
         reasoningEffort,
       });
-      dispatch({ type: "prompt_sent" });
-      send({
-        type: "prompt",
-        content,
-        model,
-        reasoningEffort,
+
+      const retryable = retryablePromptRef.current;
+      const requestId =
+        retryable &&
+        retryable.content === content &&
+        retryable.model === model &&
+        retryable.reasoningEffort === reasoningEffort
+          ? retryable.requestId
+          : crypto.randomUUID();
+      retryablePromptRef.current = { requestId, content, model, reasoningEffort };
+      const optimisticProcessing = !(state.sessionState?.isProcessing ?? false);
+      if (optimisticProcessing) dispatch({ type: "prompt_sent" });
+
+      return new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          finishPromptDelivery(
+            requestId,
+            {
+              ok: false,
+              error: "The server did not confirm the message. Retry is safe.",
+            },
+            false
+          );
+        }, PROMPT_ACK_TIMEOUT_MS);
+        pendingPromptDeliveryRef.current = {
+          requestId,
+          optimisticProcessing,
+          processingStatusVersion: processingStatusVersionRef.current,
+          resolve,
+          timeout,
+        };
+
+        send({
+          type: "prompt",
+          requestId,
+          content,
+          model,
+          reasoningEffort,
+        });
       });
     },
-    [isOpen, send]
+    [finishPromptDelivery, isOpen, send, state.sessionState?.isProcessing]
   );
 
   const compactContext = useCallback(
@@ -247,6 +373,7 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
     currentParticipantId: state.currentParticipantId,
     isProcessing,
     isCompacting,
+    promptQueue,
     hasMoreHistory,
     loadingHistory,
     sendPrompt,
