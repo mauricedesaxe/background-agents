@@ -194,10 +194,14 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
       reasoning: 0,
       cache: { read: 0, write: 0 },
     };
+    const stepObservedAt = Date.now() - 60_000;
     const collector = collectMessages(clientWs, {
       until: (msg) =>
         msg.type === "sandbox_event" &&
         (msg.event as Record<string, unknown> | undefined)?.type === "step_finish",
+    });
+    const firstAckCollector = collectMessages(sandboxWs!, {
+      until: (msg) => msg.type === "ack" && msg.ackId === "step_finish:step-1",
     });
 
     sandboxWs!.send(
@@ -205,15 +209,20 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
         type: "step_finish",
         messageId: "msg-step-finish-1",
         stepId: "step-1",
+        ackId: "step_finish:step-1",
         cost: 0.001,
         tokens: tokenUsage,
         reason: "end_turn",
         sandboxId: SANDBOX_ID,
-        timestamp: Date.now(),
+        timestamp: stepObservedAt / 1000,
       })
     );
 
-    const messages = await collector;
+    const [messages, firstAcknowledgements] = await Promise.all([collector, firstAckCollector]);
+    expect(firstAcknowledgements).toContainEqual({
+      type: "ack",
+      ackId: "step_finish:step-1",
+    });
     const stepFinish = messages.find(
       (msg) =>
         msg.type === "sandbox_event" &&
@@ -222,12 +231,17 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
 
     expect(stepFinish).toBeDefined();
     expect((stepFinish!.event as { tokens: unknown }).tokens).toEqual(tokenUsage);
+    expect((stepFinish!.event as { stepId: unknown }).stepId).toBe("step-1");
 
+    const ackCollector = collectMessages(sandboxWs!, {
+      until: (msg) => msg.type === "ack" && msg.ackId === "step_finish:step-1",
+    });
     sandboxWs!.send(
       JSON.stringify({
         type: "step_finish",
         messageId: "msg-step-finish-1",
         stepId: "step-1",
+        ackId: "step_finish:step-1",
         cost: 0.001,
         tokens: tokenUsage,
         reason: "end_turn",
@@ -235,10 +249,11 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
         timestamp: Date.now(),
       })
     );
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    const acknowledgements = await ackCollector;
+    expect(acknowledgements).toContainEqual({ type: "ack", ackId: "step_finish:step-1" });
 
     const facts = await env.DB.prepare(
-      `SELECT cost_estimate, total_tokens, input_tokens, output_tokens,
+      `SELECT observed_at, cost_estimate, total_tokens, input_tokens, output_tokens,
               cache_read_tokens, cache_write_tokens
        FROM session_usage_facts WHERE event_id = ?`
     )
@@ -246,6 +261,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
       .all();
     expect(facts.results).toEqual([
       {
+        observed_at: stepObservedAt,
         cost_estimate: 0.001,
         total_tokens: 223,
         input_tokens: 219,

@@ -19,6 +19,8 @@ type PushTerminalEvent = Extract<SandboxEvent, { type: "push_complete" | "push_e
 
 /** How long a pending push waits for its terminal event before rejecting. */
 const PUSH_TIMEOUT_MS = 360_000;
+const MAX_EVENT_CLOCK_SKEW_MS = 5 * 60 * 1000;
+const UNIX_SECONDS_UPPER_BOUND = 10_000_000_000;
 
 /** Event types that require delivery acknowledgement. */
 const CRITICAL_EVENT_TYPES: ReadonlySet<string> = new Set([
@@ -145,7 +147,7 @@ export class SessionSandboxEventProcessor {
         const totals = await this.usageStore.record({
           sessionId: session.session_name ?? session.id,
           eventId: event.stepId ?? `${event.messageId}:${event.timestamp}`,
-          observedAt: now,
+          observedAt: eventTimestampMs(event.timestamp, now),
           costEstimate: finiteNonNegative(event.cost),
           ...usage,
         });
@@ -439,4 +441,15 @@ function tokenCount(value: number | undefined): number {
 
 function finiteNonNegative(value: number | undefined): number {
   return Number.isFinite(value) && (value ?? -1) >= 0 ? (value ?? 0) : 0;
+}
+
+function eventTimestampMs(timestamp: number, receivedAt: number): number {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return receivedAt;
+  const timestampMs = Math.round(
+    timestamp < UNIX_SECONDS_UPPER_BOUND ? timestamp * 1000 : timestamp
+  );
+  if (!Number.isSafeInteger(timestampMs) || timestampMs > receivedAt + MAX_EVENT_CLOCK_SKEW_MS) {
+    return receivedAt;
+  }
+  return timestampMs;
 }
