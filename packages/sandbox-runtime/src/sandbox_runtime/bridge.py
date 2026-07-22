@@ -315,6 +315,7 @@ class AgentBridge:
         re.IGNORECASE,
     )
     CRITICAL_EVENT_TYPES: ClassVar[set[str]] = {
+        "step_finish",
         "execution_complete",
         "error",
         "snapshot_ready",
@@ -698,12 +699,17 @@ class AgentBridge:
     def _make_ack_id(event: dict[str, Any]) -> str:
         """Generate a deterministic ack ID for a critical event.
 
-        Format: "{type}:{messageId}" for events with messageId,
+        Format: "{type}:{stepId}" for step events, "{type}:{messageId}" for other messages,
         "{type}:{random_hex}" for events without (e.g., snapshot_ready).
         Deterministic IDs give natural deduplication on the DO side.
         """
         event_type = event.get("type", "unknown")
+        step_id = event.get("stepId")
+        if step_id:
+            return f"{event_type}:{step_id}"
         message_id = event.get("messageId")
+        if event_type == "step_finish" and message_id:
+            return f"{event_type}:{message_id}:{event.get('timestamp')}"
         if message_id:
             return f"{event_type}:{message_id}"
         return f"{event_type}:{secrets.token_hex(8)}"
@@ -1031,6 +1037,7 @@ class AgentBridge:
         elif part_type == "step-finish":
             return {
                 "type": "step_finish",
+                **({"stepId": part["id"]} if part.get("id") else {}),
                 "cost": part.get("cost"),
                 "tokens": part.get("tokens"),
                 "reason": part.get("reason"),
@@ -1289,6 +1296,7 @@ class AgentBridge:
                 events.append(
                     {
                         "type": "step_finish",
+                        **({"stepId": part["id"]} if part.get("id") else {}),
                         "cost": part.get("cost"),
                         "tokens": part.get("tokens"),
                         "reason": part.get("reason"),

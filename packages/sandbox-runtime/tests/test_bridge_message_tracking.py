@@ -150,6 +150,7 @@ class TestTransformPartToEvent:
 
         assert event is not None
         assert event["type"] == "step_finish"
+        assert event["stepId"] == "step-1"
         assert event["cost"] == 0.001
         assert event["tokens"] == 150
         assert event["reason"] == "end_turn"

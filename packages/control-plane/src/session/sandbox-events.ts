@@ -3,6 +3,7 @@ import { generateId } from "../auth/crypto";
 import type { Logger } from "../logger";
 import type { GitPushSpec } from "../source-control";
 import type { SandboxEvent } from "../types";
+import type { SessionUsageStore } from "../db/session-usage-store";
 import { shouldPersistToolCallEvent } from "./event-persistence";
 import { assertArtifactType } from "./artifacts";
 import type { SessionRepository } from "./repository";
@@ -22,6 +23,7 @@ const PUSH_TIMEOUT_MS = 360_000;
 /** Event types that require delivery acknowledgement. */
 const CRITICAL_EVENT_TYPES: ReadonlySet<string> = new Set([
   "execution_complete",
+  "step_finish",
   "error",
   "snapshot_ready",
   "push_complete",
@@ -38,6 +40,7 @@ export class SessionSandboxEventProcessor {
     // capturing one by value at construction time.
     private readonly getLog: () => Logger,
     private readonly repository: SessionRepository,
+    private readonly usageStore: SessionUsageStore,
     private readonly callbackService: CallbackNotificationService,
     private readonly wsManager: SessionWebSocketManager,
     private readonly messenger: SessionMessenger,
@@ -134,13 +137,20 @@ export class SessionSandboxEventProcessor {
 
     if (event.type === "step_start" || event.type === "step_finish") {
       this.updateLastActivity(now);
-      if (
-        event.type === "step_finish" &&
-        typeof event.cost === "number" &&
-        Number.isFinite(event.cost) &&
-        event.cost > 0
-      ) {
-        this.repository.addSessionCost(event.cost, now);
+      if (event.type === "step_finish") {
+        const session = this.repository.getSession();
+        if (!session) throw new Error("Cannot record usage without a session");
+
+        const usage = normalizeUsage(event.tokens);
+        const totals = await this.usageStore.record({
+          sessionId: session.session_name ?? session.id,
+          eventId: event.stepId ?? `${event.messageId}:${event.timestamp}`,
+          observedAt: now,
+          costEstimate: finiteNonNegative(event.cost),
+          ...usage,
+        });
+        this.repository.setSessionCost(totals.totalCost, now);
+        this.sendAck(ackId);
       }
       this.messenger.broadcast({ type: "sandbox_event", event });
       return;
@@ -391,4 +401,42 @@ export class SessionSandboxEventProcessor {
   private pushResolverKey(repoOwner: string, repoName: string, branchName: string): string {
     return `${repoOwner.toLowerCase()}/${repoName.toLowerCase()}::${branchName.trim().toLowerCase()}`;
   }
+}
+
+function normalizeUsage(tokens: Extract<SandboxEvent, { type: "step_finish" }>["tokens"]): {
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+} {
+  if (typeof tokens === "number") {
+    return {
+      totalTokens: tokenCount(tokens),
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    };
+  }
+
+  const inputTokens = tokenCount(tokens?.input);
+  const outputTokens = tokenCount(tokens?.output);
+  const cacheReadTokens = tokenCount(tokens?.cache?.read);
+  const cacheWriteTokens = tokenCount(tokens?.cache?.write);
+  return {
+    totalTokens: tokenCount(tokens?.total) || inputTokens + outputTokens,
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+  };
+}
+
+function tokenCount(value: number | undefined): number {
+  return Number.isFinite(value) && (value ?? -1) >= 0 ? Math.floor(value ?? 0) : 0;
+}
+
+function finiteNonNegative(value: number | undefined): number {
+  return Number.isFinite(value) && (value ?? -1) >= 0 ? (value ?? 0) : 0;
 }

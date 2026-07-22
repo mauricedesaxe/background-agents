@@ -22,6 +22,11 @@ type SessionRow = {
   active_duration_ms: number;
   message_count: number;
   pr_count: number;
+  total_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
   environment_id: string | null;
   created_at: number;
   updated_at: number;
@@ -221,6 +226,11 @@ class FakeD1Database {
           active_duration_ms: 0,
           message_count: 0,
           pr_count: 0,
+          total_tokens: 0,
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
           environment_id: environmentId,
           created_at: createdAt,
           updated_at: updatedAt,
@@ -307,7 +317,7 @@ class FakeD1Database {
       ];
       const row = this.rows.get(id);
       if (row) {
-        row.total_cost = totalCost;
+        row.total_cost = Math.max(row.total_cost, totalCost);
         row.active_duration_ms = activeDurationMs;
         row.message_count = messageCount;
         row.pr_count = prCount;
@@ -462,6 +472,11 @@ describe("SessionIndexStore", () => {
         scmLogin: null,
         userId: null,
         totalCost: 0,
+        totalTokens: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
         activeDurationMs: 0,
         messageCount: 0,
         prCount: 0,

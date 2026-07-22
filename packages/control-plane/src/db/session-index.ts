@@ -36,6 +36,11 @@ export interface SessionEntry {
   activeDurationMs?: number;
   messageCount?: number;
   prCount?: number;
+  totalTokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   createdAt: number;
   updatedAt: number;
   /**
@@ -84,6 +89,11 @@ interface SessionRow {
   active_duration_ms: number;
   message_count: number;
   pr_count: number;
+  total_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
   environment_id: string | null;
   created_at: number;
   updated_at: number;
@@ -125,6 +135,11 @@ function toEntry(row: SessionRow): SessionEntry {
     activeDurationMs: row.active_duration_ms,
     messageCount: row.message_count,
     prCount: row.pr_count,
+    totalTokens: row.total_tokens,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cacheReadTokens: row.cache_read_tokens,
+    cacheWriteTokens: row.cache_write_tokens,
     environmentId: row.environment_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -424,7 +439,7 @@ export class SessionIndexStore {
   ): Promise<boolean> {
     const result = await this.db
       .prepare(
-        `UPDATE sessions SET total_cost = ?, active_duration_ms = ?, message_count = ?, pr_count = ?
+        `UPDATE sessions SET total_cost = MAX(total_cost, ?), active_duration_ms = ?, message_count = ?, pr_count = ?
          WHERE id = ?`
       )
       .bind(metrics.totalCost, metrics.activeDurationMs, metrics.messageCount, metrics.prCount, id)

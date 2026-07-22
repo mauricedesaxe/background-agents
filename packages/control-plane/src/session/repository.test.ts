@@ -249,6 +249,16 @@ describe("SessionRepository", () => {
     });
   });
 
+  describe("setSessionCost", () => {
+    it("keeps a newer local total when an older sync arrives", () => {
+      repo.setSessionCost(0.0123, 5000);
+
+      expect(mock.calls.length).toBe(1);
+      expect(mock.calls[0].query).toContain("SET total_cost = MAX(total_cost, ?)");
+      expect(mock.calls[0].params).toEqual([0.0123, 5000]);
+    });
+  });
+
   // === SESSION REPOSITORIES ===
 
   describe("replaceSessionRepositories", () => {

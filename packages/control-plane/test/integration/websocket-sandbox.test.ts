@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { env } from "cloudflare:test";
 import {
   collectMessages,
   initNamedSession,
@@ -170,6 +171,12 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
   it("accepts step_finish messages with structured token usage", async () => {
     const name = `ws-sandbox-step-finish-${Date.now()}`;
     const { stub } = await initNamedSession(name);
+    await env.DB.prepare(
+      `INSERT INTO sessions (id, total_cost, usage_cost_baseline, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+      .bind(name, 0.5, 0.5, Date.now(), Date.now())
+      .run();
     const { ws: clientWs } = await openClientWs(name, { subscribe: true });
     await seedSandboxAuth(stub, { authToken: SANDBOX_TOKEN, sandboxId: SANDBOX_ID });
 
@@ -197,6 +204,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
       JSON.stringify({
         type: "step_finish",
         messageId: "msg-step-finish-1",
+        stepId: "step-1",
         cost: 0.001,
         tokens: tokenUsage,
         reason: "end_turn",
@@ -214,6 +222,54 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
 
     expect(stepFinish).toBeDefined();
     expect((stepFinish!.event as { tokens: unknown }).tokens).toEqual(tokenUsage);
+
+    sandboxWs!.send(
+      JSON.stringify({
+        type: "step_finish",
+        messageId: "msg-step-finish-1",
+        stepId: "step-1",
+        cost: 0.001,
+        tokens: tokenUsage,
+        reason: "end_turn",
+        sandboxId: SANDBOX_ID,
+        timestamp: Date.now(),
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const facts = await env.DB.prepare(
+      `SELECT cost_estimate, total_tokens, input_tokens, output_tokens,
+              cache_read_tokens, cache_write_tokens
+       FROM session_usage_facts WHERE event_id = ?`
+    )
+      .bind("step-1")
+      .all();
+    expect(facts.results).toEqual([
+      {
+        cost_estimate: 0.001,
+        total_tokens: 223,
+        input_tokens: 219,
+        output_tokens: 4,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+      },
+    ]);
+
+    const totals = await env.DB.prepare(
+      `SELECT total_cost, total_tokens, input_tokens, output_tokens,
+              cache_read_tokens, cache_write_tokens
+       FROM sessions WHERE id = ?`
+    )
+      .bind(name)
+      .first();
+    expect(totals).toEqual({
+      total_cost: 0.501,
+      total_tokens: 223,
+      input_tokens: 219,
+      output_tokens: 4,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    });
 
     sandboxWs!.close();
     clientWs.close();

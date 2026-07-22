@@ -210,6 +210,7 @@ describe("boundary schemas", () => {
       const result = sandboxEventSchema.safeParse({
         type: "step_finish",
         messageId: "message-1",
+        stepId: "step-1",
         cost: 0.001,
         tokens: tokenUsage,
         reason: "end_turn",
@@ -219,6 +220,7 @@ describe("boundary schemas", () => {
 
       expect(result.success).toBe(true);
       if (result.success) {
+        expect(result.data.stepId).toBe("step-1");
         expect(result.data.tokens).toEqual(tokenUsage);
       }
     });

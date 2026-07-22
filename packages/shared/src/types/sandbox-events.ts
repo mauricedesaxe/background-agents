@@ -81,6 +81,7 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
   }),
   messageSandboxEventBaseSchema.extend({
     type: z.literal("step_finish"),
+    stepId: z.string().optional(),
     cost: z.number().optional(),
     tokens: tokenUsageSchema.optional(),
     reason: z.string().optional(),
