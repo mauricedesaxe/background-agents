@@ -46,6 +46,8 @@ export type SessionSocketAction =
   | { type: "history_requested" }
   /** A prompt was sent; optimistically mark the session as processing. */
   | { type: "prompt_sent" }
+  /** A manual compaction request was sent. */
+  | { type: "compaction_sent" }
   /** The socket closed (clean or not). */
   | { type: "socket_closed" };
 
@@ -145,6 +147,7 @@ function reduceServerMessage(
           ...message.state,
           // Backward-compatible defaults for older sessions that may omit these.
           isProcessing: message.state.isProcessing ?? false,
+          isCompacting: message.state.isCompacting ?? false,
           totalCost: message.state.totalCost ?? 0,
         },
         artifacts: message.artifacts.map(toUiArtifact),
@@ -262,6 +265,12 @@ function reduceServerMessage(
         isProcessing: message.isProcessing,
       }));
 
+    case "compaction_status":
+      return updateSessionState(state, (prev) => ({
+        ...prev,
+        isCompacting: message.state === "in_progress",
+      }));
+
     case "error":
       // Reset loading state if a fetch_history request was rejected.
       return { ...state, loadingHistory: false };
@@ -284,6 +293,9 @@ export function sessionSocketReducer(
     case "events_appended": {
       let next: SessionSocketState = { ...state, events: [...state.events, ...action.events] };
       for (const event of action.events) {
+        if (event.type === "context_compacted" || event.type === "context_compaction_failed") {
+          next = updateSessionState(next, (prev) => ({ ...prev, isCompacting: false }));
+        }
         if (
           event.type === "step_finish" &&
           typeof event.cost === "number" &&
@@ -306,6 +318,9 @@ export function sessionSocketReducer(
     case "prompt_sent":
       // Optimistic: the server confirms with a processing_status message.
       return updateSessionState(state, (prev) => ({ ...prev, isProcessing: true }));
+
+    case "compaction_sent":
+      return updateSessionState(state, (prev) => ({ ...prev, isCompacting: true }));
 
     case "socket_closed":
       return { ...state, replaying: false };

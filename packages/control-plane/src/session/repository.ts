@@ -889,6 +889,11 @@ export class SessionRepository {
     );
   }
 
+  hasEvent(id: string): boolean {
+    const result = this.sql.exec("SELECT 1 FROM events WHERE id = ? LIMIT 1", id);
+    return this.rows(result).length > 0;
+  }
+
   private upsertEventByMessageId<TType extends UpsertableEventType>(
     type: TType,
     messageId: string,

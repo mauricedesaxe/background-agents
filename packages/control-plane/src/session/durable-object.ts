@@ -12,6 +12,8 @@ import { initSchema } from "./schema";
 import {
   DEFAULT_MODEL,
   clientMessageSchema,
+  getValidModelOrDefault,
+  isValidModel,
   resolveAppName,
   sandboxEventSchema,
   timingSafeEqual,
@@ -134,6 +136,7 @@ const WS_AUTH_TIMEOUT_MS = 30000; // 30 seconds
  * the client to fetch a fresh token on reconnect.
  */
 const WS_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const ACTIVE_COMPACTION_STORAGE_KEY = "activeCompactionRequestId";
 
 type BoundarySchema<T> = {
   safeParse(
@@ -195,6 +198,7 @@ export class SessionDO extends DurableObject<Env> {
   private _sandboxEventProcessor: SessionSandboxEventProcessor | null = null;
   // Session status service (lazily initialized)
   private _statusService: SessionStatusService | null = null;
+  private activeCompactionRequestId: string | null = null;
 
   // Internal HTTP route table (transport wiring only; handlers remain on SessionDO).
   private readonly routes = createSessionInternalRoutes({
@@ -1207,6 +1211,10 @@ export class SessionDO extends DurableObject<Env> {
           await this.handlePromptMessage(ws, data);
           break;
 
+        case "compact_context":
+          await this.handleCompactContext(ws, data);
+          break;
+
         case "stop":
           await this.stopExecution();
           break;
@@ -1438,7 +1446,88 @@ export class SessionDO extends DurableObject<Env> {
       return;
     }
 
+    if (await this.getActiveCompactionRequestId()) {
+      this.safeSend(ws, {
+        type: "error",
+        code: "COMPACTION_IN_PROGRESS",
+        message: "Wait for context compaction to finish before sending a prompt",
+      });
+      return;
+    }
+
     await this.messageQueue.handlePromptMessage(ws, client, data);
+  }
+
+  private async handleCompactContext(
+    ws: WebSocket,
+    data: { requestId: string; model: string }
+  ): Promise<void> {
+    if (!this.getClientInfo(ws)) {
+      this.safeSend(ws, {
+        type: "error",
+        code: "NOT_SUBSCRIBED",
+        message: "Must subscribe first",
+      });
+      return;
+    }
+
+    if (this.repository.getProcessingMessage() || (await this.getActiveCompactionRequestId())) {
+      this.safeSend(ws, {
+        type: "error",
+        code: "SESSION_BUSY",
+        message: "Context can only be compacted while the session is idle",
+      });
+      return;
+    }
+
+    if (!isValidModel(data.model)) {
+      this.safeSend(ws, {
+        type: "error",
+        code: "INVALID_MODEL",
+        message: "The selected model cannot compact this session",
+      });
+      return;
+    }
+
+    const sandboxWs = this.wsManager.getSandboxSocket();
+    if (!sandboxWs) {
+      this.safeSend(ws, {
+        type: "error",
+        code: "SANDBOX_UNAVAILABLE",
+        message: "The sandbox must be running to compact context",
+      });
+      return;
+    }
+
+    await this.setActiveCompactionRequestId(data.requestId);
+    const now = Date.now();
+    this.updateLastActivity(now);
+    await this.scheduleInactivityCheck();
+    const command = {
+      type: "compact_context" as const,
+      requestId: data.requestId,
+      model: getValidModelOrDefault(data.model),
+    };
+    if (!this.wsManager.send(sandboxWs, command)) {
+      await this.setActiveCompactionRequestId(null);
+      this.safeSend(ws, {
+        type: "error",
+        code: "COMPACTION_DISPATCH_FAILED",
+        message: "Failed to send context compaction to the sandbox",
+      });
+      return;
+    }
+
+    this.broadcast({
+      type: "compaction_status",
+      requestId: data.requestId,
+      state: "in_progress",
+    });
+    this.log.info("context.compaction.start", {
+      event: "context.compaction.start",
+      request_id: data.requestId,
+      model: command.model,
+    });
   }
 
   /**
@@ -1502,6 +1591,27 @@ export class SessionDO extends DurableObject<Env> {
    */
   private async processSandboxEvent(event: SandboxEvent): Promise<void> {
     await this.sandboxEventProcessor.processSandboxEvent(event);
+
+    if (
+      (event.type === "context_compacted" || event.type === "context_compaction_failed") &&
+      event.requestId &&
+      event.requestId === (await this.getActiveCompactionRequestId())
+    ) {
+      await this.setActiveCompactionRequestId(null);
+      const failed = event.type === "context_compaction_failed";
+      this.broadcast({
+        type: "compaction_status",
+        requestId: event.requestId,
+        state: failed ? "failed" : "completed",
+        ...(failed && { error: event.error }),
+      });
+      this.log.info("context.compaction.complete", {
+        event: "context.compaction.complete",
+        request_id: event.requestId,
+        outcome: failed ? "failure" : "success",
+        ...(failed && { error: event.error }),
+      });
+    }
   }
 
   /**
@@ -1628,6 +1738,7 @@ export class SessionDO extends DurableObject<Env> {
     sandbox ??= this.getSandbox();
     const messageCount = this.repository.getMessageCount();
     const isProcessing = this.getIsProcessing();
+    const isCompacting = (await this.getActiveCompactionRequestId()) !== null;
 
     // Decrypt code-server password if stored encrypted
     let codeServerPassword: string | null = sandbox?.code_server_password ?? null;
@@ -1673,6 +1784,7 @@ export class SessionDO extends DurableObject<Env> {
       model: session?.model ?? DEFAULT_MODEL,
       reasoningEffort: session?.reasoning_effort ?? undefined,
       isProcessing,
+      isCompacting,
       parentSessionId: session?.parent_session_id ?? null,
       totalCost: session?.total_cost ?? 0,
       codeServerUrl: sandbox?.code_server_url ?? null,
@@ -1758,6 +1870,23 @@ export class SessionDO extends DurableObject<Env> {
    */
   private getIsProcessing(): boolean {
     return this.repository.getProcessingMessage() !== null;
+  }
+
+  private async getActiveCompactionRequestId(): Promise<string | null> {
+    if (this.activeCompactionRequestId) return this.activeCompactionRequestId;
+
+    const stored = await this.ctx.storage.get<string>(ACTIVE_COMPACTION_STORAGE_KEY);
+    this.activeCompactionRequestId = stored ?? null;
+    return this.activeCompactionRequestId;
+  }
+
+  private async setActiveCompactionRequestId(requestId: string | null): Promise<void> {
+    this.activeCompactionRequestId = requestId;
+    if (requestId) {
+      await this.ctx.storage.put(ACTIVE_COMPACTION_STORAGE_KEY, requestId);
+    } else {
+      await this.ctx.storage.delete(ACTIVE_COMPACTION_STORAGE_KEY);
+    }
   }
 
   private safeParseTunnelUrls(raw: string): Record<string, string> | null {

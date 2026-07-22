@@ -419,6 +419,16 @@ function ContextCompactedEvent({ event }: EventRendererProps) {
   );
 }
 
+function ContextCompactionFailedEvent({ event }: EventRendererProps) {
+  if (event.type !== "context_compaction_failed") return null;
+
+  return (
+    <StatusRow tone="destructive" time={formatEventTime(event)}>
+      Context compaction failed: {event.error}
+    </StatusRow>
+  );
+}
+
 function ArtifactEvent({ event, sessionId, onOpenMedia }: EventRendererProps) {
   if (
     event.type !== "artifact" ||
@@ -487,6 +497,7 @@ const eventRenderers: Partial<
   tool_result: ToolResultEvent,
   git_sync: GitSyncEvent,
   context_compacted: ContextCompactedEvent,
+  context_compaction_failed: ContextCompactionFailedEvent,
   artifact: ArtifactEvent,
   error: ErrorEvent,
   execution_complete: ExecutionCompleteEvent,

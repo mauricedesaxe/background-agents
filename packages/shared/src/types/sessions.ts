@@ -100,6 +100,7 @@ export interface SessionState {
   model?: string;
   reasoningEffort?: string;
   isProcessing?: boolean;
+  isCompacting?: boolean;
   parentSessionId?: string | null;
   totalCost?: number;
   codeServerUrl?: string | null;
@@ -147,6 +148,7 @@ export const sessionStateSchema = z.object({
   model: z.string().optional(),
   reasoningEffort: z.string().optional(),
   isProcessing: z.boolean().optional(),
+  isCompacting: z.boolean().optional(),
   parentSessionId: z.string().nullable().optional(),
   totalCost: z.number().optional(),
   codeServerUrl: z.string().nullable().optional(),

@@ -11,6 +11,7 @@ import {
   MoreIcon,
   LinkIcon,
   GitHubIcon,
+  SparkleIcon,
 } from "@/components/ui/icons";
 import { Button } from "@/components/ui/button";
 import {
@@ -34,6 +35,9 @@ interface ActionBarProps {
   primaryRepo?: { repoOwner: string; repoName: string } | null;
   onArchive?: () => void | Promise<void>;
   onUnarchive?: () => void | Promise<void>;
+  isProcessing?: boolean;
+  isCompacting?: boolean;
+  onCompactContext?: () => void;
 }
 
 export function ActionBar({
@@ -43,6 +47,9 @@ export function ActionBar({
   primaryRepo,
   onArchive,
   onUnarchive,
+  isProcessing = false,
+  isCompacting = false,
+  onCompactContext,
 }: ActionBarProps) {
   const [isArchiving, setIsArchiving] = useState(false);
   const [showArchiveDialog, setShowArchiveDialog] = useState(false);
@@ -141,6 +148,13 @@ export function ActionBar({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" side="top">
+            <DropdownMenuItem
+              onClick={onCompactContext}
+              disabled={isProcessing || isCompacting || !onCompactContext}
+            >
+              <SparkleIcon className="w-4 h-4" />
+              {isCompacting ? "Compacting context..." : "Compact context"}
+            </DropdownMenuItem>
             <DropdownMenuItem onClick={handleCopyLink}>
               <LinkIcon className="w-4 h-4" />
               Copy link

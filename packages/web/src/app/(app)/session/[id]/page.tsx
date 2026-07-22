@@ -54,8 +54,10 @@ function SessionPageContent() {
     artifacts,
     currentParticipantId,
     isProcessing,
+    isCompacting,
     loadingHistory,
     sendPrompt,
+    compactContext,
     stopExecution,
     sendTyping,
     reconnect,
@@ -81,7 +83,7 @@ function SessionPageContent() {
     loadingEnabledModels,
   } = useModelSelection(sessionState);
   const { prompt, inputRef, handleSubmit, handleInputChange, handleKeyDown } = usePromptInput(
-    isProcessing,
+    isProcessing || isCompacting,
     sendPrompt,
     sendTyping,
     selectedModel,
@@ -269,6 +271,8 @@ function SessionPageContent() {
           onChange: handleInputChange,
           onKeyDown: handleKeyDown,
           onStopExecution: stopExecution,
+          isCompacting,
+          onCompactContext: () => compactContext(selectedModel),
         }}
         model={{
           selectedModel,

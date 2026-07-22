@@ -25,6 +25,8 @@ type SessionPromptComposerProps = {
     onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
     onKeyDown: (e: React.KeyboardEvent) => void;
     onStopExecution: () => void;
+    isCompacting: boolean;
+    onCompactContext: () => void;
   };
   model: {
     selectedModel: string;
@@ -36,6 +38,8 @@ type SessionPromptComposerProps = {
 };
 
 export function SessionPromptComposer({ session, prompt, model }: SessionPromptComposerProps) {
+  const isBusy = prompt.isProcessing || prompt.isCompacting;
+
   return (
     <footer className="border-t border-border-muted flex-shrink-0">
       <form onSubmit={prompt.onSubmit} className="max-w-4xl mx-auto p-4 pb-6">
@@ -48,6 +52,9 @@ export function SessionPromptComposer({ session, prompt, model }: SessionPromptC
             primaryRepo={session.primaryRepo}
             onArchive={session.onArchive}
             onUnarchive={session.onUnarchive}
+            isProcessing={prompt.isProcessing}
+            isCompacting={prompt.isCompacting}
+            onCompactContext={prompt.onCompactContext}
           />
         </div>
 
@@ -61,7 +68,11 @@ export function SessionPromptComposer({ session, prompt, model }: SessionPromptC
               onChange={prompt.onChange}
               onKeyDown={prompt.onKeyDown}
               placeholder={
-                prompt.isProcessing ? "Type your next message..." : "Ask or build anything"
+                prompt.isCompacting
+                  ? "Compacting context..."
+                  : prompt.isProcessing
+                    ? "Type your next message..."
+                    : "Ask or build anything"
               }
               className="w-full resize-none bg-transparent px-4 pt-4 pb-12 focus:outline-none text-foreground placeholder:text-secondary-foreground"
               rows={3}
@@ -83,7 +94,7 @@ export function SessionPromptComposer({ session, prompt, model }: SessionPromptC
               )}
               <button
                 type="submit"
-                disabled={!prompt.value.trim() || prompt.isProcessing}
+                disabled={!prompt.value.trim() || isBusy}
                 className="p-2 text-secondary-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition"
                 title={
                   prompt.isProcessing && prompt.value.trim()
@@ -111,7 +122,7 @@ export function SessionPromptComposer({ session, prompt, model }: SessionPromptC
                 items={model.items}
                 direction="up"
                 dropdownWidth="w-56"
-                disabled={prompt.isProcessing}
+                disabled={isBusy}
                 triggerClassName="flex max-w-full items-center gap-1 text-sm text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed transition"
               >
                 <ModelIcon className="w-3.5 h-3.5" />
@@ -125,7 +136,7 @@ export function SessionPromptComposer({ session, prompt, model }: SessionPromptC
                 selectedModel={model.selectedModel}
                 reasoningEffort={model.reasoningEffort}
                 onSelect={model.onReasoningEffortChange}
-                disabled={prompt.isProcessing}
+                disabled={isBusy}
               />
             </div>
 

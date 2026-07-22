@@ -7,7 +7,12 @@ import {
   seedEvents,
   queryDO,
   waitForSandboxStatus,
+  openSandboxWs,
+  seedSandboxAuth,
 } from "./helpers";
+
+const SANDBOX_TOKEN = "test-sandbox-token";
+const SANDBOX_ID = "test-sandbox-id";
 
 describe("Client WebSocket (via SELF.fetch)", () => {
   it("upgrade returns 101 with webSocket", async () => {
@@ -347,6 +352,127 @@ describe("Client WebSocket (via SELF.fetch)", () => {
     expect(rows[0].source).toBe("web");
 
     ws.close();
+  });
+
+  it("compacts an idle session and accepts a later prompt", async () => {
+    const name = `ws-client-compact-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    await seedSandboxAuth(stub, { authToken: SANDBOX_TOKEN, sandboxId: SANDBOX_ID });
+    const { ws: sandboxWs } = await openSandboxWs(name, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+    });
+    sandboxWs!.accept();
+    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
+
+    const sandboxMessages = collectMessages(sandboxWs!, {
+      until: (message) => message.type === "compact_context",
+    });
+    clientWs.send(
+      JSON.stringify({
+        type: "compact_context",
+        requestId: "compact-request-1",
+        model: "openai/gpt-5.6-sol",
+      })
+    );
+
+    expect((await sandboxMessages).find((message) => message.type === "compact_context")).toEqual({
+      type: "compact_context",
+      requestId: "compact-request-1",
+      model: "openai/gpt-5.6-sol",
+    });
+
+    const completed = collectMessages(clientWs, {
+      until: (message) => message.type === "compaction_status" && message.state === "completed",
+    });
+    sandboxWs!.send(
+      JSON.stringify({
+        type: "context_compacted",
+        requestId: "compact-request-1",
+        ackId: "context_compacted:compact-request-1",
+        sandboxId: SANDBOX_ID,
+        timestamp: Date.now() / 1000,
+      })
+    );
+    expect(await completed).toContainEqual({
+      type: "compaction_status",
+      requestId: "compact-request-1",
+      state: "completed",
+    });
+
+    const events = await queryDO<{ count: number }>(
+      stub,
+      "SELECT COUNT(*) AS count FROM events WHERE type = ?",
+      "context_compacted"
+    );
+    expect(events[0].count).toBe(1);
+
+    const duplicateAck = collectMessages(sandboxWs!, {
+      until: (message) =>
+        message.type === "ack" && message.ackId === "context_compacted:compact-request-1",
+    });
+    sandboxWs!.send(
+      JSON.stringify({
+        type: "context_compacted",
+        requestId: "compact-request-1",
+        ackId: "context_compacted:compact-request-1",
+        sandboxId: SANDBOX_ID,
+        timestamp: Date.now() / 1000,
+      })
+    );
+    await duplicateAck;
+    const deduplicatedEvents = await queryDO<{ count: number }>(
+      stub,
+      "SELECT COUNT(*) AS count FROM events WHERE type = ?",
+      "context_compacted"
+    );
+    expect(deduplicatedEvents[0].count).toBe(1);
+
+    const queued = collectMessages(clientWs, {
+      until: (message) => message.type === "prompt_queued",
+    });
+    clientWs.send(JSON.stringify({ type: "prompt", content: "Continue after compaction" }));
+    expect((await queued).some((message) => message.type === "prompt_queued")).toBe(true);
+
+    sandboxWs!.close();
+    clientWs.close();
+  });
+
+  it("rejects compaction while a prompt is processing", async () => {
+    const name = `ws-client-compact-busy-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    await seedSandboxAuth(stub, { authToken: SANDBOX_TOKEN, sandboxId: SANDBOX_ID });
+    const { ws: sandboxWs } = await openSandboxWs(name, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+    });
+    sandboxWs!.accept();
+    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
+
+    const promptDispatched = collectMessages(sandboxWs!, {
+      until: (message) => message.type === "prompt",
+    });
+    clientWs.send(JSON.stringify({ type: "prompt", content: "Keep working" }));
+    await promptDispatched;
+
+    const rejected = collectMessages(clientWs, {
+      until: (message) => message.type === "error" && message.code === "SESSION_BUSY",
+    });
+    clientWs.send(
+      JSON.stringify({
+        type: "compact_context",
+        requestId: "compact-request-busy",
+        model: "openai/gpt-5.6-sol",
+      })
+    );
+    expect(await rejected).toContainEqual({
+      type: "error",
+      code: "SESSION_BUSY",
+      message: "Context can only be compacted while the session is idle",
+    });
+
+    sandboxWs!.close();
+    clientWs.close();
   });
 
   it("closing one of multiple sockets for the same participant sends presence_update, not presence_leave", async () => {

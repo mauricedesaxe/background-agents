@@ -28,6 +28,7 @@ function createProcessor() {
     upsertTokenEvent: vi.fn(),
     createArtifact: vi.fn(),
     createEvent: vi.fn(),
+    hasEvent: vi.fn(() => false),
     addSessionCost: vi.fn(),
     setSessionCost: vi.fn(),
     getSession: vi.fn(() => ({ id: "do-session-1", session_name: "session-1" })),

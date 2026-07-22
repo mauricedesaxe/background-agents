@@ -30,6 +30,8 @@ const CRITICAL_EVENT_TYPES: ReadonlySet<string> = new Set([
   "snapshot_ready",
   "push_complete",
   "push_error",
+  "context_compacted",
+  "context_compaction_failed",
 ]);
 
 export class SessionSandboxEventProcessor {
@@ -71,6 +73,11 @@ export class SessionSandboxEventProcessor {
 
     // Extract ackId from the raw event (attached by bridge for critical events)
     const ackId = event.ackId;
+
+    if (ackId && this.repository.hasEvent(ackId)) {
+      this.sendAck(ackId);
+      return;
+    }
 
     if (event.type === "heartbeat") {
       this.repository.updateSandboxHeartbeat(now);
@@ -255,7 +262,7 @@ export class SessionSandboxEventProcessor {
     }
 
     this.repository.createEvent({
-      id: generateId(),
+      id: ackId ?? generateId(),
       type: event.type,
       data: JSON.stringify(event),
       messageId,

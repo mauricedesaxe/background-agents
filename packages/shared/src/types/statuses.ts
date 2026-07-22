@@ -34,6 +34,7 @@ export type EventType =
   | "step_start"
   | "step_finish"
   | "context_compacted"
+  | "context_compaction_failed"
   | "tool_result"
   | "git_sync"
   | "error"

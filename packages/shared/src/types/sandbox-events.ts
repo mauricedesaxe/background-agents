@@ -87,8 +87,15 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
     reason: z.string().optional(),
     isSubtask: z.boolean().optional(),
   }),
-  messageSandboxEventBaseSchema.extend({
+  sandboxEventBaseSchema.extend({
     type: z.literal("context_compacted"),
+    messageId: z.string().optional(),
+    requestId: z.string().optional(),
+  }),
+  sandboxEventBaseSchema.extend({
+    type: z.literal("context_compaction_failed"),
+    requestId: z.string(),
+    error: z.string(),
   }),
   messageSandboxEventBaseSchema.extend({
     type: z.literal("tool_result"),
