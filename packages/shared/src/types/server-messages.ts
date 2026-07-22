@@ -89,7 +89,13 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("ttyd_info"), url: z.string(), token: z.string() }),
   z.object({ type: z.literal("tunnel_urls"), urls: z.record(z.string(), z.string()) }),
   z.object({ type: z.literal("sandbox_dashboard_url"), url: z.string() }),
-  z.object({ type: z.literal("error"), code: z.string(), message: z.string() }),
+  z.object({
+    type: z.literal("error"),
+    code: z.string(),
+    message: z.string(),
+    requestId: z.string().optional(),
+    activeRequestId: z.string().optional(),
+  }),
 ]);
 
 export type ServerMessage = z.infer<typeof serverMessageSchema>;

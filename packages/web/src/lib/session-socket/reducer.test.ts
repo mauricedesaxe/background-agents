@@ -177,6 +177,23 @@ describe("sessionSocketReducer", () => {
       });
       expect(state.sessionState?.totalCost).toBe(1);
     });
+
+    it("returns compaction state to idle on a terminal event", () => {
+      const base = reduce(subscribedState(), { type: "compaction_sent" });
+      const state = reduce(base, {
+        type: "events_appended",
+        events: [
+          {
+            type: "context_compaction_failed",
+            requestId: "compact-1",
+            error: "Context compaction was cancelled",
+            sandboxId: "sb-1",
+            timestamp: 1,
+          },
+        ],
+      });
+      expect(state.sessionState?.isCompacting).toBe(false);
+    });
   });
 
   describe("history", () => {
@@ -345,6 +362,18 @@ describe("sessionSocketReducer", () => {
           status: "completed",
           isProcessing: true,
         })
+      );
+    });
+
+    it("tracks compaction and rejected optimistic prompts", () => {
+      const state = reduce(
+        subscribedState(),
+        { type: "prompt_sent" },
+        { type: "compaction_active" },
+        { type: "prompt_rejected" }
+      );
+      expect(state.sessionState).toEqual(
+        expect.objectContaining({ isProcessing: false, isCompacting: true })
       );
     });
 

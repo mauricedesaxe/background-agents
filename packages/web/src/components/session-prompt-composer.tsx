@@ -82,12 +82,13 @@ export function SessionPromptComposer({ session, prompt, model }: SessionPromptC
               {prompt.isProcessing && prompt.value.trim() && (
                 <span className="text-xs text-warning">Waiting...</span>
               )}
-              {prompt.isProcessing && (
+              {(prompt.isProcessing || prompt.isCompacting) && (
                 <button
                   type="button"
                   onClick={prompt.onStopExecution}
                   className="p-2 text-destructive hover:bg-destructive-muted transition"
-                  title="Stop"
+                  title={prompt.isCompacting ? "Cancel context compaction" : "Stop"}
+                  aria-label={prompt.isCompacting ? "Cancel context compaction" : "Stop"}
                 >
                   <StopIcon className="w-5 h-5" />
                 </button>
