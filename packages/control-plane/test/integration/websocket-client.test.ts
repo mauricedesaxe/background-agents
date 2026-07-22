@@ -427,6 +427,17 @@ describe("Client WebSocket (via SELF.fetch)", () => {
     );
     expect(events[0].count).toBe(1);
 
+    const successfulReplayClient = await openClientWs(name, { subscribe: true });
+    const successfulReplay = successfulReplayClient.messages!.find(
+      (message) => message.type === "subscribed"
+    ) as { replay: { events: Array<{ type: string; requestId?: string }> } };
+    expect(
+      successfulReplay.replay.events
+        .filter((event) => event.requestId === "compact-request-1")
+        .map((event) => event.type)
+    ).toEqual(["context_compaction_started", "context_compacted"]);
+    successfulReplayClient.ws.close();
+
     const duplicateAck = collectMessages(sandboxWs!, {
       until: (message) =>
         message.type === "ack" && message.ackId === "context_compacted:compact-request-1",
@@ -582,6 +593,17 @@ describe("Client WebSocket (via SELF.fetch)", () => {
       state: "failed",
       error: "Sandbox stopped before context compaction completed",
     });
+
+    const failedReplayClient = await openClientWs(name, { subscribe: true });
+    const failedReplay = failedReplayClient.messages!.find(
+      (message) => message.type === "subscribed"
+    ) as { replay: { events: Array<{ type: string; requestId?: string }> } };
+    expect(
+      failedReplay.replay.events
+        .filter((event) => event.requestId === "compact-request-terminated")
+        .map((event) => event.type)
+    ).toEqual(["context_compaction_started", "context_compaction_failed"]);
+    failedReplayClient.ws.close();
 
     const queued = collectMessages(clientWs, {
       until: (message) => message.type === "prompt_queued",
