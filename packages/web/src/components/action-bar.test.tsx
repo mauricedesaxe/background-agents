@@ -3,6 +3,7 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as matchers from "@testing-library/jest-dom/matchers";
 import { ActionBar } from "./action-bar";
 
@@ -89,6 +90,36 @@ describe("ActionBar", () => {
     render(<ActionBar sessionId="session-1" sessionStatus="active" artifacts={[]} />);
 
     expect(screen.queryByText(/Media/)).not.toBeInTheDocument();
+  });
+
+  it("offers context compaction only while the session is idle", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(
+      <ActionBar
+        sessionId="session-1"
+        sessionStatus="active"
+        artifacts={[]}
+        onCompactContext={() => undefined}
+      />
+    );
+    await user.click(screen.getAllByRole("button").at(-1)!);
+    expect(screen.getByRole("menuitem", { name: "Compact context" })).toBeEnabled();
+
+    unmount();
+    render(
+      <ActionBar
+        sessionId="session-1"
+        sessionStatus="active"
+        artifacts={[]}
+        isProcessing
+        onCompactContext={() => undefined}
+      />
+    );
+    await user.click(screen.getAllByRole("button").at(-1)!);
+    expect(screen.getByRole("menuitem", { name: "Compact context" })).toHaveAttribute(
+      "aria-disabled",
+      "true"
+    );
   });
 });
 

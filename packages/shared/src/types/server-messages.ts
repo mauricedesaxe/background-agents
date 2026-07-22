@@ -61,6 +61,12 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("sandbox_warning"), message: z.string() }),
   z.object({ type: z.literal("processing_status"), isProcessing: z.boolean() }),
   z.object({
+    type: z.literal("compaction_status"),
+    requestId: z.string(),
+    state: z.enum(["in_progress", "completed", "failed"]),
+    error: z.string().optional(),
+  }),
+  z.object({
     type: z.literal("diff_state_changed"),
     revisionId: z.string().nullable(),
     updatedAt: z.number(),

@@ -148,6 +148,12 @@ export interface StopCommand {
   type: "stop";
 }
 
+export interface CompactContextCommand {
+  type: "compact_context";
+  requestId: string;
+  model: string;
+}
+
 export interface SnapshotCommand {
   type: "snapshot";
 }
@@ -168,6 +174,7 @@ export interface PushCommand {
 
 export type SandboxCommand =
   | PromptCommand
+  | CompactContextCommand
   | StopCommand
   | SnapshotCommand
   | ShutdownCommand

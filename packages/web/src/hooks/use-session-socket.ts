@@ -2,6 +2,7 @@
 
 import { useCallback, useReducer, useRef } from "react";
 import { mutate } from "swr";
+import { toast } from "sonner";
 import { useSessionTransport } from "@/hooks/use-session-transport";
 import {
   ingestLiveSandboxEvent,
@@ -26,7 +27,6 @@ interface Message {
   createdAt: number;
 }
 
-// Message history is delivered through replayed events; kept for API shape.
 const NO_MESSAGES: Message[] = [];
 
 interface UseSessionSocketReturn {
@@ -42,9 +42,11 @@ interface UseSessionSocketReturn {
   artifacts: Artifact[];
   currentParticipantId: string | null;
   isProcessing: boolean;
+  isCompacting: boolean;
   hasMoreHistory: boolean;
   loadingHistory: boolean;
   sendPrompt: (content: string, model?: string, reasoningEffort?: string) => void;
+  compactContext: (model: string) => void;
   stopExecution: () => void;
   sendTyping: () => void;
   reconnect: () => void;
@@ -63,6 +65,8 @@ interface UseSessionSocketReturn {
 export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
   const [state, dispatch] = useReducer(sessionSocketReducer, initialSessionSocketState);
   const subscribedRef = useRef(false);
+  const pendingCompactionRequestRef = useRef<string | null>(null);
+  const activeCompactionRequestRef = useRef<string | null>(null);
   // Buffers streamed assistant text in a ref so token events (which arrive at
   // high frequency) don't re-render; the text is appended on completion.
   const pendingTextRef = useRef<PendingAssistantText | null>(null);
@@ -70,13 +74,17 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
   const handleMessage = useCallback(
     (message: ServerMessage) => {
       if (message.type === "sandbox_event") {
-        const { pending, append } = ingestLiveSandboxEvent(
-          pendingTextRef.current,
-          toUiSandboxEvent(message.event)
-        );
+        const event = toUiSandboxEvent(message.event);
+        const { pending, append } = ingestLiveSandboxEvent(pendingTextRef.current, event);
         pendingTextRef.current = pending;
         if (append.length > 0) {
           dispatch({ type: "events_appended", events: append });
+        }
+        if (event.type === "context_compacted" || event.type === "context_compaction_failed") {
+          activeCompactionRequestRef.current = null;
+          if (event.type === "context_compaction_failed") {
+            toast.error(event.error);
+          }
         }
         return;
       }
@@ -88,10 +96,17 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
         if (message.spawnError && message.state.sandboxStatus === "failed") {
           console.error("Sandbox spawn error:", message.spawnError);
         }
+      } else if (message.type === "compaction_status") {
+        activeCompactionRequestRef.current =
+          message.state === "in_progress" ? message.requestId : null;
+        if (message.state !== "in_progress") {
+          pendingCompactionRequestRef.current = null;
+        }
       } else if (message.type === "sandbox_error") {
         console.error("Sandbox error:", message.error);
       } else if (message.type === "error") {
         console.error("Session error:", message);
+        toast.error(message.message);
       }
 
       dispatch({ type: "server_message", message });
@@ -122,7 +137,6 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
 
       if (!subscribedRef.current) {
         console.error("Not subscribed yet, waiting...");
-        // Retry after a short delay
         setTimeout(
           () => sendPrompt(content, model, reasoningEffort),
           PROMPT_SUBSCRIPTION_RETRY_DELAY_MS
@@ -135,21 +149,28 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
         model,
         reasoningEffort,
       });
-
-      // Optimistically set isProcessing for immediate feedback
-      // Server will confirm with processing_status message
       dispatch({ type: "prompt_sent" });
-
-      // Note: user_message event is NOT inserted optimistically here.
-      // The server writes a user_message event to the events table and broadcasts it
-      // to all clients (including the sender), which handles both display and multiplayer.
-
       send({
         type: "prompt",
         content,
-        model, // Include model for per-message model switching
+        model,
         reasoningEffort,
       });
+    },
+    [isOpen, send]
+  );
+
+  const compactContext = useCallback(
+    (model: string) => {
+      if (!isOpen() || !subscribedRef.current) {
+        toast.error("Connect to the session before compacting context");
+        return;
+      }
+
+      const requestId = crypto.randomUUID();
+      pendingCompactionRequestRef.current = requestId;
+      dispatch({ type: "compaction_sent" });
+      send({ type: "compact_context", requestId, model });
     },
     [isOpen, send]
   );
@@ -158,7 +179,6 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
     if (!isOpen()) {
       return;
     }
-    // Preserve partial content when stopping
     const pending = pendingTextRef.current;
     pendingTextRef.current = null;
     if (pending) {
@@ -187,6 +207,7 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
   }, [isOpen, send, hasMoreHistory, loadingHistory, cursor]);
 
   const isProcessing = state.sessionState?.isProcessing ?? false;
+  const isCompacting = state.sessionState?.isCompacting ?? false;
 
   return {
     connected: transport.connected,
@@ -201,9 +222,11 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
     artifacts: state.artifacts,
     currentParticipantId: state.currentParticipantId,
     isProcessing,
+    isCompacting,
     hasMoreHistory,
     loadingHistory,
     sendPrompt,
+    compactContext,
     stopExecution,
     sendTyping,
     reconnect: transport.reconnect,

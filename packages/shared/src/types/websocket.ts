@@ -11,6 +11,11 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
     reasoningEffort: z.string().optional(),
     attachments: sessionAttachmentReferencesSchema.optional(),
   }),
+  z.object({
+    type: z.literal("compact_context"),
+    requestId: z.string().min(1),
+    model: z.string().min(1),
+  }),
   z.object({ type: z.literal("stop") }),
   z.object({ type: z.literal("typing") }),
   z.object({

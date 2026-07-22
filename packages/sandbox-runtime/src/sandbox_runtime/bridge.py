@@ -303,6 +303,7 @@ class AgentBridge:
     GIT_PUSH_TERMINATE_GRACE_SECONDS = 5.0
     JJ_COMMAND_TIMEOUT_SECONDS = 30.0
     PROMPT_MAX_DURATION = 5400.0
+    COMPACTION_MAX_DURATION = 300.0
     GIT_CONFIG_TIMEOUT_SECONDS = 10.0
     MAX_PENDING_PART_EVENTS = 2000
     MAX_EVENT_BUFFER_SIZE = 1000
@@ -322,6 +323,8 @@ class AgentBridge:
         "snapshot_ready",
         "push_complete",
         "push_error",
+        "context_compacted",
+        "context_compaction_failed",
     }
     # Events whose payload is cumulative, so a later one supersedes an earlier
     # one. These are safe to drop first under stream backpressure.
@@ -381,6 +384,7 @@ class AgentBridge:
 
         # Track the current prompt task so _handle_stop can cancel it
         self._current_prompt_task: asyncio.Task[None] | None = None
+        self._current_compaction_task: asyncio.Task[None] | None = None
 
         # Event buffer: survives WS reconnection, flushed on reconnect
         self._event_buffer: list[dict[str, Any]] = []
@@ -477,11 +481,12 @@ class AgentBridge:
                 await asyncio.sleep(delay)
 
         finally:
-            # Cancel any in-flight prompt task before closing resources
-            if self._current_prompt_task and not self._current_prompt_task.done():
-                self._current_prompt_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await self._current_prompt_task
+            # Cancel in-flight OpenCode work before closing resources.
+            for task in (self._current_prompt_task, self._current_compaction_task):
+                if task and not task.done():
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await task
             if self.http_client:
                 await self.http_client.aclose()
 
@@ -721,6 +726,9 @@ class AgentBridge:
             return f"{event_type}:{message_id}:{event.get('timestamp')}"
         if message_id:
             return f"{event_type}:{message_id}"
+        request_id = event.get("requestId")
+        if request_id:
+            return f"{event_type}:{request_id}"
         return f"{event_type}:{secrets.token_hex(8)}"
 
     async def _flush_pending_acks(self, skip_ack_ids: set[str] | None = None) -> None:
@@ -802,6 +810,37 @@ class AgentBridge:
             # Returning it would add it to background_tasks, which gets cancelled
             # in the _connect_and_run finally block on WS close.
             return None
+        elif cmd_type == "compact_context":
+            request_id = str(cmd.get("requestId") or "unknown")
+            if self._current_prompt_task and not self._current_prompt_task.done():
+                await self._send_compaction_failure(
+                    request_id, "Context can only be compacted while the session is idle"
+                )
+                return None
+            if self._current_compaction_task and not self._current_compaction_task.done():
+                await self._send_compaction_failure(
+                    request_id, "Context compaction is already in progress"
+                )
+                return None
+
+            task = asyncio.create_task(self._handle_context_compaction(cmd))
+            self._current_compaction_task = task
+
+            def handle_compaction_exception(
+                completed: asyncio.Task[None], rid: str = request_id
+            ) -> None:
+                if self._current_compaction_task is completed:
+                    self._current_compaction_task = None
+                if completed.cancelled():
+                    asyncio.create_task(
+                        self._send_compaction_failure(rid, "Context compaction was cancelled")
+                    )
+                elif exc := completed.exception():
+                    asyncio.create_task(self._send_compaction_failure(rid, str(exc)))
+
+            task.add_done_callback(handle_compaction_exception)
+            # Like prompt tasks, native compaction must survive bridge WS reconnects.
+            return None
         elif cmd_type == "stop":
             await self._handle_stop()
         elif cmd_type == "snapshot":
@@ -831,6 +870,9 @@ class AgentBridge:
         start_time = time.time()
         outcome = "success"
         pump: EventPump | None = None
+
+        if self._current_compaction_task and not self._current_compaction_task.done():
+            raise RuntimeError("Wait for context compaction to finish before sending a prompt")
 
         self.log.info(
             "prompt.start",
@@ -923,6 +965,101 @@ class AgentBridge:
                 outcome=outcome,
                 duration_ms=duration_ms,
             )
+
+    async def _handle_context_compaction(self, cmd: dict[str, Any]) -> None:
+        request_id = str(cmd.get("requestId") or "unknown")
+        model = str(cmd.get("model") or "")
+        if not self.http_client:
+            raise RuntimeError("OpenCode client is not ready")
+        if not self.opencode_session_id:
+            raise RuntimeError("OpenCode session is not ready")
+        if "/" not in model:
+            raise RuntimeError("Compaction model must include a provider")
+
+        provider_id, model_id = model.split("/", 1)
+        sse_url = f"{self.opencode_base_url}/event"
+        summarize_url = f"{self.opencode_base_url}/session/{self.opencode_session_id}/summarize"
+        started_at = time.time()
+        self.log.info(
+            "context.compaction.start",
+            request_id=request_id,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+
+        try:
+            async with asyncio.timeout(self.COMPACTION_MAX_DURATION):
+                async with self.http_client.stream(
+                    "GET",
+                    sse_url,
+                    timeout=httpx.Timeout(None, connect=self.HTTP_CONNECT_TIMEOUT, read=None),
+                ) as sse_response:
+                    if sse_response.status_code != 200:
+                        raise RuntimeError(
+                            f"OpenCode event stream failed with status {sse_response.status_code}"
+                        )
+
+                    response = await self.http_client.post(
+                        summarize_url,
+                        json={"providerID": provider_id, "modelID": model_id},
+                        timeout=None,
+                    )
+                    if response.status_code != 200:
+                        detail = getattr(response, "text", "")
+                        raise RuntimeError(
+                            f"OpenCode summarize failed with status {response.status_code}"
+                            + (f": {detail}" if detail else "")
+                        )
+
+                    async for event in self._parse_sse_stream(sse_response):
+                        event_type = event.get("type")
+                        props = event.get("properties", {})
+                        if not isinstance(props, dict):
+                            continue
+                        if props.get("sessionID") != self.opencode_session_id:
+                            continue
+                        if event_type == "session.compacted":
+                            await self._send_event(
+                                {
+                                    "type": "context_compacted",
+                                    "requestId": request_id,
+                                }
+                            )
+                            self.log.info(
+                                "context.compaction.complete",
+                                request_id=request_id,
+                                outcome="success",
+                                duration_ms=int((time.time() - started_at) * 1000),
+                            )
+                            return
+                        if event_type == "session.error":
+                            error = self._extract_error_message(props.get("error", {}))
+                            raise RuntimeError(error or "OpenCode context compaction failed")
+
+                    raise RuntimeError("OpenCode event stream ended before compaction completed")
+        except TimeoutError:
+            await self._request_opencode_stop(reason="compaction_timeout")
+            raise RuntimeError(
+                f"Context compaction timed out after {self.COMPACTION_MAX_DURATION:.0f}s"
+            ) from None
+        except asyncio.CancelledError:
+            await self._request_opencode_stop(reason="compaction_cancelled")
+            raise
+
+    async def _send_compaction_failure(self, request_id: str, error: str) -> None:
+        self.log.error(
+            "context.compaction.complete",
+            request_id=request_id,
+            outcome="failure",
+            error=error,
+        )
+        await self._send_event(
+            {
+                "type": "context_compaction_failed",
+                "requestId": request_id,
+                "error": error,
+            }
+        )
 
     def _log_dropped_events(self, message_id: str, dropped: int) -> None:
         if dropped:
@@ -1788,11 +1925,11 @@ class AgentBridge:
             self.log.error("bridge.final_state_error", exc=e)
 
     async def _handle_stop(self) -> None:
-        """Handle stop command - cancel prompt task and request OpenCode stop."""
+        """Cancel active OpenCode work and request a server-side abort."""
         self.log.info("bridge.stop")
-        task = self._current_prompt_task
-        if task and not task.done():
-            task.cancel()
+        for task in (self._current_prompt_task, self._current_compaction_task):
+            if task and not task.done():
+                task.cancel()
         # Best-effort: also tell OpenCode to stop (saves LLM compute cost)
         await self._request_opencode_stop(reason="command")
 
@@ -1809,8 +1946,9 @@ class AgentBridge:
     async def _handle_shutdown(self) -> None:
         """Handle shutdown command - graceful shutdown."""
         self.log.info("bridge.shutdown_requested")
-        if self._current_prompt_task and not self._current_prompt_task.done():
-            self._current_prompt_task.cancel()
+        for task in (self._current_prompt_task, self._current_compaction_task):
+            if task and not task.done():
+                task.cancel()
         self.shutdown_event.set()
 
     async def _handle_push(self, cmd: dict[str, Any]) -> None:

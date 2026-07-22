@@ -33,4 +33,27 @@ describe("EventItem", () => {
 
     expect(screen.getByText("Context compacted")).toBeInTheDocument();
   });
+
+  it("renders a specific context compaction failure", () => {
+    const event: SandboxEvent = {
+      type: "context_compaction_failed",
+      requestId: "compact-1",
+      error: "Provider rejected summary",
+      sandboxId: "sandbox-1",
+      timestamp: 1_700_000_000,
+    };
+
+    render(
+      <EventItem
+        event={event}
+        sessionId="session-1"
+        currentParticipantId={null}
+        onOpenMedia={vi.fn()}
+      />
+    );
+
+    expect(
+      screen.getByText("Context compaction failed: Provider rejected summary")
+    ).toBeInTheDocument();
+  });
 });
