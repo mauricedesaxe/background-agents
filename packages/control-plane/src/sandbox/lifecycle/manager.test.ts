@@ -1082,6 +1082,38 @@ describe("SandboxLifecycleManager", () => {
       ).toBe(true);
     });
 
+    it("stops a provider-managed sandbox after a connected client's extension is spent", async () => {
+      const now = Date.now();
+      const config = createTestConfig();
+      const sandbox = createMockSandbox({
+        status: "ready",
+        last_heartbeat: now - 10000,
+        last_activity: now - config.inactivity.timeoutMs - config.inactivity.extensionMs,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const wsManager = createMockWebSocketManager(true, 1);
+      const { provider, stopSandbox } = createProviderManagedStopProvider();
+
+      const { manager } = buildManager({
+        provider,
+        storage,
+        wsManager,
+        config,
+      });
+
+      await manager.handleAlarm();
+
+      expect(storage.calls).toContain("updateSandboxStatus:stopped");
+      expect(stopSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: "test-session",
+          providerObjectId: sandbox.modal_object_id,
+          reason: "inactivity_timeout",
+        })
+      );
+      expect(wsManager.closeSandboxWebSocket).toHaveBeenCalledWith(1000, "Inactivity timeout");
+    });
+
     it("schedules next alarm correctly", async () => {
       const now = Date.now();
       const sandbox = createMockSandbox({
