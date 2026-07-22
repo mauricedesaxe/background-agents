@@ -232,5 +232,5 @@ function compareAutomations(left: Automation, right: Automation): number {
 }
 
 function compareText(left: string, right: string): number {
-  return left.localeCompare(right, undefined, { sensitivity: "base" });
+  return left.localeCompare(right, undefined, { sensitivity: "accent" });
 }

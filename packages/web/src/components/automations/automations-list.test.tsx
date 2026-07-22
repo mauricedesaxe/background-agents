@@ -129,6 +129,8 @@ describe("AutomationsList ordering", () => {
       makeAutomation({ id: "older", name: "Review", createdAt: 100 }),
       makeAutomation({ id: "beta", name: "beta", createdAt: 400 }),
       makeAutomation({ id: "alpha", name: "Alpha", createdAt: 300 }),
+      makeAutomation({ id: "accented", name: "résumé", createdAt: 500 }),
+      makeAutomation({ id: "unaccented", name: "resume", createdAt: 50 }),
       makeAutomation({ id: "newer", name: "review", createdAt: 200 }),
     ]);
 
@@ -137,7 +139,7 @@ describe("AutomationsList ordering", () => {
       within(group)
         .getAllByRole("link")
         .map((link) => link.textContent)
-    ).toEqual(["Alpha", "beta", "review", "Review"]);
+    ).toEqual(["Alpha", "beta", "resume", "résumé", "review", "Review"]);
     expect(
       within(group)
         .getAllByRole("link")
@@ -145,6 +147,8 @@ describe("AutomationsList ordering", () => {
     ).toEqual([
       "/automations/alpha",
       "/automations/beta",
+      "/automations/unaccented",
+      "/automations/accented",
       "/automations/newer",
       "/automations/older",
     ]);
