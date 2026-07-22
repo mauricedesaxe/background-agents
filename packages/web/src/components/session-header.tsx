@@ -184,13 +184,7 @@ export function SessionHeader({
   );
 }
 
-export function ConnectionStatus({
-  connected,
-  connecting,
-}: {
-  connected: boolean;
-  connecting: boolean;
-}) {
+function ConnectionStatus({ connected, connecting }: { connected: boolean; connecting: boolean }) {
   if (connecting) {
     return (
       <span className="flex items-center gap-1 text-xs text-warning">
@@ -217,7 +211,7 @@ export function ConnectionStatus({
   );
 }
 
-export function SandboxStatus({
+function SandboxStatus({
   status,
   dashboardUrl,
 }: {
@@ -261,7 +255,7 @@ export function SandboxStatus({
   return <span className={className}>{label}</span>;
 }
 
-export function CombinedStatusDot({
+function CombinedStatusDot({
   connected,
   connecting,
   sandboxStatus,
