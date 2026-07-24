@@ -102,7 +102,8 @@ export class SessionMessageQueue {
     private readonly sandboxLifecycle: SandboxLifecycle,
     private readonly sessionIndex: SessionIndexStore | null,
     private readonly scmProvider: SourceControlProviderName,
-    private readonly executionTimeoutMs: number
+    private readonly executionTimeoutMs: number,
+    private readonly isCompacting: () => Promise<boolean>
   ) {}
 
   /**
@@ -269,6 +270,11 @@ export class SessionMessageQueue {
   }
 
   async processMessageQueue(): Promise<void> {
+    if (await this.isCompacting()) {
+      this.log.debug("processMessageQueue: compaction active, returning");
+      return;
+    }
+
     if (this.repository.getProcessingMessage()) {
       this.log.debug("processMessageQueue: already processing, returning");
       return;

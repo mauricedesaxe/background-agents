@@ -141,6 +141,7 @@ function buildQueue() {
   const waitUntil = vi.fn();
   const getAlarm = vi.fn(async () => null as number | null);
   const setAlarm = vi.fn(async (_timestamp: number) => {});
+  const isCompacting = vi.fn(async () => false);
 
   const queue = new SessionMessageQueue(
     { waitUntil, storage: { getAlarm, setAlarm } } as unknown as DurableObjectState,
@@ -160,7 +161,8 @@ function buildQueue() {
     sandboxLifecycle,
     null,
     "github",
-    EXECUTION_TIMEOUT_MS
+    EXECUTION_TIMEOUT_MS,
+    isCompacting
   );
 
   return {
@@ -176,6 +178,7 @@ function buildQueue() {
     sandboxLifecycle,
     getAlarm,
     setAlarm,
+    isCompacting,
     waitUntil,
   };
 }
@@ -221,6 +224,21 @@ describe("SessionMessageQueue", () => {
       expect(deadline).toBeGreaterThanOrEqual(before + EXECUTION_TIMEOUT_MS);
       expect(deadline).toBeLessThanOrEqual(Date.now() + EXECUTION_TIMEOUT_MS);
     });
+  });
+
+  it("leaves prompts pending while context compaction is active", async () => {
+    const h = buildQueue();
+    h.isCompacting.mockResolvedValue(true);
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage());
+    h.wsManager.getSandboxSocket.mockReturnValue({ readyState: WebSocket.OPEN } as WebSocket);
+
+    await h.queue.processMessageQueue();
+
+    expect(h.repository.updateMessageToProcessing).not.toHaveBeenCalled();
+    expect(h.wsManager.send).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ type: "prompt" })
+    );
   });
 
   // Upstream asserts no alarm is armed on this path. We arm the connect

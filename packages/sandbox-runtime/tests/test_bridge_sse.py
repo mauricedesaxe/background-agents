@@ -2489,6 +2489,50 @@ class TestCompactionHandling:
         assert events[0]["error"] == "Input exceeds context window of this model"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("idle_type", "idle_properties"),
+        [
+            ("session.idle", {"sessionID": "oc-session-123"}),
+            (
+                "session.status",
+                {"sessionID": "oc-session-123", "status": {"type": "idle"}},
+            ),
+        ],
+    )
+    async def test_interrupted_context_overflow_recovery_keeps_original_error(
+        self,
+        bridge: AgentBridge,
+        idle_type: str,
+        idle_properties: dict[str, Any],
+    ):
+        http_client = bridge.http_client
+        http_client.sse_events = [
+            create_sse_event(
+                "session.error",
+                {
+                    "sessionID": "oc-session-123",
+                    "error": {
+                        "name": "ContextOverflowError",
+                        "data": {"message": "Input exceeds context window of this model"},
+                    },
+                },
+            ),
+            create_sse_event(idle_type, idle_properties),
+        ]
+
+        events = []
+        async for event in bridge._stream_opencode_response_sse("cp-msg-1", "Test prompt"):
+            events.append(event)
+
+        assert events == [
+            {
+                "type": "error",
+                "error": "Input exceeds context window of this model",
+                "messageId": "cp-msg-1",
+            }
+        ]
+
+    @pytest.mark.asyncio
     async def test_unrelated_error_during_context_recovery_is_terminal(self, bridge: AgentBridge):
         http_client = bridge.http_client
 
@@ -2646,6 +2690,16 @@ class TestCompactionHandling:
                 "message.updated",
                 {
                     "info": {
+                        "id": "msg_compaction_user",
+                        "role": "user",
+                        "sessionID": "oc-session-123",
+                    }
+                },
+            ),
+            create_sse_event(
+                "message.updated",
+                {
+                    "info": {
                         "id": "oc-msg-summary",
                         "role": "assistant",
                         "sessionID": "oc-session-123",
@@ -2797,8 +2851,19 @@ class TestCompactionHandling:
         bridge.opencode_session_id = "oc-session-123"
         bridge.http_client = AsyncMock()
 
-        # API returns: compaction summary + post-compaction response
+        # API returns prior history, the compaction summary, and this prompt's
+        # post-compaction response.
         messages = [
+            {
+                "info": {
+                    "id": "oc-msg-previous",
+                    "role": "assistant",
+                    "parentID": "msg_previous_user",
+                },
+                "parts": [
+                    {"id": "previous-part", "type": "text", "text": "Previous answer"},
+                ],
+            },
             {
                 "info": {
                     "id": "oc-msg-summary",
@@ -2829,7 +2894,7 @@ class TestCompactionHandling:
             "cp-msg-1",
             "msg_original_id",
             {},
-            set(),
+            {"oc-msg-post"},
             compaction_occurred=True,
         ):
             events.append(event)

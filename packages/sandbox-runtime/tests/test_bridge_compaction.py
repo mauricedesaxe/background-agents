@@ -89,6 +89,53 @@ async def test_native_compaction_uses_selected_model_and_reports_success(
 
 
 @pytest.mark.asyncio
+async def test_native_compaction_reports_summary_usage_before_success(
+    bridge: AgentBridge,
+) -> None:
+    client = MockHttpClient(
+        [
+            sse_event(
+                "message.part.updated",
+                {
+                    "part": {
+                        "id": "part-summary-finish",
+                        "sessionID": "oc-session-123",
+                        "type": "step-finish",
+                        "cost": 0.02,
+                        "tokens": {"total": 25, "input": 20, "output": 5},
+                        "reason": "stop",
+                    }
+                },
+            ),
+            sse_event("session.compacted", {"sessionID": "oc-session-123"}),
+        ]
+    )
+    bridge.http_client = client
+    sent: list[dict[str, Any]] = []
+
+    async def capture(event: dict[str, Any]) -> None:
+        sent.append(event)
+
+    bridge._send_event = capture  # type: ignore[method-assign]
+
+    await bridge._handle_context_compaction(
+        {"requestId": "compact-usage", "model": "openai/gpt-5.6-sol"}
+    )
+
+    assert sent == [
+        {
+            "type": "step_finish",
+            "messageId": "compact-usage",
+            "stepId": "part-summary-finish",
+            "cost": 0.02,
+            "tokens": {"total": 25, "input": 20, "output": 5},
+            "reason": "stop",
+        },
+        {"type": "context_compacted", "requestId": "compact-usage"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_prompt_continues_in_same_opencode_session_after_compaction(
     bridge: AgentBridge,
 ) -> None:
