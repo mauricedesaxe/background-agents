@@ -132,8 +132,10 @@ function buildQueue() {
     reconcileAfterExecution: vi.fn(async (_success: boolean) => {}),
   };
   const spawnSandbox = vi.fn(async () => {});
+  const terminateSandbox = vi.fn(async (_reason: string) => {});
   const sandboxLifecycle = {
     spawnSandbox,
+    terminateSandbox,
     updateLastActivity: vi.fn((_timestamp: number) => {}),
   };
   const waitUntil = vi.fn();
@@ -169,6 +171,7 @@ function buildQueue() {
     getSession,
     broadcast,
     spawnSandbox,
+    terminateSandbox,
     sessionStatus,
     sandboxLifecycle,
     getAlarm,
@@ -486,8 +489,37 @@ describe("SessionMessageQueue", () => {
     );
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
     expect(h.wsManager.close).toHaveBeenCalledWith(sandboxWs, 1012, "Stop confirmation timed out");
+    expect(h.terminateSandbox).toHaveBeenCalledWith("stop_confirmation_timeout");
     expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
     vi.useRealTimers();
+  });
+
+  it("terminates a replacement sandbox before dispatching queued work after an unconfirmed stop", async () => {
+    vi.useFakeTimers();
+    const h = buildQueue();
+    const originalWs = { readyState: WebSocket.OPEN } as WebSocket;
+    const replacementWs = { readyState: WebSocket.OPEN } as WebSocket;
+    h.repository.getProcessingMessage.mockReturnValue({ id: "msg-9" });
+    h.repository.updateMessageCompletion.mockImplementation(() => {
+      h.repository.getProcessingMessage.mockReturnValue(null);
+    });
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "msg-next" }));
+    h.wsManager.getSandboxSocket.mockReturnValue(originalWs);
+    h.terminateSandbox.mockImplementation(async () => {
+      h.wsManager.getSandboxSocket.mockReturnValue(null);
+    });
+
+    await h.queue.stopExecution();
+    h.wsManager.getSandboxSocket.mockReturnValue(replacementWs);
+
+    await vi.advanceTimersByTimeAsync(STOP_CONFIRMATION_TIMEOUT_MS);
+    await h.waitUntil.mock.calls[0][0];
+
+    expect(h.terminateSandbox).toHaveBeenCalledWith("stop_confirmation_timeout");
+    expect(h.wsManager.send).not.toHaveBeenCalledWith(
+      replacementWs,
+      expect.objectContaining({ type: "prompt" })
+    );
   });
 
   it("forwards stop without a processing message so compaction can cancel", async () => {

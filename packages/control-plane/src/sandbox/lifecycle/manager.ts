@@ -305,6 +305,7 @@ export interface LifecycleCallbacks {
  */
 export interface SandboxLifecycle {
   spawnSandbox(): Promise<void>;
+  terminateSandbox(reason: string): Promise<void>;
   updateLastActivity(timestamp: number): void;
 }
 

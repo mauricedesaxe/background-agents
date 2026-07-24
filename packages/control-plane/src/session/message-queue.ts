@@ -412,6 +412,9 @@ export class SessionMessageQueue {
     }
 
     if (!options.suppressStatusReconcile) {
+      if (outcome === "confirmation_timeout") {
+        await this.sandboxLifecycle.terminateSandbox("stop_confirmation_timeout");
+      }
       await this.sessionStatus.reconcileAfterExecution(false);
       await this.processMessageQueue();
     }
