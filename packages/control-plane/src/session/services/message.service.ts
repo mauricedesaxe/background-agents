@@ -5,6 +5,7 @@ import type { SessionMessageQueue } from "../message-queue";
 import { SessionEventStream, type SessionEventListRequest } from "../event-stream";
 
 export interface EnqueuePromptRequest {
+  messageId?: string;
   content: string;
   authorId: string;
   source: string;
@@ -23,6 +24,13 @@ export interface EnqueuePromptRequest {
   scmAccessTokenEncrypted?: string;
   scmRefreshTokenEncrypted?: string;
   scmTokenExpiresAt?: number;
+}
+
+export class PromptIdConflictError extends Error {
+  constructor() {
+    super("Message ID belongs to another prompt");
+    this.name = "PromptIdConflictError";
+  }
 }
 
 export type ListEventsRequest = SessionEventListRequest;

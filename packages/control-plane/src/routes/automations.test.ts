@@ -197,6 +197,24 @@ describe("automation route handlers", () => {
     });
   });
 
+  it.each([
+    ["GET", "/automations/auto-1"],
+    ["PUT", "/automations/auto-1"],
+    ["DELETE", "/automations/auto-1"],
+    ["POST", "/automations/auto-1/pause"],
+    ["POST", "/automations/auto-1/resume"],
+    ["POST", "/automations/auto-1/trigger"],
+    ["GET", "/automations/auto-1/invocations"],
+    ["GET", "/automations/auto-1/runs/run-1"],
+    ["POST", "/automations/auto-1/regenerate-key"],
+  ])("hides one-shot tasks from %s %s", async (method, path) => {
+    mockStore.getById.mockResolvedValue({ ...sampleRow, trigger_type: "once" });
+
+    const response = await callRoute(method, path);
+
+    expect(response.status).toBe(404);
+  });
+
   describe("GET /automations (list)", () => {
     it("returns list of automations", async () => {
       mockStore.list.mockResolvedValue({

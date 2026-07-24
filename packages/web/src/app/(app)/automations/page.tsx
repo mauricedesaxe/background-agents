@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/ui/error-banner";
 import { SidebarIcon, PlusIcon } from "@/components/ui/icons";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
+import { ScheduledTasksList } from "@/components/automations/scheduled-tasks-list";
 
 export default function AutomationsPage() {
   const { isOpen, toggle } = useSidebarContext();
@@ -75,6 +76,8 @@ export default function AutomationsPage() {
               {actionError}
             </ErrorBanner>
           )}
+
+          <ScheduledTasksList />
 
           {loading ? (
             <div className="flex justify-center py-12">

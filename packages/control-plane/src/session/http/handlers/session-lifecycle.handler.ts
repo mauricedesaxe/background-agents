@@ -71,6 +71,7 @@ export interface SessionLifecycleHandlerDeps {
   scheduleWarmSandbox: () => void;
   getSession: () => SessionRow | null;
   getSandbox: () => SandboxRow | null;
+  getSessionRepositories: () => ReturnType<SessionRepository["getSessionRepositories"]>;
   getPublicSessionId: (session: SessionRow) => string;
   getParticipantByUserId: (userId: string) => ParticipantRow | null;
   statusService: SessionStatusService;
@@ -195,12 +196,90 @@ export function createSessionLifecycleHandler(
           );
         }
       } else if (hasRepoOwner && body.repositories !== undefined) {
-        // An explicit empty list alongside scalar context is a producer bug —
-        // initialize.ts synthesizes a one-entry list for scalar callers.
         return Response.json(
           { error: "repositories must include the scalar repository" },
           { status: 400 }
         );
+      }
+      const memberRepositories: RepositoryRef[] =
+        repositories.length > 0
+          ? repositories
+          : repoOwner !== null && repoName !== null && body.repoId != null && baseBranch !== null
+            ? [{ repoOwner, repoName, repoId: body.repoId, baseBranch }]
+            : [];
+
+      const existing = deps.getSession();
+      if (existing) {
+        const matches =
+          existing.session_name === sessionName &&
+          existing.repo_owner === repoOwner &&
+          existing.repo_name === repoName &&
+          existing.repo_id === (hasRepoOwner ? body.repoId : null) &&
+          existing.base_branch === baseBranch &&
+          existing.model === model &&
+          existing.reasoning_effort === reasoningEffort &&
+          existing.parent_session_id === (body.parentSessionId ?? null) &&
+          existing.spawn_source === (body.spawnSource ?? "user") &&
+          existing.spawn_depth === (body.spawnDepth ?? 0) &&
+          existing.environment_id === (body.environmentId ?? null);
+        if (!matches) {
+          return Response.json({ error: "Session ID belongs to another session" }, { status: 409 });
+        }
+        const storedRepositories = deps.getSessionRepositories();
+        const repositoriesMatch =
+          storedRepositories.length === memberRepositories.length &&
+          storedRepositories.every((stored, position) => {
+            const requested = memberRepositories[position];
+            return (
+              requested !== undefined &&
+              stored.repoOwner === requested.repoOwner &&
+              stored.repoName === requested.repoName &&
+              stored.row?.repo_id === requested.repoId &&
+              stored.baseBranch === requested.baseBranch
+            );
+          });
+        if (!repositoriesMatch && storedRepositories.length > 0) {
+          return Response.json({ error: "Session ID belongs to another session" }, { status: 409 });
+        }
+        if (!repositoriesMatch) {
+          deps.repository.replaceSessionRepositories(
+            memberRepositories.map((repo, position) => ({
+              position,
+              repoOwner: repo.repoOwner,
+              repoName: repo.repoName,
+              repoId: repo.repoId,
+              baseBranch: repo.baseBranch,
+            }))
+          );
+        }
+        let repaired = false;
+        if (!deps.getSandbox()) {
+          deps.repository.createSandbox({
+            id: deps.generateId(),
+            status: "pending",
+            gitSyncStatus: "pending",
+            createdAt: 0,
+          });
+          repaired = true;
+        }
+        if (!deps.getParticipantByUserId(body.userId)) {
+          deps.repository.createParticipant({
+            id: deps.generateId(),
+            userId: body.userId,
+            scmUserId: body.scmUserId ?? null,
+            scmLogin: body.scmLogin ?? null,
+            scmName: body.scmName ?? null,
+            scmEmail: body.scmEmail ?? null,
+            scmAccessTokenEncrypted: encryptedToken,
+            scmRefreshTokenEncrypted: body.scmRefreshTokenEncrypted ?? null,
+            scmTokenExpiresAt: body.scmTokenExpiresAt ?? null,
+            role: "owner",
+            joinedAt: now,
+          });
+          repaired = true;
+        }
+        if (repaired) deps.scheduleWarmSandbox();
+        return Response.json({ sessionId, status: existing.status });
       }
 
       deps.repository.upsertSession({
@@ -224,14 +303,6 @@ export function createSessionLifecycleHandler(
         updatedAt: now,
       });
 
-      // Legacy scalar producers (spawn paths not yet list-aware) still get a
-      // member row so spawn/read paths have one source of truth.
-      const memberRepositories: RepositoryRef[] =
-        repositories.length > 0
-          ? repositories
-          : repoOwner !== null && repoName !== null && body.repoId != null && baseBranch !== null
-            ? [{ repoOwner, repoName, repoId: body.repoId, baseBranch }]
-            : [];
       deps.repository.replaceSessionRepositories(
         memberRepositories.map((repo, position) => ({
           position,

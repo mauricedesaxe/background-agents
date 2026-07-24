@@ -127,6 +127,20 @@ async function countRows(table: string, where = "1=1"): Promise<number> {
 describe("automation invocations (D1 integration)", () => {
   beforeEach(cleanD1Tables);
 
+  it("preserves repository capture order for one-shot session targets", async () => {
+    const store = new AutomationStore(env.DB);
+    await store.create(makeAutomation({ id: "once-repository-order", trigger_type: "once" }));
+    await store.replaceRepositories("once-repository-order", [
+      { repo_owner: "acme", repo_name: "web", repo_id: 1, base_branch: "main" },
+      { repo_owner: "acme", repo_name: "api", repo_id: 2, base_branch: "develop" },
+    ]);
+
+    const repositories = await store.getRepositoriesForAutomation("once-repository-order");
+
+    expect(repositories.map((repository) => repository.repo_name)).toEqual(["web", "api"]);
+    expect(repositories.map((repository) => repository.position)).toEqual([0, 1]);
+  });
+
   // ─── 0030 invocation_id backfill ────────────────────────────────────────────
 
   describe("0030 invocation_id backfill", () => {
@@ -305,6 +319,118 @@ describe("automation invocations (D1 integration)", () => {
   // ─── Guarded insert batch semantics (real D1 — meta.changes inside batch) ──
 
   describe("insertInvocationGuarded", () => {
+    it("claims a due one-shot once and consumes its schedule atomically", async () => {
+      const store = new AutomationStore(env.DB);
+      const now = Date.now();
+      const dueAt = now - 1_000;
+      await store.create(
+        makeAutomation({
+          id: "once-claim",
+          trigger_type: "once",
+          schedule_cron: null,
+          next_run_at: dueAt,
+          user_id: "user-owner",
+        })
+      );
+      const first = await store.insertInvocationGuarded({
+        invocation: makeInvocation("once-claim", {
+          id: "once-invocation",
+          source: "schedule",
+          scheduled_at: dueAt,
+        }),
+        children: [
+          makeChild("once-claim", {
+            id: "once-run",
+            invocation_id: "once-invocation",
+            session_id: "once-session",
+            scheduled_at: dueAt,
+            prompt_content: "captured prompt",
+            repository_set: JSON.stringify([
+              { repoOwner: "acme", repoName: "web", repoId: 1, baseBranch: "main" },
+            ]),
+          }),
+        ],
+        overlapScope: { kind: "automation" },
+        consumeOnce: { dueAt, now },
+      });
+
+      expect(first.inserted).toBe(true);
+      expect(await store.getById("once-claim")).toMatchObject({ enabled: 0, next_run_at: null });
+      expect(await store.getRunById("once-claim", "once-run")).toMatchObject({
+        session_id: "once-session",
+        status: "starting",
+        prompt_content: "captured prompt",
+        repository_set: JSON.stringify([
+          { repoOwner: "acme", repoName: "web", repoId: 1, baseBranch: "main" },
+        ]),
+      });
+
+      const duplicate = await store.insertInvocationGuarded({
+        invocation: makeInvocation("once-claim", {
+          id: "duplicate-invocation",
+          source: "schedule",
+          scheduled_at: dueAt,
+        }),
+        children: [makeChild("once-claim", { id: "duplicate-run", scheduled_at: dueAt })],
+        overlapScope: { kind: "automation" },
+        consumeOnce: { dueAt, now },
+      });
+      expect(duplicate.inserted).toBe(false);
+      expect(await countRows("automation_invocations", "automation_id = 'once-claim'")).toBe(1);
+    });
+
+    it("lets cancellation win only before a one-shot claim", async () => {
+      const store = new AutomationStore(env.DB);
+      const now = Date.now();
+      const dueAt = now - 1_000;
+      await store.create(
+        makeAutomation({
+          id: "once-cancelled",
+          trigger_type: "once",
+          schedule_cron: null,
+          next_run_at: dueAt,
+          user_id: "user-owner",
+        })
+      );
+      expect(await store.cancelOnce("once-cancelled", "user-owner")).toBe(true);
+      const afterCancel = await store.insertInvocationGuarded({
+        invocation: makeInvocation("once-cancelled", {
+          source: "schedule",
+          scheduled_at: dueAt,
+        }),
+        children: [makeChild("once-cancelled", { scheduled_at: dueAt })],
+        overlapScope: { kind: "automation" },
+        consumeOnce: { dueAt, now },
+      });
+      expect(afterCancel.inserted).toBe(false);
+
+      await store.create(
+        makeAutomation({
+          id: "once-started",
+          trigger_type: "once",
+          schedule_cron: null,
+          next_run_at: dueAt,
+          user_id: "user-owner",
+        })
+      );
+      await store.insertInvocationGuarded({
+        invocation: makeInvocation("once-started", {
+          id: "started-invocation",
+          source: "schedule",
+          scheduled_at: dueAt,
+        }),
+        children: [
+          makeChild("once-started", {
+            invocation_id: "started-invocation",
+            scheduled_at: dueAt,
+          }),
+        ],
+        overlapScope: { kind: "automation" },
+        consumeOnce: { dueAt, now },
+      });
+      expect(await store.cancelOnce("once-started", "user-owner")).toBe(false);
+    });
+
     it("inserts invocation + children + advances the schedule in one batch", async () => {
       const store = new AutomationStore(env.DB);
       await store.create(makeAutomation({ id: "auto-g1", next_run_at: 1_000 }));

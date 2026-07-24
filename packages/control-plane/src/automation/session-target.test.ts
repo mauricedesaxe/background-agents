@@ -87,6 +87,31 @@ describe("resolveAutomationSessionTarget", () => {
     });
   });
 
+  it("uses a captured environment repository set without reading the live environment", async () => {
+    const repositories = [
+      { repoOwner: "acme", repoName: "web-app", repoId: 12345, baseBranch: "release" },
+      { repoOwner: "acme", repoName: "api", repoId: 67890, baseBranch: "develop" },
+    ];
+
+    const target = await resolveAutomationSessionTarget(
+      env,
+      run({ environment_id: "env_deleted" }),
+      ctx,
+      log,
+      repositories
+    );
+
+    expect(target).toEqual({
+      repoOwner: "acme",
+      repoName: "web-app",
+      repoId: 12345,
+      defaultBranch: "release",
+      repositories,
+      environmentId: "env_deleted",
+    });
+    expect(resolveEnvironmentTarget).not.toHaveBeenCalled();
+  });
+
   it("resolves the environment workspace with the primary mirrored to scalars", async () => {
     const environmentInputs = [
       { repoOwner: "acme", repoName: "web-app", baseBranch: "main" },

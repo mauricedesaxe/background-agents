@@ -109,14 +109,22 @@ vi.mock("../db/automation-store", async (importOriginal) => {
 
 const mockSessionStoreCreate = vi.fn().mockResolvedValue(undefined);
 const mockSessionStoreUpdateStatus = vi.fn().mockResolvedValue(undefined);
-vi.mock("../db/session-index", () => ({
-  SessionIndexStore: vi.fn().mockImplementation(function () {
-    return {
-      create: mockSessionStoreCreate,
-      updateStatus: mockSessionStoreUpdateStatus,
-    };
-  }),
-}));
+const mockSessionStoreGet = vi.fn().mockResolvedValue(null);
+const mockSessionStoreRepositories = vi.fn().mockResolvedValue([]);
+vi.mock("../db/session-index", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    SessionIndexStore: vi.fn().mockImplementation(function () {
+      return {
+        create: mockSessionStoreCreate,
+        updateStatus: mockSessionStoreUpdateStatus,
+        get: mockSessionStoreGet,
+        repositoriesForSession: mockSessionStoreRepositories,
+      };
+    }),
+  };
+});
 
 const mockUserStoreGetIdentity = vi.fn().mockResolvedValue(null);
 vi.mock("../db/user-store", () => ({
@@ -126,6 +134,17 @@ vi.mock("../db/user-store", () => ({
     };
   }),
 }));
+
+vi.mock("../db/model-preferences", () => ({
+  ModelPreferencesStore: vi.fn().mockImplementation(function () {
+    return { getEnabledModels: vi.fn().mockResolvedValue(null) };
+  }),
+}));
+
+vi.mock("../session/identity", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual, resolveGitHubEnrichment: vi.fn().mockResolvedValue(null) };
+});
 
 const mockEnvironmentGetById = vi.fn().mockResolvedValue(null);
 const mockEnvironmentRepositories = vi.fn().mockResolvedValue([]);
@@ -415,6 +434,8 @@ describe("SchedulerDO", () => {
     vi.clearAllMocks();
     capturedInvocationParams = [];
     mockStore = createMockStore();
+    mockSessionStoreGet.mockResolvedValue(null);
+    mockSessionStoreRepositories.mockResolvedValue([]);
     mockGetSlackAutomationsForChannel.mockResolvedValue([]);
     mockCheckRepositoryAccess.mockResolvedValue({
       repoId: 12345,
@@ -789,6 +810,40 @@ describe("SchedulerDO", () => {
       expect(promptCallCount(fetchMock)).toBe(3);
     });
 
+    it("opens a one-shot repository set in one session", async () => {
+      const automation = { ...sampleAutomation, trigger_type: "once" };
+      const repositories = [
+        repositoryRow("auto-1"),
+        repositoryRow("auto-1", { repo_name: "api", repo_id: 67890, base_branch: "develop" }),
+      ];
+      mockStore.getOverdueAutomations.mockResolvedValue([automation]);
+      selectRepositories("auto-1", repositories);
+      mockCheckRepositoryAccess.mockImplementation(async ({ owner, name }) => ({
+        repoId: name === "api" ? 67890 : 12345,
+        repoOwner: owner,
+        repoName: name,
+        defaultBranch: "main",
+      }));
+
+      const env = createEnv();
+      const stub = env.SESSION.get(env.SESSION.idFromName("any"));
+      const fetchMock = vi.mocked(stub.fetch);
+      const scheduler = createSchedulerDO(env);
+      await scheduler.fetch(new Request("http://internal/internal/tick", { method: "POST" }));
+
+      const [child] = lastInsertedChildren();
+      expect(child).toMatchObject({ prompt_content: "Run tests" });
+      expect(JSON.parse(child.repository_set as string)).toEqual([
+        { repoOwner: "acme", repoName: "web-app", repoId: 12345, baseBranch: "release" },
+        { repoOwner: "acme", repoName: "api", repoId: 67890, baseBranch: "develop" },
+      ]);
+      expect(promptCallCount(fetchMock)).toBe(1);
+      expect((await getInitBody(fetchMock)).repositories).toEqual([
+        { repoOwner: "acme", repoName: "web-app", repoId: 12345, baseBranch: "release" },
+        { repoOwner: "acme", repoName: "api", repoId: 67890, baseBranch: "develop" },
+      ]);
+    });
+
     it("fails the environment child when its environment no longer exists", async () => {
       mockStore.getOverdueAutomations.mockResolvedValue([sampleAutomation]);
       selectRepositories("auto-1", []);
@@ -1114,7 +1169,7 @@ describe("SchedulerDO", () => {
       expect(mockStore.insertInvocationGuarded).toHaveBeenCalledTimes(5);
     });
 
-    it("marks the child as failed when session creation throws", async () => {
+    it("leaves the child starting when session initialization has an ambiguous response", async () => {
       mockStore.getOverdueAutomations.mockResolvedValue([sampleAutomation]);
       selectRepositories("auto-1", [repositoryRow("auto-1")]);
       mockStore.getInvocationRunAggregate.mockResolvedValue(
@@ -1135,13 +1190,53 @@ describe("SchedulerDO", () => {
 
       expect(res.status).toBe(200);
       const body = await res.json<{ processed: number; skipped: number; failed: number }>();
-      expect(body.failed).toBe(1);
+      expect(body.processed).toBe(1);
+      expect(body.failed).toBe(0);
 
-      expect(mockStore.updateRun).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({ status: "failed" })
+      expect(mockStore.updateRun).not.toHaveBeenCalled();
+      expect(mockStore.incrementConsecutiveFailures).not.toHaveBeenCalled();
+    });
+
+    it("leaves the child starting when prompt enqueue has an ambiguous response", async () => {
+      mockStore.getOverdueAutomations.mockResolvedValue([sampleAutomation]);
+      selectRepositories("auto-1", [repositoryRow("auto-1")]);
+      const fetchMock = vi.fn(async (input: RequestInfo) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (new URL(url).pathname === "/internal/init") return Response.json({ status: "ok" });
+        throw new Error("response lost after enqueue");
+      });
+      const env = createEnv();
+      vi.mocked(env.SESSION.get).mockReturnValue({ fetch: fetchMock } as never);
+
+      const scheduler = createSchedulerDO(env);
+      const response = await scheduler.fetch(
+        new Request("http://internal/internal/tick", { method: "POST" })
       );
-      expect(mockStore.incrementConsecutiveFailures).toHaveBeenCalledWith("auto-1");
+
+      expect((await response.json<{ processed: number }>()).processed).toBe(1);
+      expect(mockStore.updateRun).not.toHaveBeenCalled();
+      expect((await getPromptBody(fetchMock)).messageId).toMatch(/^automation-run:/);
+    });
+
+    it("leaves the child starting when prompt enqueue returns 5xx", async () => {
+      mockStore.getOverdueAutomations.mockResolvedValue([sampleAutomation]);
+      selectRepositories("auto-1", [repositoryRow("auto-1")]);
+      const fetchMock = vi.fn(async (input: RequestInfo) => {
+        const url = typeof input === "string" ? input : input.url;
+        return new URL(url).pathname === "/internal/init"
+          ? Response.json({ status: "ok" })
+          : new Response("unavailable", { status: 503 });
+      });
+      const env = createEnv();
+      vi.mocked(env.SESSION.get).mockReturnValue({ fetch: fetchMock } as never);
+
+      const scheduler = createSchedulerDO(env);
+      const response = await scheduler.fetch(
+        new Request("http://internal/internal/tick", { method: "POST" })
+      );
+
+      expect((await response.json<{ processed: number }>()).processed).toBe(1);
+      expect(mockStore.updateRun).not.toHaveBeenCalled();
     });
 
     it("auto-pauses after 3 consecutive failures", async () => {
@@ -1153,7 +1248,7 @@ describe("SchedulerDO", () => {
       mockStore.incrementConsecutiveFailures.mockResolvedValue(3);
 
       const failingStub = {
-        fetch: vi.fn().mockRejectedValue(new Error("Session init failed")),
+        fetch: vi.fn().mockResolvedValue(new Response("rejected", { status: 400 })),
       } as never;
 
       const env = createEnv();
@@ -1174,7 +1269,7 @@ describe("SchedulerDO", () => {
       mockStore.incrementConsecutiveFailures.mockResolvedValue(2);
 
       const failingStub = {
-        fetch: vi.fn().mockRejectedValue(new Error("fail")),
+        fetch: vi.fn().mockResolvedValue(new Response("rejected", { status: 400 })),
       } as never;
 
       const env = createEnv();
@@ -1195,7 +1290,7 @@ describe("SchedulerDO", () => {
       mockStore.tryMarkInvocationFailureCounted.mockResolvedValue(false);
 
       const failingStub = {
-        fetch: vi.fn().mockRejectedValue(new Error("fail")),
+        fetch: vi.fn().mockResolvedValue(new Response("rejected", { status: 400 })),
       } as never;
       const env = createEnv();
       vi.mocked(env.SESSION.get).mockReturnValue(failingStub);
@@ -1255,7 +1350,7 @@ describe("SchedulerDO", () => {
       );
 
       const failingStub = {
-        fetch: vi.fn().mockRejectedValue(new Error("Session init failed")),
+        fetch: vi.fn().mockResolvedValue(new Response("rejected", { status: 400 })),
       } as never;
 
       const env = createEnv();
@@ -1277,14 +1372,15 @@ describe("SchedulerDO", () => {
       const failTrackCall = errorSpy.mock.calls.find(
         ([, data]) =>
           (data as Record<string, unknown> | undefined)?.event === "scheduler.fail_track_error" &&
-          (data as Record<string, unknown> | undefined)?.original_reason === "Session init failed"
+          (data as Record<string, unknown> | undefined)?.original_reason ===
+            "Failed to initialize session DO: 400"
       );
       expect(failTrackCall).toBeDefined();
       expect(failTrackCall![1]).toMatchObject({
         event: "scheduler.fail_track_error",
         automation_id: "auto-1",
         run_id: expect.any(String),
-        original_reason: "Session init failed",
+        original_reason: "Failed to initialize session DO: 400",
         error: "D1 timeout",
       });
 
@@ -1296,6 +1392,65 @@ describe("SchedulerDO", () => {
     });
 
     // ── Recovery sweep ──────────────────────────────────────────────────────
+
+    it("replays ambiguous recovery with the same session and message ids", async () => {
+      const orphanedRun = sampleRunRow({
+        id: "orphan-replay",
+        session_id: "session-stable",
+        status: "starting",
+        created_at: now - 10 * 60 * 1000,
+        prompt_content: "captured prompt",
+        repository_set: JSON.stringify([
+          { repoOwner: "captured", repoName: "primary", repoId: 42, baseBranch: "release" },
+        ]),
+      });
+      mockStore.getOrphanedStartingRuns.mockResolvedValue([orphanedRun]);
+      mockStore.getById.mockResolvedValue({ ...sampleAutomation, trigger_type: "once" });
+      mockSessionStoreGet.mockResolvedValue({
+        id: "session-stable",
+        environmentId: null,
+      });
+      mockSessionStoreRepositories.mockResolvedValue([
+        { repoOwner: "captured", repoName: "primary", repoId: 42, baseBranch: "release" },
+      ]);
+      const firstFetch = vi.fn(async (input: RequestInfo) => {
+        const url = typeof input === "string" ? input : input.url;
+        const path = new URL(url).pathname;
+        if (path === "/internal/state") return new Response("missing", { status: 404 });
+        if (path === "/internal/init") return Response.json({ status: "ok" });
+        throw new Error("response lost after enqueue");
+      });
+      const env = createEnv();
+      vi.mocked(env.SESSION.get).mockReturnValue({ fetch: firstFetch } as never);
+      const scheduler = createSchedulerDO(env);
+
+      await scheduler.fetch(new Request("http://internal/internal/tick", { method: "POST" }));
+      expect(mockStore.updateRun).not.toHaveBeenCalled();
+      expect(await getPromptBody(firstFetch)).toMatchObject({
+        messageId: "automation-run:orphan-replay",
+        content: "captured prompt",
+      });
+
+      const secondStub = createMockSessionStub();
+      vi.mocked(env.SESSION.get).mockReturnValue(secondStub);
+      await scheduler.fetch(new Request("http://internal/internal/tick", { method: "POST" }));
+
+      expect(mockStore.updateRun).toHaveBeenCalledWith("orphan-replay", {
+        status: "running",
+        started_at: expect.any(Number),
+      });
+      expect((await getPromptBody(vi.mocked(secondStub.fetch))).messageId).toBe(
+        "automation-run:orphan-replay"
+      );
+      expect(env.SESSION.idFromName).toHaveBeenCalledWith("session-stable");
+      expect(mockCheckRepositoryAccess).not.toHaveBeenCalled();
+      expect(await getInitBody(vi.mocked(secondStub.fetch))).toMatchObject({
+        repoOwner: "captured",
+        repoName: "primary",
+        repoId: 42,
+        defaultBranch: "release",
+      });
+    });
 
     it("recovers orphaned starting runs (legacy rows use per-run accounting)", async () => {
       const orphanedRun = {
@@ -2092,6 +2247,22 @@ describe("SchedulerDO", () => {
   });
 
   describe("/internal/trigger", () => {
+    it("rejects manual one-shot triggers", async () => {
+      mockStore.getById.mockResolvedValue({ ...sampleAutomation, trigger_type: "once" });
+      const scheduler = createSchedulerDO();
+
+      const response = await scheduler.fetch(
+        new Request("http://internal/internal/trigger", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ automationId: "auto-1" }),
+        })
+      );
+
+      expect(response.status).toBe(404);
+      expect(mockStore.insertInvocationGuarded).not.toHaveBeenCalled();
+    });
+
     it("returns 400 when automationId is missing", async () => {
       const scheduler = createSchedulerDO();
       const res = await scheduler.fetch(
@@ -2195,7 +2366,7 @@ describe("SchedulerDO", () => {
       );
 
       const failingStub = {
-        fetch: vi.fn().mockRejectedValue(new Error("Session init failed")),
+        fetch: vi.fn().mockResolvedValue(new Response("rejected", { status: 400 })),
       } as never;
 
       const env = createEnv();

@@ -555,7 +555,7 @@ async function handleGetAutomation(
 
   const store = new AutomationStore(ctx.db);
   const row = await store.getById(id);
-  if (!row) return error("Automation not found", 404);
+  if (!row || row.trigger_type === "once") return error("Automation not found", 404);
 
   return json({
     automation: toAutomation(
@@ -578,7 +578,7 @@ async function handleUpdateAutomation(
   const db: SqlDatabase = ctx.db;
   const store = new AutomationStore(db);
   const existing = await store.getById(id);
-  if (!existing) return error("Automation not found", 404);
+  if (!existing || existing.trigger_type === "once") return error("Automation not found", 404);
 
   const body = await parseJsonBody<UpdateAutomationRequest>(request);
   if (body instanceof Response) return body;
@@ -828,6 +828,8 @@ async function handleDeleteAutomation(
   if (!id) return error("Automation ID required", 400);
 
   const store = new AutomationStore(ctx.db);
+  const existing = await store.getById(id);
+  if (!existing || existing.trigger_type === "once") return error("Automation not found", 404);
   const deleted = await store.softDelete(id);
   if (!deleted) return error("Automation not found", 404);
 
@@ -851,6 +853,8 @@ async function handlePauseAutomation(
   if (!id) return error("Automation ID required", 400);
 
   const store = new AutomationStore(ctx.db);
+  const existing = await store.getById(id);
+  if (!existing || existing.trigger_type === "once") return error("Automation not found", 404);
   const paused = await store.pause(id);
   if (!paused) return error("Automation not found", 404);
 
@@ -884,7 +888,7 @@ async function handleResumeAutomation(
 
   const store = new AutomationStore(ctx.db);
   const existing = await store.getById(id);
-  if (!existing) return error("Automation not found", 404);
+  if (!existing || existing.trigger_type === "once") return error("Automation not found", 404);
 
   // For schedule automations, compute the next run time.
   // For event-driven automations, resume with null next_run_at.
@@ -932,7 +936,9 @@ async function handleTriggerAutomation(
 
   const store = new AutomationStore(ctx.db);
   const automation = await store.getById(id);
-  if (!automation) return error("Automation not found", 404);
+  if (!automation || automation.trigger_type === "once") {
+    return error("Automation not found", 404);
+  }
 
   // Forward to SchedulerDO (it performs its own authoritative concurrency check)
   if (!env.SCHEDULER) {
@@ -996,7 +1002,9 @@ async function handleListInvocations(
 
   const store = new AutomationStore(ctx.db);
   const automation = await store.getById(automationId);
-  if (!automation) return error("Automation not found", 404);
+  if (!automation || automation.trigger_type === "once") {
+    return error("Automation not found", 404);
+  }
 
   const { limit, offset } = parseRunListParams(request);
   const result = await store.listInvocations(automationId, { limit, offset });
@@ -1018,6 +1026,8 @@ async function handleGetRun(
   if (!automationId || !runId) return error("Automation ID and Run ID required", 400);
 
   const store = new AutomationStore(ctx.db);
+  const automation = await store.getById(automationId);
+  if (!automation || automation.trigger_type === "once") return error("Run not found", 404);
   const run = await store.getRunById(automationId, runId);
   if (!run) return error("Run not found", 404);
 
@@ -1035,7 +1045,9 @@ async function handleRegenerateKey(
 
   const store = new AutomationStore(ctx.db);
   const automation = await store.getById(id);
-  if (!automation) return error("Automation not found", 404);
+  if (!automation || automation.trigger_type === "once") {
+    return error("Automation not found", 404);
+  }
 
   const workerUrl = env.WORKER_URL || "";
 

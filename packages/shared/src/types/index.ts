@@ -220,11 +220,15 @@ export type {
   AutomationRepositoryInput,
   Automation,
   CreateAutomationRequest,
+  CreateScheduledTaskRequest,
   UpdateAutomationRequest,
   AutomationRun,
   ListAutomationsResponse,
   AutomationInvocation,
   ListAutomationInvocationsResponse,
+  ScheduledTaskState,
+  ScheduledTask,
+  ListScheduledTasksResponse,
 } from "./automations";
 
 export type {

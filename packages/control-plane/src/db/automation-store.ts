@@ -61,6 +61,8 @@ export interface AutomationRunRow {
   base_branch: string | null;
   /** Environment snapshot taken at firing time (null for repository/repo-less runs). */
   environment_id: string | null;
+  prompt_content?: string | null;
+  repository_set?: string | null;
 }
 
 export interface EnrichedRunRow extends AutomationRunRow {
@@ -70,6 +72,7 @@ export interface EnrichedRunRow extends AutomationRunRow {
 
 export interface AutomationRepositoryRow {
   automation_id: string;
+  position: number;
   repo_owner: string;
   repo_name: string;
   repo_id: number | null;
@@ -310,6 +313,81 @@ export class AutomationStore {
     await this.bindAutomationInsert(row).run();
   }
 
+  async insertOnceIfFuture(
+    row: AutomationRow,
+    repositories: AutomationRepositoryInsert[],
+    environmentIds: string[]
+  ): Promise<boolean> {
+    const automation = this.db
+      .prepare(
+        `INSERT INTO automations
+         (id, name, instructions,
+          trigger_type, schedule_cron, schedule_tz, model, reasoning_effort, enabled, next_run_at,
+          consecutive_failures, created_by, user_id, created_at, updated_at, deleted_at,
+          event_type, trigger_config, trigger_auth_data)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE ? > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)`
+      )
+      .bind(
+        row.id,
+        row.name,
+        row.instructions,
+        row.trigger_type,
+        row.schedule_cron,
+        row.schedule_tz,
+        row.model,
+        row.reasoning_effort,
+        row.enabled,
+        row.next_run_at,
+        row.consecutive_failures,
+        row.created_by,
+        row.user_id,
+        row.created_at,
+        row.updated_at,
+        row.deleted_at,
+        row.event_type,
+        row.trigger_config,
+        row.trigger_auth_data,
+        row.next_run_at
+      );
+    const repositoryStatements = repositories.map((repository, position) =>
+      this.db
+        .prepare(
+          `INSERT INTO automation_repositories
+           (automation_id, position, repo_owner, repo_name, repo_id, base_branch, created_at, updated_at)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?
+           WHERE EXISTS (SELECT 1 FROM automations WHERE id = ?)`
+        )
+        .bind(
+          row.id,
+          position,
+          repository.repo_owner,
+          repository.repo_name,
+          repository.repo_id,
+          repository.base_branch,
+          row.created_at,
+          row.updated_at,
+          row.id
+        )
+    );
+    const environmentStatements = environmentIds.map((environmentId) =>
+      this.db
+        .prepare(
+          `INSERT INTO automation_environments
+           (automation_id, environment_id, created_at, updated_at)
+           SELECT ?, ?, ?, ?
+           WHERE EXISTS (SELECT 1 FROM automations WHERE id = ?)`
+        )
+        .bind(row.id, environmentId, row.created_at, row.updated_at, row.id)
+    );
+    const results = await this.db.batch([
+      automation,
+      ...repositoryStatements,
+      ...environmentStatements,
+    ]);
+    return (results[0]?.meta?.changes ?? 0) > 0;
+  }
+
   async getById(id: string): Promise<AutomationRow | null> {
     return this.db
       .prepare("SELECT * FROM automations WHERE id = ? AND deleted_at IS NULL")
@@ -317,10 +395,46 @@ export class AutomationStore {
       .first<AutomationRow>();
   }
 
+  async getByIdForOwner(id: string, userId: string): Promise<AutomationRow | null> {
+    return this.db
+      .prepare("SELECT * FROM automations WHERE id = ? AND user_id = ? AND deleted_at IS NULL")
+      .bind(id, userId)
+      .first<AutomationRow>();
+  }
+
+  async listOnceForOwner(userId: string): Promise<AutomationRow[]> {
+    const result = await this.db
+      .prepare(
+        `SELECT * FROM automations
+         WHERE user_id = ? AND trigger_type = 'once' AND deleted_at IS NULL
+         ORDER BY created_at DESC`
+      )
+      .bind(userId)
+      .all<AutomationRow>();
+    return result.results ?? [];
+  }
+
+  async cancelOnce(id: string, userId: string): Promise<boolean> {
+    const now = Date.now();
+    const result = await this.db
+      .prepare(
+        `UPDATE automations
+         SET enabled = 0, next_run_at = NULL, updated_at = ?
+         WHERE id = ? AND user_id = ? AND trigger_type = 'once'
+           AND enabled = 1 AND deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM automation_invocations WHERE automation_id = automations.id
+           )`
+      )
+      .bind(now, id, userId)
+      .run();
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
   async list(
     options: { repoOwner?: string; repoName?: string } = {}
   ): Promise<{ automations: AutomationRow[]; total: number }> {
-    const conditions: string[] = ["deleted_at IS NULL"];
+    const conditions: string[] = ["deleted_at IS NULL", "trigger_type <> 'once'"];
     const params: unknown[] = [];
 
     if (options.repoOwner) {
@@ -461,7 +575,7 @@ export class AutomationStore {
       .prepare(
         `SELECT * FROM automation_repositories
          WHERE automation_id = ?
-         ORDER BY repo_owner, repo_name`
+         ORDER BY position, repo_owner, repo_name`
       )
       .bind(automationId)
       .all<AutomationRepositoryRow>();
@@ -481,7 +595,7 @@ export class AutomationStore {
       .prepare(
         `SELECT * FROM automation_repositories
          WHERE automation_id IN (${placeholders})
-         ORDER BY repo_owner, repo_name`
+         ORDER BY position, repo_owner, repo_name`
       )
       .bind(...automationIds)
       .all<AutomationRepositoryRow>();
@@ -498,15 +612,16 @@ export class AutomationStore {
     repositories: AutomationRepositoryInsert[],
     now: number
   ): SqlStatement[] {
-    return repositories.map((repository) =>
+    return repositories.map((repository, position) =>
       this.db
         .prepare(
           `INSERT INTO automation_repositories
-           (automation_id, repo_owner, repo_name, repo_id, base_branch, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
+           (automation_id, position, repo_owner, repo_name, repo_id, base_branch, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .bind(
           automationId,
+          position,
           repository.repo_owner,
           repository.repo_name,
           repository.repo_id,
@@ -613,7 +728,7 @@ export class AutomationStore {
     const result = await this.db
       .prepare(
         `SELECT COUNT(*) as count FROM automations
-         WHERE enabled = 1 AND deleted_at IS NULL AND trigger_type = 'schedule'
+         WHERE enabled = 1 AND deleted_at IS NULL AND trigger_type IN ('schedule', 'once')
          AND next_run_at IS NOT NULL AND next_run_at <= ?`
       )
       .bind(now)
@@ -625,7 +740,7 @@ export class AutomationStore {
     const result = await this.db
       .prepare(
         `SELECT * FROM automations
-         WHERE enabled = 1 AND deleted_at IS NULL AND trigger_type = 'schedule'
+         WHERE enabled = 1 AND deleted_at IS NULL AND trigger_type IN ('schedule', 'once')
          AND next_run_at IS NOT NULL AND next_run_at <= ?
          ORDER BY next_run_at ASC
          LIMIT ?`
@@ -804,6 +919,7 @@ export class AutomationStore {
     children: AutomationRunRow[];
     overlapScope: InvocationOverlapScope;
     advanceSchedule?: { nextRunAt: number };
+    consumeOnce?: { dueAt: number; now: number };
   }): Promise<{ inserted: boolean }> {
     const invocation = params.invocation;
     const overlap = this.overlapPredicate(invocation.automation_id, params.overlapScope);
@@ -816,7 +932,16 @@ export class AutomationStore {
            (id, automation_id, source, scheduled_at, trigger_key, concurrency_key,
             trigger_metadata, skip_reason, failure_counted_at, created_at, updated_at)
            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-           WHERE NOT EXISTS (${overlap.sql})`
+           WHERE NOT EXISTS (${overlap.sql})
+             ${
+               params.consumeOnce
+                 ? `AND EXISTS (
+                      SELECT 1 FROM automations a
+                      WHERE a.id = ? AND a.trigger_type = 'once' AND a.enabled = 1
+                        AND a.deleted_at IS NULL AND a.next_run_at = ? AND a.next_run_at <= ?
+                    )`
+                 : ""
+             }`
         )
         .bind(
           invocation.id,
@@ -830,7 +955,10 @@ export class AutomationStore {
           invocation.failure_counted_at,
           invocation.created_at,
           invocation.updated_at,
-          ...overlap.params
+          ...overlap.params,
+          ...(params.consumeOnce
+            ? [invocation.automation_id, params.consumeOnce.dueAt, params.consumeOnce.now]
+            : [])
         )
     );
 
@@ -840,9 +968,10 @@ export class AutomationStore {
           .prepare(
             `INSERT INTO automation_runs
              (id, automation_id, invocation_id, session_id, status, skip_reason, failure_reason,
-              scheduled_at, started_at, completed_at, created_at,
-              repo_owner, repo_name, repo_id, base_branch, environment_id)
-             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+               scheduled_at, started_at, completed_at, created_at,
+               repo_owner, repo_name, repo_id, base_branch, environment_id,
+               prompt_content, repository_set)
+              SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
              WHERE EXISTS (SELECT 1 FROM automation_invocations WHERE id = ?)`
           )
           .bind(
@@ -862,6 +991,8 @@ export class AutomationStore {
             child.repo_id,
             child.base_branch,
             child.environment_id,
+            child.prompt_content ?? null,
+            child.repository_set ?? null,
             invocation.id
           )
       );
@@ -875,6 +1006,18 @@ export class AutomationStore {
              WHERE id = ? AND deleted_at IS NULL`
           )
           .bind(params.advanceSchedule.nextRunAt, Date.now(), invocation.automation_id)
+      );
+    }
+
+    if (params.consumeOnce) {
+      statements.push(
+        this.db
+          .prepare(
+            `UPDATE automations SET enabled = 0, next_run_at = NULL, updated_at = ?
+             WHERE id = ? AND trigger_type = 'once'
+               AND EXISTS (SELECT 1 FROM automation_invocations WHERE id = ?)`
+          )
+          .bind(params.consumeOnce.now, invocation.automation_id, invocation.id)
       );
     }
 
@@ -1043,6 +1186,11 @@ export class AutomationStore {
       ),
       total,
     };
+  }
+
+  async getLatestInvocation(automationId: string): Promise<AutomationInvocation | null> {
+    const result = await this.listInvocations(automationId, { limit: 1, offset: 0 });
+    return result.invocations[0] ?? null;
   }
 
   // --- Invocation finalization sweep (D2c) ---

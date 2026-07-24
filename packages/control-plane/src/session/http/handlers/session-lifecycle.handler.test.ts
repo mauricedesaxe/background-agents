@@ -3,6 +3,7 @@ import type { Logger } from "../../../logger";
 import type { ParticipantRow, SandboxRow, SessionRow } from "../../types";
 import { createSessionLifecycleHandler } from "./session-lifecycle.handler";
 import type { SessionStatusService } from "../../session-status-service";
+import type { SessionRepositoryEntry } from "../../repository-target";
 import { getValidModelOrDefault } from "@open-inspect/shared";
 
 function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
@@ -103,6 +104,7 @@ function createHandler() {
   } as unknown as Logger;
   const getSession = vi.fn<() => SessionRow | null>();
   const getSandbox = vi.fn<() => SandboxRow | null>();
+  const getSessionRepositories = vi.fn<() => SessionRepositoryEntry[]>(() => []);
   const getPublicSessionId = vi.fn<(session: SessionRow) => string>();
   const getParticipantByUserId = vi.fn<(userId: string) => ParticipantRow | null>();
   const transition = vi.fn<(status: SessionRow["status"]) => Promise<boolean>>();
@@ -125,6 +127,7 @@ function createHandler() {
     scheduleWarmSandbox,
     getSession,
     getSandbox,
+    getSessionRepositories,
     getPublicSessionId,
     getParticipantByUserId,
     statusService,
@@ -162,6 +165,7 @@ function createHandler() {
     log,
     getSession,
     getSandbox,
+    getSessionRepositories,
     getPublicSessionId,
     getParticipantByUserId,
     transition,
@@ -302,6 +306,155 @@ describe("createSessionLifecycleHandler", () => {
     ]);
     expect(scheduleWarmSandbox).toHaveBeenCalled();
     expect(log.info).toHaveBeenCalledWith("Triggering sandbox spawn for new session");
+  });
+
+  it("treats matching session initialization as a replay without another sandbox", async () => {
+    const {
+      handler,
+      repository,
+      getSession,
+      getSandbox,
+      getSessionRepositories,
+      getParticipantByUserId,
+      validateReasoningEffort,
+      scheduleWarmSandbox,
+    } = createHandler();
+    validateReasoningEffort.mockReturnValue("high");
+    getSession.mockReturnValue(
+      createSession({
+        session_name: "session-public-id",
+        repo_id: 123,
+        base_branch: "main",
+        branch_name: null,
+        title: "Generated title",
+        parent_session_id: null,
+        status: "active",
+      })
+    );
+    getSandbox.mockReturnValue(createSandbox());
+    getParticipantByUserId.mockReturnValue(createParticipant({ user_id: "user-1" }));
+    getSessionRepositories.mockReturnValue([
+      {
+        position: 0,
+        repoOwner: "acme",
+        repoName: "repo",
+        baseBranch: "main",
+        isPrimary: true,
+        row: {
+          position: 0,
+          repo_owner: "acme",
+          repo_name: "repo",
+          repo_id: 123,
+          base_branch: "main",
+          branch_name: null,
+          base_sha: null,
+          current_sha: null,
+        },
+      },
+    ]);
+
+    const response = await handler.init(
+      new Request("http://internal/internal/init", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionName: "session-public-id",
+          repoOwner: "acme",
+          repoName: "repo",
+          repoId: 123,
+          defaultBranch: "main",
+          title: "Session title",
+          model: "anthropic/claude-haiku-4-5",
+          reasoningEffort: "high",
+          userId: "user-1",
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ sessionId: "session-do-id", status: "active" });
+    expect(repository.upsertSession).not.toHaveBeenCalled();
+    expect(repository.createSandbox).not.toHaveBeenCalled();
+    expect(repository.createParticipant).not.toHaveBeenCalled();
+    expect(scheduleWarmSandbox).not.toHaveBeenCalled();
+  });
+
+  it("repairs a matching session left partial by an interrupted initialization", async () => {
+    const {
+      handler,
+      repository,
+      getSession,
+      validateReasoningEffort,
+      generateId,
+      scheduleWarmSandbox,
+    } = createHandler();
+    validateReasoningEffort.mockReturnValue("high");
+    generateId.mockReturnValueOnce("sandbox-repair").mockReturnValueOnce("participant-repair");
+    getSession.mockReturnValue(
+      createSession({
+        session_name: "session-public-id",
+        repo_id: 123,
+        base_branch: "main",
+        branch_name: null,
+        parent_session_id: null,
+        status: "created",
+      })
+    );
+
+    const response = await handler.init(
+      new Request("http://internal/internal/init", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionName: "session-public-id",
+          repoOwner: "acme",
+          repoName: "repo",
+          repoId: 123,
+          defaultBranch: "main",
+          title: "Session title",
+          model: "anthropic/claude-haiku-4-5",
+          reasoningEffort: "high",
+          userId: "user-1",
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(repository.replaceSessionRepositories).toHaveBeenCalledOnce();
+    expect(repository.createSandbox).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "sandbox-repair", status: "pending" })
+    );
+    expect(repository.createParticipant).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "participant-repair", userId: "user-1" })
+    );
+    expect(scheduleWarmSandbox).toHaveBeenCalledOnce();
+  });
+
+  it("rejects conflicting session ID reuse", async () => {
+    const { handler, repository, getSession, validateReasoningEffort } = createHandler();
+    validateReasoningEffort.mockReturnValue("high");
+    getSession.mockReturnValue(createSession({ session_name: "another-session" }));
+
+    const response = await handler.init(
+      new Request("http://internal/internal/init", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionName: "session-public-id",
+          repoOwner: "acme",
+          repoName: "repo",
+          repoId: 1,
+          defaultBranch: "main",
+          title: "Session title",
+          model: "anthropic/claude-haiku-4-5",
+          reasoningEffort: "high",
+          userId: "user-1",
+        }),
+      })
+    );
+
+    expect(response.status).toBe(409);
+    expect(repository.upsertSession).not.toHaveBeenCalled();
   });
 
   it("persists the repositories list in position order", async () => {

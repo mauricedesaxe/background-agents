@@ -23,6 +23,8 @@ import { SessionTargetPicker } from "@/components/session-target-picker";
 import { ReasoningEffortPills } from "@/components/reasoning-effort-pills";
 import { SidebarIcon, ModelIcon, SendIcon } from "@/components/ui/icons";
 import { Combobox, type ComboboxGroup } from "@/components/ui/combobox";
+import { SchedulePromptPopover } from "@/components/schedule-prompt-popover";
+import type { SessionTargetRequestFields } from "@/lib/session-target";
 
 const LAST_SELECTED_MODEL_STORAGE_KEY = "open-inspect-last-selected-model";
 const LAST_SELECTED_REASONING_EFFORT_STORAGE_KEY = "open-inspect-last-selected-reasoning-effort";
@@ -40,6 +42,7 @@ export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
+  const [scheduleConfirmation, setScheduleConfirmation] = useState("");
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [isCreatingSession, setIsCreatingSession] = useState(false);
   const sessionCreationPromise = useRef<Promise<string | null> | null>(null);
@@ -182,17 +185,45 @@ export default function Home() {
   );
 
   const handlePromptChange = (value: string) => {
-    const wasEmpty = prompt.length === 0;
     setPrompt(value);
-    if (
-      wasEmpty &&
-      value.length > 0 &&
-      !pendingSessionId &&
-      !isCreatingSession &&
-      !loadingEnabledModels &&
-      isLaunchable
-    ) {
-      createSessionForWarming();
+  };
+
+  const handleSchedule = async (instant: Date, timeZone: string): Promise<boolean> => {
+    if (!prompt.trim() || loadingEnabledModels || !isLaunchable) return false;
+    const target = buildRequestFields();
+    if (!target) return false;
+    setError("");
+    setScheduleConfirmation("");
+    try {
+      const response = await fetch("/api/scheduled-tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instructions: prompt,
+          executeAt: instant.toISOString(),
+          scheduleTz: timeZone,
+          model: selectedModel,
+          reasoningEffort,
+          ...scheduledTargetFields(target),
+        }),
+      });
+      const data = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        setError(data.error ?? "Failed to schedule prompt");
+        return false;
+      }
+      setPrompt("");
+      setScheduleConfirmation(
+        `Scheduled for ${new Intl.DateTimeFormat(undefined, {
+          dateStyle: "medium",
+          timeStyle: "short",
+          timeZone,
+        }).format(instant)} (${timeZone})`
+      );
+      return true;
+    } catch {
+      setError("Failed to schedule prompt");
+      return false;
     }
   };
 
@@ -260,7 +291,9 @@ export default function Home() {
       creating={creating}
       isCreatingSession={isCreatingSession}
       error={error}
+      scheduleConfirmation={scheduleConfirmation}
       handleSubmit={handleSubmit}
+      handleSchedule={handleSchedule}
       modelOptions={enabledModelOptions}
     />
   );
@@ -278,7 +311,9 @@ function HomeContent({
   creating,
   isCreatingSession,
   error,
+  scheduleConfirmation,
   handleSubmit,
+  handleSchedule,
   modelOptions,
 }: {
   isAuthenticated: boolean;
@@ -292,7 +327,9 @@ function HomeContent({
   creating: boolean;
   isCreatingSession: boolean;
   error: string;
+  scheduleConfirmation: string;
   handleSubmit: (e: React.FormEvent) => void;
+  handleSchedule: (instant: Date, timeZone: string) => Promise<boolean>;
   modelOptions: ModelCategory[];
 }) {
   const { isOpen, toggle } = useSidebarContext();
@@ -345,6 +382,11 @@ function HomeContent({
           {isAuthenticated && (
             <form onSubmit={handleSubmit}>
               {error && <ErrorBanner className="mb-4">{error}</ErrorBanner>}
+              {scheduleConfirmation && (
+                <p className="mb-4 border border-accent/40 bg-accent/10 px-3 py-2 text-sm text-foreground">
+                  {scheduleConfirmation}
+                </p>
+              )}
 
               <div className="border border-border bg-input">
                 {/* Text input area */}
@@ -361,9 +403,11 @@ function HomeContent({
                   />
                   {/* Submit button */}
                   <div className="absolute bottom-3 right-3 flex items-center gap-2">
-                    {isCreatingSession && (
-                      <span className="text-xs text-accent">Warming sandbox...</span>
-                    )}
+                    {isCreatingSession && <span className="text-xs text-accent">Starting...</span>}
+                    <SchedulePromptPopover
+                      disabled={!prompt.trim() || creating || !isLaunchable}
+                      onSchedule={handleSchedule}
+                    />
                     <button
                       type="submit"
                       disabled={!prompt.trim() || creating || !isLaunchable}
@@ -468,4 +512,29 @@ function HomeContent({
       </div>
     </div>
   );
+}
+
+function scheduledTargetFields(target: SessionTargetRequestFields): {
+  repositories: Array<{ repoOwner: string; repoName: string; baseBranch?: string }>;
+  environmentIds: string[];
+} {
+  if ("environmentId" in target) {
+    return { repositories: [], environmentIds: [target.environmentId] };
+  }
+  if ("repositories" in target) {
+    return { repositories: target.repositories, environmentIds: [] };
+  }
+  if (target.repoOwner && target.repoName) {
+    return {
+      repositories: [
+        {
+          repoOwner: target.repoOwner,
+          repoName: target.repoName,
+          baseBranch: target.branch,
+        },
+      ],
+      environmentIds: [],
+    };
+  }
+  return { repositories: [], environmentIds: [] };
 }

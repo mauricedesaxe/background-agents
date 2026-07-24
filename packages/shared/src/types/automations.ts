@@ -8,6 +8,7 @@ import type { RepositoryInput, RepositoryRef } from "./repositories";
 
 export type AutomationTriggerType =
   | "schedule"
+  | "once"
   | "github_event"
   | "linear_event"
   | "sentry"
@@ -113,6 +114,28 @@ export interface CreateAutomationRequest {
   environmentIds?: string[];
 }
 
+export interface CreateScheduledTaskRequest {
+  instructions: string;
+  executeAt: string;
+  scheduleTz: string;
+  model?: string;
+  reasoningEffort?: string | null;
+  repositories?: AutomationRepositoryInput[];
+  environmentIds?: string[];
+}
+
+export type ScheduledTaskState = "scheduled" | "cancelled" | AutomationInvocationStatus;
+
+export interface ScheduledTask {
+  automation: Automation;
+  state: ScheduledTaskState;
+  invocation: AutomationInvocation | null;
+}
+
+export interface ListScheduledTasksResponse {
+  tasks: ScheduledTask[];
+}
+
 export interface UpdateAutomationRequest {
   name?: string;
   instructions?: string;
@@ -172,7 +195,7 @@ export interface AutomationInvocation {
   automationId: string;
   status: AutomationInvocationStatus;
   source: AutomationInvocationSource;
-  /** The cron slot this firing served; null for manual/event firings. */
+  /** The scheduled slot this firing served; null for manual/event firings. */
   scheduledAt: number | null;
   /** Non-null ⇔ this firing was skipped (runs is then empty). */
   skipReason: string | null;

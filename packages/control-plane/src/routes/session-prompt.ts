@@ -20,6 +20,7 @@ async function handleSessionPrompt(
   if (!sessionId) return error("Session ID required");
 
   const body = (await request.json()) as {
+    messageId?: string;
     content: string;
     authorId?: string;
     source?: string;
@@ -66,6 +67,7 @@ async function handleSessionPrompt(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       content: body.content,
+      messageId: body.messageId,
       authorId,
       source: body.source || "web",
       model: body.model,

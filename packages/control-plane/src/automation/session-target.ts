@@ -37,8 +37,21 @@ export async function resolveAutomationSessionTarget(
   env: Env,
   run: AutomationRunRow,
   ctx: RequestContext,
-  log: Logger
+  log: Logger,
+  repositorySet?: RepositoryRef[]
 ): Promise<AutomationSessionTarget> {
+  if (repositorySet) {
+    const primary = repositorySet[0];
+    return {
+      repoOwner: primary?.repoOwner ?? null,
+      repoName: primary?.repoName ?? null,
+      repoId: primary?.repoId ?? null,
+      defaultBranch: primary?.baseBranch ?? null,
+      repositories: repositorySet.length ? repositorySet : undefined,
+      environmentId: run.environment_id,
+    };
+  }
+
   if (run.environment_id) {
     const environmentInputs = await resolveEnvironmentTarget(
       new EnvironmentStore(ctx.db),

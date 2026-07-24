@@ -42,7 +42,7 @@ type SessionRepositoryRow = {
 };
 
 const QUERY_PATTERNS = {
-  INSERT_SESSION: /^INSERT OR IGNORE INTO sessions/,
+  INSERT_SESSION: /^INSERT INTO sessions/,
   INSERT_SESSION_REPO: /^INSERT INTO session_repositories/,
   SELECT_SESSION_REPOS: /^SELECT \* FROM session_repositories WHERE session_id IN/,
   SELECT_PR_SUMMARIES: /FROM session_pull_requests WHERE session_id IN/,
@@ -203,40 +203,39 @@ class FakeD1Database {
         number,
         number,
       ];
-      // INSERT OR IGNORE — skip if exists
-      const inserted = !this.rows.has(id);
-      if (inserted) {
-        this.rows.set(id, {
-          id,
-          title,
-          repo_owner: repoOwner,
-          repo_name: repoName,
-          model,
-          reasoning_effort: reasoningEffort,
-          base_branch: baseBranch,
-          status,
-          parent_session_id: parentSessionId,
-          spawn_source: spawnSource,
-          spawn_depth: spawnDepth,
-          automation_id: automationId,
-          automation_run_id: automationRunId,
-          scm_login: scmLogin,
-          user_id: userId,
-          total_cost: 0,
-          active_duration_ms: 0,
-          message_count: 0,
-          pr_count: 0,
-          total_tokens: 0,
-          input_tokens: 0,
-          output_tokens: 0,
-          cache_read_tokens: 0,
-          cache_write_tokens: 0,
-          environment_id: environmentId,
-          created_at: createdAt,
-          updated_at: updatedAt,
-        });
+      if (this.rows.has(id)) {
+        throw new Error("UNIQUE constraint failed: sessions.id");
       }
-      return { meta: { changes: inserted ? 1 : 0 } };
+      this.rows.set(id, {
+        id,
+        title,
+        repo_owner: repoOwner,
+        repo_name: repoName,
+        model,
+        reasoning_effort: reasoningEffort,
+        base_branch: baseBranch,
+        status,
+        parent_session_id: parentSessionId,
+        spawn_source: spawnSource,
+        spawn_depth: spawnDepth,
+        automation_id: automationId,
+        automation_run_id: automationRunId,
+        scm_login: scmLogin,
+        user_id: userId,
+        total_cost: 0,
+        active_duration_ms: 0,
+        message_count: 0,
+        pr_count: 0,
+        total_tokens: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        environment_id: environmentId,
+        created_at: createdAt,
+        updated_at: updatedAt,
+      });
+      return { meta: { changes: 1 } };
     }
 
     if (QUERY_PATTERNS.UPDATE_STATUS.test(normalized)) {
@@ -509,16 +508,36 @@ describe("SessionIndexStore", () => {
       );
     });
 
-    it("throws instead of silently skipping a duplicate insert", async () => {
+    it("rejects a conflicting session replay", async () => {
       const session = makeSession();
       await store.create(session);
 
-      await expect(store.create(makeSession({ title: "Different Title" }))).rejects.toThrow(
-        "Session index insert was skipped"
+      await expect(store.create(makeSession({ model: "openai/gpt-5.2" }))).rejects.toThrow(
+        "belongs to another session"
       );
 
       const result = await store.get("test-id");
       expect(result?.title).toBe("Test Session");
+    });
+
+    it("accepts replay after the session title changes", async () => {
+      const session = makeSession();
+      await store.create(session);
+      await store.updateTitle(session.id, "Generated title");
+
+      await expect(store.create(session)).resolves.toBeUndefined();
+    });
+
+    it("accepts a matching session insert replay", async () => {
+      const session = makeSession();
+      await store.create(session);
+
+      await expect(store.create(session)).resolves.toBeUndefined();
+      expect(await store.get("test-id")).toMatchObject({
+        id: "test-id",
+        title: "Test Session",
+        model: session.model,
+      });
     });
 
     it("stores parent fields when provided", async () => {
