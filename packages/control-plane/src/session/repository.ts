@@ -549,7 +549,7 @@ export class SessionRepository {
 
   updateSandboxLastActivity(timestamp: number): void {
     this.sql.exec(
-      `UPDATE sandbox SET last_activity = ? WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
+      `UPDATE sandbox SET last_activity = MAX(COALESCE(last_activity, 0), ?) WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
       timestamp
     );
   }
