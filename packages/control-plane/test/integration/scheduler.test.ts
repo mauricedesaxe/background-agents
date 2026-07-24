@@ -374,6 +374,34 @@ describe("SchedulerDO (integration)", () => {
       expect(automation!.next_run_at!).toBeGreaterThan(now);
     });
 
+    it("claims a delayed one-shot once and does not replay it on later ticks", async () => {
+      const store = new AutomationStore(env.DB);
+      const dueAt = Date.now() - 10 * 60 * 1000;
+      await store.create(
+        makeAutomation({
+          id: "once-delayed",
+          trigger_type: "once",
+          schedule_cron: null,
+          next_run_at: dueAt,
+          user_id: "owner-1",
+        })
+      );
+      const stub = getSchedulerStub();
+
+      await stub.fetch("http://internal/internal/tick", { method: "POST" });
+      await stub.fetch("http://internal/internal/tick", { method: "POST" });
+
+      const automation = await store.getById("once-delayed");
+      expect(automation).toMatchObject({ enabled: 0, next_run_at: null });
+      expect(await fetchRuns("once-delayed")).toHaveLength(1);
+      const { invocations } = await store.listInvocations("once-delayed", {
+        limit: 10,
+        offset: 0,
+      });
+      expect(invocations).toHaveLength(1);
+      expect(invocations[0]!.scheduledAt).toBe(dueAt);
+    });
+
     it("auto-pauses after recovery sweep detects 3rd consecutive failure", async () => {
       const store = new AutomationStore(env.DB);
       const now = Date.now();

@@ -214,6 +214,16 @@ complete work in an unsubmitted textarea until the active run ended, and a disco
 that work. The Durable Object's message table remains the only queue; the browser only renders its
 snapshot.
 
+### 16. One-shot prompts use replay-safe automation launches
+
+The new-session composer can persist a prompt for one future execution without creating or warming a
+session. The scheduler claims the task atomically, then initializes its preassigned session and
+message IDs. Matching retries succeed while conflicting ID reuse fails.
+
+**Why.** A scheduler response can be lost after the session or prompt was persisted. Fresh IDs on
+retry created duplicate work, while allocating a sandbox during composition defeated scheduling's
+main promise that nothing runs before the due time.
+
 ## Where we match upstream against our own docs
 
 The list above is where we differ from upstream. This is the inverse: a place where matching
@@ -380,13 +390,17 @@ refactor changes. Keep new tests on that side of the line.
 
 ## Fork-only files
 
-**Fork-only files stay under `packages/`.** There are two deliberate exceptions outside it, and both
-earn it the same way: upstream will never have the file, so it can never conflict during a sync.
+**Fork-only files stay under `packages/`.** There are three deliberate exceptions outside it, and
+each earns it the same way: upstream will never have the file, so it can never conflict during a
+sync.
 
 - **This document.** The divergence analysis has been produced and lost twice, so it is committed.
 - **`.claude/agents/`.** Repo-local reviewer agents, auto-discovered by `lazar-review` locally and
   by the PR review bot. `fork-divergence-reviewer.md` is the one that keeps this document honest by
   checking its claims against the tree on every PR that touches them.
+- **`terraform/d1/migrations/9xxx_*.sql`.** Fork-local D1 schema changes use the reserved 9000+
+  range so upstream can keep allocating lower migration identifiers without silently shadowing ours.
+  These files stay beside the migration runner that deploys them.
 
 General harness configuration is still not committed here, and the exception above is narrow: a
 reviewer that encodes _this repo's_ invariants has nowhere else to live, because a global agent

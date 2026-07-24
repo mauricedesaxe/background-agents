@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
-import { SessionIndexStore } from "../../src/db/session-index";
+import { SessionIndexStore, type SessionEntry } from "../../src/db/session-index";
 import { SessionPullRequestStore } from "../../src/db/session-pull-request-store";
 import { cleanD1Tables } from "./cleanup";
 
@@ -32,6 +32,43 @@ describe("D1 SessionIndexStore", () => {
     expect(session!.repoName).toBe("web-app");
     expect(session!.reasoningEffort).toBe("max");
     expect(session!.status).toBe("created");
+  });
+
+  it("accepts concurrent matching replays without duplicating repositories", async () => {
+    const store = new SessionIndexStore(env.DB);
+    const now = Date.now();
+    const session: SessionEntry = {
+      id: "concurrent-replay",
+      title: "Replay",
+      repoOwner: "acme",
+      repoName: "web-app",
+      model: "anthropic/claude-haiku-4-5",
+      reasoningEffort: null,
+      baseBranch: "main",
+      repositories: [
+        { repoOwner: "acme", repoName: "web-app", repoId: 1, baseBranch: "main" },
+        { repoOwner: "acme", repoName: "api", repoId: 2, baseBranch: "develop" },
+      ],
+      status: "created",
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const results = await Promise.allSettled([store.create(session), store.create(session)]);
+
+    expect(results.map((result) => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect(
+      await env.DB.prepare("SELECT COUNT(*) AS count FROM sessions WHERE id = ?")
+        .bind(session.id)
+        .first<{ count: number }>()
+    ).toEqual({ count: 1 });
+    expect(
+      await env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM session_repositories WHERE session_id = ?"
+      )
+        .bind(session.id)
+        .first<{ count: number }>()
+    ).toEqual({ count: 2 });
   });
 
   describe("isRepositoryAssociated", () => {

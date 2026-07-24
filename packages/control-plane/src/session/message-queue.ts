@@ -18,7 +18,7 @@ import type { SessionWebSocketManager } from "./websocket-manager";
 import type { ParticipantService } from "./participant-service";
 import type { CallbackNotificationService } from "./callback-notification-service";
 import type { SessionStatusService } from "./session-status-service";
-import type { EnqueuePromptRequest } from "./services/message.service";
+import { PromptIdConflictError, type EnqueuePromptRequest } from "./services/message.service";
 import { getAvatarUrl } from "./participant-service";
 import { resolveParticipantName } from "./participant-name";
 import { validateReasoningEffort } from "./reasoning-effort";
@@ -578,7 +578,7 @@ export class SessionMessageQueue {
       participant = this.repository.getParticipantById(participant.id) ?? participant;
     }
 
-    const messageId = generateId();
+    const messageId = data.messageId ?? generateId();
     const now = Date.now();
 
     let messageModel: string | null = null;
@@ -598,6 +598,29 @@ export class SessionMessageQueue {
       this.log
     );
 
+    const messageAttachments = data.attachments ? JSON.stringify(data.attachments) : null;
+    const callbackContext = data.callbackContext ? JSON.stringify(data.callbackContext) : null;
+    const existing = this.repository.getMessageById(messageId);
+    if (existing) {
+      if (
+        existing.author_id !== participant.id ||
+        existing.content !== data.content ||
+        existing.source !== data.source ||
+        existing.model !== messageModel ||
+        existing.reasoning_effort !== messageReasoningEffort ||
+        existing.attachments !== messageAttachments ||
+        existing.callback_context !== callbackContext
+      ) {
+        throw new PromptIdConflictError();
+      }
+      if (existing.status === "pending") {
+        await this.sessionStatus.transition("active");
+        this.broadcastPromptQueue();
+        await this.processMessageQueue();
+      }
+      return { messageId, status: "queued" };
+    }
+
     this.repository.createMessage({
       id: messageId,
       authorId: participant.id,
@@ -605,8 +628,8 @@ export class SessionMessageQueue {
       source: data.source as MessageSource,
       model: messageModel,
       reasoningEffort: messageReasoningEffort,
-      attachments: data.attachments ? JSON.stringify(data.attachments) : null,
-      callbackContext: data.callbackContext ? JSON.stringify(data.callbackContext) : null,
+      attachments: messageAttachments,
+      callbackContext,
       status: "pending",
       createdAt: now,
     });

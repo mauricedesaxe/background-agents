@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionMessageQueue, STOP_CONFIRMATION_TIMEOUT_MS } from "./message-queue";
 import type { ClientInfo, ServerMessage } from "../types";
 import type { MessageRow, ParticipantRow, SessionRow } from "./types";
+import { PromptIdConflictError } from "./services/message.service";
 
 const EXECUTION_TIMEOUT_MS = 60_000;
 
@@ -336,6 +337,48 @@ describe("SessionMessageQueue", () => {
       requestId: "request-1",
       message: "Request ID belongs to another prompt",
     });
+  });
+
+  it("returns an existing matching API prompt on replay", async () => {
+    const h = buildQueue();
+    h.repository.getMessageById.mockReturnValue(
+      createMessage({
+        id: "automation-run:run-1",
+        content: "scheduled work",
+        source: "automation",
+        callback_context: JSON.stringify({ source: "automation", automationId: "a1", runId: "r1" }),
+      })
+    );
+
+    await expect(
+      h.queue.enqueuePromptFromApi({
+        messageId: "automation-run:run-1",
+        content: "scheduled work",
+        authorId: "user-1",
+        source: "automation",
+        callbackContext: { source: "automation", automationId: "a1", runId: "r1" },
+      })
+    ).resolves.toEqual({ messageId: "automation-run:run-1", status: "queued" });
+    expect(h.repository.createMessage).not.toHaveBeenCalled();
+    expect(h.sessionStatus.transition).toHaveBeenCalledWith("active");
+    expect(h.broadcast).toHaveBeenCalled();
+  });
+
+  it("rejects conflicting API prompt ID reuse", async () => {
+    const h = buildQueue();
+    h.repository.getMessageById.mockReturnValue(
+      createMessage({ id: "automation-run:run-1", content: "original", source: "automation" })
+    );
+
+    await expect(
+      h.queue.enqueuePromptFromApi({
+        messageId: "automation-run:run-1",
+        content: "different",
+        authorId: "user-1",
+        source: "automation",
+      })
+    ).rejects.toBeInstanceOf(PromptIdConflictError);
+    expect(h.repository.createMessage).not.toHaveBeenCalled();
   });
 
   it.each([

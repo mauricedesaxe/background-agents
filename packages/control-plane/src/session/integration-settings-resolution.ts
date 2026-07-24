@@ -16,7 +16,8 @@ export async function resolveCodeServerEnabled(
   db: SqlDatabase | undefined,
   repoOwner: string | null,
   repoName: string | null,
-  environmentId?: string | null
+  environmentId?: string | null,
+  options: { strict?: boolean } = {}
 ): Promise<boolean> {
   if (!db) return false;
   if (!repoOwner || !repoName) return false;
@@ -34,6 +35,7 @@ export async function resolveCodeServerEnabled(
     if (enabledRepos !== null && !enabledRepos.includes(repo.toLowerCase())) return false;
     return true;
   } catch (e) {
+    if (options.strict) throw e;
     logger.warn("Failed to resolve code-server integration settings, defaulting to disabled", {
       error: e instanceof Error ? e.message : String(e),
     });
@@ -51,7 +53,8 @@ export async function resolveSandboxSettings(
   db: SqlDatabase | undefined,
   repoOwner: string | null,
   repoName: string | null,
-  environmentId?: string | null
+  environmentId?: string | null,
+  options: { strict?: boolean } = {}
 ): Promise<SandboxSettings> {
   if (!db) return {};
   if (!repoOwner || !repoName) {
@@ -60,6 +63,7 @@ export async function resolveSandboxSettings(
       const globalSettings = await store.getGlobal("sandbox");
       return (globalSettings?.defaults ?? {}) as SandboxSettings;
     } catch (e) {
+      if (options.strict) throw e;
       logger.warn("Failed to resolve global sandbox settings, using defaults", {
         error: e instanceof Error ? e.message : String(e),
       });
@@ -78,6 +82,7 @@ export async function resolveSandboxSettings(
     if (enabledRepos !== null && !enabledRepos.includes(repo.toLowerCase())) return {};
     return settings as SandboxSettings;
   } catch (e) {
+    if (options.strict) throw e;
     logger.warn("Failed to resolve sandbox settings, using defaults", {
       error: e instanceof Error ? e.message : String(e),
     });
@@ -124,7 +129,8 @@ export interface SessionScopedSettings {
 export async function resolveSessionScopedSettings(
   db: SqlDatabase | undefined,
   members: readonly RepoIdentity[],
-  environmentId?: string | null
+  environmentId?: string | null,
+  options: { strict?: boolean } = {}
 ): Promise<SessionScopedSettings> {
   const primary = members[0] ?? null;
   const [codeServerEnabled, sandboxSettings] = await Promise.all([
@@ -132,13 +138,15 @@ export async function resolveSessionScopedSettings(
       db,
       primary?.repoOwner ?? null,
       primary?.repoName ?? null,
-      environmentId
+      environmentId,
+      options
     ),
     resolveSandboxSettings(
       db,
       primary?.repoOwner ?? null,
       primary?.repoName ?? null,
-      environmentId
+      environmentId,
+      options
     ),
   ]);
   return { codeServerEnabled, sandboxSettings };

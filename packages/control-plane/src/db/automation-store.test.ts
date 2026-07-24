@@ -126,6 +126,7 @@ describe("toAutomation", () => {
     const automation = toAutomation(sampleRow, [
       {
         automation_id: "auto_test1",
+        position: 0,
         repo_owner: "acme",
         repo_name: "web-app",
         repo_id: 12345,

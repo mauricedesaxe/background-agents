@@ -170,6 +170,18 @@ function normalizeSessionRepository(session: SessionEntry): {
   };
 }
 
+export class SessionReplayConflictError extends Error {
+  constructor(sessionId: string) {
+    super(`Session ID ${sessionId} belongs to another session`);
+    this.name = "SessionReplayConflictError";
+  }
+}
+
+function isDuplicateKeyError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /unique constraint|constraint failed|duplicate/i.test(message);
+}
+
 export class SessionIndexStore {
   constructor(private readonly db: SqlDatabase) {}
 
@@ -178,7 +190,7 @@ export class SessionIndexStore {
 
     const sessionStmt = this.db
       .prepare(
-        `INSERT OR IGNORE INTO sessions (id, title, repo_owner, repo_name, model, reasoning_effort, base_branch, status, parent_session_id, spawn_source, spawn_depth, automation_id, automation_run_id, scm_login, user_id, environment_id, created_at, updated_at)
+        `INSERT INTO sessions (id, title, repo_owner, repo_name, model, reasoning_effort, base_branch, status, parent_session_id, spawn_source, spawn_depth, automation_id, automation_run_id, scm_login, user_id, environment_id, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
@@ -218,17 +230,55 @@ export class SessionIndexStore {
         )
     );
 
-    const results = await this.db.batch([sessionStmt, ...repositoryStmts]);
-
-    // INSERT OR IGNORE swallows every constraint violation, which would leave
-    // the session invisible to dashboards while the DO proceeds. Session ids
-    // are always freshly generated, so a skipped insert is a bug — surface it;
-    // initialize.ts relies on D1 failures being caught before sandbox spawn.
-    if ((results[0]?.meta?.changes ?? 0) === 0) {
-      throw new Error(
-        `Session index insert was skipped for session ${session.id} (duplicate id or constraint violation)`
-      );
+    try {
+      await this.db.batch([sessionStmt, ...repositoryStmts]);
+    } catch (error) {
+      if (!isDuplicateKeyError(error)) throw error;
+      await this.verifyReplay(session, repository);
     }
+  }
+
+  private async verifyReplay(
+    session: SessionEntry,
+    repository: ReturnType<typeof normalizeSessionRepository>
+  ): Promise<void> {
+    const existing = await this.get(session.id);
+    if (!existing) throw new SessionReplayConflictError(session.id);
+
+    const existingRepositories =
+      (await this.repositoriesForSessions([session.id])).get(session.id) ?? [];
+    const requestedRepositories = session.repositories ?? [];
+    const repositoriesMatch =
+      existingRepositories.length === requestedRepositories.length &&
+      existingRepositories.every((repo, index) => {
+        const requested = requestedRepositories[index];
+        return (
+          requested !== undefined &&
+          normalizeRepoIdentifier(repo.repoOwner) ===
+            normalizeRepoIdentifier(requested.repoOwner) &&
+          normalizeRepoIdentifier(repo.repoName) === normalizeRepoIdentifier(requested.repoName) &&
+          repo.repoId === requested.repoId &&
+          repo.baseBranch === requested.baseBranch
+        );
+      });
+    if (
+      existing.repoOwner === repository.repoOwner &&
+      existing.repoName === repository.repoName &&
+      existing.baseBranch === repository.baseBranch &&
+      existing.model === session.model &&
+      existing.reasoningEffort === session.reasoningEffort &&
+      existing.parentSessionId === (session.parentSessionId ?? null) &&
+      existing.spawnSource === (session.spawnSource ?? "user") &&
+      existing.spawnDepth === (session.spawnDepth ?? 0) &&
+      existing.automationId === (session.automationId ?? null) &&
+      existing.automationRunId === (session.automationRunId ?? null) &&
+      existing.userId === (session.userId ?? null) &&
+      existing.environmentId === (session.environmentId ?? null) &&
+      repositoriesMatch
+    ) {
+      return;
+    }
+    throw new SessionReplayConflictError(session.id);
   }
 
   async get(id: string): Promise<SessionEntry | null> {
@@ -238,6 +288,10 @@ export class SessionIndexStore {
       .first<SessionRow>();
 
     return result ? toEntry(result) : null;
+  }
+
+  async repositoriesForSession(id: string): Promise<SessionIndexRepository[]> {
+    return (await this.repositoriesForSessions([id])).get(id) ?? [];
   }
 
   /**

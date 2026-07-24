@@ -7,6 +7,13 @@ import { createLogger } from "../logger";
 
 const logger = createLogger("session-init");
 
+export class SessionInitializationRejectedError extends Error {
+  constructor(status: number) {
+    super(`Failed to initialize session DO: ${status}`);
+    this.name = "SessionInitializationRejectedError";
+  }
+}
+
 function hasBranchContext(value: string | null | undefined): boolean {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -78,7 +85,8 @@ export interface SessionInitInput {
 export async function initializeSession(
   env: Env,
   input: SessionInitInput,
-  ctx: RequestContext
+  ctx: RequestContext,
+  options: { replayable?: boolean } = {}
 ): Promise<{ sessionId: string; status: string }> {
   const hasRepoOwner = input.repoOwner !== null;
   const hasRepoName = input.repoName !== null;
@@ -157,6 +165,8 @@ export async function initializeSession(
   headers.set("x-trace-id", ctx.trace_id);
   headers.set("x-request-id", ctx.request_id);
 
+  // A transport failure may happen after the DO commits. Leave the D1 row
+  // replayable so the caller can retry the same stable session ID.
   let initResponse: Response;
   try {
     initResponse = await stub.fetch(
@@ -191,13 +201,14 @@ export async function initializeSession(
         }),
       })
     );
-  } catch (transportError) {
-    await markSessionFailed(sessionStore, input.sessionId, ctx.trace_id);
-    throw transportError;
+  } catch (error) {
+    if (!options.replayable) await markSessionFailed(sessionStore, input.sessionId, ctx.trace_id);
+    throw error;
   }
 
   if (!initResponse.ok) {
-    await markSessionFailed(sessionStore, input.sessionId, ctx.trace_id);
+    const ambiguous = options.replayable && initResponse.status >= 500;
+    if (!ambiguous) await markSessionFailed(sessionStore, input.sessionId, ctx.trace_id);
     const errorText = await initResponse.text().catch(() => "unknown");
     logger.error("DO init failed", {
       session_id: input.sessionId,
@@ -205,7 +216,8 @@ export async function initializeSession(
       error: errorText,
       trace_id: ctx.trace_id,
     });
-    throw new Error(`Failed to initialize session DO: ${initResponse.status}`);
+    if (ambiguous) throw new Error(`Session initialization returned ${initResponse.status}`);
+    throw new SessionInitializationRejectedError(initResponse.status);
   }
 
   return { sessionId: input.sessionId, status: "created" };

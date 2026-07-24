@@ -15,6 +15,9 @@ import {
   matchesConditions,
   conditionRegistry,
   computeHmacHex,
+  DEFAULT_ENABLED_MODELS,
+  isValidModel,
+  type RepositoryRef,
   type AutomationCallbackContext,
   type AutomationInvocationSource,
   type SlackAutomationEvent,
@@ -42,17 +45,24 @@ import {
   type SlackCompletionContext,
 } from "./slack-completion";
 import { UserStore } from "../db/user-store";
+import { ModelPreferencesStore } from "../db/model-preferences";
 import { createRequestMetrics } from "../db/instrumented-d1";
 import { generateId } from "../auth/crypto";
 import { createLogger, parseLogLevel } from "../logger";
 import type { Logger } from "../logger";
 import type { Env } from "../types";
 import type { SqlDatabase } from "../db/sql-database";
-import { initializeSession } from "../session/initialize";
+import { initializeSession, SessionInitializationRejectedError } from "../session/initialize";
+import { buildSessionInternalUrl, SessionInternalPaths } from "../session/contracts";
+import { SessionIndexStore, SessionReplayConflictError } from "../db/session-index";
 import { resolveSessionScopedSettings } from "../session/integration-settings-resolution";
 import { resolveAutomationRepositories } from "../automation/repository";
-import { resolveAutomationSessionTarget } from "../automation/session-target";
+import {
+  resolveAutomationSessionTarget,
+  type AutomationSessionTarget,
+} from "../automation/session-target";
 import type { RequestContext } from "../routes/shared";
+import { resolveGitHubEnrichment } from "../session/identity";
 
 /** Max automations to process per tick (backpressure). */
 const MAX_PER_TICK = 25;
@@ -76,6 +86,22 @@ const ORPHAN_THRESHOLD_MS = 5 * 60 * 1000;
 
 /** Default execution timeout for detecting timed-out runs (90 minutes). */
 const DEFAULT_EXECUTION_TIMEOUT_MS = 90 * 60 * 1000;
+
+const repositorySetSchema = z.array(
+  z.object({
+    repoOwner: z.string(),
+    repoName: z.string(),
+    repoId: z.number(),
+    baseBranch: z.string(),
+  })
+);
+
+class RetryableAutomationLaunchError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "RetryableAutomationLaunchError";
+  }
+}
 
 /** Consecutive failure threshold for auto-pause. */
 const AUTO_PAUSE_THRESHOLD = 3;
@@ -258,11 +284,11 @@ export class SchedulerDO extends DurableObject<Env> {
     const invocationId = generateId();
     const scheduledAt = params.scheduledAt ?? now;
 
-    const childBase = () => ({
+    const childBase = (): Omit<AutomationRunRow, "status"> => ({
       id: generateId(),
       automation_id: automation.id,
       invocation_id: invocationId,
-      session_id: null,
+      session_id: generateId(),
       skip_reason: null,
       failure_reason: null,
       scheduled_at: scheduledAt,
@@ -274,37 +300,68 @@ export class SchedulerDO extends DurableObject<Env> {
       repo_id: null,
       base_branch: null,
       environment_id: null,
+      prompt_content: params.instructionsOverride ?? automation.instructions,
+      repository_set: null,
     });
 
-    // One child per target. Repository children snapshot the resolved repo; a
-    // failed resolution pre-fails its child (snapshot from the selection row)
-    // without blocking siblings. Environment children snapshot the environment
-    // id — the workspace itself resolves at launch time (design §13.3), so a
-    // deleted environment fails through the launch-failure path. No targets →
-    // one repo-less child.
-    const children: AutomationRunRow[] = [
-      ...resolutions.map(
-        (resolution): AutomationRunRow => ({
-          ...childBase(),
-          status: resolution.error ? "failed" : "starting",
-          failure_reason: resolution.error,
-          completed_at: resolution.error ? now : null,
-          repo_owner: resolution.repository?.repoOwner ?? resolution.requested.repo_owner,
-          repo_name: resolution.repository?.repoName ?? resolution.requested.repo_name,
-          repo_id: resolution.repository?.repoId ?? resolution.requested.repo_id,
-          base_branch: resolution.repository?.baseBranch ?? resolution.requested.base_branch,
-        })
-      ),
-      ...environmentSelection.map(
-        (environment): AutomationRunRow => ({
-          ...childBase(),
-          status: "starting",
-          environment_id: environment.environment_id,
-        })
-      ),
-    ];
+    const repositoryChildren = resolutions.map(
+      (resolution): AutomationRunRow => ({
+        ...childBase(),
+        status: resolution.error ? "failed" : "starting",
+        failure_reason: resolution.error,
+        completed_at: resolution.error ? now : null,
+        repo_owner: resolution.repository?.repoOwner ?? resolution.requested.repo_owner,
+        repo_name: resolution.repository?.repoName ?? resolution.requested.repo_name,
+        repo_id: resolution.repository?.repoId ?? resolution.requested.repo_id,
+        base_branch: resolution.repository?.baseBranch ?? resolution.requested.base_branch,
+      })
+    );
+    const environmentChildren = environmentSelection.map(
+      (environment): AutomationRunRow => ({
+        ...childBase(),
+        status: "starting",
+        environment_id: environment.environment_id,
+      })
+    );
+    const children: AutomationRunRow[] =
+      automation.trigger_type === "once"
+        ? [oneShotChild(childBase, repositoryChildren, environmentChildren, now)]
+        : [...repositoryChildren, ...environmentChildren];
     if (children.length === 0) {
       children.push({ ...childBase(), status: "starting" });
+    }
+    if (automation.trigger_type === "once" && children[0]?.status === "starting") {
+      try {
+        const child = children[0];
+        const repositorySet = child.environment_id
+          ? ((
+              await resolveAutomationSessionTarget(
+                this.env,
+                child,
+                {
+                  trace_id: `automation:${automation.id}`,
+                  request_id: child.id,
+                  metrics: createRequestMetrics(),
+                  db: this.db,
+                },
+                this.log
+              )
+            ).repositories ?? [])
+          : resolutions.map((resolution) => ({
+              repoOwner: resolution.repository!.repoOwner,
+              repoName: resolution.repository!.repoName,
+              repoId: resolution.repository!.repoId,
+              baseBranch: resolution.repository!.baseBranch,
+            }));
+        child.repository_set = JSON.stringify(repositorySet);
+      } catch (error) {
+        children[0] = {
+          ...children[0],
+          status: "failed",
+          failure_reason: error instanceof Error ? error.message : String(error),
+          completed_at: now,
+        };
+      }
     }
 
     const invocation: AutomationInvocationRow = {
@@ -331,6 +388,10 @@ export class SchedulerDO extends DurableObject<Env> {
           source === "schedule" && params.advanceToNextRunAt !== undefined
             ? { nextRunAt: params.advanceToNextRunAt }
             : undefined,
+        consumeOnce:
+          automation.trigger_type === "once" && params.scheduledAt !== undefined
+            ? { dueAt: params.scheduledAt, now }
+            : undefined,
       }));
     } catch (e) {
       if (isDuplicateKeyError(e)) {
@@ -348,6 +409,9 @@ export class SchedulerDO extends DurableObject<Env> {
     }
 
     if (!inserted) {
+      if (automation.trigger_type === "once") {
+        return { outcome: "deduplicated" };
+      }
       // Raced an active invocation between the pre-check and the batch. The
       // batch's schedule advance already ran (deliberately unconditional), so
       // the skip record must not advance again.
@@ -356,7 +420,8 @@ export class SchedulerDO extends DurableObject<Env> {
 
     const launchChild = async (child: AutomationRunRow): Promise<void> => {
       try {
-        const { sessionId } = await this.createSessionForAutomationRun(automation, child);
+        const sessionId = child.session_id!;
+        await this.createSessionForAutomationRun(automation, child);
         await this.sendPromptToSession(
           sessionId,
           automation,
@@ -365,13 +430,21 @@ export class SchedulerDO extends DurableObject<Env> {
         );
         await store.updateRun(child.id, {
           status: "running",
-          session_id: sessionId,
           started_at: Date.now(),
         });
         child.status = "running";
-        child.session_id = sessionId;
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
+        if (e instanceof RetryableAutomationLaunchError) {
+          this.log.warn("Automation launch response was ambiguous; recovery will replay it", {
+            event: "scheduler.launch_ambiguous",
+            automation_id: automation.id,
+            invocation_id: invocationId,
+            run_id: child.id,
+            error: message,
+          });
+          return;
+        }
         this.log.error("Failed to launch automation run", {
           event: "scheduler.session_creation_failed",
           automation_id: automation.id,
@@ -534,10 +607,10 @@ export class SchedulerDO extends DurableObject<Env> {
         break;
       }
       try {
-        const nextRunAt = nextCronOccurrence(
-          automation.schedule_cron!,
-          automation.schedule_tz
-        ).getTime();
+        const nextRunAt =
+          automation.trigger_type === "schedule"
+            ? nextCronOccurrence(automation.schedule_cron!, automation.schedule_tz).getTime()
+            : undefined;
 
         const result = await this.startInvocation(store, {
           automation,
@@ -553,7 +626,7 @@ export class SchedulerDO extends DurableObject<Env> {
             // Summary parity with the pre-invocations tick: a firing that
             // launched nothing (every child pre-failed or failed to launch)
             // reports as failed, not processed.
-            if (result.launched > 0) {
+            if (result.launched > 0 || result.runs.some((run) => run.status === "starting")) {
               processed++;
             } else {
               failed++;
@@ -650,19 +723,54 @@ export class SchedulerDO extends DurableObject<Env> {
     const now = Date.now();
     const recoveredRuns: AutomationRunRow[] = [];
 
-    if (orphaned.length > 0) {
+    const replayableOrphans = orphaned.filter((run) => run.session_id != null);
+    const legacyOrphans = orphaned.filter((run) => run.session_id == null);
+
+    for (const run of replayableOrphans) {
+      try {
+        const automation = await store.getById(run.automation_id);
+        if (!automation) throw new Error("Automation not found during recovery");
+        await this.createSessionForAutomationRun(automation, run, { recovery: true });
+        await this.sendPromptToSession(
+          run.session_id!,
+          automation,
+          run.id,
+          run.prompt_content ?? undefined
+        );
+        await store.updateRun(run.id, { status: "running", started_at: Date.now() });
+      } catch (e) {
+        const reason = e instanceof Error ? e.message : String(e);
+        if (e instanceof RetryableAutomationLaunchError) {
+          this.log.warn("Recovered launch response was ambiguous; leaving run replayable", {
+            event: "scheduler.recovery.launch_ambiguous",
+            automation_id: run.automation_id,
+            run_id: run.id,
+            error: reason,
+          });
+          continue;
+        }
+        await store.updateRun(run.id, {
+          status: "failed",
+          failure_reason: reason,
+          completed_at: Date.now(),
+        });
+        recoveredRuns.push(run);
+      }
+    }
+
+    if (legacyOrphans.length > 0) {
       try {
         await store.bulkFailRuns(
-          orphaned.map((r) => r.id),
+          legacyOrphans.map((run) => run.id),
           "session_creation_timeout",
           now
         );
-        recoveredRuns.push(...orphaned);
+        recoveredRuns.push(...legacyOrphans);
       } catch (e) {
         this.log.error("Recovery sweep failed to mark orphaned runs as failed", {
           event: "scheduler.recovery.bulk_fail_error",
           category: "orphaned",
-          count: orphaned.length,
+          count: legacyOrphans.length,
           error: e instanceof Error ? e.message : String(e),
         });
       }
@@ -950,6 +1058,15 @@ export class SchedulerDO extends DurableObject<Env> {
         headers: { "Content-Type": "application/json" },
       });
     }
+    if (automation.trigger_type === "once") {
+      return new Response(
+        JSON.stringify({ error: "One-shot tasks cannot be triggered manually" }),
+        {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
 
     const result = await this.startInvocation(store, { automation, source: "manual" });
 
@@ -1203,9 +1320,11 @@ export class SchedulerDO extends DurableObject<Env> {
 
   private async createSessionForAutomationRun(
     automation: AutomationRow,
-    run: AutomationRunRow
+    run: AutomationRunRow,
+    options: { recovery?: boolean } = {}
   ): Promise<{ sessionId: string }> {
-    const sessionId = generateId();
+    const sessionId = run.session_id;
+    if (!sessionId) throw new Error("Automation run has no stable session ID");
 
     // Resolve the canonical user_id for the session index.
     // Automations created through the web UI populate user_id at creation time
@@ -1215,9 +1334,9 @@ export class SchedulerDO extends DurableObject<Env> {
     // in created_by (from NextAuth session.user.id), so a github-only identity lookup
     // recovers the canonical user. It becomes dead code once legacy rows are backfilled.
     let userId = automation.user_id;
+    const userStore = new UserStore(this.db);
     if (!userId && automation.created_by && automation.created_by !== "anonymous") {
       try {
-        const userStore = new UserStore(this.db);
         const identity = await userStore.getIdentity("github", automation.created_by);
         if (identity) {
           userId = identity.userId;
@@ -1234,11 +1353,70 @@ export class SchedulerDO extends DurableObject<Env> {
       db: this.db,
     };
 
+    const indexedSession = options.recovery
+      ? await new SessionIndexStore(this.db).get(sessionId)
+      : null;
+    const sessionInitialized = indexedSession ? await this.isSessionInitialized(sessionId) : false;
+    if (!options.recovery || !sessionInitialized) {
+      const enabledModels =
+        (await new ModelPreferencesStore(this.db).getEnabledModels()) ?? DEFAULT_ENABLED_MODELS;
+      if (!isValidModel(automation.model) || !enabledModels.includes(automation.model)) {
+        throw new Error(`Model is no longer available: ${automation.model}`);
+      }
+    }
+    let enrichment = null;
+    if (userId) {
+      try {
+        enrichment = await resolveGitHubEnrichment(this.env, this.db, userStore, userId);
+      } catch (error) {
+        this.log.warn("GitHub enrichment failed during automation launch", {
+          event: "scheduler.identity_enrichment_failed",
+          automation_id: automation.id,
+          run_id: run.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
     // What the session opens — the run's repository snapshot or, for
     // environment-bound automations, the environment's workspace. All target
     // semantics live in resolveAutomationSessionTarget; a resolution failure
     // throws into launchChild's failure path.
-    const target = await resolveAutomationSessionTarget(this.env, run, ctx, this.log);
+    let repositorySet: RepositoryRef[] | undefined;
+    if (run.repository_set) {
+      repositorySet = repositorySetSchema.parse(JSON.parse(run.repository_set));
+    }
+    if (!repositorySet && indexedSession) {
+      const indexedRepositories = await new SessionIndexStore(this.db).repositoriesForSession(
+        sessionId
+      );
+      repositorySet = indexedRepositories.map((repository) => {
+        if (repository.repoId == null) {
+          throw new Error(
+            `Session repository is unresolved: ${repository.repoOwner}/${repository.repoName}`
+          );
+        }
+        return { ...repository, repoId: repository.repoId };
+      });
+    } else if (!repositorySet && automation.trigger_type === "once" && !run.environment_id) {
+      const storedRepositories = await new AutomationStore(this.db).getRepositoriesForAutomation(
+        automation.id
+      );
+      const resolutions = await resolveAutomationRepositories(this.env, storedRepositories);
+      const failure = resolutions.find((resolution) => resolution.error);
+      if (failure?.error) throw new Error(failure.error);
+      repositorySet = resolutions.map((resolution) => ({
+        repoOwner: resolution.repository!.repoOwner,
+        repoName: resolution.repository!.repoName,
+        repoId: resolution.repository!.repoId,
+        baseBranch: resolution.repository!.baseBranch,
+      }));
+    }
+    const target = repositorySet
+      ? sessionTargetFromIndex(run.environment_id, repositorySet)
+      : indexedSession
+        ? sessionTargetFromIndex(run.environment_id, [])
+        : await resolveAutomationSessionTarget(this.env, run, ctx, this.log);
 
     // Session-scoped integration settings resolve from the primary member
     // (design §6.2), with environment-bound runs layering that environment's
@@ -1251,32 +1429,65 @@ export class SchedulerDO extends DurableObject<Env> {
     const { codeServerEnabled, sandboxSettings } = await resolveSessionScopedSettings(
       this.db,
       scopeMembers,
-      target.environmentId
+      target.environmentId,
+      { strict: true }
     );
 
-    await initializeSession(
-      this.env,
-      {
-        sessionId,
-        ...target,
-        title: `[Auto] ${automation.name}`,
-        model: automation.model,
-        reasoningEffort: automation.reasoning_effort,
-        participantUserId: automation.created_by,
-        platformUserId: userId,
-        scmTokenEncrypted: null,
-        scmRefreshTokenEncrypted: null,
-        codeServerEnabled,
-        sandboxSettings,
-        spawnSource: "automation",
-        spawnDepth: 0,
-        automationId: automation.id,
-        automationRunId: run.id,
-      },
-      ctx
-    );
+    try {
+      await initializeSession(
+        this.env,
+        {
+          sessionId,
+          ...target,
+          title: `[Auto] ${automation.name}`,
+          model: automation.model,
+          reasoningEffort: automation.reasoning_effort,
+          participantUserId: automation.created_by,
+          platformUserId: userId,
+          scmLogin: enrichment?.scmLogin,
+          scmName: enrichment?.displayName,
+          scmEmail: enrichment?.email,
+          scmUserId: enrichment?.scmUserId,
+          scmTokenEncrypted: enrichment?.accessTokenEncrypted ?? null,
+          scmRefreshTokenEncrypted: enrichment?.refreshTokenEncrypted ?? null,
+          scmTokenExpiresAt: enrichment?.tokenExpiresAt,
+          codeServerEnabled,
+          sandboxSettings,
+          spawnSource: "automation",
+          spawnDepth: 0,
+          automationId: automation.id,
+          automationRunId: run.id,
+        },
+        ctx,
+        { replayable: true }
+      );
+    } catch (error) {
+      if (
+        error instanceof SessionInitializationRejectedError ||
+        error instanceof SessionReplayConflictError
+      ) {
+        throw error;
+      }
+      throw new RetryableAutomationLaunchError(error);
+    }
 
     return { sessionId };
+  }
+
+  private async isSessionInitialized(sessionId: string): Promise<boolean> {
+    const stub = this.env.SESSION.get(this.env.SESSION.idFromName(sessionId));
+    let response: Response;
+    try {
+      response = await stub.fetch(buildSessionInternalUrl(SessionInternalPaths.state), {
+        method: "GET",
+      });
+    } catch (error) {
+      throw new RetryableAutomationLaunchError(error);
+    }
+    if (response.status >= 500) {
+      throw new RetryableAutomationLaunchError(`Session state returned ${response.status}`);
+    }
+    return response.ok;
   }
 
   private async sendPromptToSession(
@@ -1293,6 +1504,7 @@ export class SchedulerDO extends DurableObject<Env> {
     };
 
     await this.enqueueSessionPrompt(sessionId, {
+      messageId: `automation-run:${runId}`,
       content: instructionsOverride ?? automation.instructions,
       authorId: automation.created_by,
       source: "automation",
@@ -1357,6 +1569,7 @@ export class SchedulerDO extends DurableObject<Env> {
   private async enqueueSessionPrompt(
     sessionId: string,
     body: {
+      messageId?: string;
       content: string;
       authorId: string;
       source: string;
@@ -1364,16 +1577,60 @@ export class SchedulerDO extends DurableObject<Env> {
     }
   ): Promise<void> {
     const stub = this.env.SESSION.get(this.env.SESSION.idFromName(sessionId));
-    const promptResponse = await stub.fetch("http://internal/internal/prompt", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    let promptResponse: Response;
+    try {
+      promptResponse = await stub.fetch("http://internal/internal/prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      throw new RetryableAutomationLaunchError(error);
+    }
 
+    if (promptResponse.status >= 500) {
+      throw new RetryableAutomationLaunchError(`Prompt enqueue returned ${promptResponse.status}`);
+    }
     if (!promptResponse.ok) {
       throw new Error(`Prompt enqueue failed with status ${promptResponse.status}`);
     }
   }
+}
+
+function oneShotChild(
+  childBase: () => Omit<AutomationRunRow, "status">,
+  repositoryChildren: AutomationRunRow[],
+  environmentChildren: AutomationRunRow[],
+  now: number
+): AutomationRunRow {
+  const environment = environmentChildren[0];
+  if (environment) return environment;
+
+  const primary = repositoryChildren[0];
+  if (!primary) return { ...childBase(), status: "starting" };
+
+  const failure = repositoryChildren.find((child) => child.failure_reason);
+  return {
+    ...primary,
+    status: failure ? "failed" : "starting",
+    failure_reason: failure?.failure_reason ?? null,
+    completed_at: failure ? now : null,
+  };
+}
+
+function sessionTargetFromIndex(
+  environmentId: string | null,
+  repositories: RepositoryRef[]
+): AutomationSessionTarget {
+  const primary = repositories[0];
+  return {
+    repoOwner: primary?.repoOwner ?? null,
+    repoName: primary?.repoName ?? null,
+    repoId: primary?.repoId ?? null,
+    defaultBranch: primary?.baseBranch ?? null,
+    repositories: repositories.length ? repositories : undefined,
+    environmentId,
+  };
 }
 
 /**

@@ -137,6 +137,17 @@ function sessionCreateBody(): Record<string, unknown> {
 }
 
 describe("Home", () => {
+  it("does not create or warm a session while composing", async () => {
+    const user = userEvent.setup();
+    render(<Home />);
+
+    await screen.findByRole("button", { name: /background-agents/i });
+    await user.type(screen.getByPlaceholderText("What do you want to build?"), "Run this later");
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /schedule prompt/i })).toBeEnabled();
+  });
+
   it("can start a new session without a repository from the primary selector", async () => {
     const user = userEvent.setup();
     render(<Home />);

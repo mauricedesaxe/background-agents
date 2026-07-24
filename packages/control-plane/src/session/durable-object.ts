@@ -485,6 +485,7 @@ export class SessionDO extends DurableObject<Env> {
         scheduleWarmSandbox: () => this.ctx.waitUntil(this.warmSandbox()),
         getSession: () => this.getSession(),
         getSandbox: () => this.getSandbox(),
+        getSessionRepositories: () => this.repository.getSessionRepositories(),
         getPublicSessionId: (session) => this.getPublicSessionId(session),
         getParticipantByUserId: (userId) => this.participantService.getByUserId(userId),
         statusService: this.statusService,
