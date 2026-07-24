@@ -1016,6 +1016,24 @@ class AgentBridge:
                         props = event.get("properties", {})
                         if not isinstance(props, dict):
                             continue
+                        if event_type == "message.part.updated":
+                            part = props.get("part", {})
+                            if (
+                                isinstance(part, dict)
+                                and part.get("sessionID") == self.opencode_session_id
+                                and part.get("type") == "step-finish"
+                            ):
+                                await self._send_event(
+                                    {
+                                        "type": "step_finish",
+                                        "messageId": request_id,
+                                        **({"stepId": part["id"]} if part.get("id") else {}),
+                                        "cost": part.get("cost"),
+                                        "tokens": part.get("tokens"),
+                                        "reason": part.get("reason"),
+                                    }
+                                )
+                                continue
                         if props.get("sessionID") != self.opencode_session_id:
                             continue
                         if event_type == "session.compacted":
@@ -1363,10 +1381,11 @@ class AgentBridge:
         # Child session tracking (sub-tasks)
         tracked_child_session_ids: set[str] = set()
 
-        # Compaction tracking: after compaction, parentID changes so we must
-        # accept all non-summary assistant messages from the parent session
+        # Compaction tracking: after compaction, parentID changes, so messages
+        # observed in this prompt's stream become the continuation boundary.
         compaction_occurred = False
         context_overflow_recovery_pending = False
+        context_overflow_error: str | None = None
 
         start_time = time.time()
         # Baseline for OOM detection: if this cgroup's oom_kill counter rises
@@ -1559,8 +1578,8 @@ class AgentBridge:
                                             # Accept if: parentID matches our message,
                                             # OR compaction happened and this isn't the
                                             # compaction summary itself
-                                            if parent_matches or (
-                                                compaction_occurred and not is_compaction_summary
+                                            if not is_compaction_summary and (
+                                                parent_matches or compaction_occurred
                                             ):
                                                 allowed_assistant_msg_ids.add(oc_msg_id)
                                                 pending = pending_parts.pop(oc_msg_id, [])
@@ -1630,6 +1649,17 @@ class AgentBridge:
                                     idle_session_id = props.get("sessionID")
                                     # Only parent idle terminates the stream
                                     if idle_session_id == self.opencode_session_id:
+                                        if (
+                                            context_overflow_recovery_pending
+                                            and not compaction_occurred
+                                        ):
+                                            yield {
+                                                "type": "error",
+                                                "error": context_overflow_error
+                                                or "Context overflow recovery ended before compaction completed",
+                                                "messageId": message_id,
+                                            }
+                                            return
                                         elapsed = time.time() - start_time
                                         self.log.debug(
                                             "bridge.session_idle",
@@ -1655,6 +1685,17 @@ class AgentBridge:
                                         status_session_id == self.opencode_session_id
                                         and status.get("type") == "idle"
                                     ):
+                                        if (
+                                            context_overflow_recovery_pending
+                                            and not compaction_occurred
+                                        ):
+                                            yield {
+                                                "type": "error",
+                                                "error": context_overflow_error
+                                                or "Context overflow recovery ended before compaction completed",
+                                                "messageId": message_id,
+                                            }
+                                            return
                                         elapsed = time.time() - start_time
                                         self.log.debug(
                                             "bridge.session_status_idle",
@@ -1682,6 +1723,7 @@ class AgentBridge:
                                             and not context_overflow_recovery_pending
                                         ):
                                             context_overflow_recovery_pending = True
+                                            context_overflow_error = error_msg
                                             self.log.info(
                                                 "bridge.context_overflow_recovery_pending",
                                                 message_id=message_id,
@@ -1851,8 +1893,6 @@ class AgentBridge:
             cumulative_text: Text already sent, keyed by part ID
             tracked_msg_ids: Assistant message IDs tracked during SSE streaming
             compaction_occurred: Whether session compaction happened during this prompt.
-                When True, accepts non-summary assistant messages even if parentID
-                doesn't match, since compaction changes the message chain.
 
         Uses parentID-based correlation if available, falling back to
         tracked_msg_ids from SSE streaming if parentID doesn't match.
@@ -1890,13 +1930,9 @@ class AgentBridge:
                 in_tracked_set = tracked_msg_ids and msg_id in tracked_msg_ids
                 is_compaction_summary = info.get("summary") is True
 
-                # Accept if: parentID matches, was tracked during SSE, or
-                # compaction occurred and this isn't the summary message
-                should_accept = (
-                    parent_matches
-                    or in_tracked_set
-                    or (compaction_occurred and not is_compaction_summary)
-                )
+                # After compaction, only assistant IDs observed in this prompt's
+                # stream are safe. The session history also contains prior turns.
+                should_accept = not is_compaction_summary and (parent_matches or in_tracked_set)
                 if not should_accept:
                     continue
 

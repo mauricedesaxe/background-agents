@@ -290,6 +290,7 @@ describe("SessionSandboxEventProcessor", () => {
 
   it("retries a failed usage write without acknowledging or double-applying it", async () => {
     const h = createProcessor();
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
     const sandboxWs = { readyState: WebSocket.OPEN } as WebSocket;
     h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
     h.usageStore.record.mockRejectedValueOnce(new Error("D1 unavailable")).mockResolvedValueOnce({
@@ -323,6 +324,9 @@ describe("SessionSandboxEventProcessor", () => {
       type: "ack",
       ackId: "step_finish:step-1",
     });
+    expect(h.updateLastActivity).toHaveBeenNthCalledWith(1, 1_750_000_000_000);
+    expect(h.updateLastActivity).toHaveBeenNthCalledWith(2, 1_750_000_000_000);
+    dateNow.mockRestore();
   });
 
   it("converts bridge timestamps to epoch milliseconds", async () => {

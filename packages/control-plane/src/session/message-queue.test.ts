@@ -132,13 +132,16 @@ function buildQueue() {
     reconcileAfterExecution: vi.fn(async (_success: boolean) => {}),
   };
   const spawnSandbox = vi.fn(async () => {});
+  const terminateSandbox = vi.fn(async (_reason: string) => {});
   const sandboxLifecycle = {
     spawnSandbox,
+    terminateSandbox,
     updateLastActivity: vi.fn((_timestamp: number) => {}),
   };
   const waitUntil = vi.fn();
   const getAlarm = vi.fn(async () => null as number | null);
   const setAlarm = vi.fn(async (_timestamp: number) => {});
+  const isCompacting = vi.fn(async () => false);
 
   const queue = new SessionMessageQueue(
     { waitUntil, storage: { getAlarm, setAlarm } } as unknown as DurableObjectState,
@@ -158,7 +161,8 @@ function buildQueue() {
     sandboxLifecycle,
     null,
     "github",
-    EXECUTION_TIMEOUT_MS
+    EXECUTION_TIMEOUT_MS,
+    isCompacting
   );
 
   return {
@@ -169,10 +173,12 @@ function buildQueue() {
     getSession,
     broadcast,
     spawnSandbox,
+    terminateSandbox,
     sessionStatus,
     sandboxLifecycle,
     getAlarm,
     setAlarm,
+    isCompacting,
     waitUntil,
   };
 }
@@ -218,6 +224,21 @@ describe("SessionMessageQueue", () => {
       expect(deadline).toBeGreaterThanOrEqual(before + EXECUTION_TIMEOUT_MS);
       expect(deadline).toBeLessThanOrEqual(Date.now() + EXECUTION_TIMEOUT_MS);
     });
+  });
+
+  it("leaves prompts pending while context compaction is active", async () => {
+    const h = buildQueue();
+    h.isCompacting.mockResolvedValue(true);
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage());
+    h.wsManager.getSandboxSocket.mockReturnValue({ readyState: WebSocket.OPEN } as WebSocket);
+
+    await h.queue.processMessageQueue();
+
+    expect(h.repository.updateMessageToProcessing).not.toHaveBeenCalled();
+    expect(h.wsManager.send).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ type: "prompt" })
+    );
   });
 
   // Upstream asserts no alarm is armed on this path. We arm the connect
@@ -486,8 +507,37 @@ describe("SessionMessageQueue", () => {
     );
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
     expect(h.wsManager.close).toHaveBeenCalledWith(sandboxWs, 1012, "Stop confirmation timed out");
+    expect(h.terminateSandbox).toHaveBeenCalledWith("stop_confirmation_timeout");
     expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
     vi.useRealTimers();
+  });
+
+  it("terminates a replacement sandbox before dispatching queued work after an unconfirmed stop", async () => {
+    vi.useFakeTimers();
+    const h = buildQueue();
+    const originalWs = { readyState: WebSocket.OPEN } as WebSocket;
+    const replacementWs = { readyState: WebSocket.OPEN } as WebSocket;
+    h.repository.getProcessingMessage.mockReturnValue({ id: "msg-9" });
+    h.repository.updateMessageCompletion.mockImplementation(() => {
+      h.repository.getProcessingMessage.mockReturnValue(null);
+    });
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "msg-next" }));
+    h.wsManager.getSandboxSocket.mockReturnValue(originalWs);
+    h.terminateSandbox.mockImplementation(async () => {
+      h.wsManager.getSandboxSocket.mockReturnValue(null);
+    });
+
+    await h.queue.stopExecution();
+    h.wsManager.getSandboxSocket.mockReturnValue(replacementWs);
+
+    await vi.advanceTimersByTimeAsync(STOP_CONFIRMATION_TIMEOUT_MS);
+    await h.waitUntil.mock.calls[0][0];
+
+    expect(h.terminateSandbox).toHaveBeenCalledWith("stop_confirmation_timeout");
+    expect(h.wsManager.send).not.toHaveBeenCalledWith(
+      replacementWs,
+      expect.objectContaining({ type: "prompt" })
+    );
   });
 
   it("forwards stop without a processing message so compaction can cancel", async () => {

@@ -370,7 +370,8 @@ export class SessionDO extends DurableObject<Env> {
         this.lifecycleManager,
         this.db ? new SessionIndexStore(this.db) : null,
         resolveScmProviderFromEnv(this.env.SCM_PROVIDER),
-        this.executionTimeoutMs
+        this.executionTimeoutMs,
+        async () => (await this.getActiveCompaction()) !== null
       );
     }
 
@@ -1659,6 +1660,7 @@ export class SessionDO extends DurableObject<Env> {
         outcome: failed ? "failure" : "success",
         ...(failed && { error: event.error }),
       });
+      await this.processMessageQueue();
     }
   }
 

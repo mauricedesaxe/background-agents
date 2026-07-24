@@ -145,21 +145,24 @@ export class SessionSandboxEventProcessor {
     }
 
     if (event.type === "step_start" || event.type === "step_finish") {
-      this.updateLastActivity(now);
       if (event.type === "step_finish") {
         const session = this.repository.getSession();
         if (!session) throw new Error("Cannot record usage without a session");
 
+        const observedAt = eventTimestampMs(event.timestamp, now);
+        this.updateLastActivity(Math.min(observedAt, now));
         const usage = normalizeUsage(event.tokens);
         const totals = await this.usageStore.record({
           sessionId: session.session_name ?? session.id,
           eventId: event.stepId ?? `${event.messageId}:${event.timestamp}`,
-          observedAt: eventTimestampMs(event.timestamp, now),
+          observedAt,
           costEstimate: finiteNonNegative(event.cost),
           ...usage,
         });
         this.repository.setSessionCost(totals.totalCost, now);
         this.sendAck(ackId);
+      } else {
+        this.updateLastActivity(now);
       }
       this.messenger.broadcast({ type: "sandbox_event", event });
       return;

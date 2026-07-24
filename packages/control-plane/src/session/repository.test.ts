@@ -396,11 +396,13 @@ describe("SessionRepository", () => {
   });
 
   describe("updateSandboxLastActivity", () => {
-    it("updates activity timestamp", () => {
+    it("updates activity timestamp without moving it backwards", () => {
       repo.updateSandboxLastActivity(6000);
 
       expect(mock.calls.length).toBe(1);
-      expect(mock.calls[0].query).toContain("UPDATE sandbox SET last_activity");
+      expect(mock.calls[0].query).toContain(
+        "UPDATE sandbox SET last_activity = MAX(COALESCE(last_activity, 0), ?)"
+      );
       expect(mock.calls[0].params).toEqual([6000]);
     });
   });
