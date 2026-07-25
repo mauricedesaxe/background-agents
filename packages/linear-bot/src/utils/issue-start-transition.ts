@@ -1,7 +1,12 @@
 import { z } from "zod";
 import { linearGraphQL, type LinearApiClient } from "./linear-client";
 
-type LinearGraphQLExecutor = typeof linearGraphQL;
+type LinearGraphQLExecutor = (
+  client: LinearApiClient,
+  query: string,
+  variables: Record<string, unknown>,
+  responseSchema: z.ZodType
+) => Promise<unknown>;
 
 const workflowStateSchema = z.object({
   id: z.string().min(1),
@@ -64,7 +69,8 @@ export async function transitionIssueToStarted(
         }
       }
     `,
-      { issueId }
+      { issueId },
+      transitionContextSchema
     )
   );
 
@@ -97,7 +103,8 @@ export async function transitionIssueToStarted(
         }
       }
     `,
-      { issueId, stateId: target.id }
+      { issueId, stateId: target.id },
+      transitionMutationSchema
     )
   );
 
