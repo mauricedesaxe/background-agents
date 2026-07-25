@@ -96,8 +96,12 @@ export function useSessionTransport(
   const connectingEpochRef = useRef<number | null>(null);
 
   // Latest-handler ref so connect() stays stable across renders.
-  const handlersRef = useRef(handlers);
-  handlersRef.current = handlers;
+  const { onMessage, onClose } = handlers;
+  const handlersRef = useRef({ onMessage, onClose });
+
+  useEffect(() => {
+    handlersRef.current = { onMessage, onClose };
+  }, [onMessage, onClose]);
 
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);

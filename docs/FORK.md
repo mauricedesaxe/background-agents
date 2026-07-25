@@ -235,6 +235,22 @@ itself. Session creation, prompt delivery, persistence, and sandbox protocols re
 unreliable. Server-side transcription allows vocabulary steering without exposing the OpenAI key to
 the browser, while keeping mistakes visible and editable before they can start agent work.
 
+### 18. The terminal toggle keeps its functional state updater
+
+`packages/web/src/app/(app)/session/[id]/page.tsx` toggles the terminal panel with
+`setTerminalOpen((prev) => ...)`. Upstream `0273a0e5` rewrote it to read `terminalOpen` from the
+closure and added the value to the callback's dependency list. We declined that hunk and took the
+rest of the commit.
+
+**Why.** The rewrite was made to satisfy a lint rule. It reintroduces the stale read the functional
+form exists to avoid. Two toggles in one tick both see the same `terminalOpen`, so the second toggle
+is lost and both the panel and the `terminal-visible` localStorage key remain open instead of
+returning to closed. Nothing in the suite covers it because the race needs two clicks inside one
+render pass.
+
+Re-proposing it is the specific risk. Upstream's version is the one a wholesale take of this file
+brings back, and it goes green.
+
 ## Where we match upstream against our own docs
 
 The list above is where we differ from upstream. This is the inverse: a place where matching

@@ -196,6 +196,20 @@ describe("MetadataSection", () => {
 
     expect(screen.queryByText("Environment deleted")).not.toBeInTheDocument();
   });
+
+  it("gives the working-branch copy control a stable accessible name", () => {
+    render(
+      <MetadataSection
+        createdAt={Date.now()}
+        baseBranch="main"
+        repoOwner="acme"
+        repoName="web"
+        branchName="feature/some-work"
+      />
+    );
+
+    expect(screen.getByRole("button", { name: "Copy branch name" })).toBeInTheDocument();
+  });
 });
 
 describe("PR sync button", () => {
