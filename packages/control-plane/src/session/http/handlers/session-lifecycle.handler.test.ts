@@ -443,6 +443,66 @@ describe("createSessionLifecycleHandler", () => {
     expect(scheduleWarmSandbox).toHaveBeenCalledOnce();
   });
 
+  it("rejects adding repositories when an initialized session has a shorter set", async () => {
+    const {
+      handler,
+      repository,
+      getSession,
+      getSandbox,
+      getSessionRepositoryRows,
+      getParticipantByUserId,
+      validateReasoningEffort,
+    } = createHandler();
+    validateReasoningEffort.mockReturnValue("high");
+    getSession.mockReturnValue(
+      createSession({
+        session_name: "session-public-id",
+        repo_id: 123,
+        base_branch: "main",
+        branch_name: null,
+        parent_session_id: null,
+      })
+    );
+    getSandbox.mockReturnValue(createSandbox());
+    getParticipantByUserId.mockReturnValue(createParticipant({ user_id: "user-1" }));
+    getSessionRepositoryRows.mockReturnValue([
+      {
+        position: 0,
+        repo_owner: "acme",
+        repo_name: "repo",
+        repo_id: 123,
+        base_branch: "main",
+        branch_name: null,
+        base_sha: null,
+        current_sha: null,
+      },
+    ]);
+
+    const response = await handler.init(
+      new Request("http://internal/internal/init", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionName: "session-public-id",
+          repoOwner: "acme",
+          repoName: "repo",
+          repoId: 123,
+          defaultBranch: "main",
+          repositories: [
+            { repoOwner: "acme", repoName: "repo", repoId: 123, baseBranch: "main" },
+            { repoOwner: "acme", repoName: "api", repoId: 456, baseBranch: "develop" },
+          ],
+          model: "anthropic/claude-haiku-4-5",
+          reasoningEffort: "high",
+          userId: "user-1",
+        }),
+      })
+    );
+
+    expect(response.status).toBe(409);
+    expect(repository.replaceSessionRepositories).not.toHaveBeenCalled();
+  });
+
   it("rejects conflicting session ID reuse", async () => {
     const { handler, repository, getSession, validateReasoningEffort } = createHandler();
     validateReasoningEffort.mockReturnValue("high");
