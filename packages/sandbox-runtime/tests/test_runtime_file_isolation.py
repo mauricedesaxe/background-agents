@@ -19,6 +19,16 @@ from tests.conftest import redirect_runtime_file_paths
 async def test_runtime_file_operations_stay_under_each_test_directory(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENCODE_SESSION_ID", raising=False)
 
+    fixture_paths = {
+        Path(entrypoint.REPO_MANIFEST_FILE_PATH),
+        Path(bridge.REPO_MANIFEST_FILE_PATH),
+        Path(entrypoint.BOOT_WARNINGS_FILE_PATH),
+        Path(bridge.BOOT_WARNINGS_FILE_PATH),
+        Path(entrypoint.TUNNEL_ENV_FILE_PATH),
+        Path(bridge.tempfile.gettempdir()) / "opencode-session-id",
+    }
+    assert all(path.parent == tmp_path for path in fixture_paths)
+
     live_root = tmp_path / "live-runtime"
     live_root.mkdir()
     live_sentinels = {
