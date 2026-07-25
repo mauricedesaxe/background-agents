@@ -37,6 +37,12 @@ async def test_runtime_file_operations_stay_under_each_test_directory(tmp_path, 
         live_root / ".tunnels.env": "live tunnel",
         live_root / "opencode-session-id": "live session",
     }
+    guarded_live_paths = set(live_sentinels) | {
+        Path(constants.REPO_MANIFEST_FILE_PATH),
+        Path(constants.BOOT_WARNINGS_FILE_PATH),
+        Path(constants.TUNNEL_ENV_FILE_PATH),
+        Path("/tmp/opencode-session-id"),
+    }
     for path, contents in live_sentinels.items():
         path.write_text(contents)
 
@@ -56,22 +62,22 @@ async def test_runtime_file_operations_stay_under_each_test_directory(tmp_path, 
     real_unlink = Path.unlink
 
     def reject_live_open(file, *args, **kwargs):
-        if isinstance(file, (str, Path)) and Path(file) in live_sentinels:
+        if isinstance(file, (str, Path)) and Path(file) in guarded_live_paths:
             raise AssertionError(f"accessed live runtime path: {file}")
         return real_open(file, *args, **kwargs)
 
     def reject_live_read(path, *args, **kwargs):
-        if path in live_sentinels:
+        if path in guarded_live_paths:
             raise AssertionError(f"read live runtime path: {path}")
         return real_read_text(path, *args, **kwargs)
 
     def reject_live_write(path, *args, **kwargs):
-        if path in live_sentinels:
+        if path in guarded_live_paths:
             raise AssertionError(f"wrote live runtime path: {path}")
         return real_write_text(path, *args, **kwargs)
 
     def reject_live_unlink(path, *args, **kwargs):
-        if path in live_sentinels:
+        if path in guarded_live_paths:
             raise AssertionError(f"unlinked live runtime path: {path}")
         return real_unlink(path, *args, **kwargs)
 
@@ -128,13 +134,6 @@ async def test_runtime_file_operations_stay_under_each_test_directory(tmp_path, 
         tunnel_path,
         agent_bridge.session_id_file,
     }
-    live_paths = {
-        Path(constants.REPO_MANIFEST_FILE_PATH),
-        Path(constants.BOOT_WARNINGS_FILE_PATH),
-        Path(constants.TUNNEL_ENV_FILE_PATH),
-        Path("/tmp/opencode-session-id"),
-    } | set(live_sentinels)
-
     assert all(path.parent == tmp_path for path in isolated_paths)
-    assert isolated_paths.isdisjoint(live_paths)
+    assert isolated_paths.isdisjoint(guarded_live_paths)
     assert all(path.read_text() == contents for path, contents in live_sentinels.items())
