@@ -199,4 +199,23 @@ describe("scheduled task routes (D1 integration)", () => {
 
     expect(response.status).toBe(400);
   });
+
+  it("rejects repository sets whose checkout paths collide", async () => {
+    const response = await call("POST", "/scheduled-tasks", {
+      instructions: "Inspect both deployments",
+      executeAt: new Date(Date.now() + 60_000).toISOString(),
+      scheduleTz: "UTC",
+      ownerUserId: "usr_owner",
+      participantUserId: "github-user",
+      repositories: [
+        { repoOwner: "acme", repoName: "api" },
+        { repoOwner: "vendor", repoName: "api" },
+      ],
+    });
+
+    expect(response.status).toBe(400);
+    expect(
+      await env.DB.prepare("SELECT COUNT(*) AS count FROM automations").first<{ count: number }>()
+    ).toEqual({ count: 0 });
+  });
 });

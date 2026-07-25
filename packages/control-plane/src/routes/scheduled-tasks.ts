@@ -5,6 +5,7 @@ import {
   isValidModel,
   isValidReasoningEffort,
   MAX_AUTOMATION_REPOSITORIES,
+  sessionRepositoriesInputSchema,
   type CreateScheduledTaskRequest,
   type ScheduledTask,
 } from "@open-inspect/shared";
@@ -18,8 +19,9 @@ import {
 } from "../db/automation-store";
 import { EnvironmentStore } from "../db/environments";
 import { createLogger } from "../logger";
+import { resolveSessionRepositories } from "../repos/resolve";
 import type { Env } from "../types";
-import { error, json, parseJsonBody, parsePattern, resolveRepoOrError } from "./shared";
+import { error, json, parseJsonBody, parsePattern } from "./shared";
 import type { RequestContext, Route } from "./shared";
 
 const MAX_INSTRUCTIONS_LENGTH = 15_000;
@@ -64,6 +66,12 @@ async function handleCreateScheduledTask(
 
   const parsedRepositories = automationRepositoriesInputSchema.safeParse(body.repositories ?? []);
   if (!parsedRepositories.success) return error("Invalid repository selection", 400);
+  if (
+    parsedRepositories.data.length > 0 &&
+    !sessionRepositoriesInputSchema.safeParse(parsedRepositories.data).success
+  ) {
+    return error("Invalid repository selection", 400);
+  }
   const environmentIds = body.environmentIds ?? [];
   if (
     !Array.isArray(environmentIds) ||
@@ -84,22 +92,18 @@ async function handleCreateScheduledTask(
   const missingEnvironment = environmentIds.find((_, index) => !environments[index]);
   if (missingEnvironment) return error(`Environment not found: ${missingEnvironment}`, 400);
 
-  const repositories: AutomationRepositoryInsert[] = [];
-  for (const repository of parsedRepositories.data) {
-    const resolved = await resolveRepoOrError(
-      env,
-      repository.repoOwner,
-      repository.repoName,
-      ctx,
-      logger
-    );
-    repositories.push({
-      repo_owner: repository.repoOwner,
-      repo_name: repository.repoName,
-      repo_id: resolved.repoId,
-      base_branch: repository.baseBranch ?? resolved.defaultBranch,
-    });
-  }
+  const resolvedRepositories = await resolveSessionRepositories(
+    env,
+    parsedRepositories.data,
+    ctx,
+    logger
+  );
+  const repositories: AutomationRepositoryInsert[] = resolvedRepositories.map((repository) => ({
+    repo_owner: repository.repoOwner,
+    repo_name: repository.repoName,
+    repo_id: repository.repoId,
+    base_branch: repository.baseBranch,
+  }));
 
   const id = generateId();
   const now = Date.now();
