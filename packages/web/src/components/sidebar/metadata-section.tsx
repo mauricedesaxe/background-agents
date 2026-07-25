@@ -74,6 +74,7 @@ function PullRequestSyncButton({ sessionId }: { sessionId: string }) {
 
   return (
     <button
+      type="button"
       onClick={handleSync}
       disabled={syncing}
       className="p-1 hover:bg-muted transition-colors"
@@ -253,8 +254,10 @@ export function MetadataSection({
                 </span>
               )}
               <button
+                type="button"
                 onClick={handleCopyBranch}
                 className="p-1 hover:bg-muted transition-colors"
+                aria-label="Copy branch name"
                 title={copied ? "Copied!" : "Copy branch name"}
               >
                 {copied ? (
