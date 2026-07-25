@@ -10,6 +10,10 @@ import pytest
 @pytest.fixture(autouse=True)
 def isolate_runtime_file_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep tests from reading or modifying files owned by a live sandbox."""
+    redirect_runtime_file_paths(tmp_path, monkeypatch)
+
+
+def redirect_runtime_file_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     manifest_path = str(tmp_path / "oi-repo-manifest.json")
     boot_warnings_path = str(tmp_path / "oi-boot-warnings.jsonl")
     tunnel_env_path = str(tmp_path / ".tunnels.env")

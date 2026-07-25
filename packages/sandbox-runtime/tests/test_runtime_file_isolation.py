@@ -1,4 +1,4 @@
-"""Tests for isolation from mutable files owned by a live sandbox runtime."""
+"""A test run inside a live sandbox must not corrupt that sandbox's runtime files."""
 
 import json
 from pathlib import Path
@@ -11,11 +11,33 @@ from sandbox_runtime.bridge import AgentBridge
 from sandbox_runtime.constants import TUNNEL_ENV_SANDBOX_ID_KEY
 from sandbox_runtime.entrypoint import SandboxSupervisor
 from sandbox_runtime.repo_config import RepoEntry
+from tests.conftest import redirect_runtime_file_paths
 
 
 @pytest.mark.asyncio
 async def test_runtime_file_operations_stay_under_each_test_directory(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENCODE_SESSION_ID", raising=False)
+
+    live_root = tmp_path / "live-runtime"
+    live_root.mkdir()
+    live_sentinels = {
+        live_root / "oi-repo-manifest.json": "live manifest",
+        live_root / "oi-boot-warnings.jsonl": "live warning",
+        live_root / ".tunnels.env": "live tunnel",
+        live_root / "opencode-session-id": "live session",
+    }
+    for path, contents in live_sentinels.items():
+        path.write_text(contents)
+
+    live_manifest_path, live_warnings_path, live_tunnel_path, _ = live_sentinels
+    monkeypatch.setattr(entrypoint, "REPO_MANIFEST_FILE_PATH", str(live_manifest_path))
+    monkeypatch.setattr(bridge, "REPO_MANIFEST_FILE_PATH", str(live_manifest_path))
+    monkeypatch.setattr(entrypoint, "BOOT_WARNINGS_FILE_PATH", str(live_warnings_path))
+    monkeypatch.setattr(bridge, "BOOT_WARNINGS_FILE_PATH", str(live_warnings_path))
+    monkeypatch.setattr(entrypoint, "TUNNEL_ENV_FILE_PATH", str(live_tunnel_path))
+    monkeypatch.setattr(bridge.tempfile, "tempdir", str(live_root))
+
+    redirect_runtime_file_paths(tmp_path, monkeypatch)
 
     supervisor = SandboxSupervisor()
     supervisor.sandbox_id = "test-sandbox"
@@ -64,7 +86,8 @@ async def test_runtime_file_operations_stay_under_each_test_directory(tmp_path, 
         Path(constants.BOOT_WARNINGS_FILE_PATH),
         Path(constants.TUNNEL_ENV_FILE_PATH),
         Path("/tmp/opencode-session-id"),
-    }
+    } | set(live_sentinels)
 
     assert all(path.parent == tmp_path for path in isolated_paths)
     assert isolated_paths.isdisjoint(live_paths)
+    assert all(path.read_text() == contents for path, contents in live_sentinels.items())
