@@ -37,13 +37,13 @@ JJ_SHA256 = "59e5588583ac82b623239929368c65b90735931c0f26b5a16c1f04d5bb97643d"
 # the Jujutsu binary. tldraw-cli is now removed — diagrams are authored as JSON
 # records and posted to the interactive board endpoint (see the whiteboard
 # skill), so nothing renders tldraw in the sandbox.
-SANDBOX_VERSION = "daytona-v14-code-style"
+SANDBOX_VERSION = "daytona-v15-disk"
 
 # Resources baked into the base snapshot. Daytona applies these to every sandbox
-# created from it and rejects overriding them at create time. Memory (GiB) is the
-# lever for the OOM problem; cpu (cores) is a modest bump for parallel builds.
+# created from it and rejects overriding them at create time.
 SANDBOX_CPU_CORES = 2
 SANDBOX_MEMORY_GIB = 4
+SANDBOX_DISK_GIB = 8
 
 
 def build_base_image(repo_root: Path) -> Image:
@@ -140,11 +140,14 @@ def create_base_snapshot(daytona: Daytona, repo_root: Path, snapshot_name: str) 
             image=image,
             entrypoint=["python", "-m", "sandbox_runtime.entrypoint"],
             # Daytona bakes resources into the snapshot; sandboxes created from
-            # it inherit these and cannot override them at create time. ~1 GiB
-            # (the provider default) OOM-kills OpenCode during heavy builds, so
-            # give sandboxes real headroom. Disk is left at the provider default
-            # to avoid shrinking it and to not add org disk-cap pressure (#8).
-            resources=Resources(cpu=SANDBOX_CPU_CORES, memory=SANDBOX_MEMORY_GIB),
+            # it inherit these and cannot override them at create time. The
+            # provider defaults do not leave enough memory or disk for OpenCode
+            # and repository dependencies.
+            resources=Resources(
+                cpu=SANDBOX_CPU_CORES,
+                memory=SANDBOX_MEMORY_GIB,
+                disk=SANDBOX_DISK_GIB,
+            ),
         ),
         on_logs=lambda chunk: print(chunk, end="\n"),
     )
