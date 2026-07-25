@@ -19,6 +19,16 @@ afterEach(() => {
 });
 
 describe("ModelsSettings", () => {
+  it("offers Claude Opus 5 in model settings", () => {
+    render(
+      <SWRConfig value={{ provider: () => new Map() }}>
+        <ModelsSettings />
+      </SWRConfig>
+    );
+
+    expect(screen.getByRole("switch", { name: /Claude Opus 5/ })).toBeInTheDocument();
+  });
+
   it("does not count or submit removed models from stored preferences", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);
