@@ -87,11 +87,15 @@ vi.mock("@/hooks/use-branches", () => ({
 
 vi.mock("@/hooks/use-enabled-models", () => ({
   useEnabledModels: () => ({
-    enabledModels: [DEFAULT_MODEL],
+    enabledModels: [DEFAULT_MODEL, "openai/gpt-5.4"],
     enabledModelOptions: [
       {
         category: "Anthropic",
         models: [{ id: DEFAULT_MODEL, name: "Claude Sonnet 4.6", description: "" }],
+      },
+      {
+        category: "OpenAI",
+        models: [{ id: "openai/gpt-5.4", name: "GPT-5.4", description: "" }],
       },
     ],
     loading: false,
@@ -150,6 +154,14 @@ function sessionCreateBody(): Record<string, unknown> {
 }
 
 describe("Home", () => {
+  it("hydrates the saved model preference", async () => {
+    localStorage.setItem("open-inspect-last-selected-model", "openai/gpt-5.4");
+
+    render(<Home />);
+
+    expect(await screen.findByRole("button", { name: /gpt 5.4/i })).toBeInTheDocument();
+  });
+
   it("keeps a voice transcript in the new-session draft", async () => {
     const user = userEvent.setup();
     render(<Home />);
