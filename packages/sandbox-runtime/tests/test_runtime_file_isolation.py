@@ -1,5 +1,6 @@
 """A test run inside a live sandbox must not corrupt that sandbox's runtime files."""
 
+import builtins
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -10,7 +11,7 @@ from sandbox_runtime import bridge, constants, entrypoint
 from sandbox_runtime.bridge import AgentBridge
 from sandbox_runtime.constants import TUNNEL_ENV_SANDBOX_ID_KEY
 from sandbox_runtime.entrypoint import SandboxSupervisor
-from sandbox_runtime.repo_config import RepoEntry
+from sandbox_runtime.repo_config import RepoEntry, load_repo_manifest
 from tests.conftest import redirect_runtime_file_paths
 
 
@@ -39,6 +40,36 @@ async def test_runtime_file_operations_stay_under_each_test_directory(tmp_path, 
 
     redirect_runtime_file_paths(tmp_path, monkeypatch)
 
+    real_open = builtins.open
+    real_read_text = Path.read_text
+    real_write_text = Path.write_text
+    real_unlink = Path.unlink
+
+    def reject_live_open(file, *args, **kwargs):
+        if isinstance(file, (str, Path)) and Path(file) in live_sentinels:
+            raise AssertionError(f"accessed live runtime path: {file}")
+        return real_open(file, *args, **kwargs)
+
+    def reject_live_read(path, *args, **kwargs):
+        if path in live_sentinels:
+            raise AssertionError(f"read live runtime path: {path}")
+        return real_read_text(path, *args, **kwargs)
+
+    def reject_live_write(path, *args, **kwargs):
+        if path in live_sentinels:
+            raise AssertionError(f"wrote live runtime path: {path}")
+        return real_write_text(path, *args, **kwargs)
+
+    def reject_live_unlink(path, *args, **kwargs):
+        if path in live_sentinels:
+            raise AssertionError(f"unlinked live runtime path: {path}")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", reject_live_open)
+    monkeypatch.setattr(Path, "read_text", reject_live_read)
+    monkeypatch.setattr(Path, "write_text", reject_live_write)
+    monkeypatch.setattr(Path, "unlink", reject_live_unlink)
+
     supervisor = SandboxSupervisor()
     supervisor.sandbox_id = "test-sandbox"
     supervisor.repositories = [
@@ -54,6 +85,7 @@ async def test_runtime_file_operations_stay_under_each_test_directory(tmp_path, 
     supervisor._write_repo_manifest()
     manifest_path = Path(entrypoint.REPO_MANIFEST_FILE_PATH)
     assert json.loads(manifest_path.read_text())["repositories"][0]["name"] == "app"
+    assert load_repo_manifest(manifest_path)[0].name == "app"
 
     supervisor._record_boot_warning(scope="setup", message="isolated warning")
     warnings_path = Path(entrypoint.BOOT_WARNINGS_FILE_PATH)
@@ -72,6 +104,11 @@ async def test_runtime_file_operations_stay_under_each_test_directory(tmp_path, 
     agent_bridge.session_id_file.write_text("oc-isolated")
     await agent_bridge._load_session_id()
     assert agent_bridge.opencode_session_id == "oc-isolated"
+
+    monkeypatch.setattr(builtins, "open", real_open)
+    monkeypatch.setattr(Path, "read_text", real_read_text)
+    monkeypatch.setattr(Path, "write_text", real_write_text)
+    monkeypatch.setattr(Path, "unlink", real_unlink)
 
     isolated_paths = {
         manifest_path,
