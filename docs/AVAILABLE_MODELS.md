@@ -17,6 +17,7 @@ requires `ZHIPU_API_KEY`; DeepSeek requires `DEEPSEEK_API_KEY`; OpenRouter requi
 | `anthropic/claude-opus-4-6`   | Claude Opus 4.6   | Most capable, adaptive thinking    | low, medium, high, max        | high           |
 | `anthropic/claude-opus-4-7`   | Claude Opus 4.7   | Most capable, adaptive thinking    | low, medium, high, xhigh, max | high           |
 | `anthropic/claude-opus-4-8`   | Claude Opus 4.8   | Most capable, adaptive thinking    | low, medium, high, xhigh, max | high           |
+| `anthropic/claude-opus-5`     | Claude Opus 5     | Latest Opus, adaptive thinking     | low, medium, high, xhigh, max | high           |
 | `anthropic/claude-fable-5`    | Claude Fable 5    | Most powerful, new tier above Opus | low, medium, high, xhigh, max | high           |
 
 ## OpenAI

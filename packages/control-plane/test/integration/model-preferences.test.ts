@@ -66,6 +66,18 @@ describe("Model preferences API", () => {
     });
   });
 
+  it("accepts Opus 5 without changing unrelated stored preferences", async () => {
+    const stored = ["openai/gpt-5.4", "anthropic/claude-opus-5", "openrouter/x-ai/grok-4.5"];
+    await seedPreferences(stored);
+
+    const response = await SELF.fetch("https://test.local/model-preferences", {
+      headers: await authHeaders(),
+    });
+
+    expect(await response.json()).toEqual({ enabledModels: stored });
+    expect(await getStoredModels()).toEqual(stored);
+  });
+
   it("returns defaults when all stored models have been removed", async () => {
     await seedPreferences(["openai/gpt-5.2", "unknown/model"]);
 
