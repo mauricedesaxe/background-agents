@@ -107,6 +107,48 @@ const singleRepository = [
 const openRepositoryPicker = () =>
   fireEvent.click(screen.getByRole("button", { name: "Repository selection" }));
 
+describe("field labels", () => {
+  it("associates the name and instructions labels with their fields", () => {
+    render(
+      <AutomationForm
+        mode="create"
+        submitting={false}
+        onSubmit={vi.fn()}
+        initialValues={{
+          name: "Daily review",
+          model: "openai/gpt-5.4",
+          scheduleCron: "0 9 * * *",
+          scheduleTz: "UTC",
+          instructions: "Review the repo.",
+        }}
+      />
+    );
+
+    expect(screen.getByLabelText("Name")).toHaveValue("Daily review");
+    expect(screen.getByLabelText("Instructions")).toHaveValue("Review the repo.");
+  });
+
+  it("associates the Sentry client secret label with its field", () => {
+    render(
+      <AutomationForm
+        mode="create"
+        submitting={false}
+        onSubmit={vi.fn()}
+        initialValues={{
+          name: "Investigate Sentry errors",
+          repositories: singleRepository,
+          model: "openai/gpt-5.4",
+          instructions: "Investigate the error.",
+          triggerType: "sentry",
+          sentryClientSecret: "secret",
+        }}
+      />
+    );
+
+    expect(screen.getByLabelText("Sentry Client Secret")).toHaveAttribute("type", "password");
+  });
+});
+
 describe("automation cron submission", () => {
   it("clears the propagated cron when custom input becomes invalid", () => {
     const onChange = vi.fn();
