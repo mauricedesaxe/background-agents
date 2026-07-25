@@ -2,8 +2,18 @@
  * Linear API client utilities — OAuth + raw GraphQL.
  */
 
-import type { Env, LinearIssueDetails } from "../types";
+import {
+  linearAgentActivityResponseSchema,
+  linearAgentSessionUpdateResponseSchema,
+  linearCommentCreateResponseSchema,
+  linearIssueDetailsResponseSchema,
+  linearRepoSuggestionsResponseSchema,
+  linearUserResponseSchema,
+  type Env,
+  type LinearIssueDetails,
+} from "../types";
 import { timingSafeEqual } from "@open-inspect/shared";
+import { z } from "zod";
 import { computeHmacHex } from "./crypto";
 import { createLogger } from "../logger";
 import {
@@ -23,6 +33,9 @@ export {
 const log = createLogger("linear-client");
 
 const LINEAR_API_URL = "https://api.linear.app/graphql";
+const linearGraphQLErrorResponseSchema = z.object({
+  errors: z.array(z.object({ message: z.string() })),
+});
 
 // ─── OAuth Helpers ───────────────────────────────────────────────────────────
 
@@ -76,11 +89,14 @@ export async function getLinearClientOrThrow(
 /**
  * Execute a GraphQL query against the Linear API.
  */
-export async function linearGraphQL(
+export async function linearGraphQL<T>(
   client: LinearApiClient,
   query: string,
-  variables: Record<string, unknown>
-): Promise<Record<string, unknown>> {
+  variables: Record<string, unknown>,
+  responseSchema: z.ZodType<T>
+): Promise<T> {
+  const operation =
+    query.match(/\b(?:query|mutation)\s+([_A-Za-z][_0-9A-Za-z]*)/)?.[1] ?? "UnknownOperation";
   const body = JSON.stringify({ query, variables });
   const send = (accessToken: string) =>
     fetch(LINEAR_API_URL, {
@@ -128,17 +144,39 @@ export async function linearGraphQL(
   }
 
   if (!res.ok) {
-    throw new Error(`Linear API error: ${res.status}`);
+    throw new Error(`Linear ${operation} API error: ${res.status}`);
   }
 
-  const json = (await res.json()) as Record<string, unknown>;
+  return parseLinearGraphQLResponse(res, operation, responseSchema);
+}
 
-  if (Array.isArray(json.errors) && json.errors.length > 0) {
-    const msg = (json.errors[0] as { message?: string }).message ?? "Unknown GraphQL error";
-    throw new Error(`Linear GraphQL error: ${msg}`);
+async function parseLinearGraphQLResponse<T>(
+  response: Response,
+  operation: string,
+  responseSchema: z.ZodType<T>
+): Promise<T> {
+  let json: unknown;
+  try {
+    json = await response.json();
+  } catch {
+    throw new Error(`Linear ${operation} response validation failed`);
   }
 
-  return json;
+  if (typeof json === "object" && json !== null && "errors" in json) {
+    const errorResponse = linearGraphQLErrorResponseSchema.safeParse(json);
+    if (!errorResponse.success) {
+      throw new Error(`Linear ${operation} response validation failed`);
+    }
+    if (errorResponse.data.errors.length > 0) {
+      throw new Error(`Linear ${operation} GraphQL error`);
+    }
+  }
+
+  const parsed = responseSchema.safeParse(json);
+  if (!parsed.success) {
+    throw new Error(`Linear ${operation} response validation failed`);
+  }
+  return parsed.data;
 }
 
 // ─── Agent Activities ────────────────────────────────────────────────────────
@@ -161,7 +199,8 @@ export async function emitAgentActivity(
     `,
       {
         input: { agentSessionId, content, ephemeral },
-      }
+      },
+      linearAgentActivityResponseSchema
     );
     return true;
   } catch (err) {
@@ -183,7 +222,7 @@ export async function fetchIssueDetails(
   issueId: string
 ): Promise<LinearIssueDetails | null> {
   try {
-    const data = await linearGraphQL(
+    const response = await linearGraphQL(
       client,
       `
       query IssueDetails($id: String!) {
@@ -208,28 +247,14 @@ export async function fetchIssueDetails(
         }
       }
     `,
-      { id: issueId }
+      { id: issueId },
+      linearIssueDetailsResponseSchema
     );
 
-    const issue = (data as { data?: { issue?: Record<string, unknown> } }).data?.issue;
+    const issue = response.data.issue;
     if (!issue) return null;
 
-    return {
-      id: issue.id as string,
-      identifier: issue.identifier as string,
-      title: issue.title as string,
-      description: issue.description as string | null,
-      url: issue.url as string,
-      priority: issue.priority as number,
-      priorityLabel: issue.priorityLabel as string,
-      labels: (issue.labels as { nodes: Array<{ id: string; name: string }> })?.nodes || [],
-      project: issue.project as { id: string; name: string } | null,
-      assignee: issue.assignee as { id: string; name: string } | null,
-      team: issue.team as { id: string; key: string; name: string },
-      comments:
-        (issue.comments as { nodes: Array<{ body: string; user?: { name: string } }> })?.nodes ||
-        [],
-    };
+    return issue;
   } catch (err) {
     log.error("linear.fetch_issue_details", {
       issue_id: issueId,
@@ -259,7 +284,8 @@ export async function updateAgentSession(
         }
       }
     `,
-      { id: agentSessionId, input }
+      { id: agentSessionId, input },
+      linearAgentSessionUpdateResponseSchema
     );
   } catch (err) {
     log.error("linear.update_session_failed", {
@@ -279,7 +305,7 @@ export async function getRepoSuggestions(
   candidateRepos: Array<{ hostname: string; repositoryFullName: string }>
 ): Promise<Array<{ repositoryFullName: string; confidence: number }>> {
   try {
-    const data = await linearGraphQL(
+    const response = await linearGraphQL(
       client,
       `
       query RepoSuggestions($issueId: String!, $agentSessionId: String!, $candidateRepositories: [IssueRepositorySuggestionInput!]!) {
@@ -295,17 +321,11 @@ export async function getRepoSuggestions(
         }
       }
     `,
-      { issueId, agentSessionId, candidateRepositories: candidateRepos }
+      { issueId, agentSessionId, candidateRepositories: candidateRepos },
+      linearRepoSuggestionsResponseSchema
     );
 
-    const result = data as {
-      data?: {
-        issueRepositorySuggestions?: {
-          suggestions: Array<{ repositoryFullName: string; confidence: number }>;
-        };
-      };
-    };
-    return result.data?.issueRepositorySuggestions?.suggestions || [];
+    return response.data.issueRepositorySuggestions?.suggestions ?? [];
   } catch (err) {
     log.error("linear.repo_suggestions_failed", {
       issue_id: issueId,
@@ -325,7 +345,7 @@ export async function fetchUser(
   userId: string
 ): Promise<{ id: string; name: string; email: string | null } | null> {
   try {
-    const data = await linearGraphQL(
+    const response = await linearGraphQL(
       client,
       `
       query FetchUser($id: String!) {
@@ -336,16 +356,17 @@ export async function fetchUser(
         }
       }
     `,
-      { id: userId }
+      { id: userId },
+      linearUserResponseSchema
     );
 
-    const user = (data as { data?: { user?: Record<string, unknown> } }).data?.user;
+    const user = response.data.user;
     if (!user) return null;
 
     return {
-      id: user.id as string,
-      name: user.name as string,
-      email: (user.email as string) ?? null,
+      id: user.id,
+      name: user.name,
+      email: user.email ?? null,
     };
   } catch (err) {
     log.error("linear.fetch_user", {
@@ -392,8 +413,10 @@ export async function postIssueComment(
   });
 
   if (!response.ok) return { success: false };
-  const result = (await response.json()) as {
-    data?: { commentCreate?: { success: boolean } };
-  };
-  return { success: result.data?.commentCreate?.success ?? false };
+  const result = await parseLinearGraphQLResponse(
+    response,
+    "CommentCreate",
+    linearCommentCreateResponseSchema
+  );
+  return { success: result.data.commentCreate.success };
 }

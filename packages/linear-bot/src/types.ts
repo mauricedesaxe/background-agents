@@ -2,6 +2,9 @@
  * Type definitions for the Linear bot.
  */
 
+import type { LinearCallbackContext } from "@open-inspect/shared";
+import { z } from "zod";
+
 /**
  * Cloudflare Worker environment bindings.
  */
@@ -115,7 +118,6 @@ export interface IssueSession {
 
 // Re-export CallbackContext types from shared
 export type { LinearCallbackContext, CallbackContext } from "@open-inspect/shared";
-import type { LinearCallbackContext } from "@open-inspect/shared";
 
 /**
  * Completion callback payload from control-plane.
@@ -166,20 +168,84 @@ export type { UserPreferences } from "@open-inspect/shared";
 
 // ─── Linear Issue Details ────────────────────────────────────────────────────
 
-export interface LinearIssueDetails {
-  id: string;
-  identifier: string;
-  title: string;
-  description?: string | null;
-  url: string;
-  priority: number;
-  priorityLabel: string;
-  labels: Array<{ id: string; name: string }>;
-  project?: { id: string; name: string } | null;
-  assignee?: { id: string; name: string } | null;
-  team: { id: string; key: string; name: string };
-  comments: Array<{ body: string; user?: { name: string } }>;
-}
+const linearNamedEntitySchema = z.object({ id: z.string(), name: z.string() });
+const linearMutationSuccessSchema = z.object({ success: z.boolean() });
+const linearCommentSchema = z.object({
+  body: z.string(),
+  user: z.object({ name: z.string() }).nullable().optional(),
+});
+
+export const linearAgentActivityResponseSchema = z.object({
+  data: z.object({ agentActivityCreate: linearMutationSuccessSchema }),
+});
+
+const linearIssueDetailsSchema = z
+  .object({
+    id: z.string(),
+    identifier: z.string(),
+    title: z.string(),
+    description: z.string().nullable().optional(),
+    url: z.string(),
+    priority: z.number(),
+    priorityLabel: z.string(),
+    labels: z
+      .object({ nodes: z.array(linearNamedEntitySchema) })
+      .nullable()
+      .optional(),
+    project: linearNamedEntitySchema.nullable().optional(),
+    assignee: linearNamedEntitySchema.nullable().optional(),
+    team: z.object({ id: z.string(), key: z.string(), name: z.string() }),
+    comments: z
+      .object({ nodes: z.array(linearCommentSchema) })
+      .nullable()
+      .optional(),
+  })
+  .transform(({ labels, comments, ...issue }) => ({
+    ...issue,
+    labels: labels?.nodes ?? [],
+    comments: comments?.nodes ?? [],
+  }));
+
+export type LinearIssueDetails = z.infer<typeof linearIssueDetailsSchema>;
+
+export const linearIssueDetailsResponseSchema = z.object({
+  data: z.object({ issue: linearIssueDetailsSchema.nullable() }),
+});
+
+export const linearAgentSessionUpdateResponseSchema = z.object({
+  data: z.object({ agentSessionUpdate: linearMutationSuccessSchema }),
+});
+
+export const linearRepoSuggestionsResponseSchema = z.object({
+  data: z.object({
+    issueRepositorySuggestions: z
+      .object({
+        suggestions: z.array(
+          z.object({
+            repositoryFullName: z.string(),
+            confidence: z.number(),
+          })
+        ),
+      })
+      .nullable(),
+  }),
+});
+
+export const linearUserResponseSchema = z.object({
+  data: z.object({
+    user: z
+      .object({
+        id: z.string(),
+        name: z.string(),
+        email: z.string().nullable().optional(),
+      })
+      .nullable(),
+  }),
+});
+
+export const linearCommentCreateResponseSchema = z.object({
+  data: z.object({ commentCreate: linearMutationSuccessSchema }),
+});
 
 // ─── Webhook Payload Types ──────────────────────────────────────────────────
 
