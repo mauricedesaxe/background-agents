@@ -42,13 +42,14 @@ name, which is the same divergence reaching a second package.
 
 Upstream ships several providers and we retain all of them; the ones we do not run diverge only
 through the shared harness install. Daytona is the one under load here, so it carries fork-local
-work: sizing applied to the snapshot rather than the create call, 4 GiB sandboxes with a readable
-OOM cause, a 24-hour auto-archive default instead of 7 days, and a stop that retries across the
-provider's state-change settle.
+work: sizing applied to the snapshot rather than the create call, 4 GiB memory and 8 GiB disk per
+sandbox, a readable OOM cause, a 24-hour auto-archive default instead of 7 days, and a stop that
+retries across the provider's state-change settle.
 
 **Why.** Each of these was a production incident, not a preference. The 7-day auto-archive plus a
 300 GiB account disk cap produced a recurring "timed out waiting to connect" outage. The 1 GiB
-default OOM-killed OpenCode mid-build and surfaced as an unreadable stream error.
+memory default OOM-killed OpenCode mid-build and surfaced as an unreadable stream error. The 3 GiB
+disk default filled during ordinary dependency installs and made OpenCode's SQLite writes fail.
 
 Providers we do not run are kept, not pruned, and their only local change is the one-line call into
 `install-harness.sh` that every image build shares. Pruning them would create divergence to save
