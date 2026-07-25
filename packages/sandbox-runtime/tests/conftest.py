@@ -14,6 +14,7 @@ def isolate_runtime_file_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     boot_warnings_path = str(tmp_path / "oi-boot-warnings.jsonl")
     tunnel_env_path = str(tmp_path / ".tunnels.env")
 
+    monkeypatch.setattr("sandbox_runtime.bridge.tempfile.tempdir", str(tmp_path))
     monkeypatch.setattr("sandbox_runtime.entrypoint.REPO_MANIFEST_FILE_PATH", manifest_path)
     monkeypatch.setattr("sandbox_runtime.bridge.REPO_MANIFEST_FILE_PATH", manifest_path)
     monkeypatch.setattr("sandbox_runtime.entrypoint.BOOT_WARNINGS_FILE_PATH", boot_warnings_path)
