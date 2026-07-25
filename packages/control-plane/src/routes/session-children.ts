@@ -44,7 +44,7 @@ async function handleGetChild(
   );
 }
 
-async function handleCancelChild(
+export async function handleCancelChild(
   _request: Request,
   env: Env,
   match: RegExpMatchArray,
@@ -60,7 +60,45 @@ async function handleCancelChild(
     return error("Child session not found", 404);
   }
 
-  return ctx.sessionRuntime.fetch(childId, SessionInternalPaths.cancel, { method: "POST" });
+  const response = await requestCancellation(ctx, childId);
+
+  const descendantIds = await sessionStore.listActiveDescendantIds(childId);
+  const cancelledDescendantIds: string[] = [];
+  const failedSessionIds = response.ok || response.status === 409 ? [] : [childId];
+  for (const descendantId of descendantIds) {
+    const descendantResponse = await requestCancellation(ctx, descendantId);
+    if (descendantResponse.ok) {
+      cancelledDescendantIds.push(descendantId);
+    } else if (descendantResponse.status !== 409) {
+      failedSessionIds.push(descendantId);
+    }
+  }
+
+  if (failedSessionIds.length > 0) {
+    return json(
+      {
+        error: `Tasks could not be cancelled: ${failedSessionIds.join(", ")}`,
+        cancelledDescendantIds,
+      },
+      502
+    );
+  }
+
+  if (response.ok || cancelledDescendantIds.length > 0) {
+    return json({ status: "cancelled", cancelledDescendantIds });
+  }
+
+  return response;
+}
+
+async function requestCancellation(ctx: SessionRouteContext, sessionId: string): Promise<Response> {
+  try {
+    return await ctx.sessionRuntime.fetch(sessionId, SessionInternalPaths.cancel, {
+      method: "POST",
+    });
+  } catch {
+    return error("Cancellation request failed", 502);
+  }
 }
 
 export const sessionChildRoutes: Route[] = [
