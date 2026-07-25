@@ -226,33 +226,23 @@ export function createSessionLifecycleHandler(
           return Response.json({ error: "Session ID belongs to another session" }, { status: 409 });
         }
         const storedRepositories = deps.getSessionRepositoryRows();
+        const repositoriesAreMatchingPrefix = storedRepositories.every((stored, position) => {
+          const requested = memberRepositories[position];
+          return (
+            requested !== undefined &&
+            stored.position === position &&
+            stored.repo_owner === requested.repoOwner &&
+            stored.repo_name === requested.repoName &&
+            stored.repo_id === requested.repoId &&
+            stored.base_branch === requested.baseBranch
+          );
+        });
         const repositoriesMatch =
-          storedRepositories.length === memberRepositories.length &&
-          storedRepositories.every((stored, position) => {
-            const requested = memberRepositories[position];
-            return (
-              requested !== undefined &&
-              stored.position === position &&
-              stored.repo_owner === requested.repoOwner &&
-              stored.repo_name === requested.repoName &&
-              stored.repo_id === requested.repoId &&
-              stored.base_branch === requested.baseBranch
-            );
-          });
-        const repositoriesAreMatchingPrefix =
-          storedRepositories.length < memberRepositories.length &&
-          storedRepositories.every((stored, position) => {
-            const requested = memberRepositories[position];
-            return (
-              requested !== undefined &&
-              stored.position === position &&
-              stored.repo_owner === requested.repoOwner &&
-              stored.repo_name === requested.repoName &&
-              stored.repo_id === requested.repoId &&
-              stored.base_branch === requested.baseBranch
-            );
-          });
-        if (!repositoriesMatch && !repositoriesAreMatchingPrefix) {
+          storedRepositories.length === memberRepositories.length && repositoriesAreMatchingPrefix;
+        const sandbox = deps.getSandbox();
+        const participant = deps.getParticipantByUserId(body.userId);
+        const canRepairRepositoryPrefix = !sandbox && !participant;
+        if (!repositoriesMatch && (!repositoriesAreMatchingPrefix || !canRepairRepositoryPrefix)) {
           return Response.json({ error: "Session ID belongs to another session" }, { status: 409 });
         }
         if (!repositoriesMatch) {
@@ -267,7 +257,7 @@ export function createSessionLifecycleHandler(
           );
         }
         let repaired = false;
-        if (!deps.getSandbox()) {
+        if (!sandbox) {
           deps.repository.createSandbox({
             id: deps.generateId(),
             status: "pending",
@@ -276,7 +266,7 @@ export function createSessionLifecycleHandler(
           });
           repaired = true;
         }
-        if (!deps.getParticipantByUserId(body.userId)) {
+        if (!participant) {
           deps.repository.createParticipant({
             id: deps.generateId(),
             userId: body.userId,
