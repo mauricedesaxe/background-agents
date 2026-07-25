@@ -71,7 +71,7 @@ export interface SessionLifecycleHandlerDeps {
   scheduleWarmSandbox: () => void;
   getSession: () => SessionRow | null;
   getSandbox: () => SandboxRow | null;
-  getSessionRepositories: () => ReturnType<SessionRepository["getSessionRepositories"]>;
+  getSessionRepositoryRows: () => ReturnType<SessionRepository["getSessionRepositoryRows"]>;
   getPublicSessionId: (session: SessionRow) => string;
   getParticipantByUserId: (userId: string) => ParticipantRow | null;
   statusService: SessionStatusService;
@@ -225,20 +225,34 @@ export function createSessionLifecycleHandler(
         if (!matches) {
           return Response.json({ error: "Session ID belongs to another session" }, { status: 409 });
         }
-        const storedRepositories = deps.getSessionRepositories();
+        const storedRepositories = deps.getSessionRepositoryRows();
         const repositoriesMatch =
           storedRepositories.length === memberRepositories.length &&
           storedRepositories.every((stored, position) => {
             const requested = memberRepositories[position];
             return (
               requested !== undefined &&
-              stored.repoOwner === requested.repoOwner &&
-              stored.repoName === requested.repoName &&
-              stored.row?.repo_id === requested.repoId &&
-              stored.baseBranch === requested.baseBranch
+              stored.position === position &&
+              stored.repo_owner === requested.repoOwner &&
+              stored.repo_name === requested.repoName &&
+              stored.repo_id === requested.repoId &&
+              stored.base_branch === requested.baseBranch
             );
           });
-        if (!repositoriesMatch && storedRepositories.length > 0) {
+        const repositoriesAreMatchingPrefix =
+          storedRepositories.length < memberRepositories.length &&
+          storedRepositories.every((stored, position) => {
+            const requested = memberRepositories[position];
+            return (
+              requested !== undefined &&
+              stored.position === position &&
+              stored.repo_owner === requested.repoOwner &&
+              stored.repo_name === requested.repoName &&
+              stored.repo_id === requested.repoId &&
+              stored.base_branch === requested.baseBranch
+            );
+          });
+        if (!repositoriesMatch && !repositoriesAreMatchingPrefix) {
           return Response.json({ error: "Session ID belongs to another session" }, { status: 409 });
         }
         if (!repositoriesMatch) {

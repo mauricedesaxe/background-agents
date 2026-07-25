@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Logger } from "../../../logger";
 import type { ParticipantRow, SandboxRow, SessionRow } from "../../types";
+import type { SessionRepositoryRow } from "../../repository";
 import { createSessionLifecycleHandler } from "./session-lifecycle.handler";
 import type { SessionStatusService } from "../../session-status-service";
-import type { SessionRepositoryEntry } from "../../repository-target";
 import { getValidModelOrDefault } from "@open-inspect/shared";
 
 function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
@@ -104,7 +104,7 @@ function createHandler() {
   } as unknown as Logger;
   const getSession = vi.fn<() => SessionRow | null>();
   const getSandbox = vi.fn<() => SandboxRow | null>();
-  const getSessionRepositories = vi.fn<() => SessionRepositoryEntry[]>(() => []);
+  const getSessionRepositoryRows = vi.fn<() => SessionRepositoryRow[]>(() => []);
   const getPublicSessionId = vi.fn<(session: SessionRow) => string>();
   const getParticipantByUserId = vi.fn<(userId: string) => ParticipantRow | null>();
   const transition = vi.fn<(status: SessionRow["status"]) => Promise<boolean>>();
@@ -127,7 +127,7 @@ function createHandler() {
     scheduleWarmSandbox,
     getSession,
     getSandbox,
-    getSessionRepositories,
+    getSessionRepositoryRows,
     getPublicSessionId,
     getParticipantByUserId,
     statusService,
@@ -165,7 +165,7 @@ function createHandler() {
     log,
     getSession,
     getSandbox,
-    getSessionRepositories,
+    getSessionRepositoryRows,
     getPublicSessionId,
     getParticipantByUserId,
     transition,
@@ -314,7 +314,7 @@ describe("createSessionLifecycleHandler", () => {
       repository,
       getSession,
       getSandbox,
-      getSessionRepositories,
+      getSessionRepositoryRows,
       getParticipantByUserId,
       validateReasoningEffort,
       scheduleWarmSandbox,
@@ -333,23 +333,16 @@ describe("createSessionLifecycleHandler", () => {
     );
     getSandbox.mockReturnValue(createSandbox());
     getParticipantByUserId.mockReturnValue(createParticipant({ user_id: "user-1" }));
-    getSessionRepositories.mockReturnValue([
+    getSessionRepositoryRows.mockReturnValue([
       {
         position: 0,
-        repoOwner: "acme",
-        repoName: "repo",
-        baseBranch: "main",
-        isPrimary: true,
-        row: {
-          position: 0,
-          repo_owner: "acme",
-          repo_name: "repo",
-          repo_id: 123,
-          base_branch: "main",
-          branch_name: null,
-          base_sha: null,
-          current_sha: null,
-        },
+        repo_owner: "acme",
+        repo_name: "repo",
+        repo_id: 123,
+        base_branch: "main",
+        branch_name: null,
+        base_sha: null,
+        current_sha: null,
       },
     ]);
 
@@ -384,6 +377,7 @@ describe("createSessionLifecycleHandler", () => {
       handler,
       repository,
       getSession,
+      getSessionRepositoryRows,
       validateReasoningEffort,
       generateId,
       scheduleWarmSandbox,
@@ -400,6 +394,18 @@ describe("createSessionLifecycleHandler", () => {
         status: "created",
       })
     );
+    getSessionRepositoryRows.mockReturnValue([
+      {
+        position: 0,
+        repo_owner: "acme",
+        repo_name: "repo",
+        repo_id: 123,
+        base_branch: "main",
+        branch_name: null,
+        base_sha: null,
+        current_sha: null,
+      },
+    ]);
 
     const response = await handler.init(
       new Request("http://internal/internal/init", {
@@ -411,6 +417,10 @@ describe("createSessionLifecycleHandler", () => {
           repoName: "repo",
           repoId: 123,
           defaultBranch: "main",
+          repositories: [
+            { repoOwner: "acme", repoName: "repo", repoId: 123, baseBranch: "main" },
+            { repoOwner: "acme", repoName: "api", repoId: 456, baseBranch: "develop" },
+          ],
           title: "Session title",
           model: "anthropic/claude-haiku-4-5",
           reasoningEffort: "high",
@@ -420,7 +430,10 @@ describe("createSessionLifecycleHandler", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(repository.replaceSessionRepositories).toHaveBeenCalledOnce();
+    expect(repository.replaceSessionRepositories).toHaveBeenCalledWith([
+      { position: 0, repoOwner: "acme", repoName: "repo", repoId: 123, baseBranch: "main" },
+      { position: 1, repoOwner: "acme", repoName: "api", repoId: 456, baseBranch: "develop" },
+    ]);
     expect(repository.createSandbox).toHaveBeenCalledWith(
       expect.objectContaining({ id: "sandbox-repair", status: "pending" })
     );
