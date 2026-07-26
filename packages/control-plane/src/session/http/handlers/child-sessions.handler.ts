@@ -12,6 +12,8 @@ import {
   type ChildSummaryTrajectoryInput,
 } from "./child-session-summary";
 
+const TERMINAL_SESSION_STATUSES = new Set(["completed", "failed", "archived", "cancelled"]);
+
 export interface ChildSessionsHandlerDeps {
   repository: Pick<
     SessionRepository,
@@ -42,6 +44,9 @@ export function createChildSessionsHandler(deps: ChildSessionsHandlerDeps): Chil
       const session = deps.getSession();
       if (!session) {
         return Response.json({ error: "Session not found" }, { status: 404 });
+      }
+      if (TERMINAL_SESSION_STATUSES.has(session.status)) {
+        return Response.json({ error: "Session is no longer active" }, { status: 409 });
       }
 
       const participants = deps.repository.listParticipants();

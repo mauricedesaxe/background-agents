@@ -210,7 +210,9 @@ export class SessionIndexStore {
          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
          WHERE ? IS NULL OR EXISTS (
            SELECT 1 FROM sessions
-           WHERE id = ? AND status NOT IN (${TERMINAL_STATUS_SQL})
+           WHERE id = ?
+             AND status NOT IN (${TERMINAL_STATUS_SQL})
+             AND spawn_closed_at IS NULL
          )`
       )
       .bind(
@@ -557,9 +559,27 @@ export class SessionIndexStore {
     return (result.results || []).map(toEntry);
   }
 
-  /** List every descendant deepest-first so authoritative session state decides cancellation. */
-  async listDescendantIds(parentSessionId: string): Promise<string[]> {
-    const result = await this.db
+  async closeSpawningAndListDescendantIds(parentSessionId: string): Promise<string[]> {
+    const closeSpawning = this.db
+      .prepare(
+        `WITH RECURSIVE subtree(id, path) AS (
+           SELECT id, '/' || hex(CAST(id AS BLOB)) || '/'
+           FROM sessions WHERE id = ?
+           UNION ALL
+           SELECT sessions.id, subtree.path || hex(CAST(sessions.id AS BLOB)) || '/'
+           FROM sessions
+           JOIN subtree ON sessions.parent_session_id = subtree.id
+           WHERE instr(
+             subtree.path,
+             '/' || hex(CAST(sessions.id AS BLOB)) || '/'
+           ) = 0
+         )
+         UPDATE sessions
+         SET spawn_closed_at = COALESCE(spawn_closed_at, ?)
+         WHERE id IN (SELECT id FROM subtree)`
+      )
+      .bind(parentSessionId, Date.now());
+    const listDescendants = this.db
       .prepare(
         `WITH RECURSIVE descendants(id, depth, path) AS (
            SELECT id, 1,
@@ -577,8 +597,9 @@ export class SessionIndexStore {
          )
          SELECT id FROM descendants ORDER BY depth DESC`
       )
-      .bind(parentSessionId, parentSessionId)
-      .all<{ id: string }>();
+      .bind(parentSessionId, parentSessionId);
+
+    const [, result] = await this.db.batch<{ id: string }>([closeSpawning, listDescendants]);
     return (result.results || []).map(({ id }) => id);
   }
 

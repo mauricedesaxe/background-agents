@@ -230,6 +230,21 @@ describe("POST /sessions/:parentId/children — spawn child", () => {
   });
 
   it("rejects when depth >= 2 (403)", async () => {
+    const store = new SessionIndexStore(env.DB);
+    const now = Date.now();
+    await store.create({
+      id: "grandparent-1",
+      title: "Grandparent",
+      repoOwner: "acme",
+      repoName: "web-app",
+      model: "anthropic/claude-sonnet-4-6",
+      reasoningEffort: null,
+      baseBranch: null,
+      status: "active",
+      spawnDepth: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
     const { parentName, sandboxToken } = await setupParent({
       spawnDepth: 2,
       parentSessionId: "grandparent-1",
