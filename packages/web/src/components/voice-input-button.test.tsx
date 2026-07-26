@@ -87,3 +87,27 @@ it("releases the microphone when the browser cannot create a recorder", async ()
   await screen.findByText("Could not start voice input.");
   expect(stopTrack).toHaveBeenCalled();
 });
+
+it("releases microphone access that resolves after unmount", async () => {
+  let resolveStream!: (stream: { getTracks: () => Array<{ stop: () => void }> }) => void;
+  const getUserMedia = vi.fn(
+    () =>
+      new Promise<{ getTracks: () => Array<{ stop: () => void }> }>((resolve) => {
+        resolveStream = resolve;
+      })
+  );
+  Object.defineProperty(navigator, "mediaDevices", {
+    configurable: true,
+    value: { getUserMedia },
+  });
+  const user = userEvent.setup();
+  const { unmount } = render(<VoiceInputButton onTranscript={vi.fn()} />);
+
+  await user.click(screen.getByRole("button", { name: "Start voice input" }));
+  expect(screen.getByRole("button", { name: "Starting voice input" })).toBeDisabled();
+  unmount();
+  resolveStream({ getTracks: () => [{ stop: stopTrack }] });
+
+  await waitFor(() => expect(stopTrack).toHaveBeenCalledOnce());
+  expect(fetch).not.toHaveBeenCalled();
+});

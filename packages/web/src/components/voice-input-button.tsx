@@ -8,7 +8,7 @@ type VoiceInputButtonProps = {
   disabled?: boolean;
 };
 
-type VoiceInputStatus = "idle" | "recording" | "transcribing";
+type VoiceInputStatus = "idle" | "requesting" | "recording" | "transcribing";
 
 export function VoiceInputButton({ onTranscript, disabled = false }: VoiceInputButtonProps) {
   const [status, setStatus] = useState<VoiceInputStatus>("idle");
@@ -16,23 +16,41 @@ export function VoiceInputButton({ onTranscript, disabled = false }: VoiceInputB
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const mountedRef = useRef(false);
+  const requestingRef = useRef(false);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const recorder = recorderRef.current;
+      if (recorder) {
+        recorder.ondataavailable = null;
+        recorder.onstop = null;
+        recorder.onerror = null;
+        if (recorder.state !== "inactive") recorder.stop();
+      }
       stopStream(streamRef.current);
-    },
-    []
-  );
+    };
+  }, []);
 
   const startRecording = async () => {
+    if (requestingRef.current) return;
+
     setError(null);
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
       setError("Voice input is not supported by this browser.");
       return;
     }
 
+    requestingRef.current = true;
+    setStatus("requesting");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!mountedRef.current) {
+        stopStream(stream);
+        return;
+      }
       streamRef.current = stream;
       const recorder = new MediaRecorder(stream);
       recorderRef.current = recorder;
@@ -58,6 +76,7 @@ export function VoiceInputButton({ onTranscript, disabled = false }: VoiceInputB
       recorder.start();
       setStatus("recording");
     } catch (recordingError) {
+      if (!mountedRef.current) return;
       setError(
         recordingError instanceof DOMException && recordingError.name === "NotAllowedError"
           ? "Microphone access was denied."
@@ -65,6 +84,9 @@ export function VoiceInputButton({ onTranscript, disabled = false }: VoiceInputB
       );
       stopStream(streamRef.current);
       streamRef.current = null;
+      setStatus("idle");
+    } finally {
+      requestingRef.current = false;
     }
   };
 
@@ -107,7 +129,12 @@ export function VoiceInputButton({ onTranscript, disabled = false }: VoiceInputB
   };
 
   const isRecording = status === "recording";
-  const label = isRecording ? "Stop voice input" : "Start voice input";
+  const label =
+    status === "requesting"
+      ? "Starting voice input"
+      : isRecording
+        ? "Stop voice input"
+        : "Start voice input";
 
   return (
     <>
@@ -122,7 +149,7 @@ export function VoiceInputButton({ onTranscript, disabled = false }: VoiceInputB
       <button
         type="button"
         onClick={isRecording ? stopRecording : startRecording}
-        disabled={disabled || status === "transcribing"}
+        disabled={disabled || status === "requesting" || status === "transcribing"}
         className={`p-2 transition disabled:cursor-not-allowed disabled:opacity-30 ${
           isRecording
             ? "bg-destructive-muted text-destructive"
