@@ -136,12 +136,16 @@ why.
 ### 9. The tldraw whiteboard
 
 A `BoardRoom` Durable Object, board routes, a live board editor in the session view, and a
-`whiteboard` skill in the sandbox. Entirely fork-local: `packages/control-plane/src/board/`,
-`packages/control-plane/src/routes/board.ts`, `packages/web/src/components/board-editor.tsx`, and
-`packages/sandbox-runtime/src/sandbox_runtime/skills/whiteboard/`.
+`whiteboard` skill in the sandbox. Agents inspect the same document through short-lived read-only
+URLs rendered by `packages/web/src/components/board-inspection.tsx`; the sandbox's `board inspect`
+command captures that browser surface. Entirely fork-local: `packages/control-plane/src/board/`,
+`packages/control-plane/src/routes/board.ts`, `packages/web/src/components/board-*.tsx`,
+`packages/web/src/app/board/inspect/`, `packages/sandbox-runtime/src/sandbox_runtime/bin/board.js`,
+and `packages/sandbox-runtime/src/sandbox_runtime/skills/whiteboard/`.
 
-**Why.** Agents explain systems faster with a diagram than with prose, and a diagram the agent can
-edit live beats an exported image.
+**Why.** Agents explain systems faster with a diagram than with prose. The rendered inspection path
+lets them catch clipping, layering, and spacing defects before asking the user to review the live
+board.
 
 ### 10. Epoch and duration values are branded in control-plane
 
