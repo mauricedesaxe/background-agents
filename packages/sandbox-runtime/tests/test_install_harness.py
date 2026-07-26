@@ -308,6 +308,9 @@ class TestPinnedHarness:
         instructions = (opencode / "AGENTS.md").read_text()
         assert "Work the default workspace directly with `jj edit`" in instructions
 
+        assert (opencode / "plugin" / "comment-lint.ts").is_file()  # #79 write-time guard
+        assert (home / ".lazar-harness" / "bin" / "comment-lint").is_file()
+
 
 class TestScriptIsExecutable:
     def test_script_has_execute_bit(self):
