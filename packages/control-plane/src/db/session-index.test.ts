@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { SessionIndexStore } from "./session-index";
+import { ParentSessionInactiveError, SessionIndexStore } from "./session-index";
 import type { SessionEntry } from "./session-index";
 
 type SessionRow = {
@@ -59,7 +59,7 @@ const QUERY_PATTERNS = {
   DELETE_SESSION: /^DELETE FROM sessions WHERE id = \?$/,
   SELECT_BY_PARENT:
     /^SELECT \* FROM sessions WHERE parent_session_id = \? ORDER BY created_at DESC$/,
-  SELECT_ACTIVE_DESCENDANTS: /^WITH RECURSIVE descendants/,
+  SELECT_DESCENDANTS: /^WITH RECURSIVE descendants/,
   SELECT_1_CHILD: /^SELECT 1 FROM sessions WHERE id = \? AND parent_session_id = \?$/,
   SELECT_SPAWN_DEPTH: /^SELECT spawn_depth FROM sessions WHERE id = \?$/,
 } as const;
@@ -146,8 +146,7 @@ class FakeD1Database {
       return children;
     }
 
-    if (QUERY_PATTERNS.SELECT_ACTIVE_DESCENDANTS.test(normalized)) {
-      const terminalStatuses = new Set(["completed", "failed", "archived", "cancelled"]);
+    if (QUERY_PATTERNS.SELECT_DESCENDANTS.test(normalized)) {
       const descendants: Array<{ row: SessionRow; depth: number }> = [];
       let parents = [args[0] as string];
       const visited = new Set(parents);
@@ -161,10 +160,7 @@ class FakeD1Database {
         parents = children.map((row) => row.id);
         depth += 1;
       }
-      return descendants
-        .filter(({ row }) => !terminalStatuses.has(row.status))
-        .sort((a, b) => b.depth - a.depth)
-        .map(({ row }) => ({ id: row.id }));
+      return descendants.sort((a, b) => b.depth - a.depth).map(({ row }) => ({ id: row.id }));
     }
 
     if (QUERY_PATTERNS.SELECT_SESSION_REPOS.test(normalized)) {
@@ -205,6 +201,8 @@ class FakeD1Database {
         environmentId,
         createdAt,
         updatedAt,
+        requiredParentId,
+        checkedParentId,
       ] = args as [
         string,
         string | null,
@@ -224,9 +222,19 @@ class FakeD1Database {
         string | null,
         number,
         number,
+        string | null,
+        string | null,
       ];
       if (this.rows.has(id)) {
         throw new Error("UNIQUE constraint failed: sessions.id");
+      }
+      const parent = requiredParentId ? this.rows.get(requiredParentId) : null;
+      if (
+        requiredParentId !== checkedParentId ||
+        (requiredParentId &&
+          (!parent || ["completed", "failed", "archived", "cancelled"].includes(parent.status)))
+      ) {
+        return { meta: { changes: 0 } };
       }
       this.rows.set(id, {
         id,
@@ -302,6 +310,7 @@ class FakeD1Database {
         number | null,
         string,
       ];
+      if (!this.rows.has(sessionId)) return { meta: { changes: 0 } };
       this.repositoryRows.push({
         session_id: sessionId,
         position,
@@ -563,6 +572,7 @@ describe("SessionIndexStore", () => {
     });
 
     it("stores parent fields when provided", async () => {
+      await store.create(makeSession({ id: "parent-1", status: "active" }));
       const session = makeSession({
         id: "child-1",
         parentSessionId: "parent-1",
@@ -575,6 +585,22 @@ describe("SessionIndexStore", () => {
       expect(result?.parentSessionId).toBe("parent-1");
       expect(result?.spawnSource).toBe("agent");
       expect(result?.spawnDepth).toBe(1);
+    });
+
+    it("atomically rejects a child whose parent is terminal", async () => {
+      await store.create(makeSession({ id: "parent-1", status: "cancelled" }));
+
+      await expect(
+        store.create(
+          makeSession({
+            id: "child-1",
+            parentSessionId: "parent-1",
+            spawnSource: "agent",
+            spawnDepth: 1,
+          })
+        )
+      ).rejects.toBeInstanceOf(ParentSessionInactiveError);
+      await expect(store.get("child-1")).resolves.toBeNull();
     });
 
     it("stores userId when provided", async () => {
@@ -871,8 +897,9 @@ describe("SessionIndexStore", () => {
       });
     });
 
-    describe("listActiveDescendantIds", () => {
-      it("returns active descendants deepest-first through terminal ancestors", async () => {
+    describe("listDescendantIds", () => {
+      it("returns every descendant deepest-first through terminal ancestors", async () => {
+        await store.updateStatus("child-2", "active");
         await store.create(
           makeSession({
             id: "grandchild-1",
@@ -882,15 +909,17 @@ describe("SessionIndexStore", () => {
             spawnDepth: 2,
           })
         );
+        await store.updateStatus("child-2", "completed");
 
-        await expect(store.listActiveDescendantIds(parentId)).resolves.toEqual([
+        await expect(store.listDescendantIds(parentId)).resolves.toEqual([
           "grandchild-1",
           "child-1",
+          "child-2",
         ]);
       });
 
       it("returns an empty array when no descendants exist", async () => {
-        await expect(store.listActiveDescendantIds("no-children")).resolves.toEqual([]);
+        await expect(store.listDescendantIds("no-children")).resolves.toEqual([]);
       });
     });
 

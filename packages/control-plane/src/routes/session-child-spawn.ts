@@ -7,7 +7,7 @@ import {
   spawnContextSchema,
 } from "@open-inspect/shared";
 import { generateId } from "../auth/crypto";
-import { SessionIndexStore } from "../db/session-index";
+import { ParentSessionInactiveError, SessionIndexStore } from "../db/session-index";
 import { createLogger } from "../logger";
 import { SessionInternalPaths } from "../session/contracts";
 import { initializeSession, type SessionInitInput } from "../session/initialize";
@@ -21,6 +21,7 @@ import { sessionRoute, type SessionRouteContext } from "./session-route";
 
 const logger = createLogger("router:session-child-spawn");
 const MAX_SPAWN_DEPTH = 2;
+const TERMINAL_PARENT_STATUSES = new Set(["completed", "failed", "archived", "cancelled"]);
 
 async function handleSpawnChild(
   request: Request,
@@ -44,18 +45,22 @@ async function handleSpawnChild(
   const sessionStore = new SessionIndexStore(ctx.db);
 
   const parentSession = await sessionStore.get(parentId);
-  const parentUserId = parentSession?.userId ?? null;
-  const parentEnvironmentId = parentSession?.environmentId ?? null;
+  if (!parentSession) {
+    return error("Parent session not found", 404);
+  }
+  if (TERMINAL_PARENT_STATUSES.has(parentSession.status)) {
+    return error("Parent session is no longer active", 409);
+  }
+  const parentUserId = parentSession.userId ?? null;
+  const parentEnvironmentId = parentSession.environmentId ?? null;
   // Children inherit the parent's settings scope: its primary repo plus, for
   // environment-launched parents, that environment's overrides (design §13.5).
-  const childSandboxSettings = parentSession
-    ? await resolveSandboxSettings(
-        ctx.db,
-        parentSession.repoOwner,
-        parentSession.repoName,
-        parentEnvironmentId
-      )
-    : {};
+  const childSandboxSettings = await resolveSandboxSettings(
+    ctx.db,
+    parentSession.repoOwner,
+    parentSession.repoName,
+    parentEnvironmentId
+  );
   const maxConcurrentChildren =
     childSandboxSettings.maxConcurrentChildSessions ?? DEFAULT_MAX_CONCURRENT_CHILD_SESSIONS;
   const maxTotalChildren =
@@ -181,6 +186,9 @@ async function handleSpawnChild(
   try {
     await initializeSession(env, input, ctx);
   } catch (e) {
+    if (e instanceof ParentSessionInactiveError) {
+      return error("Parent session is no longer active", 409);
+    }
     logger.error("Failed to initialize child session", {
       error: e instanceof Error ? e.message : String(e),
       parent_id: parentId,

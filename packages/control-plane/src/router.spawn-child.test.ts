@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleRequest } from "./router";
 import { generateInternalToken } from "./auth/internal";
-import { SessionIndexStore } from "./db/session-index";
+import { ParentSessionInactiveError, SessionIndexStore } from "./db/session-index";
 import { SessionInternalPaths } from "./session/contracts";
 
 const integrationSettingsMocks = vi.hoisted(() => ({
@@ -9,7 +9,13 @@ const integrationSettingsMocks = vi.hoisted(() => ({
   resolveSandboxSettings: vi.fn().mockResolvedValue({}),
 }));
 
+const sessionIndexMocks = vi.hoisted(() => {
+  class ParentSessionInactiveError extends Error {}
+  return { ParentSessionInactiveError };
+});
+
 vi.mock("./db/session-index", () => ({
+  ...sessionIndexMocks,
   SessionIndexStore: vi.fn(),
 }));
 
@@ -65,6 +71,7 @@ describe("handleSpawnChild prompt enqueue handling", () => {
       repoOwner: context.repoOwner,
       repoName: context.repoName,
       environmentId: "env_parent",
+      status: "active",
     }),
     getSpawnDepth: vi.fn().mockResolvedValue(0),
     countActiveChildren: vi.fn().mockResolvedValue(0),
@@ -274,6 +281,62 @@ describe("handleSpawnChild prompt enqueue handling", () => {
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({ error: "title and prompt are required" });
     expect(SessionIndexStore).not.toHaveBeenCalled();
+  });
+
+  it("rejects child creation after the parent is cancelled", async () => {
+    const store = makeStore();
+    store.get.mockResolvedValue({
+      userId: "canonical-user-123",
+      repoOwner: "acme",
+      repoName: "web-app",
+      environmentId: "env_parent",
+      status: "cancelled",
+    });
+    vi.mocked(SessionIndexStore).mockImplementation(function () {
+      return store as never;
+    });
+    const parentFetch = vi.fn();
+    const env = {
+      INTERNAL_CALLBACK_SECRET: "test-internal-secret",
+      SCM_PROVIDER: "github",
+      DB: {},
+      SESSION: {
+        idFromName: (name: string) => name,
+        get: () => ({ fetch: parentFetch }),
+      },
+    };
+
+    const response = await makeRequest(env);
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ error: "Parent session is no longer active" });
+    expect(parentFetch).not.toHaveBeenCalled();
+    expect(store.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a child when cancellation wins the creation race", async () => {
+    const store = makeStore();
+    store.create.mockRejectedValue(new ParentSessionInactiveError(parentId));
+    vi.mocked(SessionIndexStore).mockImplementation(function () {
+      return store as never;
+    });
+    const parentStub: DurableObjectStub = {
+      fetch: vi.fn(async () => Response.json(spawnContext)),
+    } as never;
+    const env = {
+      INTERNAL_CALLBACK_SECRET: "test-internal-secret",
+      SCM_PROVIDER: "github",
+      DB: {},
+      SESSION: {
+        idFromName: (name: string) => name,
+        get: () => parentStub,
+      },
+    };
+
+    const response = await makeRequest(env);
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ error: "Parent session is no longer active" });
   });
 
   it("returns 500 for a malformed parent spawn context", async () => {
