@@ -24,6 +24,7 @@ vi.mock("@/hooks/use-analytics", () => ({
 }));
 
 vi.mock("@/components/sidebar-layout", () => ({
+  CollapsedSidebarControls: () => <div data-testid="collapsed-sidebar-controls" />,
   useSidebarContext: mockUseSidebarContext,
 }));
 
@@ -130,9 +131,9 @@ const userBreakdown: AnalyticsBreakdownResponse = {
   ],
 };
 
-function renderPage() {
+function renderPage(isSidebarOpen = true) {
   mockUseSidebarContext.mockReturnValue({
-    isOpen: true,
+    isOpen: isSidebarOpen,
     toggle: vi.fn(),
   });
 
@@ -154,6 +155,12 @@ function getUserRows() {
 }
 
 describe("AnalyticsPage", () => {
+  it("keeps collapsed sidebar actions reachable in the desktop header", () => {
+    renderPage(false);
+
+    expect(screen.getByTestId("collapsed-sidebar-controls")).toBeInTheDocument();
+  });
+
   it("refetches analytics when the selected range changes", async () => {
     const user = userEvent.setup();
 

@@ -4,21 +4,24 @@ import { createContext, useCallback, useContext, useState } from "react";
 import { useSession, signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import useSWR from "swr";
-import { SessionSidebar } from "./session-sidebar";
+import { NewSessionButton, SessionSidebar } from "./session-sidebar";
 import { GlobalCommandMenu } from "./global-command-menu";
 import { useSidebar } from "@/hooks/use-sidebar";
 import { useIsMobile } from "@/hooks/use-media-query";
 import { useGlobalShortcuts } from "@/hooks/use-global-shortcuts";
 import { SIDEBAR_SESSIONS_KEY, type SessionListResponse } from "@/lib/session-list";
 import { Button } from "@/components/ui/button";
-import { GitHubIcon, GoogleIcon } from "@/components/ui/icons";
+import { GitHubIcon, GoogleIcon, SearchIcon, SidebarIcon } from "@/components/ui/icons";
 import { APP_NAME, GOOGLE_LOGIN_ENABLED } from "@/lib/site-config";
+import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
 
 interface SidebarContextValue {
   isOpen: boolean;
   toggle: () => void;
   open: () => void;
   close: () => void;
+  searchSessions: () => void;
+  newSession: () => void;
 }
 
 const SidebarContext = createContext<SidebarContextValue | null>(null);
@@ -33,6 +36,44 @@ export function useSidebarContext() {
 
 interface SidebarLayoutProps {
   children: React.ReactNode;
+}
+
+export function SidebarToggleButton({ label = "Open sidebar" }: { label?: string }) {
+  const { toggle } = useSidebarContext();
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      onClick={toggle}
+      title={`${label} (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
+      aria-label={`${label} (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
+    >
+      <SidebarIcon className="w-4 h-4" />
+    </Button>
+  );
+}
+
+export function CollapsedSidebarControls() {
+  const { searchSessions, newSession } = useSidebarContext();
+
+  return (
+    <div className="flex items-center gap-2">
+      <SidebarToggleButton />
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        onClick={searchSessions}
+        title={`Search sessions (${SHORTCUT_LABELS.COMMAND_MENU})`}
+        aria-label={`Search sessions (${SHORTCUT_LABELS.COMMAND_MENU})`}
+      >
+        <SearchIcon className="w-4 h-4" />
+      </Button>
+      <NewSessionButton onClick={newSession} />
+    </div>
+  );
 }
 
 export function SidebarLayout({ children }: SidebarLayoutProps) {
@@ -68,6 +109,10 @@ export function SidebarLayout({ children }: SidebarLayoutProps) {
 
   const handleOpenCommandMenu = useCallback(() => {
     setIsCommandMenuOpen((prev) => !prev);
+  }, []);
+
+  const handleSearchSessions = useCallback(() => {
+    setIsCommandMenuOpen(true);
   }, []);
 
   useGlobalShortcuts({
@@ -111,7 +156,13 @@ export function SidebarLayout({ children }: SidebarLayoutProps) {
   }
 
   return (
-    <SidebarContext.Provider value={sidebar}>
+    <SidebarContext.Provider
+      value={{
+        ...sidebar,
+        searchSessions: handleSearchSessions,
+        newSession: handleNewSession,
+      }}
+    >
       <div className="flex h-dvh overflow-hidden">
         {/* Mobile: overlay backdrop */}
         {isMobile && (
