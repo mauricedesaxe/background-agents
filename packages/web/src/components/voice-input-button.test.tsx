@@ -111,3 +111,19 @@ it("releases microphone access that resolves after unmount", async () => {
   await waitFor(() => expect(stopTrack).toHaveBeenCalledOnce());
   expect(fetch).not.toHaveBeenCalled();
 });
+
+it("requests microphone access once while permission is pending", async () => {
+  const getUserMedia = vi.fn(() => new Promise<MediaStream>(() => {}));
+  Object.defineProperty(navigator, "mediaDevices", {
+    configurable: true,
+    value: { getUserMedia },
+  });
+  const user = userEvent.setup();
+  render(<VoiceInputButton onTranscript={vi.fn()} />);
+
+  await user.click(screen.getByRole("button", { name: "Start voice input" }));
+  const requestingButton = screen.getByRole("button", { name: "Starting voice input" });
+  await user.click(requestingButton);
+
+  expect(getUserMedia).toHaveBeenCalledOnce();
+});
