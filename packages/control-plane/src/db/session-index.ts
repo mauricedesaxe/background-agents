@@ -185,6 +185,13 @@ export class SessionReplayConflictError extends Error {
   }
 }
 
+export class ParentSessionInactiveError extends Error {
+  constructor(parentSessionId: string) {
+    super(`Parent session ${parentSessionId} is no longer active`);
+    this.name = "ParentSessionInactiveError";
+  }
+}
+
 function isDuplicateKeyError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /unique constraint|constraint failed|duplicate/i.test(message);
@@ -195,11 +202,16 @@ export class SessionIndexStore {
 
   async create(session: SessionEntry): Promise<void> {
     const repository = normalizeSessionRepository(session);
+    const parentSessionId = session.parentSessionId ?? null;
 
     const sessionStmt = this.db
       .prepare(
         `INSERT INTO sessions (id, title, repo_owner, repo_name, model, reasoning_effort, base_branch, status, parent_session_id, spawn_source, spawn_depth, automation_id, automation_run_id, scm_login, user_id, environment_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE ? IS NULL OR EXISTS (
+           SELECT 1 FROM sessions
+           WHERE id = ? AND status NOT IN (${TERMINAL_STATUS_SQL})
+         )`
       )
       .bind(
         session.id,
@@ -210,7 +222,7 @@ export class SessionIndexStore {
         session.reasoningEffort,
         repository.baseBranch,
         session.status,
-        session.parentSessionId ?? null,
+        parentSessionId,
         session.spawnSource ?? "user",
         session.spawnDepth ?? 0,
         session.automationId ?? null,
@@ -219,14 +231,17 @@ export class SessionIndexStore {
         session.userId ?? null,
         session.environmentId ?? null,
         session.createdAt,
-        session.updatedAt
+        session.updatedAt,
+        parentSessionId,
+        parentSessionId
       );
 
     const repositoryStmts = (session.repositories ?? []).map((repo, position) =>
       this.db
         .prepare(
           `INSERT INTO session_repositories (session_id, position, repo_owner, repo_name, repo_id, base_branch)
-           VALUES (?, ?, ?, ?, ?, ?)`
+           SELECT ?, ?, ?, ?, ?, ?
+           WHERE EXISTS (SELECT 1 FROM sessions WHERE id = ?)`
         )
         .bind(
           session.id,
@@ -234,13 +249,18 @@ export class SessionIndexStore {
           normalizeRepoIdentifier(repo.repoOwner),
           normalizeRepoIdentifier(repo.repoName),
           repo.repoId,
-          repo.baseBranch
+          repo.baseBranch,
+          session.id
         )
     );
 
     try {
-      await this.db.batch([sessionStmt, ...repositoryStmts]);
+      const [result] = await this.db.batch([sessionStmt, ...repositoryStmts]);
+      if ((result.meta.changes ?? 0) === 0 && parentSessionId) {
+        throw new ParentSessionInactiveError(parentSessionId);
+      }
     } catch (error) {
+      if (error instanceof ParentSessionInactiveError) throw error;
       if (!isDuplicateKeyError(error)) throw error;
       await this.verifyReplay(session, repository);
     }
@@ -537,16 +557,16 @@ export class SessionIndexStore {
     return (result.results || []).map(toEntry);
   }
 
-  /** List non-terminal descendants deepest-first so cancellation runs bottom-up. */
-  async listActiveDescendantIds(parentSessionId: string): Promise<string[]> {
+  /** List every descendant deepest-first so authoritative session state decides cancellation. */
+  async listDescendantIds(parentSessionId: string): Promise<string[]> {
     const result = await this.db
       .prepare(
-        `WITH RECURSIVE descendants(id, status, depth, path) AS (
-           SELECT id, status, 1,
+        `WITH RECURSIVE descendants(id, depth, path) AS (
+           SELECT id, 1,
              '/' || hex(CAST(? AS BLOB)) || '/' || hex(CAST(id AS BLOB)) || '/'
            FROM sessions WHERE parent_session_id = ?
            UNION ALL
-           SELECT sessions.id, sessions.status, descendants.depth + 1,
+           SELECT sessions.id, descendants.depth + 1,
              descendants.path || hex(CAST(sessions.id AS BLOB)) || '/'
            FROM sessions
            JOIN descendants ON sessions.parent_session_id = descendants.id
@@ -555,9 +575,7 @@ export class SessionIndexStore {
              '/' || hex(CAST(sessions.id AS BLOB)) || '/'
            ) = 0
          )
-         SELECT id FROM descendants
-         WHERE status NOT IN (${TERMINAL_STATUS_SQL})
-         ORDER BY depth DESC`
+         SELECT id FROM descendants ORDER BY depth DESC`
       )
       .bind(parentSessionId, parentSessionId)
       .all<{ id: string }>();

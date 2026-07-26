@@ -340,6 +340,7 @@ describe("Child session operations (list, get, cancel)", () => {
           ...[...deeperDescendantNames].reverse(),
           greatGrandchildName,
           grandchildName,
+          completedDescendantName,
         ],
       });
       expect((await store.get(childName))?.status).toBe("cancelled");
@@ -349,15 +350,39 @@ describe("Child session operations (list, get, cancel)", () => {
         expect((await store.get(descendantName))?.status).toBe("cancelled");
       }
       expect((await store.get(siblingName))?.status).toBe("active");
-      expect((await store.get(completedDescendantName))?.status).toBe("completed");
+      expect((await store.get(completedDescendantName))?.status).toBe("cancelled");
+    });
+
+    it("cancels a live descendant whose indexed status is stale", async () => {
+      const { pName, childName, sandboxToken, store } = await setupParentAndChild({
+        childStatus: "active",
+      });
+      const grandchildName = await setupNestedSession(store, childName, 2, "stale-grandchild");
+      await store.updateStatus(grandchildName, "completed");
+
+      const res = await SELF.fetch(
+        `https://test.local/sessions/${pName}/children/${childName}/cancel`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${sandboxToken}` },
+        }
+      );
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({
+        status: "cancelled",
+        cancelledDescendantIds: [grandchildName],
+      });
+      expect((await store.get(grandchildName))?.status).toBe("cancelled");
     });
 
     it("continues cascading when the direct child is already terminal", async () => {
       const { pName, childName, childStub, sandboxToken, store } = await setupParentAndChild({
-        childStatus: "cancelled",
+        childStatus: "active",
       });
-      await queryDO(childStub, "UPDATE session SET status = 'cancelled'");
       const grandchildName = await setupNestedSession(store, childName, 2, "grandchild-retry");
+      await store.updateStatus(childName, "cancelled");
+      await queryDO(childStub, "UPDATE session SET status = 'cancelled'");
 
       const res = await SELF.fetch(
         `https://test.local/sessions/${pName}/children/${childName}/cancel`,

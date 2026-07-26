@@ -62,7 +62,7 @@ export async function handleCancelChild(
 
   const response = await requestCancellation(ctx, childId);
 
-  const descendantIds = await sessionStore.listActiveDescendantIds(childId);
+  const descendantIds = await sessionStore.listDescendantIds(childId);
   const cancelledDescendantIds: string[] = [];
   const failedSessionIds = response.ok || response.status === 409 ? [] : [childId];
   for (const descendantId of descendantIds) {
