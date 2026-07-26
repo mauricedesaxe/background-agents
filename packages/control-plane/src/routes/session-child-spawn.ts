@@ -7,7 +7,7 @@ import {
   spawnContextSchema,
 } from "@open-inspect/shared";
 import { generateId } from "../auth/crypto";
-import { ParentSessionInactiveError, SessionIndexStore } from "../db/session-index";
+import { ParentSessionSpawnRejectedError, SessionIndexStore } from "../db/session-index";
 import { createLogger } from "../logger";
 import { SessionInternalPaths } from "../session/contracts";
 import { initializeSession, type SessionInitInput } from "../session/initialize";
@@ -49,7 +49,7 @@ async function handleSpawnChild(
     return error("Parent session not found", 404);
   }
   if (TERMINAL_PARENT_STATUSES.has(parentSession.status)) {
-    return error("Parent session is no longer active", 409);
+    return error("Parent session no longer accepts child sessions", 409);
   }
   const parentUserId = parentSession.userId ?? null;
   const parentEnvironmentId = parentSession.environmentId ?? null;
@@ -186,8 +186,8 @@ async function handleSpawnChild(
   try {
     await initializeSession(env, input, ctx);
   } catch (e) {
-    if (e instanceof ParentSessionInactiveError) {
-      return error("Parent session is no longer active", 409);
+    if (e instanceof ParentSessionSpawnRejectedError) {
+      return error("Parent session no longer accepts child sessions", 409);
     }
     logger.error("Failed to initialize child session", {
       error: e instanceof Error ? e.message : String(e),

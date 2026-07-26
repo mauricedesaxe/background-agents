@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { SELF, env } from "cloudflare:test";
-import { ParentSessionInactiveError, SessionIndexStore } from "../../src/db/session-index";
+import { ParentSessionSpawnRejectedError, SessionIndexStore } from "../../src/db/session-index";
 import { cleanD1Tables } from "./cleanup";
 import {
   initNamedSession,
@@ -424,10 +424,98 @@ describe("Child session operations (list, get, cancel)", () => {
             createdAt: now,
             updatedAt: now,
           })
-        ).rejects.toBeInstanceOf(ParentSessionInactiveError);
+        ).rejects.toBeInstanceOf(ParentSessionSpawnRejectedError);
       } finally {
         await env.DB.prepare(`DROP TRIGGER IF EXISTS ${triggerName}`).run();
       }
+    });
+
+    it("rejects initialization when cancellation sees an indexed but empty child DO", async () => {
+      const pName = parentName();
+      const childName = `child-before-init-${Date.now()}`;
+      const { stub: parentStub } = await initNamedSession(pName, {
+        repoOwner: "acme",
+        repoName: "web-app",
+        userId: "user-1",
+      });
+      const sandboxToken = `sb-before-init-${Date.now()}`;
+      await seedSandboxAuth(parentStub, { authToken: sandboxToken, sandboxId: "sb-before-init" });
+
+      const store = new SessionIndexStore(env.DB);
+      const now = Date.now();
+      await store.create({
+        id: pName,
+        title: "Parent Session",
+        repoOwner: "acme",
+        repoName: "web-app",
+        model: "anthropic/claude-sonnet-4-6",
+        reasoningEffort: null,
+        baseBranch: null,
+        status: "active",
+        spawnDepth: 0,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await store.create({
+        id: childName,
+        title: "Child before init",
+        repoOwner: "acme",
+        repoName: "web-app",
+        model: "anthropic/claude-sonnet-4-6",
+        reasoningEffort: null,
+        baseBranch: "main",
+        status: "created",
+        parentSessionId: pName,
+        spawnSource: "agent",
+        spawnDepth: 1,
+        createdAt: now + 1,
+        updatedAt: now + 1,
+      });
+
+      const cancelResponse = await SELF.fetch(
+        `https://test.local/sessions/${pName}/children/${childName}/cancel`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${sandboxToken}` },
+        }
+      );
+      expect(cancelResponse.status).toBe(502);
+
+      const childStub = env.SESSION.get(env.SESSION.idFromName(childName));
+      const initResponse = await childStub.fetch("http://internal/internal/init", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionName: childName,
+          repoOwner: "acme",
+          repoName: "web-app",
+          repoId: 123,
+          branch: "main",
+          repositories: [
+            {
+              repoOwner: "acme",
+              repoName: "web-app",
+              repoId: 123,
+              baseBranch: "main",
+            },
+          ],
+          model: "anthropic/claude-sonnet-4-6",
+          userId: "user-1",
+          parentSessionId: pName,
+          spawnSource: "agent",
+          spawnDepth: 1,
+        }),
+      });
+
+      expect(initResponse.status).toBe(409);
+      await expect(initResponse.json()).resolves.toEqual({
+        error: "Session initialization was cancelled",
+      });
+      const [{ count }] = await queryDO<{ count: number }>(
+        childStub,
+        "SELECT COUNT(*) AS count FROM session"
+      );
+      expect(count).toBe(0);
     });
 
     it("continues cascading when the direct child is already terminal", async () => {

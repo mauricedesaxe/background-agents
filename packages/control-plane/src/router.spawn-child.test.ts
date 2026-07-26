@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleRequest } from "./router";
 import { generateInternalToken } from "./auth/internal";
-import { ParentSessionInactiveError, SessionIndexStore } from "./db/session-index";
+import { ParentSessionSpawnRejectedError, SessionIndexStore } from "./db/session-index";
 import { SessionInternalPaths } from "./session/contracts";
 
 const integrationSettingsMocks = vi.hoisted(() => ({
@@ -10,8 +10,8 @@ const integrationSettingsMocks = vi.hoisted(() => ({
 }));
 
 const sessionIndexMocks = vi.hoisted(() => {
-  class ParentSessionInactiveError extends Error {}
-  return { ParentSessionInactiveError };
+  class ParentSessionSpawnRejectedError extends Error {}
+  return { ParentSessionSpawnRejectedError };
 });
 
 vi.mock("./db/session-index", () => ({
@@ -309,14 +309,16 @@ describe("handleSpawnChild prompt enqueue handling", () => {
     const response = await makeRequest(env);
 
     expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toEqual({ error: "Parent session is no longer active" });
+    await expect(response.json()).resolves.toEqual({
+      error: "Parent session no longer accepts child sessions",
+    });
     expect(parentFetch).not.toHaveBeenCalled();
     expect(store.create).not.toHaveBeenCalled();
   });
 
   it("rejects a child when cancellation wins the creation race", async () => {
     const store = makeStore();
-    store.create.mockRejectedValue(new ParentSessionInactiveError(parentId));
+    store.create.mockRejectedValue(new ParentSessionSpawnRejectedError(parentId));
     vi.mocked(SessionIndexStore).mockImplementation(function () {
       return store as never;
     });
@@ -336,7 +338,9 @@ describe("handleSpawnChild prompt enqueue handling", () => {
     const response = await makeRequest(env);
 
     expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toEqual({ error: "Parent session is no longer active" });
+    await expect(response.json()).resolves.toEqual({
+      error: "Parent session no longer accepts child sessions",
+    });
   });
 
   it("returns 500 for a malformed parent spawn context", async () => {

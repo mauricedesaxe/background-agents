@@ -69,6 +69,7 @@ export interface SessionLifecycleHandlerDeps {
   generateId: (bytes?: number) => string;
   now: () => number;
   scheduleWarmSandbox: () => void;
+  canInitializeSession: (sessionId: string) => Promise<boolean>;
   getSession: () => SessionRow | null;
   getSandbox: () => SandboxRow | null;
   getSessionRepositoryRows: () => ReturnType<SessionRepository["getSessionRepositoryRows"]>;
@@ -207,6 +208,10 @@ export function createSessionLifecycleHandler(
           : repoOwner !== null && repoName !== null && body.repoId != null && baseBranch !== null
             ? [{ repoOwner, repoName, repoId: body.repoId, baseBranch }]
             : [];
+
+      if (!(await deps.canInitializeSession(sessionName))) {
+        return Response.json({ error: "Session initialization was cancelled" }, { status: 409 });
+      }
 
       const existing = deps.getSession();
       if (existing) {

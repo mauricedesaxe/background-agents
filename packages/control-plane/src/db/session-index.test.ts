@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { ParentSessionInactiveError, SessionIndexStore } from "./session-index";
+import { ParentSessionSpawnRejectedError, SessionIndexStore } from "./session-index";
 import type { SessionEntry } from "./session-index";
 
 type SessionRow = {
@@ -11,7 +11,7 @@ type SessionRow = {
   reasoning_effort: string | null;
   base_branch: string | null;
   status: string;
-  spawn_closed_at: number | null;
+  spawn_closed: number;
   parent_session_id: string | null;
   spawn_source: "user" | "agent" | "automation";
   spawn_depth: number;
@@ -61,8 +61,9 @@ const QUERY_PATTERNS = {
   SELECT_BY_PARENT:
     /^SELECT \* FROM sessions WHERE parent_session_id = \? ORDER BY created_at DESC$/,
   SELECT_DESCENDANTS: /^WITH RECURSIVE descendants/,
-  CLOSE_SPAWNING: /^WITH RECURSIVE subtree.*UPDATE sessions SET spawn_closed_at/,
+  CLOSE_SPAWNING: /^WITH RECURSIVE subtree.*UPDATE sessions SET spawn_closed/,
   SELECT_1_CHILD: /^SELECT 1 FROM sessions WHERE id = \? AND parent_session_id = \?$/,
+  SELECT_CAN_INITIALIZE: /^SELECT spawn_closed FROM sessions WHERE id = \?$/,
   SELECT_SPAWN_DEPTH: /^SELECT spawn_depth FROM sessions WHERE id = \?$/,
 } as const;
 
@@ -108,6 +109,11 @@ class FakeD1Database {
         return { "1": 1 };
       }
       return null;
+    }
+
+    if (QUERY_PATTERNS.SELECT_CAN_INITIALIZE.test(normalized)) {
+      const row = this.rows.get(args[0] as string);
+      return row ? { spawn_closed: row.spawn_closed } : null;
     }
 
     if (QUERY_PATTERNS.SELECT_SPAWN_DEPTH.test(normalized)) {
@@ -235,7 +241,7 @@ class FakeD1Database {
         requiredParentId !== checkedParentId ||
         (requiredParentId &&
           (!parent ||
-            parent.spawn_closed_at !== null ||
+            parent.spawn_closed !== 0 ||
             ["completed", "failed", "archived", "cancelled"].includes(parent.status)))
       ) {
         return { meta: { changes: 0 } };
@@ -249,7 +255,7 @@ class FakeD1Database {
         reasoning_effort: reasoningEffort,
         base_branch: baseBranch,
         status,
-        spawn_closed_at: null,
+        spawn_closed: 0,
         parent_session_id: parentSessionId,
         spawn_source: spawnSource,
         spawn_depth: spawnDepth,
@@ -285,7 +291,7 @@ class FakeD1Database {
     }
 
     if (QUERY_PATTERNS.CLOSE_SPAWNING.test(normalized)) {
-      const [rootId, closedAt] = args as [string, number];
+      const [rootId] = args as [string];
       let currentIds = [rootId];
       const visited = new Set<string>();
       while (currentIds.length > 0) {
@@ -294,7 +300,7 @@ class FakeD1Database {
           if (visited.has(id)) continue;
           visited.add(id);
           const row = this.rows.get(id);
-          if (row) row.spawn_closed_at ??= closedAt;
+          if (row) row.spawn_closed = 1;
           nextIds.push(
             ...Array.from(this.rows.values())
               .filter((candidate) => candidate.parent_session_id === id)
@@ -633,7 +639,7 @@ describe("SessionIndexStore", () => {
             spawnDepth: 1,
           })
         )
-      ).rejects.toBeInstanceOf(ParentSessionInactiveError);
+      ).rejects.toBeInstanceOf(ParentSessionSpawnRejectedError);
       await expect(store.get("child-1")).resolves.toBeNull();
     });
 
@@ -960,7 +966,7 @@ describe("SessionIndexStore", () => {
               spawnDepth: 3,
             })
           )
-        ).rejects.toBeInstanceOf(ParentSessionInactiveError);
+        ).rejects.toBeInstanceOf(ParentSessionSpawnRejectedError);
       });
 
       it("closes a session that has no descendants", async () => {
@@ -974,7 +980,7 @@ describe("SessionIndexStore", () => {
               spawnDepth: 2,
             })
           )
-        ).rejects.toBeInstanceOf(ParentSessionInactiveError);
+        ).rejects.toBeInstanceOf(ParentSessionSpawnRejectedError);
       });
     });
 
