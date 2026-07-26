@@ -11,6 +11,7 @@ type SessionRow = {
   reasoning_effort: string | null;
   base_branch: string | null;
   status: string;
+  spawn_closed_at: number | null;
   parent_session_id: string | null;
   spawn_source: "user" | "agent" | "automation";
   spawn_depth: number;
@@ -60,6 +61,7 @@ const QUERY_PATTERNS = {
   SELECT_BY_PARENT:
     /^SELECT \* FROM sessions WHERE parent_session_id = \? ORDER BY created_at DESC$/,
   SELECT_DESCENDANTS: /^WITH RECURSIVE descendants/,
+  CLOSE_SPAWNING: /^WITH RECURSIVE subtree.*UPDATE sessions SET spawn_closed_at/,
   SELECT_1_CHILD: /^SELECT 1 FROM sessions WHERE id = \? AND parent_session_id = \?$/,
   SELECT_SPAWN_DEPTH: /^SELECT spawn_depth FROM sessions WHERE id = \?$/,
 } as const;
@@ -81,7 +83,7 @@ class FakeD1Database {
   async batch(statements: FakePreparedStatement[]) {
     const results = [];
     for (const statement of statements) {
-      results.push(await statement.run());
+      results.push(await statement.executeBatch());
     }
     return results;
   }
@@ -232,7 +234,9 @@ class FakeD1Database {
       if (
         requiredParentId !== checkedParentId ||
         (requiredParentId &&
-          (!parent || ["completed", "failed", "archived", "cancelled"].includes(parent.status)))
+          (!parent ||
+            parent.spawn_closed_at !== null ||
+            ["completed", "failed", "archived", "cancelled"].includes(parent.status)))
       ) {
         return { meta: { changes: 0 } };
       }
@@ -245,6 +249,7 @@ class FakeD1Database {
         reasoning_effort: reasoningEffort,
         base_branch: baseBranch,
         status,
+        spawn_closed_at: null,
         parent_session_id: parentSessionId,
         spawn_source: spawnSource,
         spawn_depth: spawnDepth,
@@ -277,6 +282,28 @@ class FakeD1Database {
         return { meta: { changes: 1 } };
       }
       return { meta: { changes: 0 } };
+    }
+
+    if (QUERY_PATTERNS.CLOSE_SPAWNING.test(normalized)) {
+      const [rootId, closedAt] = args as [string, number];
+      let currentIds = [rootId];
+      const visited = new Set<string>();
+      while (currentIds.length > 0) {
+        const nextIds: string[] = [];
+        for (const id of currentIds) {
+          if (visited.has(id)) continue;
+          visited.add(id);
+          const row = this.rows.get(id);
+          if (row) row.spawn_closed_at ??= closedAt;
+          nextIds.push(
+            ...Array.from(this.rows.values())
+              .filter((candidate) => candidate.parent_session_id === id)
+              .map((candidate) => candidate.id)
+          );
+        }
+        currentIds = nextIds;
+      }
+      return { meta: { changes: visited.size } };
     }
 
     if (QUERY_PATTERNS.UPDATE_TITLE_IF_NEWER.test(normalized)) {
@@ -457,6 +484,13 @@ class FakePreparedStatement {
 
   async run() {
     return this.db.run(this.query, this.bound);
+  }
+
+  async executeBatch() {
+    if (QUERY_PATTERNS.SELECT_DESCENDANTS.test(normalizeQuery(this.query))) {
+      return { results: this.db.all(this.query, this.bound) };
+    }
+    return this.run();
   }
 }
 
@@ -897,8 +931,8 @@ describe("SessionIndexStore", () => {
       });
     });
 
-    describe("listDescendantIds", () => {
-      it("returns every descendant deepest-first through terminal ancestors", async () => {
+    describe("closeSpawningAndListDescendantIds", () => {
+      it("closes the subtree and returns every descendant deepest-first", async () => {
         await store.updateStatus("child-2", "active");
         await store.create(
           makeSession({
@@ -911,15 +945,36 @@ describe("SessionIndexStore", () => {
         );
         await store.updateStatus("child-2", "completed");
 
-        await expect(store.listDescendantIds(parentId)).resolves.toEqual([
+        await expect(store.closeSpawningAndListDescendantIds(parentId)).resolves.toEqual([
           "grandchild-1",
           "child-1",
           "child-2",
         ]);
+
+        await expect(
+          store.create(
+            makeSession({
+              id: "late-child",
+              parentSessionId: "grandchild-1",
+              spawnSource: "agent",
+              spawnDepth: 3,
+            })
+          )
+        ).rejects.toBeInstanceOf(ParentSessionInactiveError);
       });
 
-      it("returns an empty array when no descendants exist", async () => {
-        await expect(store.listDescendantIds("no-children")).resolves.toEqual([]);
+      it("closes a session that has no descendants", async () => {
+        await expect(store.closeSpawningAndListDescendantIds("child-1")).resolves.toEqual([]);
+        await expect(
+          store.create(
+            makeSession({
+              id: "late-child",
+              parentSessionId: "child-1",
+              spawnSource: "agent",
+              spawnDepth: 2,
+            })
+          )
+        ).rejects.toBeInstanceOf(ParentSessionInactiveError);
       });
     });
 

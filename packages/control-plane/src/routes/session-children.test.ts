@@ -49,9 +49,37 @@ describe("handleCancelChild", () => {
       cancelledDescendantIds: ["later-success"],
     });
   });
+
+  it("does not cancel any session when the spawn fence fails", async () => {
+    const db = createDb([], true);
+    const fetch = vi.fn<SessionRuntimeClient["fetch"]>();
+    const match = "/sessions/parent/children/child/cancel".match(
+      parsePattern("/sessions/:id/children/:childId/cancel")
+    );
+    if (!match) throw new Error("Expected route match");
+
+    const response = await handleCancelChild(
+      new Request("https://test.local/sessions/parent/children/child/cancel", { method: "POST" }),
+      {} as Env,
+      match,
+      {
+        db,
+        metrics: {} as SessionRouteContext["metrics"],
+        request_id: "request-id",
+        trace_id: "trace-id",
+        sessionRuntime: { fetch },
+      }
+    );
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({
+      error: "Cancellation could not prevent new child sessions",
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
 });
 
-function createDb(descendantIds: string[]): SqlDatabase {
+function createDb(descendantIds: string[], failFence = false): SqlDatabase {
   return {
     prepare(query) {
       let boundValues: unknown[] = [];
@@ -77,7 +105,8 @@ function createDb(descendantIds: string[]): SqlDatabase {
       return statement;
     },
     async batch<T>() {
-      return [] as SqlResult<T>[];
+      if (failFence) throw new Error("forced fence failure");
+      return [result([]), result(descendantIds.map((id) => ({ id })))] as SqlResult<T>[];
     },
   };
 }

@@ -191,6 +191,20 @@ describe("createChildSessionsHandler", () => {
     expect(await response.json()).toEqual({ error: "No owner participant found" });
   });
 
+  it.each(["completed", "failed", "archived", "cancelled"] as const)(
+    "returns 409 when the %s session requests spawn context",
+    async (status) => {
+      const { handler, getSession, repository } = createHandler();
+      getSession.mockReturnValue(createSession({ status }));
+
+      const response = handler.getSpawnContext();
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: "Session is no longer active" });
+      expect(repository.listParticipants).not.toHaveBeenCalled();
+    }
+  );
+
   it("maps spawn context from session and owner participant", async () => {
     const { handler, getSession, repository } = createHandler();
     getSession.mockReturnValue(createSession({ reasoning_effort: "high" }));

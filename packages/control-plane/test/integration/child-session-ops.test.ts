@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { SELF, env } from "cloudflare:test";
-import { SessionIndexStore } from "../../src/db/session-index";
+import { ParentSessionInactiveError, SessionIndexStore } from "../../src/db/session-index";
 import { cleanD1Tables } from "./cleanup";
 import {
   initNamedSession,
@@ -374,6 +374,60 @@ describe("Child session operations (list, get, cancel)", () => {
         cancelledDescendantIds: [grandchildName],
       });
       expect((await store.get(grandchildName))?.status).toBe("cancelled");
+    });
+
+    it("blocks a late spawn when cancellation status projection fails", async () => {
+      const { pName, childName, childStub, sandboxToken, store } = await setupParentAndChild({
+        childStatus: "active",
+      });
+      const triggerName = `fail_cancel_projection_${Date.now()}`;
+      await env.DB.prepare(
+        `CREATE TRIGGER ${triggerName}
+         BEFORE UPDATE OF status ON sessions
+         WHEN OLD.id = '${childName}' AND NEW.status = 'cancelled'
+         BEGIN
+           SELECT RAISE(ABORT, 'forced status projection failure');
+         END;`
+      ).run();
+
+      try {
+        const res = await SELF.fetch(
+          `https://test.local/sessions/${pName}/children/${childName}/cancel`,
+          {
+            method: "POST",
+            headers: { Authorization: `Bearer ${sandboxToken}` },
+          }
+        );
+
+        expect(res.status).toBe(200);
+        expect((await store.get(childName))?.status).toBe("active");
+        const [childSession] = await queryDO<{ status: string }>(
+          childStub,
+          "SELECT status FROM session LIMIT 1"
+        );
+        expect(childSession.status).toBe("cancelled");
+
+        const now = Date.now();
+        await expect(
+          store.create({
+            id: `late-child-${now}`,
+            title: "Late child",
+            repoOwner: "acme",
+            repoName: "web-app",
+            model: "anthropic/claude-sonnet-4-6",
+            reasoningEffort: null,
+            baseBranch: null,
+            status: "created",
+            parentSessionId: childName,
+            spawnSource: "agent",
+            spawnDepth: 2,
+            createdAt: now,
+            updatedAt: now,
+          })
+        ).rejects.toBeInstanceOf(ParentSessionInactiveError);
+      } finally {
+        await env.DB.prepare(`DROP TRIGGER IF EXISTS ${triggerName}`).run();
+      }
     });
 
     it("continues cascading when the direct child is already terminal", async () => {

@@ -60,9 +60,14 @@ export async function handleCancelChild(
     return error("Child session not found", 404);
   }
 
-  const response = await requestCancellation(ctx, childId);
+  let descendantIds: string[];
+  try {
+    descendantIds = await sessionStore.closeSpawningAndListDescendantIds(childId);
+  } catch {
+    return error("Cancellation could not prevent new child sessions", 502);
+  }
 
-  const descendantIds = await sessionStore.listDescendantIds(childId);
+  const response = await requestCancellation(ctx, childId);
   const cancelledDescendantIds: string[] = [];
   const failedSessionIds = response.ok || response.status === 409 ? [] : [childId];
   for (const descendantId of descendantIds) {
