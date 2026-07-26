@@ -29,6 +29,7 @@ import { applyBoardMutation, boardMutateRequestSchema } from "./mutation";
 interface SocketAttachment {
   sessionId: string;
   snapshot: SessionStateSnapshot | null;
+  isReadonly: boolean;
 }
 
 export class BoardRoom extends DurableObject<Env> {
@@ -59,7 +60,14 @@ export class BoardRoom extends DurableObject<Env> {
       clientTimeout: Infinity,
       onSessionSnapshot: (sessionId, snapshot) => {
         const ws = this.sessionIdToWs.get(sessionId);
-        if (ws) ws.serializeAttachment({ sessionId, snapshot } satisfies SocketAttachment);
+        if (ws) {
+          const attachment = ws.deserializeAttachment() as SocketAttachment | null;
+          ws.serializeAttachment({
+            sessionId,
+            snapshot,
+            isReadonly: attachment?.isReadonly ?? false,
+          } satisfies SocketAttachment);
+        }
       },
     });
 
@@ -75,7 +83,11 @@ export class BoardRoom extends DurableObject<Env> {
           snapshot: attachment.snapshot,
         });
       } else {
-        this.room.handleSocketConnect({ sessionId: attachment.sessionId, socket: ws });
+        this.room.handleSocketConnect({
+          sessionId: attachment.sessionId,
+          socket: ws,
+          isReadonly: attachment.isReadonly,
+        });
       }
     }
 
@@ -99,7 +111,9 @@ export class BoardRoom extends DurableObject<Env> {
 
   /** Accept a browser peer. `sessionId` is tldraw's per-connection id. */
   private handleConnect(request: Request): Response {
-    const sessionId = new URL(request.url).searchParams.get("sessionId");
+    const url = new URL(request.url);
+    const sessionId = url.searchParams.get("sessionId");
+    const isReadonly = url.searchParams.get("access") === "readonly";
     if (!sessionId) {
       return Response.json({ error: "Missing sessionId" }, { status: 400 });
     }
@@ -108,11 +122,15 @@ export class BoardRoom extends DurableObject<Env> {
     const client = pair[0];
     const server = pair[1];
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ sessionId, snapshot: null } satisfies SocketAttachment);
+    server.serializeAttachment({
+      sessionId,
+      snapshot: null,
+      isReadonly,
+    } satisfies SocketAttachment);
     this.sessionIdToWs.set(sessionId, server);
 
     try {
-      this.getOrCreateRoom().handleSocketConnect({ sessionId, socket: server });
+      this.getOrCreateRoom().handleSocketConnect({ sessionId, socket: server, isReadonly });
     } catch (e) {
       this.log.error("board.connect_failed", { event: "board.connect_failed", error: asError(e) });
       return Response.json({ error: "Board room unavailable" }, { status: 500 });

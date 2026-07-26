@@ -1,26 +1,8 @@
 "use client";
 
-import "tldraw/tldraw.css";
 import { useCallback } from "react";
-import { useSync } from "@tldraw/sync";
-import { Tldraw, type TLAssetStore } from "tldraw";
 import { WS_URL } from "@/lib/ws-url";
-
-/**
- * Boards are shape-only: no embedded image/video bytes, so there is no R2 asset
- * path. `useSync` still requires an asset store, so provide one that refuses
- * uploads; `resolve` never runs because no asset is ever created.
- */
-const boardAssets: TLAssetStore = {
-  upload() {
-    return Promise.reject(new Error("Image assets are not supported on boards"));
-  },
-  resolve: () => null,
-};
-
-// Optional: without a key, tldraw shows the free "Made with tldraw" watermark.
-// Set on a real domain to remove it (requires a commercial license).
-const LICENSE_KEY = process.env.NEXT_PUBLIC_TLDRAW_LICENSE_KEY;
+import { BoardCanvas, useBoardSync } from "./board-canvas";
 
 export interface BoardEditorProps {
   sessionId: string;
@@ -38,9 +20,8 @@ export interface BoardEditorProps {
  * raw WebSocket can't send an Authorization header. `useSync` appends its own
  * `sessionId` param via URLSearchParams, so the `?token=` here is preserved.
  *
- * No `assets` store is passed: boards are shape-only (no embedded images), so
- * there is no R2 asset path. The default `tldraw` shape/binding set matches the
- * server room schema (both pinned to one tldraw version).
+ * Boards are shape-only, so the shared board asset store rejects uploads. The
+ * default `tldraw` shape/binding set matches the server room schema.
  */
 export default function BoardEditor({ sessionId, boardId }: BoardEditorProps) {
   const uri = useCallback(async () => {
@@ -52,11 +33,11 @@ export default function BoardEditor({ sessionId, boardId }: BoardEditorProps) {
     return `${WS_URL}/sessions/${sessionId}/board/${boardId}/ws?token=${encodeURIComponent(token)}`;
   }, [sessionId, boardId]);
 
-  const store = useSync({ uri, assets: boardAssets });
+  const store = useBoardSync(uri);
 
   return (
     <div className="absolute inset-0">
-      <Tldraw store={store} licenseKey={LICENSE_KEY} />
+      <BoardCanvas store={store} />
     </div>
   );
 }

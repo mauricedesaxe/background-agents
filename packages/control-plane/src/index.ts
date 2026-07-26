@@ -9,6 +9,11 @@ import { createLogger } from "./logger";
 import { SessionInternalPaths } from "./session/contracts";
 import { createSessionRuntimeClient } from "./session/runtime-client";
 import type { Env } from "./types";
+import { nowMs } from "./time";
+import {
+  BOARD_INSPECTION_TOKEN_PREFIX,
+  verifyBoardInspectionToken,
+} from "./board/inspection-token";
 
 const logger = createLogger("worker");
 
@@ -76,36 +81,54 @@ async function handleBoardWebSocket(
     return new Response("Authentication required", { status: 401 });
   }
 
-  const ctx = { trace_id: crypto.randomUUID(), request_id: crypto.randomUUID().slice(0, 8) };
-  let verifyResponse: Response;
-  try {
-    verifyResponse = await createSessionRuntimeClient(env, ctx).fetch(
+  const inspectionConnection = token.startsWith(BOARD_INSPECTION_TOKEN_PREFIX);
+  if (inspectionConnection) {
+    const result = await verifyBoardInspectionToken(token, env.TOKEN_ENCRYPTION_KEY, {
       sessionId,
-      SessionInternalPaths.verifyWsToken,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token }),
-      }
-    );
-  } catch (e) {
-    logger.error("board.ws.verify_unreachable", {
-      event: "board.ws.verify_unreachable",
-      session_id: sessionId,
-      board_id: boardId,
-      error: e instanceof Error ? e : String(e),
+      boardId,
+      nowMs: nowMs(),
     });
-    return new Response("Board authentication unavailable", { status: 503 });
-  }
+    if (!result.ok) {
+      logger.warn("board.ws.inspection_auth_failed", {
+        event: "board.ws.inspection_auth_failed",
+        session_id: sessionId,
+        board_id: boardId,
+        reason: result.error,
+      });
+      return new Response(`Invalid inspection token: ${result.error}`, { status: 401 });
+    }
+  } else {
+    const ctx = { trace_id: crypto.randomUUID(), request_id: crypto.randomUUID().slice(0, 8) };
+    let verifyResponse: Response;
+    try {
+      verifyResponse = await createSessionRuntimeClient(env, ctx).fetch(
+        sessionId,
+        SessionInternalPaths.verifyWsToken,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token }),
+        }
+      );
+    } catch (e) {
+      logger.error("board.ws.verify_unreachable", {
+        event: "board.ws.verify_unreachable",
+        session_id: sessionId,
+        board_id: boardId,
+        error: e instanceof Error ? e : String(e),
+      });
+      return new Response("Board authentication unavailable", { status: 503 });
+    }
 
-  if (!verifyResponse.ok) {
-    logger.warn("board.ws.auth_failed", {
-      event: "board.ws.auth_failed",
-      session_id: sessionId,
-      board_id: boardId,
-      http_status: verifyResponse.status,
-    });
-    return new Response("Invalid authentication token", { status: 401 });
+    if (!verifyResponse.ok) {
+      logger.warn("board.ws.auth_failed", {
+        event: "board.ws.auth_failed",
+        session_id: sessionId,
+        board_id: boardId,
+        http_status: verifyResponse.status,
+      });
+      return new Response("Invalid authentication token", { status: 401 });
+    }
   }
 
   logger.info("board.ws.connect", {
@@ -115,7 +138,10 @@ async function handleBoardWebSocket(
   });
 
   const stub = env.BOARD_ROOM.get(env.BOARD_ROOM.idFromName(boardId));
-  const response = await stub.fetch(request);
+  const boardUrl = new URL(request.url);
+  boardUrl.searchParams.delete("token");
+  if (inspectionConnection) boardUrl.searchParams.set("access", "readonly");
+  const response = await stub.fetch(new Request(boardUrl, request));
   if (response.webSocket) {
     return new Response(null, {
       status: 101,

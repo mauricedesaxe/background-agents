@@ -4,15 +4,17 @@
  * Create persists a `board` artifact on the session (which broadcasts
  * `artifact_created` to the web client, exactly like every other artifact).
  * Mutate and snapshot forward to the BoardRoom Durable Object keyed by boardId.
- * All three are sandbox-authenticated (the agent's `SANDBOX_AUTH_TOKEN`); the
- * browser reaches the board over a separate authenticated WebSocket (see the
- * board WS handler in index.ts).
+ * Inspect mints a short-lived, read-only browser URL. All four are
+ * sandbox-authenticated with the agent's `SANDBOX_AUTH_TOKEN`; browser sockets
+ * use participant or board-scoped inspection tokens in index.ts.
  */
 import { generateId } from "../auth/crypto";
 import { createLogger } from "../logger";
 import { BoardInternalPaths, buildBoardInternalUrl } from "../board/contracts";
+import { mintBoardInspectionToken } from "../board/inspection-token";
 import { SessionInternalPaths } from "../session/contracts";
 import { createSessionRuntimeClient } from "../session/runtime-client";
+import { addDuration, durationMs, nowMs } from "../time";
 import type { Env } from "../types";
 import { error, json, parsePattern, type RequestContext, type Route } from "./shared";
 
@@ -21,6 +23,12 @@ const logger = createLogger("board-routes");
 /** Board title cap — a label, not a document. */
 const BOARD_TITLE_MAX_LENGTH = 200;
 const DEFAULT_BOARD_TITLE = "Whiteboard";
+const BOARD_INSPECTION_TOKEN_TTL_MS = durationMs(2 * 60 * 1000);
+
+interface ArtifactSummary {
+  type: string;
+  metadata: Record<string, unknown> | null;
+}
 
 /**
  * Normalize a client-supplied board title: trim, fall back to a default when
@@ -32,6 +40,22 @@ export function normalizeBoardTitle(raw: unknown): string {
   return trimmed.length > BOARD_TITLE_MAX_LENGTH
     ? trimmed.slice(0, BOARD_TITLE_MAX_LENGTH)
     : trimmed;
+}
+
+export function hasBoardArtifact(artifacts: ArtifactSummary[], boardId: string): boolean {
+  return artifacts.some(
+    (artifact) => artifact.type === "board" && artifact.metadata?.boardId === boardId
+  );
+}
+
+export function buildBoardInspectionUrl(
+  webAppUrl: string,
+  sessionId: string,
+  boardId: string,
+  token: string
+): string {
+  const base = webAppUrl.replace(/\/$/, "");
+  return `${base}/board/inspect/${encodeURIComponent(sessionId)}/${encodeURIComponent(boardId)}#token=${encodeURIComponent(token)}`;
 }
 
 async function handleCreateBoard(
@@ -138,6 +162,39 @@ async function handleBoardSnapshot(
   return response;
 }
 
+async function handleInspectBoard(
+  _request: Request,
+  env: Env,
+  match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  const sessionId = match.groups?.id;
+  const boardId = match.groups?.boardId;
+  if (!sessionId || !boardId) return error("Session ID and board ID required", 400);
+  if (!env.WEB_APP_URL) return error("Board inspection is not configured", 503);
+
+  const artifactsResponse = await createSessionRuntimeClient(env, ctx).fetch(
+    sessionId,
+    SessionInternalPaths.artifacts
+  );
+  if (!artifactsResponse.ok) return error("Failed to verify board", 503);
+
+  let artifacts: ArtifactSummary[];
+  try {
+    const body = (await artifactsResponse.json()) as { artifacts?: unknown };
+    artifacts = Array.isArray(body.artifacts) ? (body.artifacts as ArtifactSummary[]) : [];
+  } catch {
+    return error("Failed to verify board", 503);
+  }
+  if (!hasBoardArtifact(artifacts, boardId)) return error("Board not found", 404);
+
+  const token = await mintBoardInspectionToken(
+    { sessionId, boardId, expiresAtMs: addDuration(nowMs(), BOARD_INSPECTION_TOKEN_TTL_MS) },
+    env.TOKEN_ENCRYPTION_KEY
+  );
+  return json({ url: buildBoardInspectionUrl(env.WEB_APP_URL, sessionId, boardId, token) });
+}
+
 export const boardRoutes: Route[] = [
   {
     method: "POST",
@@ -153,5 +210,10 @@ export const boardRoutes: Route[] = [
     method: "GET",
     pattern: parsePattern("/sessions/:id/board/:boardId/snapshot"),
     handler: handleBoardSnapshot,
+  },
+  {
+    method: "POST",
+    pattern: parsePattern("/sessions/:id/board/:boardId/inspect"),
+    handler: handleInspectBoard,
   },
 ];

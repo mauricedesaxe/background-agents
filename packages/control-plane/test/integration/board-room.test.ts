@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { env, SELF } from "cloudflare:test";
 import { BoardInternalPaths } from "../../src/board/contracts";
+import { mintBoardInspectionToken } from "../../src/board/inspection-token";
+import { boardSchema } from "../../src/board/schema";
+import { epochMs } from "../../src/time";
+import { getTlsyncProtocolVersion } from "@tldraw/sync-core";
+
+const INSPECTION_SECRET = "test-encryption-key-32chars-long!";
 
 /**
  * Exercises the BoardRoom Durable Object directly (the worker board routes just
@@ -35,6 +41,16 @@ async function snapshotIds(stub: DurableObjectStub): Promise<string[]> {
   expect(res.status).toBe(200);
   const snapshot = (await res.json()) as { documents: { state: { id: string } }[] };
   return snapshot.documents.map((d) => d.state.id);
+}
+
+function nextSocketMessage(socket: WebSocket): Promise<Record<string, unknown>> {
+  return new Promise((resolve) => {
+    socket.addEventListener(
+      "message",
+      (event) => resolve(JSON.parse(String(event.data)) as Record<string, unknown>),
+      { once: true }
+    );
+  });
 }
 
 describe("BoardRoom (integration)", () => {
@@ -133,5 +149,106 @@ describe("board WebSocket auth hop (integration)", () => {
       { headers: { Upgrade: "websocket" } }
     );
     expect(res.status).toBe(401);
+  });
+
+  it("lets an inspection peer observe changes but rejects its document mutations", async () => {
+    const token = await mintBoardInspectionToken(
+      {
+        sessionId: "s-inspect",
+        boardId: "b-inspect",
+        expiresAtMs: epochMs(Date.now() + 60_000),
+      },
+      INSPECTION_SECRET
+    );
+    const res = await SELF.fetch(
+      `https://example.com/sessions/s-inspect/board/b-inspect/ws?sessionId=peer-1&token=${encodeURIComponent(token)}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+
+    expect(res.status).toBe(101);
+    const socket = res.webSocket;
+    expect(socket).toBeDefined();
+    socket!.accept();
+
+    const connected = nextSocketMessage(socket!);
+    socket!.send(
+      JSON.stringify({
+        type: "connect",
+        connectRequestId: "inspection-connect",
+        lastServerClock: 0,
+        protocolVersion: getTlsyncProtocolVersion(),
+        schema: boardSchema.serialize(),
+      })
+    );
+    expect(await connected).toMatchObject({ type: "connect", isReadonly: true });
+
+    const rejected = nextSocketMessage(socket!);
+    socket!.send(
+      JSON.stringify({
+        type: "push",
+        clientClock: 1,
+        diff: { "page:inspection-write": ["put", page("page:inspection-write", "Rejected")] },
+      })
+    );
+    expect(await rejected).toMatchObject({
+      type: "data",
+      data: [{ type: "push_result", clientClock: 1, action: "discard" }],
+    });
+
+    const stub = env.BOARD_ROOM.get(env.BOARD_ROOM.idFromName("b-inspect"));
+    expect(await snapshotIds(stub)).not.toContain("page:inspection-write");
+
+    const observed = nextSocketMessage(socket!);
+    expect((await mutate(stub, { create: [page("page:server-write", "Observed")] })).status).toBe(
+      200
+    );
+    expect(await observed).toMatchObject({
+      type: "data",
+      data: [
+        {
+          type: "patch",
+          diff: { "page:server-write": ["put", page("page:server-write", "Observed")] },
+        },
+      ],
+    });
+    socket!.close();
+  });
+
+  it("rejects expired, cross-session, and cross-board inspection tokens", async () => {
+    const validScope = { sessionId: "s-inspect", boardId: "b-inspect" };
+    const cases = [
+      {
+        token: await mintBoardInspectionToken(
+          { ...validScope, expiresAtMs: epochMs(Date.now() - 1) },
+          INSPECTION_SECRET
+        ),
+        sessionId: validScope.sessionId,
+        boardId: validScope.boardId,
+      },
+      {
+        token: await mintBoardInspectionToken(
+          { ...validScope, expiresAtMs: epochMs(Date.now() + 60_000) },
+          INSPECTION_SECRET
+        ),
+        sessionId: "another-session",
+        boardId: validScope.boardId,
+      },
+      {
+        token: await mintBoardInspectionToken(
+          { ...validScope, expiresAtMs: epochMs(Date.now() + 60_000) },
+          INSPECTION_SECRET
+        ),
+        sessionId: validScope.sessionId,
+        boardId: "another-board",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const res = await SELF.fetch(
+        `https://example.com/sessions/${testCase.sessionId}/board/${testCase.boardId}/ws?sessionId=peer-1&token=${encodeURIComponent(testCase.token)}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      expect(res.status).toBe(401);
+    }
   });
 });

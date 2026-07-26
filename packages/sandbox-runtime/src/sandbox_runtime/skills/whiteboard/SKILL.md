@@ -13,9 +13,10 @@ flowchart, wireframe) into the session UI. It is not a static image: the board i
 canvas the user can pan, zoom, and edit, and **you edit the same board** by posting record changes.
 When the user drags a box or you add one, both sides see it immediately.
 
-No tldraw runs in the sandbox — there is no `tldraw` CLI here and nothing renders a `.tldr`. You
-author tldraw **records as JSON** and post them with the `board` bash command; the board document
-lives in the control plane.
+You author tldraw **records as JSON** and post them with the `board` bash command; the board
+document lives in the control plane. `board inspect` opens a read-only web renderer with the
+sandbox's installed browser and captures what the user sees. It does not render or transform a
+`.tldr` file.
 
 For a screenshot you already have on disk, use `upload-screenshot` instead. This skill is for
 diagrams you construct.
@@ -44,12 +45,13 @@ toward `lazar-tldraw`'s shape, and do not carry a `.tldr` from it into `board mu
 
 ## The `board` command
 
-`board` is a bash command on PATH. Three subcommands:
+`board` is a bash command on PATH:
 
 ```bash
 board create --title "System architecture"     # -> {"boardId":"...","title":"..."}
 board mutate <boardId> --file changes.json      # apply record changes (also accepts stdin)
 board snapshot <boardId>                        # print the document JSON (for saving to git)
+board inspect <boardId> --output /tmp/board.png  # render the live board for visual inspection
 ```
 
 `create` returns a `boardId` — keep it; every later edit needs it. The board appears in the
@@ -88,7 +90,19 @@ session's right sidebar under **Whiteboards** the moment you create it.
    Validate the JSON first so a syntax error doesn't waste a round-trip:
    `python3 -m json.tool changes.json > /dev/null`.
 
-3. **Editing later is the point.** To change a shape that already exists (including one the user
+3. **Inspect the rendered board before asking the user to review it:**
+
+   ```bash
+   board inspect aX9... --output /tmp/board.png
+   # Saved /tmp/board.png (1440x900)
+   ```
+
+   Read the PNG with your image tool. Check text wrapping, clipping, overlap, layering, spacing, and
+   arrow routing. Mutate and inspect again until the rendered result is sound. Run inspection after
+   the initial board creation and after every meaningful visual mutation. Upload the PNG with
+   `upload-screenshot` only when the user also needs it as a session artifact.
+
+4. **Editing later is the point.** To change a shape that already exists (including one the user
    just moved), send an `update` patch, not a fresh `create`. The server merges your patch onto the
    _current_ record, so you can recolor a box without stomping the position the user dragged it to:
 
@@ -282,6 +296,8 @@ git add docs/diagrams/request-flow.tldr && git commit -m "docs: add request-flow
   invalid record, so nothing half-applies.
 - `board snapshot` fails loudly if the board is unreachable — it never prints an empty document in
   that case, so a non-error snapshot genuinely reflects the board.
+- `board inspect` fails loudly on authentication, sync, font, render, browser, and timeout errors. A
+  successful PNG is rendered from the authoritative live room after its current state has synced.
 - `index` values are fractional-index strings (`a1`..`a9`, `aA`..`aZ`, `aa`..`az`), never integers,
   and each shape's index must be unique.
 - To edit an existing shape, send an `update` patch — never re-`create` it from a stale snapshot, or

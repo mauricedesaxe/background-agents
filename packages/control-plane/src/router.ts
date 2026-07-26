@@ -84,6 +84,7 @@ const SANDBOX_AUTH_ROUTES: RegExp[] = [
   /^\/sessions\/[^/]+\/board$/, // Board creation from sandbox
   /^\/sessions\/[^/]+\/board\/[^/]+\/mutate$/, // Board mutation from sandbox
   /^\/sessions\/[^/]+\/board\/[^/]+\/snapshot$/, // Board snapshot read from sandbox
+  /^\/sessions\/[^/]+\/board\/[^/]+\/inspect$/,
 ];
 
 type CachedScmProvider =
@@ -148,7 +149,7 @@ function isScmAgnosticRoute(path: string): boolean {
     /^\/provider-identities\/(github|slack|linear|google)\/[^/]+$/.test(path) ||
     /^\/sessions\/[^/]+\/tunnel-urls$/.test(path) ||
     // Boards are unrelated to the SCM provider.
-    /^\/sessions\/[^/]+\/board(\/[^/]+\/(mutate|snapshot))?$/.test(path)
+    /^\/sessions\/[^/]+\/board(\/[^/]+\/(mutate|snapshot|inspect))?$/.test(path)
   );
 }
 
