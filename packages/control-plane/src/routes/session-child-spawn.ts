@@ -7,10 +7,18 @@ import {
   spawnContextSchema,
 } from "@open-inspect/shared";
 import { generateId } from "../auth/crypto";
-import { ParentSessionSpawnRejectedError, SessionIndexStore } from "../db/session-index";
+import {
+  ParentSessionSpawnRejectedError,
+  sessionAcceptsChildSpawns,
+  SessionIndexStore,
+} from "../db/session-index";
 import { createLogger } from "../logger";
 import { SessionInternalPaths } from "../session/contracts";
-import { initializeSession, type SessionInitInput } from "../session/initialize";
+import {
+  initializeSession,
+  SessionInitializationRejectedError,
+  type SessionInitInput,
+} from "../session/initialize";
 import {
   resolveCodeServerEnabled,
   resolveSandboxSettings,
@@ -21,7 +29,6 @@ import { sessionRoute, type SessionRouteContext } from "./session-route";
 
 const logger = createLogger("router:session-child-spawn");
 const MAX_SPAWN_DEPTH = 2;
-const TERMINAL_PARENT_STATUSES = new Set(["completed", "failed", "archived", "cancelled"]);
 
 async function handleSpawnChild(
   request: Request,
@@ -48,7 +55,7 @@ async function handleSpawnChild(
   if (!parentSession) {
     return error("Parent session not found", 404);
   }
-  if (TERMINAL_PARENT_STATUSES.has(parentSession.status)) {
+  if (!sessionAcceptsChildSpawns(parentSession.status)) {
     return error("Parent session no longer accepts child sessions", 409);
   }
   const parentUserId = parentSession.userId ?? null;
@@ -187,6 +194,9 @@ async function handleSpawnChild(
     await initializeSession(env, input, ctx);
   } catch (e) {
     if (e instanceof ParentSessionSpawnRejectedError) {
+      return error("Parent session no longer accepts child sessions", 409);
+    }
+    if (e instanceof SessionInitializationRejectedError && e.status === 409) {
       return error("Parent session no longer accepts child sessions", 409);
     }
     logger.error("Failed to initialize child session", {

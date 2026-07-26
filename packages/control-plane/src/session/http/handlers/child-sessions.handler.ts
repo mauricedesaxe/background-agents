@@ -1,4 +1,5 @@
 import type { SpawnContext } from "@open-inspect/shared";
+import { sessionAcceptsChildSpawns } from "../../../db/session-index";
 import type { SessionStatus } from "../../../types";
 import type { SessionMessenger } from "../../messenger";
 import type { SessionRepository } from "../../repository";
@@ -11,8 +12,6 @@ import {
   type ChildSummaryFinalResponseInput,
   type ChildSummaryTrajectoryInput,
 } from "./child-session-summary";
-
-const TERMINAL_SESSION_STATUSES = new Set(["completed", "failed", "archived", "cancelled"]);
 
 export interface ChildSessionsHandlerDeps {
   repository: Pick<
@@ -45,7 +44,7 @@ export function createChildSessionsHandler(deps: ChildSessionsHandlerDeps): Chil
       if (!session) {
         return Response.json({ error: "Session not found" }, { status: 404 });
       }
-      if (TERMINAL_SESSION_STATUSES.has(session.status)) {
+      if (!sessionAcceptsChildSpawns(session.status)) {
         return Response.json({ error: "Session is no longer active" }, { status: 409 });
       }
 

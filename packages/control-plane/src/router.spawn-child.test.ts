@@ -11,7 +11,9 @@ const integrationSettingsMocks = vi.hoisted(() => ({
 
 const sessionIndexMocks = vi.hoisted(() => {
   class ParentSessionSpawnRejectedError extends Error {}
-  return { ParentSessionSpawnRejectedError };
+  const sessionAcceptsChildSpawns = (status: string) =>
+    !["completed", "failed", "archived", "cancelled"].includes(status);
+  return { ParentSessionSpawnRejectedError, sessionAcceptsChildSpawns };
 });
 
 vi.mock("./db/session-index", () => ({
@@ -332,6 +334,41 @@ describe("handleSpawnChild prompt enqueue handling", () => {
       SESSION: {
         idFromName: (name: string) => name,
         get: () => parentStub,
+      },
+    };
+
+    const response = await makeRequest(env);
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Parent session no longer accepts child sessions",
+    });
+  });
+
+  it("returns 409 when cancellation closes the fence before DO initialization", async () => {
+    const store = makeStore();
+    vi.mocked(SessionIndexStore).mockImplementation(function () {
+      return store as never;
+    });
+    const parentStub: DurableObjectStub = {
+      fetch: vi.fn(async () => Response.json(spawnContext)),
+    } as never;
+    const childStub: DurableObjectStub = {
+      fetch: vi.fn(async (request: Request) => {
+        const path = new URL(request.url).pathname;
+        if (path === SessionInternalPaths.init) {
+          return Response.json({ error: "Session initialization was cancelled" }, { status: 409 });
+        }
+        return Response.json({ error: "unexpected" }, { status: 404 });
+      }),
+    } as never;
+    const env = {
+      INTERNAL_CALLBACK_SECRET: "test-internal-secret",
+      SCM_PROVIDER: "github",
+      DB: {},
+      SESSION: {
+        idFromName: (name: string) => name,
+        get: (id: string) => (id === parentId ? parentStub : childStub),
       },
     };
 

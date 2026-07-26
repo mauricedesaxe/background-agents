@@ -7,13 +7,17 @@ import type {
 import { SessionPullRequestStore } from "./session-pull-request-store";
 import type { SqlDatabase } from "./sql-database";
 
-const TERMINAL_STATUSES = [
+const TERMINAL_STATUSES: readonly SessionStatus[] = [
   "completed",
   "failed",
   "archived",
   "cancelled",
-] satisfies SessionStatus[];
+];
 const TERMINAL_STATUS_SQL = TERMINAL_STATUSES.map((status) => `'${status}'`).join(", ");
+
+export function sessionAcceptsChildSpawns(status: SessionStatus): boolean {
+  return !TERMINAL_STATUSES.includes(status);
+}
 
 /**
  * One member of a session's repository set — the identity subset of the

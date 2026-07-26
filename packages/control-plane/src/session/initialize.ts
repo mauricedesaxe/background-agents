@@ -8,7 +8,7 @@ import { createLogger } from "../logger";
 const logger = createLogger("session-init");
 
 export class SessionInitializationRejectedError extends Error {
-  constructor(status: number) {
+  constructor(readonly status: number) {
     super(`Failed to initialize session DO: ${status}`);
     this.name = "SessionInitializationRejectedError";
   }
