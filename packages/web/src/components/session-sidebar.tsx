@@ -62,6 +62,21 @@ import type { Session } from "@open-inspect/shared";
 export type SessionItem = Session;
 
 export const MOBILE_LONG_PRESS_MS = 450;
+
+export function NewSessionButton({ onClick }: { onClick?: () => void }) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      onClick={onClick}
+      title={`New session (${SHORTCUT_LABELS.NEW_SESSION})`}
+      aria-label={`New session (${SHORTCUT_LABELS.NEW_SESSION})`}
+    >
+      <PlusIcon className="w-4 h-4" />
+    </Button>
+  );
+}
 const MOBILE_LONG_PRESS_MOVE_THRESHOLD_PX = 10;
 type SessionCreatorFilter = "all" | "mine";
 
@@ -325,15 +340,7 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
           </Link>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={onNewSession}
-            title={`New session (${SHORTCUT_LABELS.NEW_SESSION})`}
-            aria-label={`New session (${SHORTCUT_LABELS.NEW_SESSION})`}
-          >
-            <PlusIcon className="w-4 h-4" />
-          </Button>
+          <NewSessionButton onClick={onNewSession} />
           <Link
             href="/settings"
             onClick={handleNavigationSelect}

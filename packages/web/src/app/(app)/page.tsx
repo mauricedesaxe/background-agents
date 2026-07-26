@@ -5,8 +5,7 @@ import { useRouter } from "next/navigation";
 import { mutate } from "swr";
 import { useState, useEffect, useRef, useCallback } from "react";
 import Link from "next/link";
-import { useSidebarContext } from "@/components/sidebar-layout";
-import { Button } from "@/components/ui/button";
+import { CollapsedSidebarControls, useSidebarContext } from "@/components/sidebar-layout";
 import { ErrorBanner } from "@/components/ui/error-banner";
 import { formatModelNameLower } from "@/lib/format";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
@@ -21,7 +20,7 @@ import {
 } from "@/hooks/use-session-target-picker";
 import { SessionTargetPicker } from "@/components/session-target-picker";
 import { ReasoningEffortPills } from "@/components/reasoning-effort-pills";
-import { SidebarIcon, ModelIcon, SendIcon } from "@/components/ui/icons";
+import { ModelIcon, SendIcon } from "@/components/ui/icons";
 import { Combobox, type ComboboxGroup } from "@/components/ui/combobox";
 import { SchedulePromptPopover } from "@/components/schedule-prompt-popover";
 import type { SessionTargetRequestFields } from "@/lib/session-target";
@@ -341,7 +340,7 @@ function HomeContent({
   handleSchedule: (instant: Date, timeZone: string) => Promise<boolean>;
   modelOptions: ModelCategory[];
 }) {
-  const { isOpen, toggle } = useSidebarContext();
+  const { isOpen } = useSidebarContext();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const { sessionTarget, selectedRepo, repos, loadingRepos, isLaunchable } = picker;
 
@@ -360,15 +359,7 @@ function HomeContent({
       {!isOpen && (
         <header className="border-b border-border-muted flex-shrink-0">
           <div className="px-4 py-3">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={toggle}
-              title={`Open sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
-              aria-label={`Open sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
-            >
-              <SidebarIcon className="w-4 h-4" />
-            </Button>
+            <CollapsedSidebarControls />
           </div>
         </header>
       )}

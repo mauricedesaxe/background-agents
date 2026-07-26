@@ -74,6 +74,7 @@ vi.mock("@/hooks/use-environments", () => ({
 }));
 
 vi.mock("@/components/sidebar-layout", () => ({
+  CollapsedSidebarControls: () => <div data-testid="collapsed-sidebar-controls" />,
   useSidebarContext: () => ({ isOpen: true, toggle: vi.fn() }),
 }));
 
