@@ -208,7 +208,8 @@ export class SessionDO extends DurableObject<Env> {
 
   // Internal HTTP route table (transport wiring only; handlers remain on SessionDO).
   private readonly routes = createSessionInternalRoutes({
-    init: (request, _url, log) => this.sessionLifecycleHandler.init(request, log),
+    init: (request, _url, log) =>
+      this.ctx.blockConcurrencyWhile(() => this.sessionLifecycleHandler.init(request, log)),
     state: () => this.sessionLifecycleHandler.getState(),
     prompt: (request, _url, log) => this.messagesHandler.enqueuePrompt(request, log),
     stop: () => this.messagesHandler.stop(),
