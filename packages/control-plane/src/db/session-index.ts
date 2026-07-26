@@ -185,10 +185,10 @@ export class SessionReplayConflictError extends Error {
   }
 }
 
-export class ParentSessionInactiveError extends Error {
+export class ParentSessionSpawnRejectedError extends Error {
   constructor(parentSessionId: string) {
-    super(`Parent session ${parentSessionId} is no longer active`);
-    this.name = "ParentSessionInactiveError";
+    super(`Parent session ${parentSessionId} no longer accepts child sessions`);
+    this.name = "ParentSessionSpawnRejectedError";
   }
 }
 
@@ -212,7 +212,7 @@ export class SessionIndexStore {
            SELECT 1 FROM sessions
            WHERE id = ?
              AND status NOT IN (${TERMINAL_STATUS_SQL})
-             AND spawn_closed_at IS NULL
+             AND spawn_closed = 0
          )`
       )
       .bind(
@@ -259,10 +259,10 @@ export class SessionIndexStore {
     try {
       const [result] = await this.db.batch([sessionStmt, ...repositoryStmts]);
       if ((result.meta.changes ?? 0) === 0 && parentSessionId) {
-        throw new ParentSessionInactiveError(parentSessionId);
+        throw new ParentSessionSpawnRejectedError(parentSessionId);
       }
     } catch (error) {
-      if (error instanceof ParentSessionInactiveError) throw error;
+      if (error instanceof ParentSessionSpawnRejectedError) throw error;
       if (!isDuplicateKeyError(error)) throw error;
       await this.verifyReplay(session, repository);
     }
@@ -318,6 +318,14 @@ export class SessionIndexStore {
       .first<SessionRow>();
 
     return result ? toEntry(result) : null;
+  }
+
+  async canInitializeSession(id: string): Promise<boolean> {
+    const result = await this.db
+      .prepare("SELECT spawn_closed FROM sessions WHERE id = ?")
+      .bind(id)
+      .first<{ spawn_closed: number }>();
+    return result?.spawn_closed !== 1;
   }
 
   async repositoriesForSession(id: string): Promise<SessionIndexRepository[]> {
@@ -575,10 +583,10 @@ export class SessionIndexStore {
            ) = 0
          )
          UPDATE sessions
-         SET spawn_closed_at = COALESCE(spawn_closed_at, ?)
+         SET spawn_closed = 1
          WHERE id IN (SELECT id FROM subtree)`
       )
-      .bind(parentSessionId, Date.now());
+      .bind(parentSessionId);
     const listDescendants = this.db
       .prepare(
         `WITH RECURSIVE descendants(id, depth, path) AS (

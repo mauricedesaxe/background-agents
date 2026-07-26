@@ -95,6 +95,7 @@ function createHandler() {
   const generateId = vi.fn();
   const now = vi.fn(() => 1234);
   const scheduleWarmSandbox = vi.fn();
+  const canInitializeSession = vi.fn(async () => true);
   const log = {
     debug: vi.fn(),
     info: vi.fn(),
@@ -125,6 +126,7 @@ function createHandler() {
     generateId,
     now,
     scheduleWarmSandbox,
+    canInitializeSession,
     getSession,
     getSandbox,
     getSessionRepositoryRows,
@@ -162,6 +164,7 @@ function createHandler() {
     generateId,
     now,
     scheduleWarmSandbox,
+    canInitializeSession,
     log,
     getSession,
     getSandbox,
@@ -179,6 +182,33 @@ function createHandler() {
 }
 
 describe("createSessionLifecycleHandler", () => {
+  it("rejects initialization after cancellation closes the D1 fence", async () => {
+    const { handler, repository, canInitializeSession, scheduleWarmSandbox } = createHandler();
+    canInitializeSession.mockResolvedValue(false);
+
+    const response = await handler.init(
+      new Request("http://internal/internal/init", {
+        method: "POST",
+        body: JSON.stringify({
+          sessionName: "cancelled-before-init",
+          repoOwner: null,
+          repoName: null,
+          repoId: null,
+          repositories: [],
+          model: "anthropic/claude-haiku-4-5",
+          userId: "user-1",
+        }),
+      })
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Session initialization was cancelled",
+    });
+    expect(repository.upsertSession).not.toHaveBeenCalled();
+    expect(scheduleWarmSandbox).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["repoOwner without repoName", { repoOwner: "acme", repoName: null }],
     ["repoId without repository context", { repoOwner: null, repoName: null, repoId: 123 }],

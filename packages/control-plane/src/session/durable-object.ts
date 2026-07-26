@@ -483,6 +483,10 @@ export class SessionDO extends DurableObject<Env> {
         generateId: (bytes) => generateId(bytes),
         now: () => Date.now(),
         scheduleWarmSandbox: () => this.ctx.waitUntil(this.warmSandbox()),
+        canInitializeSession: (sessionId) =>
+          this.db
+            ? new SessionIndexStore(this.db).canInitializeSession(sessionId)
+            : Promise.resolve(true),
         getSession: () => this.getSession(),
         getSandbox: () => this.getSandbox(),
         getSessionRepositoryRows: () => this.repository.getSessionRepositoryRows(),
