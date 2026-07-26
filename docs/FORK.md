@@ -251,6 +251,16 @@ render pass.
 Re-proposing it is the specific risk. Upstream's version is the one a wholesale take of this file
 brings back, and it goes green.
 
+### 19. Linear GraphQL responses are validated without the upstream callback rewrite
+
+`packages/linear-bot/src/utils/linear-client.ts` parses each touched operation through an explicit
+Zod schema from `packages/linear-bot/src/types.ts`. The issue-start transition keeps its fork-local
+state handling while validating its own query and mutation responses.
+
+**Why.** Upstream's response validation arrived with a later authentication and callback rewrite.
+This fork needs the boundary checks without changing its existing webhook and issue-start behavior,
+so future syncs must port Linear client changes selectively rather than replace the package.
+
 ## Where we match upstream against our own docs
 
 The list above is where we differ from upstream. This is the inverse: a place where matching
@@ -350,7 +360,7 @@ The shape matters when sequencing a sync. Ordered by how much diverges, heaviest
 | `modal-infra`        | The harness install call in the image build, nothing else   |
 | `opencomputer-infra` | The harness install call in the image build, nothing else   |
 | `slack-bot`          | Page-cap warning, and a Terraform binding parity guard      |
-| `linear-bot`         | **Nothing.** Take upstream wholesale.                       |
+| `linear-bot`         | GraphQL response validation; fork-local start transitions   |
 
 Recompute the counts rather than remembering them, since any commit changes them:
 
@@ -358,8 +368,8 @@ Recompute the counts rather than remembering them, since any commit changes them
 git diff --name-only "$(git merge-base HEAD upstream/main)"..HEAD | grep '^packages/'
 ```
 
-`linear-bot` is the last package that can be taken whole without a merge, and that stays true only
-until someone edits it.
+`linear-bot` cannot be taken whole. Port upstream client changes around the operation-specific
+response schemas and preserve the existing issue-start transition and webhook behavior.
 
 `slack-bot` was in the same position one issue earlier. A sync was written to take both bots
 wholesale on the strength of a row like the one above, and by the time it ran a fan-out fix had
