@@ -18,7 +18,11 @@ import type { SessionWebSocketManager } from "./websocket-manager";
 import type { ParticipantService } from "./participant-service";
 import type { CallbackNotificationService } from "./callback-notification-service";
 import type { SessionStatusService } from "./session-status-service";
-import { PromptIdConflictError, type EnqueuePromptRequest } from "./services/message.service";
+import {
+  PromptEnqueueRejectedError,
+  PromptIdConflictError,
+  type EnqueuePromptRequest,
+} from "./services/message.service";
 import { getAvatarUrl } from "./participant-service";
 import { resolveParticipantName } from "./participant-name";
 import { validateReasoningEffort } from "./reasoning-effort";
@@ -550,6 +554,10 @@ export class SessionMessageQueue {
   async enqueuePromptFromApi(
     data: EnqueuePromptRequest
   ): Promise<{ messageId: string; status: "queued" }> {
+    if (this.repository.getSession()?.status === "cancelled") {
+      throw new PromptEnqueueRejectedError();
+    }
+
     let participant = this.participantService.getByUserId(data.authorId);
     if (!participant) {
       participant = this.participantService.create(

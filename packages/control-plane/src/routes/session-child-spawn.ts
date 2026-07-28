@@ -241,6 +241,9 @@ async function handleSpawnChild(
       trace_id: ctx.trace_id,
       request_id: ctx.request_id,
     });
+    if (promptResponse.status === 409) {
+      return error("Child session was cancelled before its prompt was queued", 409);
+    }
     await sessionStore.updateStatus(childId, "failed");
     return error("Failed to enqueue child session prompt", 500);
   }

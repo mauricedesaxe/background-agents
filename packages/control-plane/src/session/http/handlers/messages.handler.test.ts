@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Logger } from "../../../logger";
 import { createMessagesHandler } from "./messages.handler";
-import type { MessageService } from "../../services/message.service";
+import { PromptEnqueueRejectedError, type MessageService } from "../../services/message.service";
 
 function createHandler() {
   const messageService = {
@@ -58,6 +58,22 @@ describe("createMessagesHandler", () => {
       authorId: "user-1",
       source: "web",
     });
+  });
+
+  it("returns 409 when the session no longer accepts prompts", async () => {
+    const { handler, messageService, log } = createHandler();
+    vi.mocked(messageService.enqueuePrompt).mockRejectedValue(new PromptEnqueueRejectedError());
+
+    const response = await handler.enqueuePrompt(
+      new Request("http://internal/internal/prompt", {
+        method: "POST",
+        body: JSON.stringify({ content: "hello", authorId: "user-1", source: "agent" }),
+      }),
+      log
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ error: "Session no longer accepts prompts" });
   });
 
   it("logs and rethrows when enqueue prompt parsing fails", async () => {

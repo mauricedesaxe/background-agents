@@ -1,5 +1,6 @@
 import type { Logger } from "../../../logger";
 import {
+  PromptEnqueueRejectedError,
   PromptIdConflictError,
   type EnqueuePromptRequest,
   type MessageService,
@@ -51,6 +52,9 @@ export function createMessagesHandler(deps: MessagesHandlerDeps): MessagesHandle
         const body = (await request.json()) as EnqueuePromptRequest;
         return Response.json(await deps.messageService.enqueuePrompt(body));
       } catch (error) {
+        if (error instanceof PromptEnqueueRejectedError) {
+          return Response.json({ error: error.message }, { status: 409 });
+        }
         if (error instanceof PromptIdConflictError) {
           return Response.json({ error: error.message }, { status: 409 });
         }

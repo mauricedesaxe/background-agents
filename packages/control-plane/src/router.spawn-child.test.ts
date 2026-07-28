@@ -554,6 +554,45 @@ describe("handleSpawnChild prompt enqueue handling", () => {
     const createdChildId = store.create.mock.calls[0]?.[0]?.id;
     expect(store.updateStatus).toHaveBeenCalledWith(createdChildId, "failed");
   });
+
+  it("preserves cancellation when it wins before initial prompt enqueue", async () => {
+    const store = makeStore();
+    vi.mocked(SessionIndexStore).mockImplementation(function () {
+      return store as never;
+    });
+
+    const parentStub: DurableObjectStub = {
+      fetch: vi.fn(async () => Response.json(spawnContext)),
+    } as never;
+    const childStub: DurableObjectStub = {
+      fetch: vi.fn(async (request: Request) => {
+        const path = new URL(request.url).pathname;
+        if (path === SessionInternalPaths.init) return Response.json({ status: "ok" });
+        if (path === SessionInternalPaths.prompt) {
+          return Response.json({ error: "Session no longer accepts prompts" }, { status: 409 });
+        }
+        return Response.json({ error: "unexpected" }, { status: 404 });
+      }),
+    } as never;
+    const env = {
+      INTERNAL_CALLBACK_SECRET: "test-internal-secret",
+      SCM_PROVIDER: "github",
+      DB: {},
+      SESSION: {
+        idFromName: (name: string) => name,
+        get: (id: string) => (id === parentId ? parentStub : childStub),
+      },
+    };
+
+    const response = await makeRequest(env);
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Child session was cancelled before its prompt was queued",
+    });
+    expect(store.updateStatus).not.toHaveBeenCalled();
+  });
+
   it("refuses to spawn when the repository's child-session cap is zero", async () => {
     // Zero is the fan-out kill switch. It has to answer before anything is
     // created, and answer 403 so the agent reports why instead of backing off

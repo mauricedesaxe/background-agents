@@ -33,6 +33,13 @@ export class PromptIdConflictError extends Error {
   }
 }
 
+export class PromptEnqueueRejectedError extends Error {
+  constructor() {
+    super("Session no longer accepts prompts");
+    this.name = "PromptEnqueueRejectedError";
+  }
+}
+
 export type ListEventsRequest = SessionEventListRequest;
 
 export interface ListMessagesRequest {
