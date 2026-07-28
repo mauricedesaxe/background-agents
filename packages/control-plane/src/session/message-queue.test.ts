@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionMessageQueue, STOP_CONFIRMATION_TIMEOUT_MS } from "./message-queue";
 import type { ClientInfo, ServerMessage } from "../types";
 import type { MessageRow, ParticipantRow, SessionRow } from "./types";
-import { PromptIdConflictError } from "./services/message.service";
+import { PromptEnqueueRejectedError, PromptIdConflictError } from "./services/message.service";
 
 const EXECUTION_TIMEOUT_MS = 60_000;
 
@@ -738,6 +738,23 @@ describe("SessionMessageQueue", () => {
   });
 
   describe("enqueuePromptFromApi", () => {
+    it("rejects prompts after cancellation without creating queued work", async () => {
+      const h = buildQueue();
+      h.getSession.mockReturnValue(createSession({ status: "cancelled" }));
+
+      await expect(
+        h.queue.enqueuePromptFromApi({
+          content: "Fix bug",
+          authorId: "github:1001",
+          source: "github-bot",
+        })
+      ).rejects.toBeInstanceOf(PromptEnqueueRejectedError);
+
+      expect(h.repository.createMessage).not.toHaveBeenCalled();
+      expect(h.sessionStatus.transition).not.toHaveBeenCalled();
+      expect(h.spawnSandbox).not.toHaveBeenCalled();
+    });
+
     it("creates participant with authorDisplayName when new", async () => {
       const h = buildQueue();
       h.participantService.getByUserId.mockReturnValue(null as unknown as ParticipantRow);
