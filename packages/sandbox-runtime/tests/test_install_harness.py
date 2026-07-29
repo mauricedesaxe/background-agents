@@ -308,8 +308,13 @@ class TestPinnedHarness:
         instructions = (opencode / "AGENTS.md").read_text()
         assert "Work the default workspace directly with `jj edit`" in instructions
 
-        assert (opencode / "plugin" / "comment-lint.ts").is_file()  # #79 write-time guard
+        assert (opencode / "plugin" / "comment-lint.ts").is_file()
         assert (home / ".lazar-harness" / "bin" / "comment-lint").is_file()
+
+        philosophy = (opencode / "rules" / "PHILOSOPHY.md").read_text()
+        assert "## §32. Complexity and deep modules" in philosophy
+        complexity = (opencode / "agents" / "complexity-reviewer.md").read_text()
+        assert "mode: subagent" in complexity
 
 
 class TestScriptIsExecutable:
