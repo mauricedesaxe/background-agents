@@ -296,6 +296,21 @@ one participant clear another's inbox. Future syncs must preserve the completion
 normal and synthetic failure paths, the `9005_session_read_states.sql` migration, and the sidebar's
 desktop and mobile actions.
 
+### 22. Daily upstream exchange scans have a durable commit ledger
+
+`terraform/d1/migrations/9007_upstream_exchange_ledger.sql`, the control-plane
+`UpstreamExchangeStore`, and the sandbox's `upstream-exchange` tool persist one immutable
+classification per source commit. The two fork-specific templates in
+`packages/web/src/lib/automation-templates.ts` scan both directions and post read-only reports to
+Slack. A successful automation callback advances a scan only when every expected commit has a
+classification and `slack-notify` recorded a delivery receipt.
+
+**Why.** A cron slot, automation invocation, and Slack post do not say which commits were examined.
+Using any of them as the cursor loses commits after a failed run or classifies the same work again.
+The finalized `to_sha` is the cursor, while classifications from failed scans remain reusable. The
+inbound boundary is deliberately report-only: it never creates local artifacts or merges. The
+outbound boundary never writes upstream.
+
 ## Where we match upstream against our own docs
 
 The list above is where we differ from upstream. This is the inverse: a place where matching

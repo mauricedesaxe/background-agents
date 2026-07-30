@@ -57,8 +57,8 @@ export const TEMPLATE_CATEGORIES: ReadonlyArray<{ id: TemplateCategory; label: s
   { id: "data-research", label: "Data & Research" },
 ];
 
-// Conservative cadences to limit recurring cost. Both are ≥ the 15-minute floor.
 const DAILY_9AM = "0 9 * * *";
+const DAILY_8AM = "0 8 * * *";
 const WEEKLY_MON_9AM = "0 9 * * 1";
 
 /**
@@ -265,6 +265,108 @@ export const automationTemplates: AutomationTemplate[] = [
         "assessment — what is wrong, the relevant file references, and a recommended next step — that " +
         "becomes the run result posted back into the thread. Do not open a pull request unless the fix " +
         "is small and clearly correct.",
+    },
+  },
+  {
+    id: "upstream-exchange-outbound",
+    title: "Find work to contribute upstream",
+    description:
+      "Classify new fork commits for upstream usefulness and post a read-only daily Slack digest.",
+    categories: ["data-research"],
+    primaryOutput: "slack",
+    setupNote:
+      "For the tracked background-agents fork. Requires Slack notifications and the bot in #upstream-exchange.",
+    prefill: {
+      name: "Daily outbound upstream exchange",
+      triggerType: "schedule",
+      scheduleCron: DAILY_8AM,
+      model: "openai/gpt-5.6-sol",
+      reasoningEffort: "high",
+      instructions:
+        "Produce the daily outbound exchange report for the tracked fork mauricedesaxe/background-agents. " +
+        "This is classification and reporting only. Never write to ColeMurray/background-agents. Do not " +
+        "create or edit issues, comments, branches, commits, pull requests, releases, or repository settings " +
+        "in either repository. Do not modify the working tree. Use gh only for read operations.\n\n" +
+        "Read docs/FORK.md before classifying anything. Fetch the current upstream main without changing " +
+        "the checkout: `git fetch https://github.com/ColeMurray/background-agents.git " +
+        "+refs/heads/main:refs/remotes/upstream/main`. The sandbox clone is shallow, so deepen or fetch " +
+        "specific commits until the fork head, upstream head, durable cursor, and merge base are all " +
+        "available. Recompute the fork head, upstream head, and merge base. Never trust a pin written in a " +
+        "document.\n\n" +
+        "Call upstream-exchange with action=cursor, direction=outbound, and " +
+        "sourceRepository=mauricedesaxe/background-agents. The returned SHA is the last finalized to_sha. " +
+        "If there is no cursor, begin at the merge base. Verify the chosen start is an ancestor of the fork " +
+        "head. Examine every fork commit after that start through the fork head, oldest first. Call " +
+        "upstream-exchange action=begin with the exact ordered SHA list plus fromSha (null when there was no " +
+        "durable cursor), toSha=fork head, both heads, and merge base. Keep the returned scanId and " +
+        "classifiedCommitShas.\n\n" +
+        "Classify each expected commit absent from classifiedCommitShas with upstream-exchange action=classify. " +
+        "Never recreate an existing durable disposition. Use only these " +
+        "outbound classifications: candidate, intentional_divergence, deployment_specific, already_upstream, " +
+        "or not_useful_upstream. A candidate must say whether its useful unit is an idea, bug report, test " +
+        "case, or implementation. Record concrete evidence, affected packages, Terraform impact, migration " +
+        "impact, touched docs/FORK.md divergence entries, whether overlapping tests require hand-merging, and " +
+        "semantic-port evidence, and usefulUnit for candidates (idea, bug_report, test_case, or implementation). " +
+        "proposedArtifact must be null because outbound reporting cannot propose local fork work. " +
+        "Use commit diffs, commit and PR context, and current upstream code as evidence rather than judging the " +
+        "subject line alone.\n\n" +
+        "Post one concise digest to #upstream-exchange with slack-notify and pass scan_id=scanId. Include the " +
+        "examined compare range, fork head, upstream head, merge base, links to candidate commits, the useful " +
+        "unit and rationale for each candidate, and explicit grouped exclusions. If there are no commits, " +
+        "post a short no-op report with the unchanged range and heads. The run is successful only after that " +
+        "Slack call returns ok=true. Do not call slack-notify without scan_id.",
+    },
+  },
+  {
+    id: "upstream-exchange-inbound",
+    title: "Review new upstream changes",
+    description:
+      "Classify new upstream commits against fork behavior and post a read-only daily Slack digest.",
+    categories: ["data-research"],
+    primaryOutput: "slack",
+    setupNote:
+      "For the tracked background-agents fork. Requires Slack notifications and the bot in #upstream-exchange.",
+    prefill: {
+      name: "Daily inbound upstream exchange",
+      triggerType: "schedule",
+      scheduleCron: DAILY_9AM,
+      model: "openai/gpt-5.6-sol",
+      reasoningEffort: "high",
+      instructions:
+        "Produce the daily inbound exchange report for mauricedesaxe/background-agents from " +
+        "ColeMurray/background-agents. This is classification and reporting only. Do not create or edit " +
+        "issues, comments, branches, commits, pull requests, releases, or repository settings. Never merge, " +
+        "cherry-pick, rebase, or modify the working tree. Use gh only for read operations. A human will create " +
+        "or update a local issue after reading the digest.\n\n" +
+        "Read docs/FORK.md before classifying anything. Fetch current upstream main without changing the " +
+        "checkout: `git fetch https://github.com/ColeMurray/background-agents.git " +
+        "+refs/heads/main:refs/remotes/upstream/main`. The sandbox clone is shallow, so deepen or fetch " +
+        "specific commits until the fork head, upstream head, durable cursor, and merge base are all " +
+        "available. Recompute the fork head, upstream head, and merge base. Never trust a pin written in a " +
+        "document.\n\n" +
+        "Call upstream-exchange with action=cursor, direction=inbound, and " +
+        "sourceRepository=ColeMurray/background-agents. The returned SHA is the last finalized to_sha. If " +
+        "there is no cursor, begin at the merge base. Verify the chosen start is an ancestor of upstream main. " +
+        "Examine every upstream commit after that start through upstream main, oldest first. Call " +
+        "upstream-exchange action=begin with the exact ordered SHA list plus fromSha (null when there was no " +
+        "durable cursor), toSha=upstream head, both heads, and merge base. Keep the returned scanId and " +
+        "classifiedCommitShas.\n\n" +
+        "Classify each expected commit absent from classifiedCommitShas with upstream-exchange action=classify. " +
+        "Never recreate an existing durable disposition. Use only these " +
+        "inbound classifications: present, not_applicable, divergence_conflict, clean_candidate, or " +
+        "needs_decision. Record concrete evidence, affected packages, Terraform or binding impact, migration " +
+        "impact, touched docs/FORK.md divergence entries, whether overlapping tests require hand-merging, and " +
+        "semantic-port evidence. usefulUnit must be null for inbound classifications. proposedArtifact is a " +
+        "short human follow-up description when local work is proposed, otherwise null. " +
+        "Inspect the upstream diff and the current fork implementation. Preserve all intentional behavior in " +
+        "docs/FORK.md. Test files must be hand-merged, upstream migrations retain upstream IDs, fork-local " +
+        "migrations use 9000+, and package contract changes include Terraform review.\n\n" +
+        "Post one concise digest to #upstream-exchange with slack-notify and pass scan_id=scanId. Include the " +
+        "examined compare range, fork head, upstream head, merge base, a link and rationale for every clean " +
+        "candidate or needs-decision commit, divergence conflicts, and grouped present/not-applicable " +
+        "exclusions. Include any proposed local artifact only as a human follow-up description, never create " +
+        "it. If there are no commits, post a short no-op report with the unchanged range and heads. The run is " +
+        "successful only after Slack returns ok=true. Do not call slack-notify without scan_id.",
     },
   },
   {

@@ -14,6 +14,10 @@ import {
 } from "@open-inspect/shared";
 import { IntegrationSettingsStore, resolveSlackSettings } from "../db/integration-settings";
 import { SessionIndexStore } from "../db/session-index";
+import {
+  UpstreamExchangeConflictError,
+  UpstreamExchangeStore,
+} from "../db/upstream-exchange-store";
 import { createLogger } from "../logger";
 import type { Env } from "../types";
 import { error, json, type RequestContext } from "./shared";
@@ -34,6 +38,7 @@ interface ParsedBody {
   text: string;
   threadTs: string | undefined;
   reason: string | undefined;
+  scanId: string | undefined;
 }
 
 interface AuditFields {
@@ -68,6 +73,22 @@ export async function handleSlackNotify(
     parent_session_id: session.parentSessionId ?? null,
     repo: repoScope,
   };
+
+  if (parsed.scanId) {
+    if (!session.automationId || !session.automationRunId) {
+      return failureResponse("invalid_input", "scanId requires an automation run.");
+    }
+    try {
+      await new UpstreamExchangeStore(ctx.db).assertOpenScan(
+        parsed.scanId,
+        session.automationId,
+        session.automationRunId
+      );
+    } catch (cause) {
+      if (!(cause instanceof UpstreamExchangeConflictError)) throw cause;
+      return failureResponse("invalid_input", cause.message);
+    }
+  }
 
   const token = env.SLACK_BOT_TOKEN;
   if (!token) {
@@ -135,7 +156,23 @@ export async function handleSlackNotify(
   const channelId = post.channel;
   const messageTs = post.ts;
   const permalinkResp = await getPermalink(token, channelId, messageTs);
-  const permalink = permalinkResp.ok ? permalinkResp.permalink : "";
+  if (!permalinkResp.ok) {
+    const reasonCode = mapSlackError(permalinkResp.error);
+    logDenial(sessionId, ctx, parsed, audit, reasonCode, permalinkResp.retryAfter);
+    return failureResponse(reasonCode, permalinkResp.error, permalinkResp.retryAfter);
+  }
+  const permalink = permalinkResp.permalink;
+
+  if (parsed.scanId) {
+    await new UpstreamExchangeStore(ctx.db).recordSlackDelivery({
+      scanId: parsed.scanId,
+      automationId: session.automationId!,
+      automationRunId: session.automationRunId!,
+      channelId,
+      messageTs,
+      permalink,
+    });
+  }
 
   const result: SlackNotifySuccessOutput = {
     ok: true,
@@ -201,12 +238,20 @@ async function parseBody(request: Request): Promise<ParsedBody | Response> {
     typeof body.thread_ts === "string" && body.thread_ts.length > 0 ? body.thread_ts : undefined;
   const rawReason = typeof body.reason === "string" ? body.reason : undefined;
   const reason = rawReason ? rawReason.slice(0, REASON_MAX_LENGTH) : undefined;
+  const scanId = typeof body.scan_id === "string" ? body.scan_id : undefined;
+  if (
+    scanId &&
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(scanId)
+  ) {
+    return failureResponse("invalid_input", "scan_id must be a UUID.");
+  }
 
   return {
     channel: channelValue,
     text,
     threadTs,
     reason,
+    scanId,
   };
 }
 
