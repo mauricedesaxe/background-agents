@@ -91,8 +91,9 @@ export class DaytonaSandboxProvider implements SandboxProvider {
         env: envVars,
         labels,
         autoStopInterval: this.client.config.autoStopIntervalMinutes,
-        autoArchiveInterval:
-          config.autoArchiveIntervalMinutes ?? this.client.config.autoArchiveIntervalMinutes,
+        autoArchiveInterval: this.client.config.autoArchiveIntervalExplicit
+          ? this.client.config.autoArchiveIntervalMinutes
+          : (config.autoArchiveIntervalMinutes ?? this.client.config.autoArchiveIntervalMinutes),
         public: false,
       };
       if (this.client.config.target) {

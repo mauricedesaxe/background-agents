@@ -26,6 +26,8 @@ export interface DaytonaRestConfig {
   autoStopIntervalMinutes: number;
   /** Minutes before Daytona auto-archives a continuously stopped sandbox */
   autoArchiveIntervalMinutes: number;
+  /** Whether autoArchiveIntervalMinutes came from an explicit deployment setting. */
+  autoArchiveIntervalExplicit?: boolean;
 }
 
 // ---------------------------------------------------------------------------

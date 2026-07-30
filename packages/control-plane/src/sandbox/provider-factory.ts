@@ -104,6 +104,7 @@ function createDaytonaProviderFromEnv(env: Env): DaytonaSandboxProvider {
       env.DAYTONA_AUTO_ARCHIVE_INTERVAL_MINUTES,
       getSandboxAutoArchiveIntervalMinutes("user")
     ),
+    autoArchiveIntervalExplicit: env.DAYTONA_AUTO_ARCHIVE_INTERVAL_MINUTES !== undefined,
   });
 
   return createDaytonaProvider(client, {

@@ -85,8 +85,6 @@ export interface SessionLifecycleHandlerDeps {
   sendToSandbox: (ws: WebSocket, message: string | object) => boolean;
   /** Mark the sandbox dead and stop the provider sandbox with it. */
   terminateSandbox: (reason: string) => Promise<void>;
-  /** Archive failures remain visible so the lifecycle operation stays retryable. */
-  archiveSandboxStrict: (reason: string) => Promise<void>;
 }
 
 function sessionTitleUpdateStatus(
@@ -408,7 +406,7 @@ export function createSessionLifecycleHandler(
       return Response.json({ title: result.title });
     },
 
-    async archive(request: Request, log: Logger): Promise<Response> {
+    async archive(request: Request, _log: Logger): Promise<Response> {
       const session = deps.getSession();
       if (!session) {
         return Response.json({ error: "Session not found" }, { status: 404 });
@@ -430,23 +428,19 @@ export function createSessionLifecycleHandler(
         return Response.json({ error: "Not authorized to archive this session" }, { status: 403 });
       }
 
-      // Stop an in-flight prompt before archiving stops its sandbox, or the
-      // processing row is left stuck once the sandbox goes away. archiveCascade
-      // guards the same way.
-      if (!TERMINAL_STATUSES.has(session.status)) {
-        await deps.stopExecution({ suppressStatusReconcile: true });
+      const result = await deps.statusService.archive("session_archived", {
+        beforeProviderArchive: async () => {
+          if (!TERMINAL_STATUSES.has(session.status)) {
+            await deps.stopExecution({ suppressStatusReconcile: true });
+          }
+        },
+      });
+      if (result === "in_progress") {
+        return Response.json({ error: "Session archive is already in progress" }, { status: 409 });
       }
-
-      try {
-        await deps.archiveSandboxStrict("session_archived");
-      } catch (error) {
-        log.error("Sandbox archive failed", {
-          error: error instanceof Error ? error : String(error),
-        });
+      if (result === "failed") {
         return Response.json({ error: "Sandbox archive must be retried" }, { status: 503 });
       }
-
-      await deps.statusService.transition("archived");
 
       return Response.json({ status: "archived" });
     },
@@ -476,7 +470,9 @@ export function createSessionLifecycleHandler(
         );
       }
 
-      await deps.statusService.unarchive();
+      if (!(await deps.statusService.unarchive())) {
+        return Response.json({ error: "Session archive is in progress" }, { status: 409 });
+      }
 
       return Response.json({ status: "active" });
     },
@@ -491,7 +487,7 @@ export function createSessionLifecycleHandler(
      * transitionSessionStatus("archived") cascades onward to this session's own
      * children, so grandchildren are archived without extra recursion here.
      */
-    async archiveCascade(_request: Request, _url: URL, log: Logger): Promise<Response> {
+    async archiveCascade(_request: Request, _url: URL, _log: Logger): Promise<Response> {
       const session = deps.getSession();
       // Child DO may never have been created (or was already torn down); the
       // cascade is best-effort, so treat a missing session as already done.
@@ -499,23 +495,17 @@ export function createSessionLifecycleHandler(
         return Response.json({ status: "archived" });
       }
 
-      // Only running sessions have execution to stop; terminal-but-not-archived
-      // children (completed/failed/cancelled) just need the status flip so they
-      // leave the sidebar.
-      if (session.status !== "archived" && !TERMINAL_STATUSES.has(session.status)) {
-        await deps.stopExecution({ suppressStatusReconcile: true });
+      const result = await deps.statusService.archive("session_archived", {
+        retryOnFailure: true,
+        beforeProviderArchive: async () => {
+          if (session.status !== "archived" && !TERMINAL_STATUSES.has(session.status)) {
+            await deps.stopExecution({ suppressStatusReconcile: true });
+          }
+        },
+      });
+      if (result !== "archived") {
+        return Response.json({ status: "archive_pending" }, { status: 202 });
       }
-
-      try {
-        await deps.archiveSandboxStrict("session_archived");
-      } catch (error) {
-        log.error("Cascade sandbox archive failed", {
-          error: error instanceof Error ? error : String(error),
-        });
-        return Response.json({ error: "Sandbox archive must be retried" }, { status: 503 });
-      }
-
-      await deps.statusService.transition("archived");
 
       return Response.json({ status: "archived" });
     },

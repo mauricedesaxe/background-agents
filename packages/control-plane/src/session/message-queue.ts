@@ -129,6 +129,15 @@ export class SessionMessageQueue {
     const messageId = data.requestId ?? generateId();
     const now = Date.now();
 
+    if (this.sessionStatus.isArchiveInProgress()) {
+      this.wsManager.send(ws, {
+        type: "prompt_rejected",
+        requestId: messageId,
+        message: "Session archive is in progress",
+      } as ServerMessage);
+      return;
+    }
+
     let participant = this.participantService.getByUserId(client.userId);
     if (!participant) {
       participant = this.participantService.create(client.userId, client.name);
@@ -568,7 +577,10 @@ export class SessionMessageQueue {
   async enqueuePromptFromApi(
     data: EnqueuePromptRequest
   ): Promise<{ messageId: string; status: "queued" }> {
-    if (this.repository.getSession()?.status === "cancelled") {
+    if (
+      this.repository.getSession()?.status === "cancelled" ||
+      this.sessionStatus.isArchiveInProgress()
+    ) {
       throw new PromptEnqueueRejectedError();
     }
 

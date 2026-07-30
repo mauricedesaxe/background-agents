@@ -30,6 +30,9 @@ function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
     total_cost: 2.5,
     sandbox_settings: null,
     environment_id: null,
+    terminal_at: null,
+    archive_requested_at: null,
+    archive_claimed_at: null,
     created_at: 1000,
     updated_at: 2000,
     ...overrides,
@@ -41,7 +44,31 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
 
   const repository = {
     getSession: vi.fn(() => session),
-    updateSessionStatus: vi.fn(),
+    updateSessionStatus: vi.fn(
+      (sessionId: string, status: SessionRow["status"], updatedAt: number) => {
+        if (!session || session.id !== sessionId) return;
+        session.status = status;
+        session.updated_at = updatedAt;
+        session.terminal_at = ["completed", "failed", "cancelled"].includes(status)
+          ? (session.terminal_at ?? updatedAt)
+          : null;
+        if (status === "archived") {
+          session.archive_requested_at = null;
+          session.archive_claimed_at = null;
+        }
+      }
+    ),
+    claimSessionArchive: vi.fn((sessionId: string, claimedAt: number) => {
+      if (!session || session.id !== sessionId || session.archive_claimed_at != null) return false;
+      session.archive_claimed_at = claimedAt;
+      session.archive_requested_at = session.archive_requested_at ?? claimedAt;
+      return true;
+    }),
+    clearSessionArchiveClaim: vi.fn((sessionId: string, keepRetryRequest: boolean) => {
+      if (!session || session.id !== sessionId) return;
+      session.archive_claimed_at = null;
+      if (!keepRetryRequest) session.archive_requested_at = null;
+    }),
     getPendingOrProcessingCount: vi.fn(() => 0),
     getMessageCount: vi.fn(() => 3),
     getActiveDurationMs: vi.fn(() => 4500),
@@ -392,6 +419,65 @@ describe("SessionStatusService.handleAutoArchiveAlarm", () => {
     expect(h.setAlarm).toHaveBeenCalledWith(terminalAt + 12 * 60 * 60 * 1000);
   });
 
+  it("keeps the original retention deadline after later metadata updates", async () => {
+    const terminalAt = 10_000;
+    const h = harness({
+      session: createSession({
+        status: "completed",
+        terminal_at: terminalAt,
+        updated_at: terminalAt + 6 * 60 * 60 * 1000,
+      }),
+    });
+
+    await h.service.handleAutoArchiveAlarm(terminalAt + 12 * 60 * 60 * 1000);
+
+    expect(h.archiveSandbox).toHaveBeenCalledWith("session_auto_archived");
+  });
+
+  it("durably retries timed archival after the provider recovers", async () => {
+    const terminalAt = 10_000;
+    const session = createSession({
+      status: "completed",
+      terminal_at: terminalAt,
+      updated_at: terminalAt,
+    });
+    const h = harness({ session });
+    h.archiveSandbox.mockRejectedValueOnce(new Error("provider unavailable"));
+
+    await h.service.handleAutoArchiveAlarm(terminalAt + 12 * 60 * 60 * 1000);
+
+    expect(session.archive_claimed_at).toBeNull();
+    expect(session.archive_requested_at).not.toBeNull();
+    expect(h.setAlarm).toHaveBeenCalled();
+
+    await h.service.handleAutoArchiveAlarm(terminalAt + 13 * 60 * 60 * 1000);
+
+    expect(h.archiveSandbox).toHaveBeenCalledTimes(2);
+    expect(session.status).toBe("archived");
+    expect(session.archive_requested_at).toBeNull();
+  });
+
+  it("blocks resume while provider archival is in flight", async () => {
+    const session = createSession({ status: "completed" });
+    const h = harness({ session });
+    let releaseArchive!: () => void;
+    h.archiveSandbox.mockReturnValue(
+      new Promise<void>((resolve) => {
+        releaseArchive = resolve;
+      })
+    );
+
+    const archive = h.service.archive("session_archived");
+    await Promise.resolve();
+
+    expect(session.archive_claimed_at).not.toBeNull();
+    expect(await h.service.unarchive()).toBe(false);
+    expect(session.status).toBe("completed");
+
+    releaseArchive();
+    await expect(archive).resolves.toBe("archived");
+  });
+
   it("never auto-archives an active session", async () => {
     const h = harness({ session: createSession({ status: "active" }) });
     await h.service.handleAutoArchiveAlarm(Number.MAX_SAFE_INTEGER);
@@ -473,5 +559,26 @@ describe("SessionStatusService archive cascade", () => {
 
     expect(h.parentFetch).toHaveBeenCalledTimes(2);
     expect(h.log.error).not.toHaveBeenCalledWith("cascade_archive.child_failed", expect.anything());
+  });
+
+  it("re-arms the parent alarm when immediate child retries are exhausted", async () => {
+    const h = harness({ session: createSession({ status: "completed" }) });
+    h.sessionIndex!.listByParent.mockResolvedValue([
+      { id: "child-1", status: "completed" },
+    ] as never);
+    h.parentFetch.mockRejectedValueOnce(new Error("unavailable"));
+    h.parentFetch.mockRejectedValueOnce(new Error("unavailable"));
+    h.parentFetch.mockRejectedValueOnce(new Error("unavailable"));
+
+    await h.service.transition("archived");
+    await h.waitUntil.mock.calls[0][0];
+
+    expect(h.parentFetch).toHaveBeenCalledTimes(3);
+    expect(h.setAlarm).toHaveBeenCalled();
+
+    await h.service.handleAutoArchiveAlarm(Number.MAX_SAFE_INTEGER);
+    await h.waitUntil.mock.calls[1][0];
+
+    expect(h.parentFetch).toHaveBeenCalledTimes(4);
   });
 });
