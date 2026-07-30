@@ -1,5 +1,5 @@
 import { isCanonicalUserId, type SessionStatus } from "@open-inspect/shared";
-import { SessionIndexStore, type SessionReadAction } from "../db/session-index";
+import { SessionIndexStore, type SessionReadUpdate } from "../db/session-index";
 import { error, json, parsePattern, type RequestContext, type Route } from "./shared";
 import type { Env } from "../types";
 
@@ -92,8 +92,6 @@ async function handleListSessions(
   });
 }
 
-const SESSION_READ_ACTIONS: SessionReadAction[] = ["viewed", "mark_read", "mark_unread"];
-
 async function handleUpdateReadState(
   request: Request,
   _env: Env,
@@ -106,24 +104,25 @@ async function handleUpdateReadState(
   const userId = ctx.principal?.kind === "user" ? ctx.principal.user.canonicalUserId : null;
   if (!userId) return error("User identity required", 403);
 
-  let body: { action?: unknown };
+  let body: { action?: unknown; messageId?: unknown };
   try {
-    body = (await request.json()) as { action?: unknown };
+    body = (await request.json()) as { action?: unknown; messageId?: unknown };
   } catch {
     return error("Invalid request body", 400);
   }
-  if (
-    typeof body.action !== "string" ||
-    !SESSION_READ_ACTIONS.includes(body.action as SessionReadAction)
-  ) {
+  if (body.action !== "viewed" && body.action !== "mark_read" && body.action !== "mark_unread") {
     return error("Invalid read-state action", 400);
   }
+  if (body.action === "viewed" && typeof body.messageId !== "string") {
+    return error("Viewed output message ID required", 400);
+  }
 
-  const unread = await new SessionIndexStore(ctx.db).updateReadState(
-    sessionId,
-    userId,
-    body.action as SessionReadAction
-  );
+  const update: SessionReadUpdate =
+    body.action === "viewed"
+      ? { action: body.action, messageId: body.messageId as string }
+      : { action: body.action };
+
+  const unread = await new SessionIndexStore(ctx.db).updateReadState(sessionId, userId, update);
   if (unread === null) return error("Session not found", 404);
   return json({ sessionId, unread });
 }

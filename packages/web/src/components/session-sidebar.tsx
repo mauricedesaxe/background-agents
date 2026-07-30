@@ -864,10 +864,9 @@ function SessionListItem({
   const handleReadStateAction = async () => {
     setIsActionsOpen(false);
     try {
-      const unread = await updateSessionReadState(
-        session.id,
-        session.unread ? "mark_read" : "mark_unread"
-      );
+      const unread = await updateSessionReadState(session.id, {
+        action: session.unread ? "mark_read" : "mark_unread",
+      });
       onReadStateChanged(session.id, unread);
     } catch (error) {
       console.error("Failed to update session read state", error);
@@ -1159,10 +1158,9 @@ function ChildSessionListItem({
   const handleReadStateAction = async () => {
     setIsActionsOpen(false);
     try {
-      const unread = await updateSessionReadState(
-        session.id,
-        session.unread ? "mark_read" : "mark_unread"
-      );
+      const unread = await updateSessionReadState(session.id, {
+        action: session.unread ? "mark_read" : "mark_unread",
+      });
       onReadStateChanged(session.id, unread);
     } catch (error) {
       console.error("Failed to update session read state", error);

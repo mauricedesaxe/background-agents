@@ -123,7 +123,9 @@ export interface ListSessionsOptions {
   viewerUserId?: string;
 }
 
-export type SessionReadAction = "viewed" | "mark_read" | "mark_unread";
+export type SessionReadUpdate =
+  | { action: "viewed"; messageId: string }
+  | { action: "mark_read" | "mark_unread" };
 
 export interface ListSessionsResult {
   sessions: SessionEntry[];
@@ -576,7 +578,7 @@ export class SessionIndexStore {
   async updateReadState(
     sessionId: string,
     userId: string,
-    action: SessionReadAction
+    update: SessionReadUpdate
   ): Promise<boolean | null> {
     const session = await this.db
       .prepare("SELECT latest_output_message_id FROM sessions WHERE id = ?")
@@ -585,7 +587,7 @@ export class SessionIndexStore {
     if (!session) return null;
 
     const now = Date.now();
-    if (action === "mark_unread") {
+    if (update.action === "mark_unread") {
       await this.db
         .prepare(
           `INSERT INTO session_read_states
@@ -600,21 +602,25 @@ export class SessionIndexStore {
       return true;
     }
 
-    if (action === "viewed") {
+    if (update.action === "viewed") {
       await this.db
         .prepare(
           `INSERT INTO session_read_states
              (user_id, session_id, read_output_message_id, manually_unread, updated_at)
            VALUES (?, ?, ?, 0, ?)
            ON CONFLICT(user_id, session_id) DO UPDATE SET
-             read_output_message_id = CASE
-               WHEN session_read_states.manually_unread = 0
-               THEN excluded.read_output_message_id
-               ELSE session_read_states.read_output_message_id
-             END,
-             updated_at = excluded.updated_at`
+              read_output_message_id = CASE
+                WHEN session_read_states.manually_unread = 0
+                  AND (
+                    session_read_states.read_output_message_id IS NULL
+                    OR excluded.read_output_message_id = ?
+                  )
+                THEN excluded.read_output_message_id
+                ELSE session_read_states.read_output_message_id
+              END,
+              updated_at = excluded.updated_at`
         )
-        .bind(userId, sessionId, session.latest_output_message_id, now)
+        .bind(userId, sessionId, update.messageId, now, session.latest_output_message_id)
         .run();
     } else {
       await this.db
