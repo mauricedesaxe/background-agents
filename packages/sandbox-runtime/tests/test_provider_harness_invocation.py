@@ -35,6 +35,7 @@ HARNESS_PIN_FINGERPRINTS = {
     "modal": REPO_ROOT / "terraform/environments/production/modal.tf",
     "vercel": REPO_ROOT / "terraform/environments/production/vercel.tf",
 }
+HASH_IMPLEMENTATION_COUNT = 2
 
 
 @pytest.mark.parametrize("provider", sorted(PROVIDER_BUILDS))
@@ -82,4 +83,4 @@ class TestNoProviderIsMissed:
 @pytest.mark.parametrize("provider", sorted(HARNESS_PIN_FINGERPRINTS))
 def test_harness_pin_invalidates_provider_image(provider):
     fingerprint = HARNESS_PIN_FINGERPRINTS[provider].read_text()
-    assert fingerprint.count('-name "*.sh"') == 2
+    assert fingerprint.count('-name "*.sh"') == HASH_IMPLEMENTATION_COUNT
