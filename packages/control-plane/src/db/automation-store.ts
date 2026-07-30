@@ -407,6 +407,10 @@ export class AutomationStore {
       .prepare(
         `SELECT * FROM automations
          WHERE user_id = ? AND trigger_type = 'once' AND deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM sessions
+             WHERE sessions.automation_id = automations.id AND sessions.status = 'archived'
+           )
          ORDER BY created_at DESC`
       )
       .bind(userId)

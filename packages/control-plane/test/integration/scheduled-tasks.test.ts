@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 import { AutomationStore, type AutomationRow } from "../../src/db/automation-store";
+import { SessionIndexStore } from "../../src/db/session-index";
 import { scheduledTaskRoutes } from "../../src/routes/scheduled-tasks";
 import type { RequestContext } from "../../src/routes/shared";
 import type { Env } from "../../src/types";
@@ -130,6 +131,48 @@ describe("scheduled task routes (D1 integration)", () => {
     expect(response.status).toBe(200);
     const result = await response.json<{ tasks: Array<{ automation: { id: string } }> }>();
     expect(result.tasks.map((task) => task.automation.id)).toEqual(["scheduled-task-1"]);
+  });
+
+  it("hides a scheduled prompt after its session is archived", async () => {
+    const automationStore = new AutomationStore(env.DB);
+    const sessionStore = new SessionIndexStore(env.DB);
+    const now = Date.now();
+    await automationStore.create(onceAutomation({ id: "completed-task", created_at: now - 1 }));
+    await automationStore.create(onceAutomation({ id: "archived-task", created_at: now }));
+    await sessionStore.create({
+      id: "completed-session",
+      title: "Completed scheduled prompt",
+      repoOwner: null,
+      repoName: null,
+      model: "anthropic/claude-sonnet-4-6",
+      reasoningEffort: null,
+      baseBranch: null,
+      status: "completed",
+      automationId: "completed-task",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await sessionStore.create({
+      id: "archived-session",
+      title: "Archived scheduled prompt",
+      repoOwner: null,
+      repoName: null,
+      model: "anthropic/claude-sonnet-4-6",
+      reasoningEffort: null,
+      baseBranch: null,
+      status: "archived",
+      automationId: "archived-task",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const response = await call("GET", "/scheduled-tasks", undefined, {
+      ownerUserId: "usr_owner",
+    });
+
+    expect(response.status).toBe(200);
+    const result = await response.json<{ tasks: Array<{ automation: { id: string } }> }>();
+    expect(result.tasks.map((task) => task.automation.id)).toEqual(["completed-task"]);
   });
 
   it("returns the current execution when claim beats cancellation", async () => {
