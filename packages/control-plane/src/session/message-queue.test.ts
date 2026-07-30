@@ -124,6 +124,7 @@ function buildQueue() {
 
   const callbackService = {
     notifyComplete: vi.fn(async () => {}),
+    notifyStarted: vi.fn(async () => {}),
   };
 
   const broadcast = vi.fn((_message: ServerMessage) => {});
@@ -175,6 +176,7 @@ function buildQueue() {
     getAlarm,
     setAlarm,
     waitUntil,
+    callbackService,
   };
 }
 
@@ -234,6 +236,7 @@ describe("SessionMessageQueue", () => {
     expect(h.setAlarm).toHaveBeenCalledTimes(1);
     expect(h.setAlarm.mock.calls[0][0]).toBeGreaterThan(Date.now());
     expect(h.repository.updateMessageToProcessing).not.toHaveBeenCalled();
+    expect(h.callbackService.notifyStarted).not.toHaveBeenCalled();
   });
 
   it("marks session active when a prompt is enqueued", async () => {
@@ -242,6 +245,29 @@ describe("SessionMessageQueue", () => {
     await h.queue.handlePromptMessage({} as WebSocket, createClientInfo(), { content: "hello" });
 
     expect(h.sessionStatus.transition).toHaveBeenCalledWith("active");
+  });
+
+  it("notifies the integration after a prompt is dispatched to the sandbox", async () => {
+    const h = buildQueue();
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "msg-linear" }));
+    h.wsManager.getSandboxSocket.mockReturnValue({ readyState: WebSocket.OPEN } as WebSocket);
+
+    await h.queue.processMessageQueue();
+
+    expect(h.callbackService.notifyStarted).toHaveBeenCalledWith("msg-linear");
+    expect(h.waitUntil).toHaveBeenCalledOnce();
+  });
+
+  it("does not notify the integration when sandbox dispatch fails", async () => {
+    const h = buildQueue();
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "msg-failed" }));
+    h.wsManager.getSandboxSocket.mockReturnValue({ readyState: WebSocket.OPEN } as WebSocket);
+    h.wsManager.send.mockReturnValue(false);
+
+    await h.queue.processMessageQueue();
+
+    expect(h.callbackService.notifyStarted).not.toHaveBeenCalled();
+    expect(h.waitUntil).not.toHaveBeenCalled();
   });
 
   it("broadcasts the persisted prompt queue after enqueue", async () => {
