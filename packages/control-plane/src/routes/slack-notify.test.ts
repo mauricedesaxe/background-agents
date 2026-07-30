@@ -4,6 +4,7 @@ import { handleSlackNotify } from "./slack-notify";
 import type { RequestContext } from "./shared";
 import type { SqlDatabase } from "../db/sql-database";
 import type { Env } from "../types";
+import { UpstreamExchangeConflictError } from "../db/upstream-exchange-store";
 
 const sessionStoreMock = {
   get: vi.fn(),
@@ -12,6 +13,11 @@ const sessionStoreMock = {
 const integrationStoreMock = {
   getResolvedConfig: vi.fn(),
   getGlobal: vi.fn(),
+};
+
+const upstreamExchangeStoreMock = {
+  assertOpenScan: vi.fn(),
+  recordSlackDelivery: vi.fn(),
 };
 
 vi.mock("../db/session-index", async (importOriginal) => {
@@ -30,6 +36,16 @@ vi.mock("../db/integration-settings", async (importOriginal) => {
     ...actual,
     IntegrationSettingsStore: vi.fn().mockImplementation(function () {
       return integrationStoreMock;
+    }),
+  };
+});
+
+vi.mock("../db/upstream-exchange-store", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    UpstreamExchangeStore: vi.fn().mockImplementation(function () {
+      return upstreamExchangeStoreMock;
     }),
   };
 });
@@ -93,6 +109,8 @@ function seedActiveSession(opts?: {
   status?: SessionStatus;
   repoOwner?: string | null;
   repoName?: string | null;
+  automationId?: string | null;
+  automationRunId?: string | null;
 }) {
   sessionStoreMock.get.mockResolvedValue({
     id: "sess-1",
@@ -107,6 +125,8 @@ function seedActiveSession(opts?: {
     spawnSource: opts?.spawnSource ?? "user",
     spawnDepth: 0,
     userId: opts?.userId ?? "user-1",
+    automationId: opts?.automationId ?? null,
+    automationRunId: opts?.automationRunId ?? null,
     createdAt: 1,
     updatedAt: 1,
   });
@@ -173,6 +193,106 @@ describe("handleSlackNotify", () => {
     await callHandler({ channel: "#ops", text: "hello" });
 
     expect(sessionFetchMock).not.toHaveBeenCalled();
+  });
+
+  it("persists an exchange scan receipt after Slack accepts the digest", async () => {
+    seedActiveSession({
+      spawnSource: "automation",
+      automationId: "automation-1",
+      automationRunId: "run-1",
+    });
+    upstreamExchangeStoreMock.assertOpenScan.mockResolvedValue(undefined);
+    upstreamExchangeStoreMock.recordSlackDelivery.mockResolvedValue(undefined);
+    integrationStoreMock.getResolvedConfig.mockResolvedValue({
+      enabledRepos: null,
+      settings: { agentNotificationsEnabled: true, mentionsPolicy: "allow" },
+    });
+    mockSlackResponse({ body: { ok: true, channel: "C1", ts: "1.2" } });
+    mockSlackResponse({ body: { ok: true, permalink: "https://x.slack.com/p", channel: "C1" } });
+
+    const scanId = "85d77f25-4397-4d5e-9040-35acc3227e9b";
+    const response = await callHandler({
+      channel: "#upstream-exchange",
+      text: "digest",
+      scan_id: scanId,
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstreamExchangeStoreMock.assertOpenScan).toHaveBeenCalledWith(
+      scanId,
+      "automation-1",
+      "run-1"
+    );
+    expect(upstreamExchangeStoreMock.recordSlackDelivery).toHaveBeenCalledWith({
+      scanId,
+      automationId: "automation-1",
+      automationRunId: "run-1",
+      channelId: "C1",
+      messageTs: "1.2",
+      permalink: "https://x.slack.com/p",
+    });
+  });
+
+  it("does not persist an exchange receipt when Slack cannot provide a permalink", async () => {
+    seedActiveSession({
+      spawnSource: "automation",
+      automationId: "automation-1",
+      automationRunId: "run-1",
+    });
+    upstreamExchangeStoreMock.assertOpenScan.mockResolvedValue(undefined);
+    integrationStoreMock.getResolvedConfig.mockResolvedValue({
+      enabledRepos: null,
+      settings: { agentNotificationsEnabled: true, mentionsPolicy: "allow" },
+    });
+    mockSlackResponse({ body: { ok: true, channel: "C1", ts: "1.2" } });
+    mockSlackResponse({ body: { ok: false, error: "permalink_unavailable" } });
+
+    const response = await callHandler({
+      channel: "#upstream-exchange",
+      text: "digest",
+      scan_id: "85d77f25-4397-4d5e-9040-35acc3227e9b",
+    });
+
+    expect(response.status).toBe(502);
+    expect(upstreamExchangeStoreMock.recordSlackDelivery).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid exchange scan before posting to Slack", async () => {
+    seedActiveSession({
+      spawnSource: "automation",
+      automationId: "automation-1",
+      automationRunId: "run-1",
+    });
+    upstreamExchangeStoreMock.assertOpenScan.mockRejectedValue(
+      new UpstreamExchangeConflictError("Exchange scan not found for this automation run")
+    );
+
+    const response = await callHandler({
+      channel: "#upstream-exchange",
+      text: "digest",
+      scan_id: "85d77f25-4397-4d5e-9040-35acc3227e9b",
+    });
+
+    expect(response.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("propagates an exchange ledger outage instead of reporting invalid input", async () => {
+    seedActiveSession({
+      spawnSource: "automation",
+      automationId: "automation-1",
+      automationRunId: "run-1",
+    });
+    upstreamExchangeStoreMock.assertOpenScan.mockRejectedValue(new Error("D1 unavailable"));
+
+    await expect(
+      callHandler({
+        channel: "#upstream-exchange",
+        text: "digest",
+        scan_id: "85d77f25-4397-4d5e-9040-35acc3227e9b",
+      })
+    ).rejects.toThrow("D1 unavailable");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("returns 503 feature_unavailable and logs at error level when SLACK_BOT_TOKEN is missing", async () => {

@@ -3,6 +3,7 @@ import { env } from "cloudflare:test";
 import { AutomationStore, type AutomationRow } from "../../src/db/automation-store";
 import { cleanD1Tables } from "./cleanup";
 import { makeRunRow, seedRun, fetchRuns } from "./run-helpers";
+import { UpstreamExchangeStore } from "../../src/db/upstream-exchange-store";
 
 function getSchedulerStub() {
   const id = env.SCHEDULER.idFromName("global-scheduler");
@@ -146,6 +147,57 @@ describe("SchedulerDO (integration)", () => {
 
       const automation = await store.getById("auto-rc2");
       expect(automation!.consecutive_failures).toBe(1);
+    });
+
+    it("fails a successful exchange run when its durable scan is incomplete", async () => {
+      const store = new AutomationStore(env.DB);
+      const now = Date.now();
+      await store.create(makeAutomation({ id: "auto-exchange-incomplete" }));
+      await seedRun(
+        makeRunRow("auto-exchange-incomplete", {
+          id: "run-exchange-incomplete",
+          session_id: "sess-exchange-incomplete",
+          status: "running",
+          started_at: now,
+        })
+      );
+      await new UpstreamExchangeStore(env.DB).beginScan({
+        id: crypto.randomUUID(),
+        automationId: "auto-exchange-incomplete",
+        automationRunId: "run-exchange-incomplete",
+        direction: "inbound",
+        sourceRepository: "ColeMurray/background-agents",
+        fromSha: null,
+        toSha: "2".repeat(40),
+        forkHeadSha: "a".repeat(40),
+        upstreamHeadSha: "2".repeat(40),
+        mergeBaseSha: "b".repeat(40),
+        expectedCommitShas: ["1".repeat(40)],
+      });
+
+      const response = await getSchedulerStub().fetch("http://internal/internal/run-complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          automationId: "auto-exchange-incomplete",
+          runId: "run-exchange-incomplete",
+          sessionId: "sess-exchange-incomplete",
+          messageId: "msg-exchange-incomplete",
+          success: true,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const run = await store.getRunById("auto-exchange-incomplete", "run-exchange-incomplete");
+      expect(run?.status).toBe("failed");
+      expect(run?.failure_reason).toContain("Slack delivery receipt is missing");
+      expect(
+        await new UpstreamExchangeStore(env.DB).getCursor(
+          "auto-exchange-incomplete",
+          "inbound",
+          "ColeMurray/background-agents"
+        )
+      ).toBeNull();
     });
 
     it("auto-pauses after 3 consecutive failures", async () => {

@@ -40,6 +40,7 @@ import { providerIdentityRoutes } from "./routes/provider-identities";
 import { sessionRoutes } from "./routes/sessions";
 import { boardRoutes } from "./routes/board";
 import { handleSlackNotify } from "./routes/slack-notify";
+import { upstreamExchangeRoutes } from "./routes/upstream-exchange";
 import { webhookRoutes } from "./webhooks";
 
 const logger = createLogger("router");
@@ -88,6 +89,7 @@ const SANDBOX_ONLY_ROUTES: PrincipalRouteGrant[] = [
   { method: "POST", pattern: /^\/sessions\/[^/]+\/children$/ },
   { method: "POST", pattern: /^\/sessions\/[^/]+\/children\/[^/]+\/cancel$/ },
   { method: "POST", pattern: /^\/sessions\/[^/]+\/slack-notify$/ },
+  { method: "POST", pattern: /^\/sessions\/[^/]+\/upstream-exchange$/ },
   { method: "POST", pattern: /^\/sessions\/[^/]+\/board$/ },
   { method: "POST", pattern: /^\/sessions\/[^/]+\/board\/[^/]+\/mutate$/ },
   { method: "GET", pattern: /^\/sessions\/[^/]+\/board\/[^/]+\/snapshot$/ },
@@ -388,6 +390,7 @@ const routes: Route[] = [
     pattern: parsePattern("/sessions/:id/slack-notify"),
     handler: handleSlackNotify,
   },
+  ...upstreamExchangeRoutes,
 
   // Interactive tldraw boards (create is session-scoped; mutate/snapshot reach
   // the BoardRoom DO). All sandbox-authenticated.

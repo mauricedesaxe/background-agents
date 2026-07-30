@@ -87,6 +87,13 @@ export default tool({
       .describe(
         "Optional short note explaining why you are posting. Recorded server-side for audit; not shown in Slack."
       ),
+    scan_id: z
+      .string()
+      .uuid()
+      .optional()
+      .describe(
+        "Exchange scan ID returned by upstream-exchange begin. Supply it only for an upstream exchange digest so successful Slack delivery is attached to that scan."
+      ),
   },
   async execute(args) {
     let response;
@@ -98,6 +105,7 @@ export default tool({
           text: args.text,
           thread_ts: args.thread_ts,
           reason: args.reason,
+          scan_id: args.scan_id,
         }),
       });
     } catch (error) {

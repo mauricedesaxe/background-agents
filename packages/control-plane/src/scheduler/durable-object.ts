@@ -38,6 +38,7 @@ import {
   type AutomationEnvironmentRow,
 } from "../db/automation-store";
 import { ApiTokenStore } from "../db/api-tokens";
+import { UpstreamExchangeStore } from "../db/upstream-exchange-store";
 import { SlackChannelStore } from "../db/slack-channel-store";
 import {
   buildSlackCompletionNotification,
@@ -1160,20 +1161,35 @@ export class SchedulerDO extends DurableObject<Env> {
       });
     }
 
+    let completionSuccess = body.success;
+    let completionError = body.error;
+    let exchangeRunTransitioned: boolean | null = null;
+    if (completionSuccess) {
+      const finalization = await new UpstreamExchangeStore(this.db).finalizeForRun(body.runId);
+      if (finalization.kind === "finalized") {
+        exchangeRunTransitioned = finalization.runTransitioned;
+      } else if (finalization.kind === "blocked") {
+        completionSuccess = false;
+        completionError = `Upstream exchange scan could not finalize: ${finalization.reason}`;
+      }
+    }
+
     // SQL-guarded transition: only an active run may go terminal. When the
     // guard suppresses the write (recovery sweep or a concurrent callback got
     // there first) the callback is acknowledged as ignored — a terminal child
     // must never transition again.
-    const transitioned = await store.updateRun(
-      body.runId,
-      body.success
-        ? { status: "completed", completed_at: Date.now() }
-        : {
-            status: "failed",
-            failure_reason: body.error || "Unknown error",
-            completed_at: Date.now(),
-          }
-    );
+    const transitioned =
+      exchangeRunTransitioned ??
+      (await store.updateRun(
+        body.runId,
+        completionSuccess
+          ? { status: "completed", completed_at: Date.now() }
+          : {
+              status: "failed",
+              failure_reason: completionError || "Unknown error",
+              completed_at: Date.now(),
+            }
+      ));
 
     if (!transitioned) {
       this.log.warn("Ignoring run-complete callback for non-active run", {
@@ -1193,13 +1209,13 @@ export class SchedulerDO extends DurableObject<Env> {
     // accounting until the backfill repairs them.
     if (run.invocation_id) {
       await this.applyInvocationAccounting(store, body.automationId, run.invocation_id);
-    } else if (body.success) {
+    } else if (completionSuccess) {
       await store.resetConsecutiveFailures(body.automationId);
     } else {
       await this.trackAutomationFailure(store, body.automationId);
     }
 
-    if (body.success) {
+    if (completionSuccess) {
       this.log.info("Run completed successfully", {
         event: "scheduler.run_complete",
         automation_id: body.automationId,
@@ -1212,7 +1228,7 @@ export class SchedulerDO extends DurableObject<Env> {
         automation_id: body.automationId,
         run_id: body.runId,
         session_id: body.sessionId,
-        error: body.error,
+        error: completionError,
       });
     }
 
@@ -1227,8 +1243,8 @@ export class SchedulerDO extends DurableObject<Env> {
       await this.notifySlackCompletion(run, slackMeta, {
         sessionId: body.sessionId,
         messageId: body.messageId,
-        success: body.success,
-        error: body.error,
+        success: completionSuccess,
+        error: completionError,
         repoFullName: formatRunRepositoryLabel(run),
         model: automation?.model ?? "",
         reasoningEffort: automation?.reasoning_effort ?? undefined,
