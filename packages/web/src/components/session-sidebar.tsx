@@ -468,7 +468,7 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
           <>
             {groups.map((group) => (
               <SessionRepositoryGroupSection
-                key={`${group.key}:${searchQuery.trim().length > 0 ? "search" : "browse"}`}
+                key={`${group.key}:${searchQuery.trim() || "browse"}`}
                 group={group}
                 revealInactive={searchQuery.trim().length > 0}
                 environmentNamesById={environmentNamesById}
