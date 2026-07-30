@@ -1,13 +1,15 @@
-export type SessionReadAction = "viewed" | "mark_read" | "mark_unread";
+export type SessionReadUpdate =
+  | { action: "viewed"; messageId: string }
+  | { action: "mark_read" | "mark_unread" };
 
 export async function updateSessionReadState(
   sessionId: string,
-  action: SessionReadAction
+  update: SessionReadUpdate
 ): Promise<boolean> {
   const response = await fetch(`/api/sessions/${sessionId}/read-state`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action }),
+    body: JSON.stringify(update),
   });
   if (!response.ok) {
     throw new Error(`Failed to update session read state: ${response.status}`);

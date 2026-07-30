@@ -141,13 +141,26 @@ export function SessionTimeline({
     return null;
   }, [events]);
 
+  const reportVisibleOutput = useCallback(() => {
+    if (
+      latestOutputMessageId &&
+      onLatestOutputViewed &&
+      document.visibilityState === "visible" &&
+      isNearBottomRef.current
+    ) {
+      onLatestOutputViewed(latestOutputMessageId);
+    }
+  }, [latestOutputMessageId, onLatestOutputViewed]);
+
   const handleScroll = useCallback(() => {
     hasScrolledRef.current = true;
     const el = scrollContainerRef.current;
     if (el) {
+      const wasNearBottom = isNearBottomRef.current;
       isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+      if (!wasNearBottom && isNearBottomRef.current) reportVisibleOutput();
     }
-  }, []);
+  }, [reportVisibleOutput]);
 
   useEffect(() => {
     const sentinel = topSentinelRef.current;
@@ -190,15 +203,10 @@ export function SessionTimeline({
   useEffect(() => {
     if (!latestOutputMessageId || !onLatestOutputViewed) return;
 
-    const reportVisibleOutput = () => {
-      if (document.visibilityState === "visible" && isNearBottomRef.current) {
-        onLatestOutputViewed(latestOutputMessageId);
-      }
-    };
     reportVisibleOutput();
     document.addEventListener("visibilitychange", reportVisibleOutput);
     return () => document.removeEventListener("visibilitychange", reportVisibleOutput);
-  }, [latestOutputMessageId, onLatestOutputViewed]);
+  }, [latestOutputMessageId, onLatestOutputViewed, reportVisibleOutput]);
 
   return (
     <div

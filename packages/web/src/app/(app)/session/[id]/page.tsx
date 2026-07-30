@@ -114,7 +114,10 @@ function SessionPageContent() {
       if (viewedOutputRef.current === messageId) return;
       viewedOutputRef.current = messageId;
       try {
-        const unread = await updateSessionReadState(sessionId, "viewed");
+        const unread = await updateSessionReadState(sessionId, {
+          action: "viewed",
+          messageId,
+        });
         await mutate<SessionListResponse>(
           isSessionListKey,
           (current) => applyUnreadUpdate(current, sessionId, unread),
