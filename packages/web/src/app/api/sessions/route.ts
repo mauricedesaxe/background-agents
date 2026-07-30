@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { buildAuthDisplay, buildScmAttribution } from "@/lib/build-auth-identity";
+import { buildAuthDisplay } from "@/lib/build-auth-identity";
 import { controlPlaneUserFetch } from "@/lib/control-plane";
 import {
   buildControlPlanePath,
@@ -91,10 +91,7 @@ export async function POST(request: NextRequest) {
       // side): a named environment or an ad-hoc repository list.
       environmentId: body.environmentId,
       repositories: body.repositories,
-      // Display-only auth block (GitHub or Google); GitHub-only scm*
-      // attribution is empty for Google.
       ...buildAuthDisplay(user),
-      ...buildScmAttribution(user),
     };
 
     const response = await controlPlaneUserFetch("/sessions", {

@@ -104,7 +104,10 @@ describe("handleCreateSession D1 ordering", () => {
       SCM_PROVIDER: "github",
       DB: {
         prepare: vi.fn(() => statement),
-        batch: vi.fn(),
+        batch: vi.fn(async () => [
+          { results: [], meta: { changes: 0 } },
+          { results: [], meta: { changes: 1 } },
+        ]),
         exec: vi.fn(),
         dump: vi.fn(),
       },
@@ -295,14 +298,11 @@ describe("handleCreateSession D1 ordering", () => {
     });
     const initFetch = vi.fn(async (request: Request) => {
       const body = (await request.json()) as Record<string, unknown>;
-      // Body display fields win; enrichment fills the gaps from the linked
-      // GitHub identity. Credentials would come only from the token store
-      // (none stored here), never from the body.
       expect(body).toMatchObject({
         userId: "slack:U0123",
         spawnSource: "slack-bot",
         scmUserId: "2002",
-        scmLogin: "caller-login",
+        scmLogin: "ada",
         scmName: "Trusted Ada",
         scmEmail: "2002+ada@users.noreply.github.com",
         scmTokenEncrypted: null,
@@ -314,7 +314,6 @@ describe("handleCreateSession D1 ordering", () => {
     const response = await createSessionRequestWithBody(createEnv(initFetch), {
       title: "Attributed session",
       model: "anthropic/claude-haiku-4-5",
-      scmLogin: "caller-login",
     });
 
     expect(response.status).toBe(201);
@@ -384,7 +383,7 @@ describe("handleCreateSession D1 ordering", () => {
     expect(initFetch).not.toHaveBeenCalled();
   });
 
-  it("preserves non-GitHub SCM display identity without GitHub enrichment", async () => {
+  it("rejects non-GitHub SCM identity fields without initializing a session", async () => {
     const create = vi.fn().mockResolvedValue(undefined);
     vi.mocked(SessionIndexStore).mockImplementation(function () {
       return { create } as never;
@@ -446,8 +445,8 @@ describe("handleCreateSession D1 ordering", () => {
       }
     );
 
-    expect(response.status).toBe(201);
-    expect(initFetch).toHaveBeenCalledOnce();
+    expect(response.status).toBe(400);
+    expect(initFetch).not.toHaveBeenCalled();
     expect(getIdentitiesForUser).not.toHaveBeenCalled();
   });
 });

@@ -28,6 +28,7 @@ import { resolveScopeEnabled } from "../../src/image-builds/scope";
 import type { AnyImageBuildAdapter, DeleteImageInput } from "../../src/image-builds/types";
 import { evaluateImageBuildForSpawn } from "../../src/sandbox/lifecycle/image-selection";
 import { cleanD1Tables } from "./cleanup";
+import { serviceFetch } from "./helpers";
 import {
   RUNTIME_VERSION,
   REPOSITORY_SHAS,
@@ -1297,7 +1298,7 @@ describe("Image builds", () => {
       // state never flickers off on a transient resolution failure.
       await enableRepo();
 
-      const response = await modalFetch(`${BASE}/image-builds/enabled-repos`);
+      const response = await serviceFetch(`${BASE}/image-builds/enabled-repos`);
 
       expect(response.status).toBe(200);
       await expect(response.json()).resolves.toEqual({
@@ -1311,7 +1312,7 @@ describe("Image builds", () => {
       // The integration harness has no source-control provider configured, so
       // enabling — which resolves the repo through the trigger path's
       // canonical resolver first — fails without persisting the flag.
-      const enable = await modalFetch(`${BASE}/image-builds/toggle/repo/Acme/Web`, {
+      const enable = await serviceFetch(`${BASE}/image-builds/toggle/repo/Acme/Web`, {
         method: "PUT",
         body: JSON.stringify({ enabled: true }),
       });
@@ -1321,7 +1322,7 @@ describe("Image builds", () => {
       // Disabling never resolves — a repo that became unresolvable must
       // remain disableable.
       await enableRepo();
-      const disable = await modalFetch(`${BASE}/image-builds/toggle/repo/acme/web`, {
+      const disable = await serviceFetch(`${BASE}/image-builds/toggle/repo/acme/web`, {
         method: "PUT",
         body: JSON.stringify({ enabled: false }),
       });
@@ -1331,7 +1332,7 @@ describe("Image builds", () => {
     });
 
     it("rejects a non-boolean toggle body", async () => {
-      const response = await modalFetch(`${BASE}/image-builds/toggle/repo/acme/web`, {
+      const response = await serviceFetch(`${BASE}/image-builds/toggle/repo/acme/web`, {
         method: "PUT",
         body: JSON.stringify({ enabled: "yes" }),
       });
@@ -1352,7 +1353,7 @@ describe("Image builds", () => {
       });
       await seedImageRow({ id: "sec-building", environmentId, status: "building" });
 
-      const response = await modalFetch(`${BASE}/environments/${environmentId}/secrets`, {
+      const response = await serviceFetch(`${BASE}/environments/${environmentId}/secrets`, {
         method: "PUT",
         body: JSON.stringify({ secrets: { API_KEY: "rotated-value" } }),
       });
@@ -1372,7 +1373,7 @@ describe("Image builds", () => {
         status: "ready",
         providerImageId: "im-del",
       });
-      await modalFetch(`${BASE}/environments/${environmentId}/secrets`, {
+      await serviceFetch(`${BASE}/environments/${environmentId}/secrets`, {
         method: "PUT",
         body: JSON.stringify({ secrets: { API_KEY: "v" } }),
       });
@@ -1385,7 +1386,7 @@ describe("Image builds", () => {
         providerImageId: "im-del-2",
       });
 
-      const response = await modalFetch(`${BASE}/environments/${environmentId}/secrets/API_KEY`, {
+      const response = await serviceFetch(`${BASE}/environments/${environmentId}/secrets/API_KEY`, {
         method: "DELETE",
       });
 

@@ -213,7 +213,7 @@ describe("sessions API route (POST)", () => {
     expect(controlPlaneUserFetch).not.toHaveBeenCalled();
   });
 
-  it("sends auth* display and scm* attribution for a GitHub session — never identity or credentials", async () => {
+  it("sends auth display without request-controlled SCM identity or credentials", async () => {
     vi.mocked(getServerSession).mockResolvedValue({
       user: {
         id: "12345",
@@ -243,10 +243,6 @@ describe("sessions API route (POST)", () => {
       authEmail: "ada@example.com",
       authName: "Ada Lovelace",
       authAvatarUrl: "https://avatars.githubusercontent.com/u/12345",
-      scmLogin: "ada",
-      scmName: "Ada Lovelace",
-      scmEmail: "ada@example.com",
-      scmAvatarUrl: "https://avatars.githubusercontent.com/u/12345",
     });
     // Forbidden under strict identity enforcement: the control plane derives
     // these from the Bearer principal, so the web must not send them.
@@ -259,6 +255,10 @@ describe("sessions API route (POST)", () => {
     expect(sent.scmToken).toBeUndefined();
     expect(sent.scmRefreshToken).toBeUndefined();
     expect(sent.scmTokenExpiresAt).toBeUndefined();
+    expect(sent.scmLogin).toBeUndefined();
+    expect(sent.scmName).toBeUndefined();
+    expect(sent.scmEmail).toBeUndefined();
+    expect(sent.scmAvatarUrl).toBeUndefined();
   });
 
   it("sends auth* display but no scm* for a Google session", async () => {

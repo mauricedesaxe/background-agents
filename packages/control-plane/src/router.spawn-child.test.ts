@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleRequest } from "./router";
 import { ParentSessionSpawnRejectedError, SessionIndexStore } from "./db/session-index";
-import { signedServiceRequest, TEST_SERVICE_SECRETS } from "./router.test-support";
+import { TEST_SERVICE_SECRETS } from "./router.test-support";
 import { SessionInternalPaths } from "./session/contracts";
 
 const integrationSettingsMocks = vi.hoisted(() => ({
@@ -88,13 +88,36 @@ describe("handleSpawnChild prompt enqueue handling", () => {
     integrationSettingsMocks.resolveSandboxSettings.mockResolvedValue({});
   });
 
-  async function makeRequest(env: Record<string, unknown>): Promise<Response> {
+  async function makeRequest(
+    env: Record<string, unknown>,
+    body: Record<string, unknown> = { title: "Child task", prompt: "Do the thing" }
+  ): Promise<Response> {
+    const session = env.SESSION as {
+      idFromName(name: string): unknown;
+      get(id: unknown): { fetch(request: Request): Promise<Response> } | undefined;
+    };
+    const authorizedEnv = {
+      ...env,
+      SESSION: {
+        idFromName: session.idFromName,
+        get: (id: unknown) => {
+          const stub = session.get(id);
+          return {
+            fetch: (request: Request) =>
+              new URL(request.url).pathname === SessionInternalPaths.verifySandboxToken
+                ? Promise.resolve(new Response(null, { status: 204 }))
+                : stub!.fetch(request),
+          };
+        },
+      },
+    };
     return handleRequest(
-      await signedServiceRequest(`https://test.local/sessions/${parentId}/children`, {
+      new Request(`https://test.local/sessions/${parentId}/children`, {
         method: "POST",
-        body: JSON.stringify({ title: "Child task", prompt: "Do the thing" }),
+        headers: { Authorization: "Bearer sandbox-token" },
+        body: JSON.stringify(body),
       }),
-      env as never
+      authorizedEnv as never
     );
   }
 
@@ -220,17 +243,11 @@ describe("handleSpawnChild prompt enqueue handling", () => {
       },
     };
 
-    const response = await handleRequest(
-      await signedServiceRequest(`https://test.local/sessions/${parentId}/children`, {
-        method: "POST",
-        body: JSON.stringify({
-          title: "Child task",
-          prompt: "Do the thing",
-          model: "not-a-real-model",
-        }),
-      }),
-      env as never
-    );
+    const response = await makeRequest(env, {
+      title: "Child task",
+      prompt: "Do the thing",
+      model: "not-a-real-model",
+    });
 
     expect(response.status).not.toBe(400);
     expect(store.create).toHaveBeenCalledWith(
@@ -254,13 +271,7 @@ describe("handleSpawnChild prompt enqueue handling", () => {
       },
     };
 
-    const response = await handleRequest(
-      await signedServiceRequest(`https://test.local/sessions/${parentId}/children`, {
-        method: "POST",
-        body: JSON.stringify({ title: "Child task" }),
-      }),
-      env as never
-    );
+    const response = await makeRequest(env, { title: "Child task" });
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({ error: "title and prompt are required" });
@@ -602,13 +613,7 @@ describe("handleSpawnChild prompt enqueue handling", () => {
       },
     };
 
-    const response = await handleRequest(
-      await signedServiceRequest(`https://test.local/sessions/${parentId}/children`, {
-        method: "POST",
-        body: JSON.stringify({ title: "Child task", prompt: "Do the thing" }),
-      }),
-      env as never
-    );
+    const response = await makeRequest(env);
 
     expect(response.status).toBe(403);
     expect(store.create).not.toHaveBeenCalled();

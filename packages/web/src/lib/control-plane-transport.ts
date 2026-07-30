@@ -123,7 +123,9 @@ export async function controlPlaneTokenFetch(
 ): Promise<Response> {
   if (
     init.method !== "POST" ||
-    (path !== "/auth/tokens/exchange" && path !== "/auth/tokens/refresh")
+    (path !== "/auth/tokens/exchange" &&
+      path !== "/auth/tokens/refresh" &&
+      path !== "/auth/tokens/revoke")
   ) {
     throw new Error("Service authentication is restricted to token endpoints");
   }

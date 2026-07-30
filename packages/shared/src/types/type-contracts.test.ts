@@ -69,7 +69,6 @@ it("preserves representative session and protocol contracts", () => {
   };
   const internalInput: CreateSessionInput = {
     repositories: [{ repoOwner: "acme", repoName: "web", baseBranch: null }],
-    scmLogin: "ada",
   };
   const event = {
     type: "ready",

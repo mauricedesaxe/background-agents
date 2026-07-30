@@ -52,7 +52,7 @@ describe("automations API route (POST)", () => {
     expect(controlPlaneUserFetch).not.toHaveBeenCalled();
   });
 
-  it("sends auth* display and scm* attribution for a GitHub user — never identity or credentials", async () => {
+  it("sends auth display without request-controlled SCM identity or credentials", async () => {
     vi.mocked(getServerSession).mockResolvedValue({
       user: {
         id: "12345",
@@ -81,10 +81,6 @@ describe("automations API route (POST)", () => {
       authEmail: "ada@example.com",
       authName: "Ada Lovelace",
       authAvatarUrl: "https://avatars.githubusercontent.com/u/12345",
-      scmLogin: "ada",
-      scmName: "Ada Lovelace",
-      scmEmail: "ada@example.com",
-      scmAvatarUrl: "https://avatars.githubusercontent.com/u/12345",
     });
     // Forbidden under strict identity enforcement: the control plane derives
     // created_by from the Bearer principal.
@@ -96,6 +92,10 @@ describe("automations API route (POST)", () => {
     expect(sent.scmToken).toBeUndefined();
     expect(sent.scmRefreshToken).toBeUndefined();
     expect(sent.scmTokenExpiresAt).toBeUndefined();
+    expect(sent.scmLogin).toBeUndefined();
+    expect(sent.scmName).toBeUndefined();
+    expect(sent.scmEmail).toBeUndefined();
+    expect(sent.scmAvatarUrl).toBeUndefined();
   });
 
   it("sends auth* display but no scm* for a Google user (F1/F2: a Google sub must never become a GitHub identity)", async () => {

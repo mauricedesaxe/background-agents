@@ -160,12 +160,6 @@ export type CreateSessionRequest = z.infer<typeof createSessionRequestSchema>;
 
 export const createSessionInputSchema = createSessionRequestBaseSchema
   .extend({
-    // Display-only identity fields. Callers may not assert identity or SCM
-    // credentials in the body — identity derives from the verified principal
-    // and the control plane rejects forbidden identity fields.
-    scmLogin: z.string().optional(),
-    scmName: z.string().optional(),
-    scmEmail: z.string().optional(),
     actorDisplayName: z.string().optional(),
     actorEmail: z.string().optional(),
     actorAvatarUrl: z.string().optional(),

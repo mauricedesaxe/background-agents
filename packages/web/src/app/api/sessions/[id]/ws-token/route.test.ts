@@ -44,7 +44,7 @@ describe("ws-token API route", () => {
     expect(controlPlaneUserFetch).not.toHaveBeenCalled();
   });
 
-  it("sends scm* attribution for a GitHub user — never userId or credentials (forbidden under strict)", async () => {
+  it("omits request-controlled SCM identity for a GitHub user", async () => {
     vi.mocked(getServerSession).mockResolvedValue({
       user: {
         id: "12345",
@@ -68,10 +68,6 @@ describe("ws-token API route", () => {
     );
     expect(sentBody()).toEqual({
       authName: "Ada Lovelace",
-      scmLogin: "ada",
-      scmName: "Ada Lovelace",
-      scmEmail: "ada@example.com",
-      scmAvatarUrl: "https://avatars.githubusercontent.com/u/12345",
     });
   });
 

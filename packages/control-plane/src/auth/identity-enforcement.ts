@@ -36,14 +36,16 @@ const SPAWNING_FORBIDDEN_FIELDS = [
   "scmToken",
   "scmRefreshToken",
   "scmUserId",
+  "scmLogin",
+  "scmName",
+  "scmEmail",
+  "scmAvatarUrl",
 ] as const;
 
 /**
  * Raw-body keys a caller may not send: identity comes from the principal,
  * SCM credentials from server-side enrichment. Checked against raw JSON
- * before Zod because every schema is strip-mode. Display-only fields
- * (authEmail/Name/AvatarUrl, actorDisplayName, scmLogin…) stay body-carried
- * by design.
+ * before Zod because every schema is strip-mode.
  */
 const FORBIDDEN_IDENTITY_FIELDS: Record<IdentityRoute, readonly string[]> = {
   "session-create": SPAWNING_FORBIDDEN_FIELDS,

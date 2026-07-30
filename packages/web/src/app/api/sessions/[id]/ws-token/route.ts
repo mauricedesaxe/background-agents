@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { buildAuthDisplay, buildScmAttribution } from "@/lib/build-auth-identity";
+import { buildAuthDisplay } from "@/lib/build-auth-identity";
 import { controlPlaneUserFetch } from "@/lib/control-plane";
 
 /**
@@ -39,8 +39,6 @@ export async function POST(_request: NextRequest, { params }: { params: Promise<
       method: "POST",
       body: JSON.stringify({
         authName,
-        // GitHub-only commit attribution; empty for Google.
-        ...buildScmAttribution(user),
       }),
     });
     const fetchMs = Date.now() - fetchStart;

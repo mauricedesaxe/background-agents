@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { buildAuthDisplay, buildScmAttribution } from "@/lib/build-auth-identity";
+import { buildAuthDisplay } from "@/lib/build-auth-identity";
 import { controlPlaneUserFetch } from "@/lib/control-plane";
 import { buildControlPlanePath } from "@/lib/control-plane-query";
 
@@ -56,7 +56,6 @@ export async function POST(request: NextRequest) {
       repositories: body.repositories,
       environmentIds: body.environmentIds,
       ...buildAuthDisplay(user),
-      ...buildScmAttribution(user),
     };
 
     const response = await controlPlaneUserFetch("/automations", {

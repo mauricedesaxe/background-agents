@@ -8,10 +8,6 @@
  *
  * - `auth*` display block (`buildAuthDisplay`) — email/name/avatar for BOTH
  *   GitHub and Google.
- * - `scm*` attribution block (`buildScmAttribution`) — GitHub-only
- *   login/name/email/avatar for git-commit attribution; a Google session
- *   carries no `scm*` at all.
- *
  * `buildAuthIdentity` normalizes the provider/id pair used in the
  * provider-identity resolution path. The pair is carried in the URL only; the
  * control plane authorizes it against the Bearer principal.
@@ -54,13 +50,6 @@ export interface AuthDisplay {
   authAvatarUrl?: string;
 }
 
-export interface ScmAttribution {
-  scmLogin?: string;
-  scmName?: string;
-  scmEmail?: string;
-  scmAvatarUrl?: string;
-}
-
 /**
  * Resolve the authentication provider for a session user. Legacy GitHub
  * sessions were minted before `provider` existed, so a missing provider is
@@ -93,28 +82,5 @@ export function buildAuthDisplay(user: AuthIdentityUser | null | undefined): Aut
     authEmail: user?.email ?? undefined,
     authName: user?.name ?? undefined,
     authAvatarUrl: user?.image ?? undefined,
-  };
-}
-
-/**
- * GitHub-only git-commit attribution (display fields, no credentials). Returns
- * an empty object for non-GitHub providers (e.g. Google) so their request
- * bodies carry no `scm*` fields at all — the provider gate the F1/F2 findings
- * call for, enforced here at the single source rather than at each call site.
- *
- * SCM credentials (`scmUserId`/`scmToken`/`scmRefreshToken`/expiry) are never
- * sent: the control plane derives them from the authenticated principal's
- * token store and strict enforcement rejects them in the body.
- */
-export function buildScmAttribution(user: AuthIdentityUser | null | undefined): ScmAttribution {
-  if (resolveAuthProvider(user) !== "github") {
-    return {};
-  }
-
-  return {
-    scmLogin: user?.login ?? undefined,
-    scmName: user?.name ?? undefined,
-    scmEmail: user?.email ?? undefined,
-    scmAvatarUrl: user?.image ?? undefined,
   };
 }

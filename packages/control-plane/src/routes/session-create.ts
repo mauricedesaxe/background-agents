@@ -124,11 +124,9 @@ async function handleCreateSession(
   if (resolution instanceof Response) return resolution;
   const resolvedUserId = resolution.userId;
 
-  let scmLogin = body.scmLogin;
-  let scmName = body.scmName;
-  let scmEmail = body.scmEmail;
-  // SCM credentials never arrive in the body; enrichment below fills them
-  // from the token store via the canonical user.
+  let scmLogin: string | undefined;
+  let scmName: string | undefined;
+  let scmEmail: string | undefined;
   let scmTokenExpiresAt: number | undefined;
   let scmUserId: string | undefined;
   let scmTokenEncrypted: string | null = null;
@@ -136,11 +134,6 @@ async function handleCreateSession(
 
   const githubDeployment = (env.SCM_PROVIDER ?? "github") === "github";
 
-  // On GitHub deployments, enrich the owner with their linked GitHub identity
-  // from D1: fill in SCM fields the caller didn't provide (email, display name,
-  // OAuth token). Other SCM deployments retain their provider-native identity
-  // and credentials unchanged.
-  //
   // This intentionally applies even when the session was authenticated via a
   // non-GitHub provider (e.g. Google): if the canonical user has ALSO linked a
   // verified-email GitHub identity, enrichment surfaces THAT identity's token so
@@ -154,9 +147,9 @@ async function handleCreateSession(
       const enrichment = await resolveGitHubEnrichment(env, ctx.db, userStore, resolvedUserId);
       if (enrichment) {
         scmUserId = enrichment.scmUserId;
-        scmLogin ??= enrichment.scmLogin;
-        scmName ??= enrichment.displayName;
-        scmEmail ??= enrichment.email;
+        scmLogin = enrichment.scmLogin;
+        scmName = enrichment.displayName;
+        scmEmail = enrichment.email;
         scmTokenEncrypted = enrichment.accessTokenEncrypted ?? null;
         scmRefreshTokenEncrypted = enrichment.refreshTokenEncrypted ?? null;
         scmTokenExpiresAt = enrichment.tokenExpiresAt;

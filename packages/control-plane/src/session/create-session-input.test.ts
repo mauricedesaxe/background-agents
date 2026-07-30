@@ -31,7 +31,17 @@ describe("parseCreateSessionInput", () => {
     };
     const result = await parseCreateSessionInput(jsonRequest(fields));
 
-    expect(result).toEqual({ ok: true, input: fields, raw: fields });
+    expect(result).toEqual({
+      ok: true,
+      input: {
+        repoOwner: "open-inspect",
+        repoName: "background-agents",
+        actorDisplayName: "Ada Lovelace",
+        actorEmail: "ada@example.com",
+        actorAvatarUrl: "https://avatars.example.com/ada.png",
+      },
+      raw: fields,
+    });
   });
 
   it("strips legacy identity fields from input while preserving them in raw", async () => {

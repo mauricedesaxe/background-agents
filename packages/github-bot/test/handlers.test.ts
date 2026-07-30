@@ -217,8 +217,8 @@ describe("handlePullRequestOpened", () => {
     expect(sessionBody.repoOwner).toBe("acme");
     expect(sessionBody.repoName).toBe("widgets");
     expect(sessionBody.title).toContain("Review PR #42");
-    expect(sessionBody.scmLogin).toBe("alice");
-    expect(sessionBody.scmAvatarUrl).toBe("https://avatars.githubusercontent.com/u/1001");
+    expect(sessionBody.scmLogin).toBeUndefined();
+    expect(sessionBody.scmAvatarUrl).toBeUndefined();
     // Identity travels via the signed actor assertion, never the body.
     expect(sessionBody).not.toHaveProperty("scmUserId");
     expect(sessionBody).not.toHaveProperty("spawnSource");
@@ -411,8 +411,8 @@ describe("handleReviewRequested", () => {
     expect(sessionBody.repoOwner).toBe("acme");
     expect(sessionBody.repoName).toBe("widgets");
     expect(sessionBody.title).toContain("Review PR #42");
-    expect(sessionBody.scmLogin).toBe("alice");
-    expect(sessionBody.scmAvatarUrl).toBe("https://avatars.githubusercontent.com/u/1001");
+    expect(sessionBody.scmLogin).toBeUndefined();
+    expect(sessionBody.scmAvatarUrl).toBeUndefined();
     // Identity travels via the signed actor assertion, never the body.
     expect(sessionBody).not.toHaveProperty("scmUserId");
     expect(sessionBody).not.toHaveProperty("spawnSource");
@@ -507,8 +507,8 @@ describe("handleIssueComment", () => {
     expect(cpFetch).toHaveBeenCalledTimes(3);
 
     const sessionBody = sessionCreateBody(cpFetch);
-    expect(sessionBody.scmLogin).toBe("bob");
-    expect(sessionBody.scmAvatarUrl).toBe("https://avatars.githubusercontent.com/u/1002");
+    expect(sessionBody.scmLogin).toBeUndefined();
+    expect(sessionBody.scmAvatarUrl).toBeUndefined();
     // Identity travels via the signed actor assertion, never the body.
     expect(sessionBody).not.toHaveProperty("scmUserId");
     expect(sessionBody).not.toHaveProperty("spawnSource");
@@ -606,8 +606,8 @@ describe("handleReviewComment", () => {
     const cpFetch = getControlPlaneFetch(env);
 
     const sessionBody = sessionCreateBody(cpFetch);
-    expect(sessionBody.scmLogin).toBe("carol");
-    expect(sessionBody.scmAvatarUrl).toBe("https://avatars.githubusercontent.com/u/1003");
+    expect(sessionBody.scmLogin).toBeUndefined();
+    expect(sessionBody.scmAvatarUrl).toBeUndefined();
     // Identity travels via the signed actor assertion, never the body.
     expect(sessionBody).not.toHaveProperty("scmUserId");
     expect(sessionBody).not.toHaveProperty("spawnSource");

@@ -14,7 +14,6 @@ import {
   ACTOR_HEADER,
   SERVICE_HEADER,
   SERVICE_SIGNATURE_HEADER,
-  TOKEN_VALIDITY_MS,
   isServiceName,
   parseServiceSignatureHeader,
   readBodyCapped,
@@ -31,6 +30,7 @@ import {
 } from "./principal";
 import { ACCESS_TOKEN_PREFIX, WebSessionTokenService } from "./web-session-tokens";
 import { ApiTokenStore } from "../db/api-tokens";
+import { ServiceAuthNonceStore } from "../db/service-auth-nonces";
 import { UserStore } from "../db/user-store";
 import { createLogger } from "../logger";
 import type { RequestContext } from "../routes/shared";
@@ -99,43 +99,6 @@ function parseActor(actor: string): { provider: ActorNamespace; providerUserId: 
   const providerUserId = actor.slice(separator + 1);
   if (providerUserId === "" || !isActorNamespace(namespace)) return null;
   return { provider: namespace, providerUserId };
-}
-
-/**
- * Best-effort nonce-reuse detection (log-only for now; a future change may
- * reject). In-isolate only — a replay against a different isolate is not
- * observed. Entries expire with the signature validity window.
- */
-const seenNonces = new Map<string, number>();
-const SEEN_NONCE_LIMIT = 5000;
-
-function recordNonce(service: ServiceName, nonce: string, ctx: RequestContext): void {
-  const now = Date.now();
-  const key = `${service}:${nonce}`;
-  const expiresAt = seenNonces.get(key);
-  if (expiresAt !== undefined && expiresAt > now) {
-    logger.warn("Service auth nonce reused", {
-      event: "auth.nonce_reuse",
-      service,
-      request_id: ctx.request_id,
-      trace_id: ctx.trace_id,
-    });
-    return;
-  }
-  if (seenNonces.size >= SEEN_NONCE_LIMIT) {
-    for (const [candidate, expiry] of seenNonces) {
-      if (expiry <= now) seenNonces.delete(candidate);
-    }
-    // Still over cap: shed the oldest entries (Map iteration is insertion
-    // order, and entries are inserted with monotonically increasing expiry).
-    // A flood must degrade detection gradually, never erase all memory.
-    let excess = seenNonces.size - SEEN_NONCE_LIMIT + 1;
-    for (const candidate of seenNonces.keys()) {
-      if (excess-- <= 0) break;
-      seenNonces.delete(candidate);
-    }
-  }
-  seenNonces.set(key, now + TOKEN_VALIDITY_MS);
 }
 
 async function authenticateServiceCredential(
@@ -223,8 +186,6 @@ async function authenticateServiceCredential(
     return { reason: "Unauthorized", status: 401, failedScheme: "per-service" };
   }
 
-  recordNonce(service, verification.nonce, ctx);
-
   let resolvedActor = null;
   if (actor !== "") {
     const parsed = parseActor(actor);
@@ -248,6 +209,33 @@ async function authenticateServiceCredential(
       canonicalUserId: identity?.userId ?? null,
       participantUserId: actor,
     };
+  }
+
+  let nonceClaimed: boolean;
+  try {
+    nonceClaimed = await new ServiceAuthNonceStore(ctx.db).claim(service, verification.nonce);
+  } catch (error) {
+    logger.error("Service auth nonce claim failed", {
+      event: "auth.nonce_claim_failed",
+      service,
+      error,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+    return {
+      reason: "Service authentication unavailable",
+      status: 500,
+      failedScheme: "per-service",
+    };
+  }
+  if (!nonceClaimed) {
+    logger.warn("Service auth nonce reused", {
+      event: "auth.nonce_reuse",
+      service,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+    return { reason: "Unauthorized", status: 401, failedScheme: "per-service" };
   }
 
   // The body was consumed to hash it; hand the handler a request that can

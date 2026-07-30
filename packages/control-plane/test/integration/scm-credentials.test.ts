@@ -90,6 +90,6 @@ describe("POST /sessions/:id/scm-credentials", () => {
       headers: { Authorization: `Bearer ${sandboxToken}` },
     });
 
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(401);
   });
 });

@@ -5,6 +5,7 @@
 import type { Env } from "./types";
 import { authenticate, isAuthError } from "./auth/authenticate";
 import type { Principal } from "./auth/principal";
+import type { ServiceName } from "@open-inspect/shared";
 import {
   resolveScmProviderFromEnv,
   SourceControlProviderError,
@@ -73,21 +74,67 @@ const PUBLIC_ROUTES: RegExp[] = [
  * These are session-specific routes that can be called by sandboxes using their auth token.
  * The sandbox token is validated by the Durable Object.
  */
-const SANDBOX_AUTH_ROUTES: RegExp[] = [
-  /^\/sessions\/[^/]+\/pr$/, // PR creation from sandbox
-  /^\/sessions\/[^/]+\/openai-token-refresh$/, // OpenAI token refresh from sandbox
-  /^\/sessions\/[^/]+\/scm-credentials$/, // SCM credential broker for git credential helper
-  /^\/sessions\/[^/]+\/tunnel-urls$/, // Tunnel URL fetch for sandboxes whose .tunnels.env write isn't visible from inside
-  /^\/sessions\/[^/]+\/media$/, // Media upload from sandbox
-  /^\/sessions\/[^/]+\/children$/, // POST spawn, GET list
-  /^\/sessions\/[^/]+\/children\/[^/]+$/, // GET child detail
-  /^\/sessions\/[^/]+\/children\/[^/]+\/cancel$/, // POST cancel child
-  /^\/sessions\/[^/]+\/slack-notify$/, // Agent-initiated Slack notification
-  /^\/sessions\/[^/]+\/board$/, // Board creation from sandbox
-  /^\/sessions\/[^/]+\/board\/[^/]+\/mutate$/, // Board mutation from sandbox
-  /^\/sessions\/[^/]+\/board\/[^/]+\/snapshot$/, // Board snapshot read from sandbox
-  /^\/sessions\/[^/]+\/board\/[^/]+\/inspect$/,
+interface PrincipalRouteGrant {
+  method: string;
+  pattern: RegExp;
+}
+
+const SANDBOX_ONLY_ROUTES: PrincipalRouteGrant[] = [
+  { method: "POST", pattern: /^\/sessions\/[^/]+\/pr$/ },
+  { method: "POST", pattern: /^\/sessions\/[^/]+\/openai-token-refresh$/ },
+  { method: "POST", pattern: /^\/sessions\/[^/]+\/scm-credentials$/ },
+  { method: "GET", pattern: /^\/sessions\/[^/]+\/tunnel-urls$/ },
+  { method: "POST", pattern: /^\/sessions\/[^/]+\/media$/ },
+  { method: "POST", pattern: /^\/sessions\/[^/]+\/children$/ },
+  { method: "POST", pattern: /^\/sessions\/[^/]+\/children\/[^/]+\/cancel$/ },
+  { method: "POST", pattern: /^\/sessions\/[^/]+\/slack-notify$/ },
+  { method: "POST", pattern: /^\/sessions\/[^/]+\/board$/ },
+  { method: "POST", pattern: /^\/sessions\/[^/]+\/board\/[^/]+\/mutate$/ },
+  { method: "GET", pattern: /^\/sessions\/[^/]+\/board\/[^/]+\/snapshot$/ },
+  { method: "POST", pattern: /^\/sessions\/[^/]+\/board\/[^/]+\/inspect$/ },
 ];
+
+const USER_OR_SANDBOX_ROUTES: PrincipalRouteGrant[] = [
+  { method: "GET", pattern: /^\/sessions\/[^/]+\/children$/ },
+  { method: "GET", pattern: /^\/sessions\/[^/]+\/children\/[^/]+$/ },
+];
+
+const SERVICE_ROUTE_GRANTS: Record<ServiceName, PrincipalRouteGrant[]> = {
+  web: [{ method: "POST", pattern: /^\/auth\/tokens\/(exchange|refresh|revoke)$/ }],
+  "slack-bot": [
+    { method: "GET", pattern: /^\/repos$/ },
+    { method: "GET", pattern: /^\/environments$/ },
+    { method: "GET", pattern: /^\/model-preferences$/ },
+    { method: "GET", pattern: /^\/integration-settings\/slack$/ },
+    { method: "GET", pattern: /^\/integration-settings\/slack\/watched-channels$/ },
+    { method: "POST", pattern: /^\/sessions$/ },
+    { method: "POST", pattern: /^\/sessions\/[^/]+\/prompt$/ },
+    { method: "GET", pattern: /^\/sessions\/[^/]+\/(events|artifacts)$/ },
+    { method: "POST", pattern: /^\/internal\/slack-event$/ },
+  ],
+  "github-bot": [
+    { method: "GET", pattern: /^\/repos\/[^/]+\/[^/]+\/metadata$/ },
+    { method: "GET", pattern: /^\/environments\/[^/]+$/ },
+    { method: "GET", pattern: /^\/integration-settings\/github\/resolved\/[^/]+\/[^/]+$/ },
+    { method: "POST", pattern: /^\/sessions$/ },
+    { method: "POST", pattern: /^\/sessions\/[^/]+\/prompt$/ },
+    { method: "POST", pattern: /^\/internal\/github-event$/ },
+  ],
+  "linear-bot": [
+    { method: "GET", pattern: /^\/repos$/ },
+    { method: "GET", pattern: /^\/environments$/ },
+    { method: "GET", pattern: /^\/integration-settings\/linear\/resolved\/[^/]+\/[^/]+$/ },
+    { method: "POST", pattern: /^\/sessions$/ },
+    { method: "POST", pattern: /^\/sessions\/[^/]+\/(prompt|stop)$/ },
+    { method: "GET", pattern: /^\/sessions\/[^/]+\/(events|artifacts)$/ },
+  ],
+  modal: [
+    { method: "GET", pattern: /^\/image-builds\/(enabled|status)$/ },
+    { method: "POST", pattern: /^\/image-builds\/(mark-stale|cleanup)$/ },
+    { method: "POST", pattern: /^\/image-builds\/trigger\/environment\/[^/]+$/ },
+    { method: "POST", pattern: /^\/image-builds\/trigger\/repo\/[^/]+\/[^/]+$/ },
+  ],
+};
 
 type CachedScmProvider =
   | {
@@ -139,19 +186,47 @@ function isPublicRoute(path: string): boolean {
 /**
  * Check if a path matches any sandbox auth route pattern.
  */
-function isSandboxAuthRoute(path: string, _method: string): boolean {
-  return SANDBOX_AUTH_ROUTES.some((pattern) => pattern.test(path));
+function matchesGrant(grant: PrincipalRouteGrant, path: string, method: string): boolean {
+  return grant.method === method && grant.pattern.test(path);
+}
+
+function isSandboxAuthRoute(path: string, method: string): boolean {
+  return [...SANDBOX_ONLY_ROUTES, ...USER_OR_SANDBOX_ROUTES].some((grant) =>
+    matchesGrant(grant, path, method)
+  );
+}
+
+function authorizePrincipal(
+  principal: Principal,
+  path: string,
+  method: string,
+  sandboxSessionId: string | null
+): boolean {
+  const sandboxOnly = SANDBOX_ONLY_ROUTES.some((grant) => matchesGrant(grant, path, method));
+  const userOrSandbox = USER_OR_SANDBOX_ROUTES.some((grant) => matchesGrant(grant, path, method));
+
+  if (principal.kind === "sandbox") {
+    return (
+      (sandboxOnly || userOrSandbox) &&
+      sandboxSessionId !== null &&
+      principal.sessionId === sandboxSessionId
+    );
+  }
+  if (sandboxOnly) return false;
+  if (principal.kind === "user") return true;
+  return SERVICE_ROUTE_GRANTS[principal.service].some((grant) => matchesGrant(grant, path, method));
 }
 
 function isScmAgnosticRoute(path: string): boolean {
   return (
     // Token issuance is identity work, independent of the SCM provider.
-    /^\/auth\/tokens\/(exchange|refresh)$/.test(path) ||
+    /^\/auth\/tokens\/(exchange|refresh|revoke)$/.test(path) ||
     /^\/analytics\/(summary|timeseries|breakdown|pull-requests)$/.test(path) ||
     // Identity resolution is independent of the SCM provider. Only the known
     // auth providers are agnostic; an unimplemented SCM (e.g. gitlab) still 501s.
     /^\/provider-identities\/(github|slack|linear|google)\/[^/]+$/.test(path) ||
     /^\/sessions\/[^/]+\/tunnel-urls$/.test(path) ||
+    /^\/sessions\/[^/]+\/children(\/[^/]+(\/cancel)?)?$/.test(path) ||
     // Boards are unrelated to the SCM provider.
     /^\/sessions\/[^/]+\/board(\/[^/]+\/(mutate|snapshot|inspect))?$/.test(path)
   );
@@ -438,6 +513,9 @@ export async function handleRequest(
 
     if (ctx.principal) {
       logPrincipal(ctx.principal, ctx, path);
+      if (!authorizePrincipal(ctx.principal, path, method, sandboxSessionId)) {
+        return withCorsAndTraceHeaders(error("Forbidden", 403), ctx);
+      }
     }
   }
 

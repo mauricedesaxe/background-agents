@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   buildAuthDisplay,
   buildAuthIdentity,
-  buildScmAttribution,
   isAuthProvider,
   resolveAuthProvider,
   type AuthIdentityUser,
@@ -94,29 +93,6 @@ describe("buildAuthDisplay", () => {
       authEmail: undefined,
       authName: undefined,
       authAvatarUrl: undefined,
-    });
-  });
-});
-
-describe("buildScmAttribution", () => {
-  it("returns the GitHub attribution block — never credentials (forbidden under strict)", () => {
-    expect(buildScmAttribution(githubUser)).toEqual({
-      scmLogin: "ada",
-      scmName: "Ada Lovelace",
-      scmEmail: "ada@example.com",
-      scmAvatarUrl: "https://avatars.githubusercontent.com/u/12345",
-    });
-  });
-
-  it("returns an empty object for Google — no scm* fields at all", () => {
-    // The provider gate (F1/F2): a Google session must never carry scm*
-    // attribution, which the control plane would store as GitHub identity.
-    expect(buildScmAttribution(googleUser)).toEqual({});
-  });
-
-  it("treats a missing provider as GitHub (legacy session back-compat)", () => {
-    expect(buildScmAttribution({ id: "12345", login: "ada" })).toMatchObject({
-      scmLogin: "ada",
     });
   });
 });

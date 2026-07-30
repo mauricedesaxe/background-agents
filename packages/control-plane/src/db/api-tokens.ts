@@ -18,6 +18,7 @@ export interface ApiTokenRow {
   providerUserId: string | null;
   familyId: string | null;
   rotatedTo: string | null;
+  refreshWinnerEncrypted: string | null;
   createdAt: number;
   expiresAt: number;
   familyExpiresAt: number | null;
@@ -45,7 +46,11 @@ export interface WebSessionTokenStore {
   createPair(tokens: [NewApiToken, NewApiToken]): Promise<[string, string]>;
   getByHash(tokenHash: string): Promise<ApiTokenRow | null>;
   getById(id: string): Promise<ApiTokenRow | null>;
-  consumeRefreshToken(id: string, successorId: string): Promise<boolean>;
+  consumeRefreshToken(
+    id: string,
+    successorId: string,
+    refreshWinnerEncrypted: string
+  ): Promise<boolean>;
   revokeFamily(familyId: string): Promise<void>;
   revokeToken(id: string): Promise<void>;
 }
@@ -69,6 +74,7 @@ interface ApiTokenDbRow {
   provider_user_id: string | null;
   family_id: string | null;
   rotated_to: string | null;
+  refresh_winner_encrypted: string | null;
   created_at: number;
   expires_at: number;
   family_expires_at: number | null;
@@ -86,6 +92,7 @@ function toApiTokenRow(row: ApiTokenDbRow): ApiTokenRow {
     providerUserId: row.provider_user_id,
     familyId: row.family_id,
     rotatedTo: row.rotated_to,
+    refreshWinnerEncrypted: row.refresh_winner_encrypted,
     createdAt: row.created_at,
     expiresAt: row.expires_at,
     familyExpiresAt: row.family_expires_at,
@@ -150,12 +157,16 @@ export class ApiTokenStore implements WebSessionTokenStore {
    * false when the token was already consumed or revoked (a concurrent redeem
    * or a replay), in which case the caller must treat the redeem as reuse.
    */
-  async consumeRefreshToken(id: string, successorId: string): Promise<boolean> {
+  async consumeRefreshToken(
+    id: string,
+    successorId: string,
+    refreshWinnerEncrypted: string
+  ): Promise<boolean> {
     const result = await this.db
       .prepare(
-        "UPDATE api_tokens SET rotated_to = ? WHERE id = ? AND rotated_to IS NULL AND revoked_at IS NULL"
+        "UPDATE api_tokens SET rotated_to = ?, refresh_winner_encrypted = ? WHERE id = ? AND rotated_to IS NULL AND revoked_at IS NULL"
       )
-      .bind(successorId, id)
+      .bind(successorId, refreshWinnerEncrypted, id)
       .run();
     return (result.meta?.changes ?? 0) > 0;
   }

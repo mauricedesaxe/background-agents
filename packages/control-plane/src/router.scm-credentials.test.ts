@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { handleRequest } from "./router";
-import { signedServiceRequest, TEST_SERVICE_SECRETS } from "./router.test-support";
+import { TEST_SERVICE_SECRETS } from "./router.test-support";
 
 function createEnv() {
-  const fetch = vi.fn(async (_request: Request) => Response.json({ ok: true }, { status: 202 }));
+  const fetch = vi.fn(async (request: Request) =>
+    new URL(request.url).pathname === "/internal/verify-sandbox-token"
+      ? new Response(null, { status: 204 })
+      : Response.json({ ok: true }, { status: 202 })
+  );
   const statement = {
     bind: vi.fn(() => statement),
     first: vi.fn(async () => null),
@@ -19,7 +23,7 @@ function createEnv() {
       GITLAB_ACCESS_TOKEN: "glpat-test",
       DB: {
         prepare: vi.fn(() => statement),
-        batch: vi.fn(),
+        batch: vi.fn(async () => []),
         exec: vi.fn(),
         dump: vi.fn(),
       },
@@ -36,15 +40,16 @@ describe("SCM credentials router provider gate", () => {
     const { env, fetch } = createEnv();
 
     const response = await handleRequest(
-      await signedServiceRequest("https://test.local/sessions/session-1/scm-credentials", {
+      new Request("https://test.local/sessions/session-1/scm-credentials", {
         method: "POST",
+        headers: { Authorization: "Bearer sandbox-token" },
       }),
       env as never
     );
 
     expect(response.status).toBe(202);
-    expect(fetch).toHaveBeenCalledOnce();
-    const request = fetch.mock.calls[0][0];
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const request = fetch.mock.calls[1][0];
     expect(new URL(request.url).pathname).toBe("/internal/scm-credentials");
   });
 
@@ -52,13 +57,15 @@ describe("SCM credentials router provider gate", () => {
     const { env, fetch } = createEnv();
 
     const response = await handleRequest(
-      await signedServiceRequest("https://test.local/sessions/session-1/tunnel-urls"),
+      new Request("https://test.local/sessions/session-1/tunnel-urls", {
+        headers: { Authorization: "Bearer sandbox-token" },
+      }),
       env as never
     );
 
     expect(response.status).toBe(202);
-    expect(fetch).toHaveBeenCalledOnce();
-    const request = fetch.mock.calls[0][0];
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const request = fetch.mock.calls[1][0];
     expect(new URL(request.url).pathname).toBe("/internal/tunnel-urls");
   });
 
@@ -66,8 +73,9 @@ describe("SCM credentials router provider gate", () => {
     const { env, fetch } = createEnv();
 
     const response = await handleRequest(
-      await signedServiceRequest("https://test.local/sessions/session-1/pr", {
+      new Request("https://test.local/sessions/session-1/pr", {
         method: "POST",
+        headers: { Authorization: "Bearer sandbox-token" },
       }),
       env as never
     );
@@ -76,6 +84,6 @@ describe("SCM credentials router provider gate", () => {
     await expect(response.json()).resolves.toEqual({
       error: "SCM provider 'gitlab' is not implemented in this deployment.",
     });
-    expect(fetch).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledOnce();
   });
 });
