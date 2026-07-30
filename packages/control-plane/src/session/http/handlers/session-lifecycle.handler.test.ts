@@ -116,7 +116,7 @@ function createHandler() {
   const getSandboxSocket = vi.fn<() => WebSocket | null>();
   const sendToSandbox = vi.fn();
   const terminateSandbox = vi.fn(async () => {});
-  const archiveSandbox = vi.fn(async () => {});
+  const archiveSandboxStrict = vi.fn(async () => {});
 
   const lifecycleHandler = createSessionLifecycleHandler({
     repository,
@@ -139,7 +139,7 @@ function createHandler() {
     getSandboxSocket,
     sendToSandbox,
     terminateSandbox,
-    archiveSandbox,
+    archiveSandboxStrict,
   });
 
   // Bind the request-scoped log so call sites exercise the threading without
@@ -179,7 +179,7 @@ function createHandler() {
     getSandboxSocket,
     sendToSandbox,
     terminateSandbox,
-    archiveSandbox,
+    archiveSandboxStrict,
   };
 }
 
@@ -933,7 +933,7 @@ describe("createSessionLifecycleHandler", () => {
   });
 
   it("archives successfully for participant and archives the sandbox", async () => {
-    const { handler, getSession, getParticipantByUserId, transition, archiveSandbox } =
+    const { handler, getSession, getParticipantByUserId, transition, archiveSandboxStrict } =
       createHandler();
     getSession.mockReturnValue(createSession());
     getParticipantByUserId.mockReturnValue(createParticipant());
@@ -950,7 +950,7 @@ describe("createSessionLifecycleHandler", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: "archived" });
     expect(transition).toHaveBeenCalledWith("archived");
-    expect(archiveSandbox).toHaveBeenCalledWith("session_archived");
+    expect(archiveSandboxStrict).toHaveBeenCalledWith("session_archived");
   });
 
   it("stops an in-flight prompt before archiving an active session", async () => {
@@ -992,14 +992,13 @@ describe("createSessionLifecycleHandler", () => {
     expect(stopExecution).not.toHaveBeenCalled();
   });
 
-  it("still archives the session when the sandbox archive fails", async () => {
-    const { handler, getSession, getParticipantByUserId, transition, archiveSandbox } =
+  it("leaves the session unarchived when its sandbox archive must be retried", async () => {
+    const { handler, getSession, getParticipantByUserId, transition, archiveSandboxStrict } =
       createHandler();
     getSession.mockReturnValue(createSession());
     getParticipantByUserId.mockReturnValue(createParticipant());
     transition.mockResolvedValue(true);
-    // Best-effort: even a rejected sandbox archive must not fail the request.
-    archiveSandbox.mockRejectedValue(new Error("provider archive failed"));
+    archiveSandboxStrict.mockRejectedValue(new Error("provider archive failed"));
 
     const response = await handler.archive(
       new Request("http://internal/internal/archive", {
@@ -1009,9 +1008,8 @@ describe("createSessionLifecycleHandler", () => {
       })
     );
 
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ status: "archived" });
-    expect(transition).toHaveBeenCalledWith("archived");
+    expect(response.status).toBe(503);
+    expect(transition).not.toHaveBeenCalled();
   });
 
   it("unarchives successfully for participant", async () => {
@@ -1040,7 +1038,7 @@ describe("createSessionLifecycleHandler", () => {
       getParticipantByUserId,
       stopExecution,
       transition,
-      archiveSandbox,
+      archiveSandboxStrict,
     } = createHandler();
     getSession.mockReturnValue(createSession({ status: "active" }));
     stopExecution.mockResolvedValue(undefined);
@@ -1054,13 +1052,14 @@ describe("createSessionLifecycleHandler", () => {
     expect(stopExecution).toHaveBeenCalledWith({ suppressStatusReconcile: true });
     expect(transition).toHaveBeenCalledWith("archived");
     // A cascaded archive frees the child's sandbox disk too.
-    expect(archiveSandbox).toHaveBeenCalledWith("session_archived");
+    expect(archiveSandboxStrict).toHaveBeenCalledWith("session_archived");
     // Trusted DO-to-DO call: no participant lookup happens.
     expect(getParticipantByUserId).not.toHaveBeenCalled();
   });
 
   it("archiveCascade archives a completed child without stopping execution", async () => {
-    const { handler, getSession, stopExecution, transition, archiveSandbox } = createHandler();
+    const { handler, getSession, stopExecution, transition, archiveSandboxStrict } =
+      createHandler();
     getSession.mockReturnValue(createSession({ status: "completed" }));
     transition.mockResolvedValue(true);
 
@@ -1072,11 +1071,12 @@ describe("createSessionLifecycleHandler", () => {
     expect(stopExecution).not.toHaveBeenCalled();
     expect(transition).toHaveBeenCalledWith("archived");
     // A stopped-but-not-archived child sandbox still holds disk, so archive it.
-    expect(archiveSandbox).toHaveBeenCalledWith("session_archived");
+    expect(archiveSandboxStrict).toHaveBeenCalledWith("session_archived");
   });
 
   it("archiveCascade retries reconciliation when the session is already archived", async () => {
-    const { handler, getSession, stopExecution, transition, archiveSandbox } = createHandler();
+    const { handler, getSession, stopExecution, transition, archiveSandboxStrict } =
+      createHandler();
     getSession.mockReturnValue(createSession({ status: "archived" }));
 
     const response = await handler.archiveCascade();
@@ -1085,7 +1085,7 @@ describe("createSessionLifecycleHandler", () => {
     expect(await response.json()).toEqual({ status: "archived" });
     expect(stopExecution).not.toHaveBeenCalled();
     expect(transition).toHaveBeenCalledWith("archived");
-    expect(archiveSandbox).toHaveBeenCalledWith("session_archived");
+    expect(archiveSandboxStrict).toHaveBeenCalledWith("session_archived");
   });
 
   it("archiveCascade treats a missing session as already archived", async () => {
@@ -1096,6 +1096,17 @@ describe("createSessionLifecycleHandler", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: "archived" });
+    expect(transition).not.toHaveBeenCalled();
+  });
+
+  it("leaves a child unarchived when its sandbox archive must be retried", async () => {
+    const { handler, getSession, transition, archiveSandboxStrict } = createHandler();
+    getSession.mockReturnValue(createSession({ status: "completed" }));
+    archiveSandboxStrict.mockRejectedValue(new Error("provider unavailable"));
+
+    const response = await handler.archiveCascade();
+
+    expect(response.status).toBe(503);
     expect(transition).not.toHaveBeenCalled();
   });
 

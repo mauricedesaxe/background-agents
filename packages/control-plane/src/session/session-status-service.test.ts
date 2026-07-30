@@ -65,7 +65,13 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
         };
 
   const waitUntil = vi.fn();
-  const ctx = { waitUntil, id: { toString: () => "do-id" } } as unknown as DurableObjectState;
+  const getAlarm = vi.fn(async () => null as number | null);
+  const setAlarm = vi.fn(async (_deadlineAt: number) => {});
+  const ctx = {
+    waitUntil,
+    id: { toString: () => "do-id" },
+    storage: { getAlarm, setAlarm },
+  } as unknown as DurableObjectState;
 
   const parentFetch = vi.fn(async (_request: Request) => new Response(null, { status: 200 }));
   const parentStub = { fetch: parentFetch };
@@ -73,6 +79,7 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
     idFromName: vi.fn(() => "parent-do-id"),
     get: vi.fn(() => parentStub),
   };
+  const archiveSandbox = vi.fn(async (_reason: string) => {});
 
   const log = {
     debug: vi.fn(),
@@ -88,7 +95,8 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
     repository as unknown as SessionRepository,
     messenger,
     sessionIndex as unknown as SessionIndexStore | null,
-    parentSessions as unknown as DurableObjectNamespace
+    parentSessions as unknown as DurableObjectNamespace,
+    archiveSandbox
   );
 
   return {
@@ -97,8 +105,11 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
     broadcast,
     sessionIndex,
     waitUntil,
+    getAlarm,
+    setAlarm,
     parentSessions,
     parentFetch,
+    archiveSandbox,
     log,
   };
 }
@@ -157,6 +168,31 @@ describe("SessionStatusService.transition", () => {
       prCount: 2,
     });
     expect(h.waitUntil).toHaveBeenCalled();
+  });
+
+  it.each(["user", "agent", "github-bot", "linear-bot", "slack-bot"] as const)(
+    "schedules %s sessions to archive 12 hours after completion",
+    async (spawnSource) => {
+      const h = harness({
+        session: createSession({ status: "active", spawn_source: spawnSource }),
+      });
+
+      await h.service.transition("completed");
+
+      const terminalAt = h.repository.updateSessionStatus.mock.calls[0][2] as number;
+      expect(h.setAlarm).toHaveBeenCalledWith(terminalAt + 12 * 60 * 60 * 1000);
+    }
+  );
+
+  it("schedules automation sessions to archive one hour after completion", async () => {
+    const h = harness({
+      session: createSession({ status: "active", spawn_source: "automation" }),
+    });
+
+    await h.service.transition("completed");
+
+    const terminalAt = h.repository.updateSessionStatus.mock.calls[0][2] as number;
+    expect(h.setAlarm).toHaveBeenCalledWith(terminalAt + 60 * 60 * 1000);
   });
 
   it("syncs metrics even when already in the terminal status", async () => {
@@ -324,6 +360,47 @@ describe("SessionStatusService.reconcileAfterExecution", () => {
   });
 });
 
+describe("SessionStatusService.handleAutoArchiveAlarm", () => {
+  it("archives an automation session and its sandbox one hour after completion", async () => {
+    const terminalAt = 10_000;
+    const h = harness({
+      session: createSession({
+        status: "completed",
+        spawn_source: "automation",
+        updated_at: terminalAt,
+      }),
+    });
+    await h.service.handleAutoArchiveAlarm(terminalAt + 60 * 60 * 1000);
+
+    expect(h.repository.updateSessionStatus).toHaveBeenCalledWith(
+      "session-1",
+      "archived",
+      expect.any(Number)
+    );
+    expect(h.archiveSandbox).toHaveBeenCalledWith("session_auto_archived");
+  });
+
+  it("keeps a completed session available until its retention deadline", async () => {
+    const terminalAt = 10_000;
+    const h = harness({
+      session: createSession({ status: "completed", updated_at: terminalAt }),
+    });
+    await h.service.handleAutoArchiveAlarm(terminalAt + 1000);
+
+    expect(h.repository.updateSessionStatus).not.toHaveBeenCalled();
+    expect(h.archiveSandbox).not.toHaveBeenCalled();
+    expect(h.setAlarm).toHaveBeenCalledWith(terminalAt + 12 * 60 * 60 * 1000);
+  });
+
+  it("never auto-archives an active session", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+    await h.service.handleAutoArchiveAlarm(Number.MAX_SAFE_INTEGER);
+
+    expect(h.repository.updateSessionStatus).not.toHaveBeenCalled();
+    expect(h.archiveSandbox).not.toHaveBeenCalled();
+  });
+});
+
 describe("SessionStatusService.notifyParentOfChildUpdate", () => {
   it("posts the child update to the parent Durable Object", async () => {
     const h = harness();
@@ -378,5 +455,23 @@ describe("SessionStatusService.notifyParentOfChildUpdate", () => {
 
     expect(h.parentSessions.idFromName).not.toHaveBeenCalled();
     expect(h.waitUntil).not.toHaveBeenCalled();
+  });
+});
+
+describe("SessionStatusService archive cascade", () => {
+  it("retries a child archive when the child Durable Object temporarily rejects it", async () => {
+    const h = harness({ session: createSession({ status: "completed" }) });
+    h.sessionIndex!.listByParent.mockResolvedValue([
+      { id: "child-1", status: "completed" },
+    ] as never);
+    h.parentFetch
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(new Response(null, { status: 200 }));
+
+    await h.service.transition("archived");
+    await h.waitUntil.mock.calls[0][0];
+
+    expect(h.parentFetch).toHaveBeenCalledTimes(2);
+    expect(h.log.error).not.toHaveBeenCalledWith("cascade_archive.child_failed", expect.anything());
   });
 });

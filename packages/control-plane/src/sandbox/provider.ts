@@ -82,6 +82,8 @@ export interface CreateSandboxConfig {
   prebuiltImageSha?: string | null;
   /** Sandbox lifetime in seconds. Defaults to DEFAULT_SANDBOX_TIMEOUT_SECONDS on Modal. */
   timeoutSeconds?: number;
+  /** Minutes a stopped provider sandbox may retain disk before automatic archival. */
+  autoArchiveIntervalMinutes?: number;
   /** Git branch to work on (defaults to repo's default branch) */
   branch?: string | null;
   /** Whether to enable code-server (browser-based editor) in the sandbox */

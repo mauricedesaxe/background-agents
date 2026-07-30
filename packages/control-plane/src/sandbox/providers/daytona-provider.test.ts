@@ -154,6 +154,16 @@ describe("DaytonaSandboxProvider", () => {
       expect(createCall.disk).toBeUndefined();
     });
 
+    it("uses the session-specific auto-archive interval", async () => {
+      const client = createMockClient();
+      const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+      await provider.createSandbox({ ...baseCreateConfig, autoArchiveIntervalMinutes: 60 });
+
+      const createCall = (client.createSandbox as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(createCall.autoArchiveInterval).toBe(60);
+    });
+
     it("assembles env vars correctly for GitHub, without embedding any token", async () => {
       const client = createMockClient();
       const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);

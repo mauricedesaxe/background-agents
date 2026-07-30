@@ -16,6 +16,9 @@ function createHandler() {
   const lifecycleManager = {
     handleAlarm: vi.fn<() => Promise<void>>().mockResolvedValue(),
   };
+  const statusService = {
+    handleAutoArchiveAlarm: vi.fn<(_now: number) => Promise<void>>().mockResolvedValue(),
+  };
   const now = vi.fn(() => 2000);
   const log = {
     debug: vi.fn(),
@@ -29,6 +32,7 @@ function createHandler() {
     repository,
     messageQueue,
     lifecycleManager,
+    statusService,
     executionTimeoutMs: 1000,
     now,
     log,
@@ -39,6 +43,7 @@ function createHandler() {
     repository,
     messageQueue,
     lifecycleManager,
+    statusService,
     now,
     log,
   };
@@ -46,13 +51,15 @@ function createHandler() {
 
 describe("createAlarmHandler", () => {
   it("delegates to lifecycle manager when no processing message exists", async () => {
-    const { handler, repository, messageQueue, lifecycleManager, now } = createHandler();
+    const { handler, repository, messageQueue, lifecycleManager, statusService, now } =
+      createHandler();
     repository.getProcessingMessageWithStartedAt.mockReturnValue(null);
 
     await handler.handle();
 
-    expect(now).not.toHaveBeenCalled();
+    expect(now).toHaveBeenCalledTimes(1);
     expect(messageQueue.failStuckProcessingMessage).not.toHaveBeenCalled();
+    expect(statusService.handleAutoArchiveAlarm).toHaveBeenCalledWith(2000);
     expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
   });
 

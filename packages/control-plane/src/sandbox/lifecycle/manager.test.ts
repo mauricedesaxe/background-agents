@@ -512,6 +512,18 @@ describe("SandboxLifecycleManager", () => {
       expect(provider.createSandbox).toHaveBeenCalledWith(expect.objectContaining({ userEnvVars }));
     });
 
+    it("uses the automation retention window for provider auto-archive", async () => {
+      const sandbox = createMockSandbox({ status: "pending", created_at: Date.now() - 60000 });
+      const storage = createMockStorage(createMockSession({ spawn_source: "automation" }), sandbox);
+      const { manager, provider } = buildManager({ storage });
+
+      await manager.spawnSandbox();
+
+      expect(provider.createSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({ autoArchiveIntervalMinutes: 60 })
+      );
+    });
+
     it("spawns no-repository sessions without repo-only sandbox features", async () => {
       const sandbox = createMockSandbox({ status: "pending", created_at: Date.now() - 60000 });
       const storage = createMockStorage(
@@ -3207,6 +3219,32 @@ describe("SandboxLifecycleManager", () => {
       await expect(manager.archiveSandbox("session_archived")).resolves.toBeUndefined();
 
       expect(storage.calls).toContain("updateSandboxStatus:stopped");
+    });
+
+    it("surfaces a failed provider archive when the caller requests a retryable operation", async () => {
+      const archiveSandbox = vi.fn(async (): Promise<ArchiveResult> => {
+        throw new SandboxProviderError("provider exploded", "transient");
+      });
+      const provider = createMockProvider({
+        archiveSandbox,
+        capabilities: {
+          supportsSnapshots: false,
+          supportsRestore: false,
+          supportsPersistentResume: true,
+          supportsExplicitStop: true,
+          supportsArchive: true,
+        },
+      });
+      delete provider.takeSnapshot;
+      const { manager } = buildArchivingManager(
+        createMockSandbox({ status: "stopped", modal_object_id: "provider-obj-123" }),
+        provider,
+        archiveSandbox
+      );
+
+      await expect(
+        manager.archiveSandbox("session_auto_archived", { throwOnFailure: true })
+      ).rejects.toThrow("provider exploded");
     });
   });
 

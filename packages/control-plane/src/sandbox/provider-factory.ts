@@ -13,6 +13,7 @@ import { createVercelSandboxClient } from "./providers/vercel/client";
 import { createVercelProvider, type VercelSandboxProvider } from "./providers/vercel/provider";
 import { resolveScmProviderFromEnv } from "../source-control";
 import type { Env } from "../types";
+import { getSandboxAutoArchiveIntervalMinutes } from "../session/auto-archive-policy";
 
 function createModalProviderFromEnv(env: Env): ModalSandboxProvider {
   if (!env.MODAL_API_SECRET || !env.MODAL_WORKSPACE) {
@@ -101,7 +102,7 @@ function createDaytonaProviderFromEnv(env: Env): DaytonaSandboxProvider {
     autoArchiveIntervalMinutes: parseNumericEnv(
       "DAYTONA_AUTO_ARCHIVE_INTERVAL_MINUTES",
       env.DAYTONA_AUTO_ARCHIVE_INTERVAL_MINUTES,
-      1440
+      getSandboxAutoArchiveIntervalMinutes("user")
     ),
   });
 
