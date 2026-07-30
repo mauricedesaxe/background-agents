@@ -22,7 +22,7 @@ const task: ScheduledTask = {
   automation: {
     id: "task-1",
     name: "Inspect deployment",
-    instructions: "Inspect deployment",
+    instructions: "Inspect deployment\n\nCheck the production logs and report any regressions.",
     triggerType: "once",
     scheduleCron: null,
     scheduleTz: "UTC",
@@ -37,7 +37,14 @@ const task: ScheduledTask = {
     deletedAt: null,
     eventType: null,
     triggerConfig: null,
-    repositories: [],
+    repositories: [
+      {
+        repoOwner: "open-inspect",
+        repoName: "background-agents",
+        repoId: 1,
+        baseBranch: "main",
+      },
+    ],
     environmentIds: [],
   },
   state: "scheduled",
@@ -62,6 +69,22 @@ describe("ScheduledTasksList", () => {
 
     expect(screen.getByText("Scheduled prompts could not be loaded.")).toBeInTheDocument();
     expect(screen.queryByText("No scheduled prompts.")).not.toBeInTheDocument();
+  });
+
+  it("shows the repository and opens the full prompt", async () => {
+    render(<ScheduledTasksList />);
+
+    expect(screen.getByText("Repository: open-inspect/background-agents")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Check the production logs and report any regressions.")
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Inspect deployment" }));
+
+    expect(
+      await screen.findByText(/Check the production logs and report any regressions\./)
+    ).toBeInTheDocument();
+    expect(screen.getByText("Scheduled for open-inspect/background-agents.")).toBeInTheDocument();
   });
 
   it("shows cancellation failures", async () => {
