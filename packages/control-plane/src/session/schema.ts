@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS session (
   total_cost REAL NOT NULL DEFAULT 0,              -- Running session cost from step_finish events
   sandbox_settings TEXT DEFAULT NULL,               -- JSON blob of SandboxSettings (resolved at session creation)
   environment_id TEXT,                              -- Launch environment provenance; NULL for repo-launched/ad-hoc sessions
+  terminal_at INTEGER,                              -- Stable start of the terminal retention window
+  archive_requested_at INTEGER,                     -- Durable retry intent for provider archival
+  archive_claimed_at INTEGER,                       -- Prevents resume or prompt races during provider archival
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   CHECK (
@@ -464,6 +467,24 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
       }
       if (!names.has("stop_unreconciled_provider_id")) {
         runMigration(sql, `ALTER TABLE sandbox ADD COLUMN stop_unreconciled_provider_id TEXT`);
+      }
+    },
+  },
+  {
+    id: 9002,
+    description: "Add durable session archive tracking",
+    run: (sql) => {
+      const columns = sql.exec("PRAGMA table_info(session)").toArray() as Array<{ name: string }>;
+      const names = new Set(columns.map((column) => column.name));
+
+      if (!names.has("terminal_at")) {
+        runMigration(sql, `ALTER TABLE session ADD COLUMN terminal_at INTEGER`);
+      }
+      if (!names.has("archive_requested_at")) {
+        runMigration(sql, `ALTER TABLE session ADD COLUMN archive_requested_at INTEGER`);
+      }
+      if (!names.has("archive_claimed_at")) {
+        runMigration(sql, `ALTER TABLE session ADD COLUMN archive_claimed_at INTEGER`);
       }
     },
   },

@@ -51,6 +51,9 @@ function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
     total_cost: 0,
     sandbox_settings: null,
     environment_id: null,
+    terminal_at: null,
+    archive_requested_at: null,
+    archive_claimed_at: null,
     created_at: 1000,
     updated_at: 1000,
     ...overrides,
@@ -130,6 +133,7 @@ function buildQueue() {
   const broadcast = vi.fn((_message: ServerMessage) => {});
   const messenger = { broadcast, sendToSandbox: vi.fn(() => true) };
   const sessionStatus = {
+    isArchiveInProgress: vi.fn(() => false),
     transition: vi.fn(async (_status: string) => true),
     reconcileAfterExecution: vi.fn(async (_success: boolean) => {}),
     recordCompletedOutput: vi.fn(async (_messageId: string, _completedAt: number) => {}),
@@ -246,6 +250,23 @@ describe("SessionMessageQueue", () => {
     await h.queue.handlePromptMessage({} as WebSocket, createClientInfo(), { content: "hello" });
 
     expect(h.sessionStatus.transition).toHaveBeenCalledWith("active");
+  });
+
+  it("rejects a prompt while provider archival is in progress", async () => {
+    const h = buildQueue();
+    h.sessionStatus.isArchiveInProgress.mockReturnValue(true);
+
+    await h.queue.handlePromptMessage({} as WebSocket, createClientInfo(), {
+      requestId: "request-archive-race",
+      content: "resume",
+    });
+
+    expect(h.repository.createMessage).not.toHaveBeenCalled();
+    expect(h.wsManager.send).toHaveBeenCalledWith(expect.anything(), {
+      type: "prompt_rejected",
+      requestId: "request-archive-race",
+      message: "Session archive is in progress",
+    });
   });
 
   it("notifies the integration after a prompt is dispatched to the sandbox", async () => {
