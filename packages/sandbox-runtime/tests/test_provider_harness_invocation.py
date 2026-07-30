@@ -31,6 +31,11 @@ PROVIDER_BUILDS = {
     "vercel": REPO_ROOT / "packages/control-plane/src/sandbox/providers/vercel/bootstrap.ts",
 }
 
+HARNESS_PIN_FINGERPRINTS = {
+    "modal": REPO_ROOT / "terraform/environments/production/modal.tf",
+    "vercel": REPO_ROOT / "terraform/environments/production/vercel.tf",
+}
+
 
 @pytest.mark.parametrize("provider", sorted(PROVIDER_BUILDS))
 class TestProviderInvokesInstaller:
@@ -72,3 +77,9 @@ class TestNoProviderIsMissed:
         assert copying == set(PROVIDER_BUILDS), (
             "a provider stopped copying sandbox_runtime, or this list is stale"
         )
+
+
+@pytest.mark.parametrize("provider", sorted(HARNESS_PIN_FINGERPRINTS))
+def test_harness_pin_invalidates_provider_image(provider):
+    fingerprint = HARNESS_PIN_FINGERPRINTS[provider].read_text()
+    assert fingerprint.count('-name "*.sh"') == 2
