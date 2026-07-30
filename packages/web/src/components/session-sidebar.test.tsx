@@ -317,6 +317,7 @@ describe("SessionSidebar", () => {
     );
 
     expect(await screen.findByTestId(`session-unread-${parent.id}`)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Expand 1 child session/ }));
     expect(screen.getByTestId(`session-unread-${child.id}`)).toBeInTheDocument();
   });
 
@@ -1027,6 +1028,7 @@ describe("SessionSidebar", () => {
       </SWRConfig>
     );
 
+    fireEvent.click(await screen.findByRole("button", { name: /Expand 1 child session/ }));
     const link = await screen.findByRole("link", { name: /unread child/i });
     vi.useFakeTimers();
     fireEvent.touchStart(link, { touches: [{ clientX: 20, clientY: 20 }] });
