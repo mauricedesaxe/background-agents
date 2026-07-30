@@ -13,6 +13,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { useEnvironments } from "@/hooks/use-environments";
+import { formatRepoLabel } from "@/lib/repo-label";
 
 const fetcher = async (url: string): Promise<ListScheduledTasksResponse> => {
   const response = await fetch(url);
@@ -22,7 +23,7 @@ const fetcher = async (url: string): Promise<ListScheduledTasksResponse> => {
 
 export function ScheduledTasksList() {
   const [cancelError, setCancelError] = useState<string | null>(null);
-  const { environments } = useEnvironments();
+  const { environments, loading: environmentsLoading } = useEnvironments();
   const {
     data,
     error: loadError,
@@ -30,6 +31,8 @@ export function ScheduledTasksList() {
     mutate,
   } = useSWR<ListScheduledTasksResponse>("/api/scheduled-tasks", fetcher);
   const tasks = data?.tasks ?? [];
+  const waitingForEnvironmentTargets =
+    environmentsLoading && tasks.some((task) => task.automation.environmentIds.length > 0);
 
   const cancel = async (id: string) => {
     setCancelError(null);
@@ -60,7 +63,7 @@ export function ScheduledTasksList() {
         <p className="border border-destructive/40 px-4 py-5 text-sm text-destructive">
           Scheduled prompts could not be loaded.
         </p>
-      ) : isLoading ? (
+      ) : isLoading || waitingForEnvironmentTargets ? (
         <p className="py-4 text-sm text-muted-foreground">Loading scheduled prompts...</p>
       ) : tasks.length === 0 ? (
         <p className="border border-border-muted px-4 py-5 text-sm text-muted-foreground">
@@ -99,7 +102,7 @@ function ScheduledTaskRow({
       environments.find((environment) => environment.id === environmentId)?.repositories ?? []
   );
   const repositoryLabels = [...task.automation.repositories, ...environmentRepositories].map(
-    (repository) => `${repository.repoOwner}/${repository.repoName}`
+    (repository) => formatRepoLabel(repository.repoOwner, repository.repoName)
   );
   const repositories = repositoryLabels.join(", ");
   return (
