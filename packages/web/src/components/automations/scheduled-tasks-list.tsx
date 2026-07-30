@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import useSWR from "swr";
-import type { ListScheduledTasksResponse, ScheduledTask } from "@open-inspect/shared";
+import type { Environment, ListScheduledTasksResponse, ScheduledTask } from "@open-inspect/shared";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,6 +12,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { useEnvironments } from "@/hooks/use-environments";
 
 const fetcher = async (url: string): Promise<ListScheduledTasksResponse> => {
   const response = await fetch(url);
@@ -21,6 +22,7 @@ const fetcher = async (url: string): Promise<ListScheduledTasksResponse> => {
 
 export function ScheduledTasksList() {
   const [cancelError, setCancelError] = useState<string | null>(null);
+  const { environments } = useEnvironments();
   const {
     data,
     error: loadError,
@@ -67,7 +69,12 @@ export function ScheduledTasksList() {
       ) : (
         <div className="divide-y divide-border-muted border border-border-muted">
           {tasks.map((task) => (
-            <ScheduledTaskRow key={task.automation.id} task={task} onCancel={cancel} />
+            <ScheduledTaskRow
+              key={task.automation.id}
+              task={task}
+              environments={environments}
+              onCancel={cancel}
+            />
           ))}
         </div>
       )}
@@ -78,16 +85,23 @@ export function ScheduledTasksList() {
 
 function ScheduledTaskRow({
   task,
+  environments,
   onCancel,
 }: {
   task: ScheduledTask;
+  environments: Environment[];
   onCancel: (id: string) => Promise<void>;
 }) {
   const run = task.invocation?.runs[0];
   const scheduledAt = task.automation.nextRunAt ?? task.invocation?.scheduledAt;
-  const repositories = task.automation.repositories
-    .map((repository) => `${repository.repoOwner}/${repository.repoName}`)
-    .join(", ");
+  const environmentRepositories = task.automation.environmentIds.flatMap(
+    (environmentId) =>
+      environments.find((environment) => environment.id === environmentId)?.repositories ?? []
+  );
+  const repositoryLabels = [...task.automation.repositories, ...environmentRepositories].map(
+    (repository) => `${repository.repoOwner}/${repository.repoName}`
+  );
+  const repositories = repositoryLabels.join(", ");
   return (
     <article className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
       <div className="min-w-0">
@@ -113,8 +127,7 @@ function ScheduledTaskRow({
         </Dialog>
         {repositories && (
           <p className="mt-1 truncate text-xs text-muted-foreground">
-            {task.automation.repositories.length === 1 ? "Repository" : "Repositories"}:{" "}
-            {repositories}
+            {repositoryLabels.length === 1 ? "Repository" : "Repositories"}: {repositories}
           </p>
         )}
         <p className="mt-1 text-xs text-muted-foreground">

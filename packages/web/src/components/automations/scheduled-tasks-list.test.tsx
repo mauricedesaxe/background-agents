@@ -14,6 +14,29 @@ afterEach(cleanup);
 const { mutate, useSWR } = vi.hoisted(() => ({ mutate: vi.fn(), useSWR: vi.fn() }));
 
 vi.mock("swr", () => ({ default: useSWR }));
+vi.mock("@/hooks/use-environments", () => ({
+  useEnvironments: () => ({
+    environments: [
+      {
+        id: "env_1",
+        name: "Production",
+        description: null,
+        prebuildEnabled: true,
+        createdAt: 1,
+        updatedAt: 1,
+        repositories: [
+          {
+            repoOwner: "open-inspect",
+            repoName: "control-plane",
+            repoId: 2,
+            baseBranch: "main",
+          },
+        ],
+      },
+    ],
+    loading: false,
+  }),
+}));
 vi.mock("next/link", () => ({
   default: ({ children, ...props }: ComponentProps<"a">) => <a {...props}>{children}</a>,
 }));
@@ -85,6 +108,30 @@ describe("ScheduledTasksList", () => {
       await screen.findByText(/Check the production logs and report any regressions\./)
     ).toBeInTheDocument();
     expect(screen.getByText("Scheduled for open-inspect/background-agents.")).toBeInTheDocument();
+  });
+
+  it("shows repositories from an environment target", () => {
+    useSWR.mockReturnValue({
+      data: {
+        tasks: [
+          {
+            ...task,
+            automation: {
+              ...task.automation,
+              repositories: [],
+              environmentIds: ["env_1"],
+            },
+          },
+        ],
+      },
+      error: null,
+      isLoading: false,
+      mutate,
+    });
+
+    render(<ScheduledTasksList />);
+
+    expect(screen.getByText("Repository: open-inspect/control-plane")).toBeInTheDocument();
   });
 
   it("shows cancellation failures", async () => {
