@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
+import { getServerSession } from "next-auth";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Providers } from "./providers";
+import { authOptions } from "@/lib/auth";
 import { APP_FAVICON_URL, APP_NAME } from "@/lib/site-config";
 import "./globals.css";
 
@@ -20,7 +22,9 @@ export const metadata: Metadata = {
   icons: { icon: APP_FAVICON_URL },
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const session = await getServerSession(authOptions);
+
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
@@ -36,7 +40,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body className={`${geistSans.variable} ${geistMono.variable}`}>
-        <Providers>{children}</Providers>
+        <Providers session={session}>{children}</Providers>
       </body>
     </html>
   );
