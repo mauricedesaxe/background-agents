@@ -19,7 +19,10 @@ function createEnv(verifyStatus: number) {
     GITLAB_ACCESS_TOKEN: "glpat-test",
     DB: {
       prepare: vi.fn(() => statement),
-      batch: vi.fn(),
+      batch: vi.fn(async () => [
+        { results: [], meta: { changes: 0 } },
+        { results: [], meta: { changes: 1 } },
+      ]),
       exec: vi.fn(),
       dump: vi.fn(),
     },
@@ -77,6 +80,32 @@ describe("router sandbox-token fallback", () => {
     expect(response.status).toBe(401);
     expect(doFetch).not.toHaveBeenCalled();
   });
+
+  it("rejects a valid service principal from a sandbox-only route", async () => {
+    const { env, doFetch } = createEnv(204);
+    const response = await handleRequest(
+      await signedServiceRequest("https://test.local/sessions/session-1/scm-credentials", {
+        method: "POST",
+        service: "slack-bot",
+      }),
+      { ...env, ...TEST_SERVICE_SECRETS } as never
+    );
+
+    expect(response.status).toBe(403);
+    expect(doFetch).not.toHaveBeenCalled();
+  });
+
+  it("accepts sandbox authentication on dual child GET routes", async () => {
+    const { env } = createEnv(204);
+    const response = await handleRequest(
+      new Request("https://test.local/sessions/session-1/children", {
+        headers: { Authorization: "Bearer valid-sandbox-token" },
+      }),
+      env as never
+    );
+
+    expect(response.status).toBe(200);
+  });
 });
 
 describe("auth token routes are SCM-agnostic", () => {
@@ -85,10 +114,26 @@ describe("auth token routes are SCM-agnostic", () => {
   it.each(["exchange", "refresh"])(
     "reaches /auth/tokens/%s under a gitlab provider",
     async (route) => {
+      const statement = {
+        bind: vi.fn(function () {
+          return statement;
+        }),
+        first: vi.fn(async () => null),
+        all: vi.fn(async () => ({ results: [], meta: { changes: 0 } })),
+        run: vi.fn(async () => ({ results: [], meta: { changes: 0 } })),
+      };
       const env = {
         ...TEST_SERVICE_SECRETS,
         SCM_PROVIDER: "gitlab",
-        DB: { prepare: vi.fn(), batch: vi.fn(), exec: vi.fn(), dump: vi.fn() },
+        DB: {
+          prepare: vi.fn(() => statement),
+          batch: vi.fn(async () => [
+            { results: [], meta: { changes: 0 } },
+            { results: [], meta: { changes: 1 } },
+          ]),
+          exec: vi.fn(),
+          dump: vi.fn(),
+        },
       };
 
       const response = await handleRequest(

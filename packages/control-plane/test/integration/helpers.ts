@@ -6,12 +6,8 @@ import { hashToken } from "../../src/auth/crypto";
 
 const DEFAULT_WAIT_FOR_SANDBOX_STATUS_TIMEOUT_MS = 3000;
 
-/**
- * Fetch a control-plane route as a service principal. Signs per request —
- * sig1 binds method, URL, and body, so headers can never be reused across
- * calls. Defaults to the `web` service; secrets follow the
- * `test-service-secret-<service>` bindings in vitest.integration.config.ts.
- */
+const TEST_USER_ACCESS_TOKEN = "oi_at_integration-user";
+
 export async function serviceFetch(
   url: string,
   init?: {
@@ -23,7 +19,34 @@ export async function serviceFetch(
   }
 ): Promise<Response> {
   const method = init?.method ?? "GET";
-  const service = init?.service ?? "web";
+  if (!init?.service) {
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO api_tokens
+       (id, token_hash, kind, user_id, provider, provider_user_id, family_id, created_at, expires_at)
+       VALUES (?, ?, 'web_session', ?, 'github', ?, ?, ?, ?)`
+    )
+      .bind(
+        "integration-user-token",
+        await hashToken(TEST_USER_ACCESS_TOKEN),
+        "integration-user",
+        "583231",
+        "integration-user-family",
+        Date.now(),
+        Date.now() + 60 * 60 * 1000
+      )
+      .run();
+    return SELF.fetch(url, {
+      method,
+      headers: {
+        ...(init?.body === undefined ? {} : { "Content-Type": "application/json" }),
+        ...init?.headers,
+        Authorization: `Bearer ${TEST_USER_ACCESS_TOKEN}`,
+      },
+      body: init?.body,
+    });
+  }
+
+  const service = init.service;
   const auth = await buildServiceAuthHeaders({
     service,
     secret: `test-service-secret-${service}`,

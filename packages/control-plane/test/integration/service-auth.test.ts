@@ -8,7 +8,6 @@ import {
   SERVICE_SIGNATURE_HEADER,
   type ServiceName,
 } from "@open-inspect/shared";
-import { GlobalSecretsStore } from "../../src/db/global-secrets";
 import { UserStore } from "../../src/db/user-store";
 import { cleanD1Tables } from "./cleanup";
 
@@ -47,51 +46,84 @@ async function signedFetch(p: {
 describe("sig1 service-credential authentication", () => {
   beforeEach(cleanD1Tables);
 
-  it("accepts a signed GET from every registered service", async () => {
+  it("rejects services from user-only routes", async () => {
     for (const service of Object.keys(SERVICE_SECRET) as ServiceName[]) {
       const response = await signedFetch({
         service,
         method: "GET",
         url: "https://test.local/sessions",
       });
-      expect(response.status, service).toBe(200);
-      const body = await response.json<{ sessions: unknown[] }>();
-      expect(body.sessions).toEqual([]);
+      expect(response.status, service).toBe(403);
+    }
+  });
+
+  it("allows each service only on an explicit caller route", async () => {
+    const cases: Array<{ service: ServiceName; method: string; url: string; status: number }> = [
+      {
+        service: "web",
+        method: "POST",
+        url: "https://test.local/auth/tokens/exchange",
+        status: 400,
+      },
+      {
+        service: "slack-bot",
+        method: "GET",
+        url: "https://test.local/model-preferences",
+        status: 200,
+      },
+      {
+        service: "github-bot",
+        method: "GET",
+        url: "https://test.local/environments/missing",
+        status: 404,
+      },
+      {
+        service: "linear-bot",
+        method: "GET",
+        url: "https://test.local/environments",
+        status: 200,
+      },
+      {
+        service: "modal",
+        method: "GET",
+        url: "https://test.local/image-builds/status",
+        status: 200,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const response = await signedFetch({
+        service: testCase.service,
+        method: testCase.method,
+        url: testCase.url,
+        body: testCase.method === "POST" ? "{}" : undefined,
+      });
+      expect(response.status, testCase.service).toBe(testCase.status);
     }
   });
 
   it("accepts a signed request with a query string regardless of param order", async () => {
-    const createdBy = "a".repeat(32);
-    const signedUrl = `https://test.local/sessions?limit=5&createdBy=${createdBy}`;
+    const signedUrl = "https://test.local/model-preferences?first=1&second=2";
     const headers = await buildServiceAuthHeaders({
-      service: "web",
-      secret: SERVICE_SECRET.web,
+      service: "slack-bot",
+      secret: SERVICE_SECRET["slack-bot"],
       method: "GET",
       url: signedUrl,
     });
-    const response = await SELF.fetch(
-      `https://test.local/sessions?createdBy=${createdBy}&limit=5`,
-      {
-        headers,
-      }
-    );
+    const response = await SELF.fetch("https://test.local/model-preferences?second=2&first=1", {
+      headers,
+    });
     expect(response.status).toBe(200);
   });
 
-  it("delivers the signed body intact to the handler (D1 write lands)", async () => {
+  it("delivers the signed body intact to an explicitly granted handler", async () => {
     const response = await signedFetch({
-      service: "web",
-      method: "PUT",
-      url: "https://test.local/secrets",
-      body: JSON.stringify({ secrets: { SIGNED_BODY_TEST: "intact" } }),
+      service: "modal",
+      method: "POST",
+      url: "https://test.local/image-builds/mark-stale",
+      body: JSON.stringify({ max_age_seconds: 60 }),
     });
     expect(response.status).toBe(200);
-
-    const secrets = await new GlobalSecretsStore(
-      env.DB,
-      env.REPO_SECRETS_ENCRYPTION_KEY!
-    ).getDecryptedSecrets();
-    expect(secrets.SIGNED_BODY_TEST).toBe("intact");
   });
 
   it("does not let the web service credential mutate provider identities", async () => {
@@ -135,6 +167,34 @@ describe("sig1 service-credential authentication", () => {
 
     const wrongMethod = await SELF.fetch(url, { method: "POST", headers });
     expect(wrongMethod.status).toBe(401);
+  });
+
+  it("rejects an identical signed request replay", async () => {
+    const url = "https://test.local/model-preferences";
+    const headers = await buildServiceAuthHeaders({
+      service: "slack-bot",
+      secret: SERVICE_SECRET["slack-bot"],
+      method: "GET",
+      url,
+    });
+
+    expect((await SELF.fetch(url, { headers })).status).toBe(200);
+    expect((await SELF.fetch(url, { headers })).status).toBe(401);
+  });
+
+  it("allows exactly one of two concurrent identical signed requests", async () => {
+    const url = "https://test.local/model-preferences";
+    const headers = await buildServiceAuthHeaders({
+      service: "slack-bot",
+      secret: SERVICE_SECRET["slack-bot"],
+      method: "GET",
+      url,
+    });
+    const responses = await Promise.all([
+      SELF.fetch(url, { headers }),
+      SELF.fetch(url, { headers }),
+    ]);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 401]);
   });
 
   it("rejects a query string added after signing", async () => {
@@ -200,21 +260,16 @@ describe("sig1 service-credential authentication", () => {
 
     const identity = await new UserStore(env.DB).getIdentity("slack", "U0001");
     expect(identity).not.toBeNull();
-    const listed = await signedFetch({
-      service: "web",
-      method: "GET",
-      url: "https://test.local/sessions",
+    const stored = await env.DB.prepare(
+      "SELECT title, user_id, spawn_source FROM sessions WHERE title = ?"
+    )
+      .bind("Slack-owned session")
+      .first<{ title: string; user_id: string; spawn_source: string }>();
+    expect(stored).toEqual({
+      title: "Slack-owned session",
+      user_id: identity!.userId,
+      spawn_source: "slack-bot",
     });
-    const body = await listed.json<{
-      sessions: Array<{ title: string; userId: string; spawnSource: string }>;
-    }>();
-    expect(body.sessions).toContainEqual(
-      expect.objectContaining({
-        title: "Slack-owned session",
-        userId: identity!.userId,
-        spawnSource: "slack-bot",
-      })
-    );
   });
 
   it("requires a user or signed actor before any service can create a session", async () => {

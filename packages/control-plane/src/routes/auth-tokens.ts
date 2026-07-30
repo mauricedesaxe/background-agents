@@ -36,8 +36,8 @@ function requireWebServicePrincipal(ctx: RequestContext): Response | null {
   return null;
 }
 
-function createTokenService(ctx: RequestContext): WebSessionTokenService {
-  return new WebSessionTokenService(new ApiTokenStore(ctx.db));
+function createTokenService(ctx: RequestContext, env: Env): WebSessionTokenService {
+  return new WebSessionTokenService(new ApiTokenStore(ctx.db), env.TOKEN_ENCRYPTION_KEY);
 }
 
 /** WebSessionTokenPair is exactly the wire shape — the pair is the body. */
@@ -64,7 +64,7 @@ async function handleTokenExchange(
   const result = await performExchange(
     body,
     ctx.db,
-    createTokenService(ctx),
+    createTokenService(ctx, env),
     env.TOKEN_ENCRYPTION_KEY
   );
   if (!result.ok) {
@@ -94,7 +94,7 @@ async function handleTokenExchange(
 
 async function handleTokenRefresh(
   request: Request,
-  _env: Env,
+  env: Env,
   _match: RegExpMatchArray,
   ctx: RequestContext
 ): Promise<Response> {
@@ -107,7 +107,9 @@ async function handleTokenRefresh(
     return error("invalid_request", 400);
   }
 
-  const redemption = await createTokenService(ctx).redeemRefreshToken(parsed.data.refreshToken);
+  const redemption = await createTokenService(ctx, env).redeemRefreshToken(
+    parsed.data.refreshToken
+  );
   if (!redemption.ok) {
     if (redemption.failure === "refresh_superseded") {
       // Benign concurrent renewal — the winner's pair is live. Info, not
@@ -144,7 +146,25 @@ async function handleTokenRefresh(
   return tokenPairResponse(redemption.pair);
 }
 
+async function handleTokenRevoke(
+  request: Request,
+  env: Env,
+  _match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  const gate = requireWebServicePrincipal(ctx);
+  if (gate) return gate;
+
+  const raw: unknown = await request.json().catch(() => null);
+  const parsed = refreshRequestSchema.safeParse(raw);
+  if (!parsed.success) return error("invalid_request", 400);
+
+  await createTokenService(ctx, env).revokeRefreshToken(parsed.data.refreshToken);
+  return new Response(null, { status: 204 });
+}
+
 export const authTokenRoutes: Route[] = [
   { method: "POST", pattern: parsePattern("/auth/tokens/exchange"), handler: handleTokenExchange },
   { method: "POST", pattern: parsePattern("/auth/tokens/refresh"), handler: handleTokenRefresh },
+  { method: "POST", pattern: parsePattern("/auth/tokens/revoke"), handler: handleTokenRevoke },
 ];

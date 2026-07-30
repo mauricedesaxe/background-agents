@@ -126,6 +126,18 @@ async function redeemWebSessionRefresh(refreshToken: string): Promise<RefreshOut
   }
 }
 
+export async function revokeWebSessionTokens(refreshToken: string): Promise<boolean> {
+  try {
+    const response = await controlPlaneTokenFetch("/auth/tokens/revoke", {
+      method: "POST",
+      body: JSON.stringify({ refreshToken }),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Read the current request's NextAuth JWT and return a live web session
  * token, or null when the pair is absent/expired or there is no request

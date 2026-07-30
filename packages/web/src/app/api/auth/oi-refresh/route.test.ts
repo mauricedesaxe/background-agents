@@ -61,7 +61,9 @@ beforeEach(() => {
 
 describe("POST /api/auth/oi-refresh", () => {
   it("rotates a near-expiry pair and persists the re-encoded session cookie", async () => {
-    tokenFetch.mockResolvedValue(new Response(JSON.stringify(FRESH_PAIR), { status: 200 }));
+    tokenFetch.mockImplementation(
+      async () => new Response(JSON.stringify(FRESH_PAIR), { status: 200 })
+    );
     const jwt = await encodeSession({
       oiAccessToken: "oi_at_near_expiry",
       oiAccessTokenExpiresAt: Date.now() + OI_ACCESS_TOKEN_RENEW_WINDOW_MS - 60_000,
@@ -89,6 +91,47 @@ describe("POST /api/auth/oi-refresh", () => {
       provider: "github",
       oiAccessToken: "oi_at_rotated",
       oiRefreshToken: "oi_rt_rotated",
+    });
+  });
+
+  it("persists the same recovered winner from concurrent stale-cookie requests", async () => {
+    tokenFetch.mockImplementation(
+      async () => new Response(JSON.stringify(FRESH_PAIR), { status: 200 })
+    );
+    const jwt = await encodeSession({
+      oiAccessToken: "oi_at_stale",
+      oiAccessTokenExpiresAt: Date.now() - 60_000,
+      oiRefreshToken: "oi_rt_consumed",
+    });
+    const first = fakeCookieStore({ [SECURE_COOKIE]: jwt });
+    const second = {
+      sets: [] as SetCall[],
+      getAll: () => [{ name: SECURE_COOKIE, value: jwt }],
+      set: (name: string, value: string, options: SetCall["options"]) => {
+        second.sets.push({ name, value, options });
+      },
+    };
+    vi.mocked(cookies)
+      .mockResolvedValueOnce(first as never)
+      .mockResolvedValueOnce(second as never);
+
+    const responses = await Promise.all([POST(), POST()]);
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    const written = [first, second].map((store) =>
+      store.sets.find((entry) => entry.name === SECURE_COOKIE && entry.options.maxAge > 0)
+    );
+    expect(written.every(Boolean)).toBe(true);
+    const decoded = await Promise.all(
+      written.map((entry) => decode({ token: entry!.value, secret: SECRET }))
+    );
+    expect(decoded[0]).toMatchObject({
+      oiAccessToken: FRESH_PAIR.accessToken,
+      oiRefreshToken: FRESH_PAIR.refreshToken,
+    });
+    expect(decoded[1]).toMatchObject({
+      oiAccessToken: FRESH_PAIR.accessToken,
+      oiRefreshToken: FRESH_PAIR.refreshToken,
     });
   });
 

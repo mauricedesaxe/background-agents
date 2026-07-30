@@ -11,10 +11,11 @@ import {
   useRef,
   type TouchEvent,
 } from "react";
-import { useSession, signOut } from "next-auth/react";
+import { useSession } from "next-auth/react";
 import useSWR, { mutate } from "swr";
 import { ArchiveSessionDialog } from "@/components/archive-session-dialog";
 import { archiveSession } from "@/lib/archive-session";
+import { revokeAndSignOut } from "@/lib/sign-out";
 import { pullRequestSummaryDisplay } from "@/lib/pr-summary";
 import { PullRequestStateIcon } from "@/components/pr-state-icon";
 import { formatRelativeTime } from "@/lib/time";
@@ -583,7 +584,7 @@ function UserMenu({ user }: { user?: { name?: string | null; image?: string | nu
           {user?.name || "User"}
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onClick={() => signOut()}>
+        <DropdownMenuItem onClick={() => void revokeAndSignOut()}>
           <svg
             className="w-4 h-4"
             fill="none"

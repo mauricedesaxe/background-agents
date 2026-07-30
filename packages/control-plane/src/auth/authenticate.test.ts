@@ -28,18 +28,28 @@ const SERVICE_SECRET: Record<ServiceName, string> = {
   modal: SECRETS.SERVICE_AUTH_SECRET_MODAL,
 };
 
-function createCtx(identityRow: Record<string, unknown> | null = null): RequestContext {
+function createCtx(
+  identityRow: Record<string, unknown> | null = null,
+  nonceClaims: number[] = [1]
+): RequestContext {
   const statement = {
     bind: vi.fn(() => statement),
     first: vi.fn(async () => identityRow),
     all: vi.fn(async () => ({ results: [] })),
-    run: vi.fn(async () => ({ meta: { changes: 0 } })),
+    run: vi.fn(async () => ({ results: [], meta: { changes: 0 } })),
   };
   return {
     trace_id: "trace-test",
     request_id: "req-test",
     metrics: { summarize: () => ({}) },
-    db: { prepare: vi.fn(() => statement), batch: vi.fn(), exec: vi.fn() },
+    db: {
+      prepare: vi.fn(() => statement),
+      batch: vi.fn(async () => [
+        { results: [], meta: { changes: 0 } },
+        { results: [], meta: { changes: nonceClaims.shift() ?? 1 } },
+      ]),
+      exec: vi.fn(),
+    },
   } as unknown as RequestContext;
 }
 
@@ -309,8 +319,8 @@ describe("authenticate — service credentials", () => {
   });
 });
 
-describe("authenticate — nonce replay logging", () => {
-  it("warns on nonce reuse inside the validity window but still authenticates", async () => {
+describe("authenticate — nonce replay prevention", () => {
+  it("rejects nonce reuse inside the validity window", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const url = "https://cp.test.local/sessions";
@@ -324,15 +334,19 @@ describe("authenticate — nonce replay logging", () => {
       });
       const build = () => new Request(url, { method: "POST", headers: { ...headers }, body });
 
-      const first = await authenticate(build(), createEnv(), createCtx());
+      const ctx = createCtx(null, [1, 0]);
+      const first = await authenticate(build(), createEnv(), ctx);
       expect(isAuthError(first)).toBe(false);
       const reuseLogged = () =>
         warnSpy.mock.calls.some((call) => JSON.stringify(call).includes("auth.nonce_reuse"));
       expect(reuseLogged()).toBe(false);
 
-      // Log-only detection: the replay is observed, not rejected.
-      const second = await authenticate(build(), createEnv(), createCtx());
-      expect(isAuthError(second)).toBe(false);
+      const second = await authenticate(build(), createEnv(), ctx);
+      expect(second).toEqual({
+        reason: "Unauthorized",
+        status: 401,
+        failedScheme: "per-service",
+      });
       expect(reuseLogged()).toBe(true);
     } finally {
       warnSpy.mockRestore();

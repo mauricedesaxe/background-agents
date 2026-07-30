@@ -10,6 +10,7 @@ import {
   WEB_SESSION_TOKEN_TTL_MS,
   WebSessionTokenService,
 } from "./web-session-tokens";
+import { generateEncryptionKey } from "./crypto";
 
 /** In-memory ApiTokenStore double with the same semantics as the D1 store. */
 class FakeApiTokenStore implements WebSessionTokenStore {
@@ -28,6 +29,7 @@ class FakeApiTokenStore implements WebSessionTokenStore {
         providerUserId: token.providerUserId,
         familyId: token.familyId,
         rotatedTo: null,
+        refreshWinnerEncrypted: null,
         createdAt: Date.now(),
         expiresAt: token.expiresAt,
         familyExpiresAt: token.familyExpiresAt,
@@ -51,10 +53,15 @@ class FakeApiTokenStore implements WebSessionTokenStore {
     return row ? { ...row } : null;
   }
 
-  async consumeRefreshToken(id: string, successorId: string): Promise<boolean> {
+  async consumeRefreshToken(
+    id: string,
+    successorId: string,
+    refreshWinnerEncrypted: string
+  ): Promise<boolean> {
     const row = this.rows.get(id);
     if (!row || row.rotatedTo !== null || row.revokedAt !== null) return false;
     row.rotatedTo = successorId;
+    row.refreshWinnerEncrypted = refreshWinnerEncrypted;
     return true;
   }
 
@@ -76,7 +83,7 @@ const SUBJECT = { provider: "github" as const, providerUserId: "424242" };
 
 function createService(): { service: WebSessionTokenService; store: FakeApiTokenStore } {
   const store = new FakeApiTokenStore();
-  return { service: new WebSessionTokenService(store), store };
+  return { service: new WebSessionTokenService(store, generateEncryptionKey()), store };
 }
 
 afterEach(() => {
@@ -263,15 +270,9 @@ describe("redeemRefreshToken", () => {
     expect(rotated.ok).toBe(true);
     if (!rotated.ok) return;
 
-    // A concurrent renewal that lost the race replays the consumed token
-    // almost immediately: superseded (NOT a dead grant), rotated pair live.
     vi.setSystemTime(1_000_000 + 5_000);
     const replay = await service.redeemRefreshToken(first.refreshToken);
-    expect(replay).toEqual({
-      ok: false,
-      failure: "refresh_superseded",
-      familyId: expect.any(String),
-    });
+    expect(replay).toEqual(rotated);
     expect((await service.verifyAccessToken(rotated.pair.accessToken)).ok).toBe(true);
   });
 

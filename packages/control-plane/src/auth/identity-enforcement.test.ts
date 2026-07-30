@@ -129,7 +129,6 @@ describe("applyIdentityEnforcement — forbidden-field rejection", () => {
     ).toBeUndefined();
     expect(
       applyIdentityEnforcement(createCtx(USER_PRINCIPAL), "session-create", {
-        scmLogin: "ada",
         actorDisplayName: "Ada",
         title: "display fields stay body-carried",
       }).rejection
@@ -148,6 +147,10 @@ describe("applyIdentityEnforcement — forbidden-field rejection", () => {
         "scmToken",
         "scmRefreshToken",
         "scmUserId",
+        "scmLogin",
+        "scmName",
+        "scmEmail",
+        "scmAvatarUrl",
       ]) {
         const { rejection } = applyIdentityEnforcement(createCtx(USER_PRINCIPAL), route, {
           [field]: "asserted",

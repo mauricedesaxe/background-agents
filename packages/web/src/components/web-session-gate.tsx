@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { signOut, useSession } from "next-auth/react";
+import { useSession } from "next-auth/react";
+import { revokeAndSignOut } from "@/lib/sign-out";
 
 /**
  * Check interval for web session token renewal. Must sit comfortably inside
@@ -45,7 +46,7 @@ export function WebSessionGate({ children }: { children?: ReactNode }) {
         if (response.status === 401 && !signingOutRef.current) {
           signingOutRef.current = true;
           try {
-            await signOut();
+            await revokeAndSignOut();
           } catch {
             if (!cancelled) {
               signingOutRef.current = false;

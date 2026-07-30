@@ -13,9 +13,11 @@
  */
 
 import { generateId, hashToken } from "./crypto";
+import { decryptToken, encryptToken } from "./crypto";
 import { base64UrlEncode } from "./encoding";
 import type { WebAuthProvider } from "./subject-verification";
 import type { ApiTokenRow, WebSessionTokenStore } from "../db/api-tokens";
+import { z } from "zod";
 
 export const WEB_SESSION_TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
 export const WEB_SESSION_REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -37,6 +39,13 @@ export interface WebSessionTokenPair {
   refreshToken: string;
   refreshTokenExpiresAtEpochMs: number;
 }
+
+const webSessionTokenPairSchema = z.strictObject({
+  accessToken: z.string().min(1),
+  accessTokenExpiresAtEpochMs: z.number().int().positive(),
+  refreshToken: z.string().min(1),
+  refreshTokenExpiresAtEpochMs: z.number().int().positive(),
+});
 
 export type AccessTokenVerification =
   | {
@@ -100,7 +109,10 @@ function isWebSessionRow(row: ApiTokenRow): row is WebSessionRow {
 }
 
 export class WebSessionTokenService {
-  constructor(private readonly store: WebSessionTokenStore) {}
+  constructor(
+    private readonly store: WebSessionTokenStore,
+    private readonly encryptionKey?: string
+  ) {}
 
   /** Mint a fresh pair in a new rotation family (exchange path). */
   async mintPair(userId: string, subject: TokenSubject): Promise<WebSessionTokenPair> {
@@ -191,8 +203,8 @@ export class WebSessionTokenService {
   }
 
   /**
-   * Redeem a refresh token for a new pair, consuming it. Reuse of a consumed
-   * token — or losing the consume race — revokes the whole family.
+   * Redeem a refresh token for a new pair, consuming it. Concurrent redemption
+   * recovers the winning pair during the grace window; later reuse revokes the family.
    */
   async redeemRefreshToken(token: string): Promise<RefreshRedemption> {
     const row = await this.store.getByHash(await hashToken(token));
@@ -206,11 +218,12 @@ export class WebSessionTokenService {
     // revoked/expired checks so that reuse of a consumed-and-since-expired
     // token still counts as the attack signal and revokes the family.
     if (row.rotatedTo !== null) {
-      // Replay of an already-consumed token. Within the grace window this is
-      // a benign concurrent renewal — reject without a new pair, but leave
-      // the family alive. Beyond it, assume the family is compromised.
       const successor = await this.store.getById(row.rotatedTo);
       if (successor !== null && Date.now() - successor.createdAt <= REFRESH_REUSE_GRACE_MS) {
+        const winner = await this.recoverRefreshWinner(row);
+        if (winner) {
+          return { ok: true, pair: winner, userId: row.userId, familyId: row.familyId };
+        }
         return { ok: false, failure: "refresh_superseded", familyId: row.familyId };
       }
       await this.store.revokeFamily(row.familyId);
@@ -236,7 +249,23 @@ export class WebSessionTokenService {
       row.familyExpiresAt
     );
 
-    const consumed = await this.store.consumeRefreshToken(row.id, minted.refreshTokenId);
+    if (!this.encryptionKey) {
+      await Promise.all([
+        this.store.revokeToken(minted.accessTokenId),
+        this.store.revokeToken(minted.refreshTokenId),
+      ]);
+      return { ok: false, failure: "invalid_refresh_token", familyId: row.familyId };
+    }
+    const refreshWinnerEncrypted = await encryptToken(
+      JSON.stringify(minted.pair),
+      this.encryptionKey
+    );
+
+    const consumed = await this.store.consumeRefreshToken(
+      row.id,
+      minted.refreshTokenId,
+      refreshWinnerEncrypted
+    );
     if (!consumed) {
       // Lost a concurrent redeem race — by definition within the grace
       // window. Revoke only the orphaned pair this call minted; the race
@@ -245,9 +274,30 @@ export class WebSessionTokenService {
         this.store.revokeToken(minted.accessTokenId),
         this.store.revokeToken(minted.refreshTokenId),
       ]);
-      return { ok: false, failure: "refresh_superseded", familyId: row.familyId };
+      const consumedRow = await this.store.getById(row.id);
+      const winner = consumedRow ? await this.recoverRefreshWinner(consumedRow) : null;
+      return winner
+        ? { ok: true, pair: winner, userId: row.userId, familyId: row.familyId }
+        : { ok: false, failure: "refresh_superseded", familyId: row.familyId };
     }
 
     return { ok: true, pair: minted.pair, userId: row.userId, familyId: row.familyId };
+  }
+
+  async revokeRefreshToken(token: string): Promise<void> {
+    const row = await this.store.getByHash(await hashToken(token));
+    if (!row || row.kind !== "web_session_refresh" || !isWebSessionRow(row)) return;
+    await this.store.revokeFamily(row.familyId);
+  }
+
+  private async recoverRefreshWinner(row: ApiTokenRow): Promise<WebSessionTokenPair | null> {
+    if (!row.refreshWinnerEncrypted || !this.encryptionKey) return null;
+    try {
+      const decrypted = await decryptToken(row.refreshWinnerEncrypted, this.encryptionKey);
+      const parsed = webSessionTokenPairSchema.safeParse(JSON.parse(decrypted));
+      return parsed.success ? parsed.data : null;
+    } catch {
+      return null;
+    }
   }
 }

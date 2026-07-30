@@ -347,7 +347,7 @@ describe("token exchange and refresh grant", () => {
     await expectNoDurableAuthState();
   });
 
-  it("rotates via the refresh grant; immediate replay is rejected without revoking the family", async () => {
+  it("rotates via the refresh grant and recovers the exact winner on immediate replay", async () => {
     const first = await exchangeGitHub();
 
     const refreshResponse = await serviceFetch({
@@ -364,16 +364,12 @@ describe("token exchange and refresh grant", () => {
     });
     expect(ok.status).toBe(200);
 
-    // Immediate replay of the consumed token = benign concurrent renewal:
-    // superseded (NOT a dead grant), family left alive (grace window).
-    // Post-grace replay revokes the family — covered by the service unit
-    // tests.
     const replay = await serviceFetch({
       path: "/auth/tokens/refresh",
       body: { refreshToken: first.refreshToken },
     });
-    expect(replay.status).toBe(401);
-    expect(await replay.json()).toMatchObject({ error: "refresh_superseded" });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(second);
 
     const stillValid = await SELF.fetch("https://test.local/sessions", {
       headers: { Authorization: `Bearer ${second.accessToken}` },
@@ -394,11 +390,10 @@ describe("token exchange and refresh grant", () => {
       }),
     ]);
 
-    expect(requests.map((response) => response.status).sort()).toEqual([200, 401]);
-    const winnerResponse = requests.find((response) => response.status === 200)!;
-    const loserResponse = requests.find((response) => response.status === 401)!;
-    const winner = await winnerResponse.json<TokenPair>();
-    expect(await loserResponse.json()).toEqual({ error: "refresh_superseded" });
+    expect(requests.map((response) => response.status)).toEqual([200, 200]);
+    const pairs = await Promise.all(requests.map((response) => response.json<TokenPair>()));
+    expect(pairs[1]).toEqual(pairs[0]);
+    const winner = pairs[0];
 
     const winnerAccess = await SELF.fetch("https://test.local/sessions", {
       headers: { Authorization: `Bearer ${winner.accessToken}` },
@@ -455,6 +450,68 @@ describe("token exchange and refresh grant", () => {
     });
     expect(response.status).toBe(401);
     expect(await response.json()).toMatchObject({ error: "invalid_refresh_token" });
+  });
+
+  it("revokes a family idempotently by refresh token", async () => {
+    const pair = await exchangeGitHub();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await serviceFetch({
+        path: "/auth/tokens/revoke",
+        body: { refreshToken: pair.refreshToken },
+      });
+      expect(response.status).toBe(204);
+    }
+
+    const access = await SELF.fetch("https://test.local/sessions", {
+      headers: { Authorization: `Bearer ${pair.accessToken}` },
+    });
+    expect(access.status).toBe(401);
+    const refresh = await serviceFetch({
+      path: "/auth/tokens/refresh",
+      body: { refreshToken: pair.refreshToken },
+    });
+    expect(refresh.status).toBe(401);
+  });
+
+  it("forbids revoke to every principal except the web service", async () => {
+    const pair = await exchangeGitHub();
+    const body = { refreshToken: pair.refreshToken };
+
+    const asSlack = await serviceFetch({
+      service: "slack-bot",
+      path: "/auth/tokens/revoke",
+      body,
+    });
+    expect(asSlack.status).toBe(403);
+
+    const asUser = await SELF.fetch("https://test.local/auth/tokens/revoke", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${pair.accessToken}`,
+      },
+      body: JSON.stringify(body),
+    });
+    expect(asUser.status).toBe(403);
+
+    const asWeb = await serviceFetch({ path: "/auth/tokens/revoke", body });
+    expect(asWeb.status).toBe(204);
+  });
+
+  it("rejects users and unrelated services from sandbox SCM credentials", async () => {
+    const pair = await exchangeGitHub();
+    const asUser = await SELF.fetch("https://test.local/sessions/other/scm-credentials", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${pair.accessToken}` },
+    });
+    expect(asUser.status).toBe(403);
+
+    const asSlack = await serviceFetch({
+      service: "slack-bot",
+      path: "/sessions/other/scm-credentials",
+      body: {},
+    });
+    expect(asSlack.status).toBe(403);
   });
 
   it("forbids refresh to every principal except the web service", async () => {
@@ -657,8 +714,8 @@ describe("api_tokens retention sweep", () => {
     ]);
 
     const outcomes = await Promise.all([
-      store.consumeRefreshToken(refreshId, "successor-a"),
-      store.consumeRefreshToken(refreshId, "successor-b"),
+      store.consumeRefreshToken(refreshId, "successor-a", "encrypted-a"),
+      store.consumeRefreshToken(refreshId, "successor-b", "encrypted-b"),
     ]);
 
     expect(outcomes.filter(Boolean)).toHaveLength(1);

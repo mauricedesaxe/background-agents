@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { env, runInDurableObject } from "cloudflare:test";
+import { SELF, env, runInDurableObject } from "cloudflare:test";
 import type { SourceControlProvider } from "../../src/source-control";
 import type { SessionDO } from "../../src/session/durable-object";
-import { initNamedSession, initSession, queryDO, seedMessage, serviceFetch } from "./helpers";
+import { initNamedSession, initSession, queryDO, seedMessage, seedSandboxAuth } from "./helpers";
 
 describe("POST /internal/create-pr", () => {
   it("returns 404 when session is not initialized", async () => {
@@ -503,10 +503,13 @@ describe("POST /internal/create-pr", () => {
 
     it("rejects an omitted target on a multi-repo session through the proxy route", async () => {
       const sessionName = `pr-target-400-${Date.now()}`;
-      await initNamedSession(sessionName, multiRepoInit);
+      const { stub } = await initNamedSession(sessionName, multiRepoInit);
+      const sandboxToken = `sandbox-token-${sessionName}`;
+      await seedSandboxAuth(stub, { authToken: sandboxToken, sandboxId: `sandbox-${sessionName}` });
 
-      const res = await serviceFetch(`https://test.local/sessions/${sessionName}/pr`, {
+      const res = await SELF.fetch(`https://test.local/sessions/${sessionName}/pr`, {
         method: "POST",
+        headers: { Authorization: `Bearer ${sandboxToken}` },
         body: JSON.stringify({ title: "PR", body: "desc" }),
       });
 
@@ -519,10 +522,13 @@ describe("POST /internal/create-pr", () => {
 
     it("rejects a non-member target with 403 through the proxy route", async () => {
       const sessionName = `pr-target-403-${Date.now()}`;
-      await initNamedSession(sessionName, multiRepoInit);
+      const { stub } = await initNamedSession(sessionName, multiRepoInit);
+      const sandboxToken = `sandbox-token-${sessionName}`;
+      await seedSandboxAuth(stub, { authToken: sandboxToken, sandboxId: `sandbox-${sessionName}` });
 
-      const res = await serviceFetch(`https://test.local/sessions/${sessionName}/pr`, {
+      const res = await SELF.fetch(`https://test.local/sessions/${sessionName}/pr`, {
         method: "POST",
+        headers: { Authorization: `Bearer ${sandboxToken}` },
         body: JSON.stringify({
           title: "PR",
           body: "desc",
