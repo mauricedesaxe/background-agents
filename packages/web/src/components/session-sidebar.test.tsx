@@ -143,7 +143,7 @@ describe("SessionSidebar", () => {
     expect(screen.getByText("Session 2").closest("a")).not.toHaveTextContent("3 PRs · 2 open");
   });
 
-  it("renders nested child sessions under their immediate parent", async () => {
+  it("collapses descendants by default and expands them from the parent", async () => {
     const now = Date.now();
     const parent = createSession(1, { updatedAt: now });
     const child = createSession(2, {
@@ -179,8 +179,97 @@ describe("SessionSidebar", () => {
     );
 
     expect(await screen.findByText("Session 1")).toBeInTheDocument();
+    expect(screen.queryByText("Child session")).not.toBeInTheDocument();
+    expect(screen.queryByText("Grandchild session")).not.toBeInTheDocument();
+
+    const expandButton = screen.getByRole("button", {
+      name: "Expand 2 child sessions for Session 1, 2 active",
+    });
+    expect(expandButton).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(expandButton);
+
     expect(screen.getByText("Child session")).toBeInTheDocument();
     expect(screen.getByText("Grandchild session")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Collapse 2 child sessions for Session 1, 2 active",
+      })
+    ).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("rolls child activity up to a collapsed parent", async () => {
+    const parent = createSession(1);
+    const completedChild = createSession(2, {
+      parentSessionId: parent.id,
+      spawnSource: "agent",
+      status: "completed",
+    });
+    const activeGrandchild = createSession(3, {
+      parentSessionId: completedChild.id,
+      spawnSource: "agent",
+      status: "active",
+    });
+
+    render(
+      <SWRConfig
+        value={{
+          fallback: {
+            [SIDEBAR_SESSIONS_KEY]: {
+              sessions: [parent, completedChild, activeGrandchild],
+              hasMore: false,
+            },
+          },
+          dedupingInterval: 0,
+          revalidateOnFocus: false,
+        }}
+      >
+        <SessionSidebar />
+      </SWRConfig>
+    );
+
+    expect(
+      await screen.findByRole("button", {
+        name: "Expand 2 child sessions for Session 1, 1 active",
+      })
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Session 2")).not.toBeInTheDocument();
+  });
+
+  it("reveals matching descendants while searching", async () => {
+    const parent = createSession(1);
+    const child = createSession(2, {
+      title: "Needle child",
+      parentSessionId: parent.id,
+      spawnSource: "agent",
+    });
+
+    render(
+      <SWRConfig
+        value={{
+          fallback: {
+            [SIDEBAR_SESSIONS_KEY]: { sessions: [parent, child], hasMore: false },
+          },
+          dedupingInterval: 0,
+          revalidateOnFocus: false,
+        }}
+      >
+        <SessionSidebar />
+      </SWRConfig>
+    );
+
+    expect(await screen.findByText("Session 1")).toBeInTheDocument();
+    expect(screen.queryByText("Needle child")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Search sessions..."), {
+      target: { value: "Needle child" },
+    });
+
+    expect(screen.getByText("Needle child")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Collapse 1 child session/ })).toHaveAttribute(
+      "aria-expanded",
+      "true"
+    );
   });
 
   it("defaults to manual sessions and switches to automatic roots with their children", async () => {
@@ -216,6 +305,8 @@ describe("SessionSidebar", () => {
     fireEvent.click(screen.getByRole("radio", { name: "Automatic" }));
 
     expect(screen.getByText("Scheduled session")).toBeInTheDocument();
+    expect(screen.queryByText("Automatic child")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Expand 1 child session/ }));
     expect(screen.getByText("Automatic child")).toBeInTheDocument();
     expect(screen.queryByText("Manual session")).not.toBeInTheDocument();
   });

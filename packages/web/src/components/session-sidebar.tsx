@@ -44,6 +44,7 @@ import {
   BranchIcon,
   BoxIcon,
   DataControlsIcon,
+  ChevronRightIcon,
 } from "@/components/ui/icons";
 import { APP_SHORT_NAME } from "@/lib/site-config";
 import { formatSessionRepositoriesListLabel } from "@/lib/repo-label";
@@ -477,6 +478,7 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
                 onArchive={handleSessionArchived}
                 onSessionSelect={onSessionSelect}
                 onSessionRenamed={handleSessionRenamed}
+                revealDescendants={searchQuery.trim().length > 0}
               />
             ))}
 
@@ -502,6 +504,7 @@ function SessionRepositoryGroupSection({
   onArchive,
   onSessionSelect,
   onSessionRenamed,
+  revealDescendants,
 }: {
   group: SessionRepositoryGroup;
   revealInactive: boolean;
@@ -512,6 +515,7 @@ function SessionRepositoryGroupSection({
   onArchive: (sessionId: string) => Promise<void>;
   onSessionSelect?: () => void;
   onSessionRenamed: (sessionId: string, title: string) => void;
+  revealDescendants: boolean;
 }) {
   const [inactiveOpen, setInactiveOpen] = useState(revealInactive);
 
@@ -528,6 +532,7 @@ function SessionRepositoryGroupSection({
       onArchive={onArchive}
       onSessionSelect={onSessionSelect}
       onSessionRenamed={onSessionRenamed}
+      revealDescendants={revealDescendants}
     />
   );
 
@@ -614,6 +619,7 @@ function SessionWithChildren({
   onArchive,
   onSessionSelect,
   onSessionRenamed,
+  revealDescendants,
 }: {
   session: SessionItem;
   environmentName?: string;
@@ -623,7 +629,12 @@ function SessionWithChildren({
   onArchive: (sessionId: string) => Promise<void>;
   onSessionSelect?: () => void;
   onSessionRenamed: (sessionId: string, title: string) => void;
+  revealDescendants: boolean;
 }) {
+  const [childrenOpen, setChildrenOpen] = useState(revealDescendants);
+  const childSummary = descendantSummary(session.id, childrenMap);
+  const childrenId = `session-children-${session.id}`;
+
   return (
     <>
       <SessionListItem
@@ -634,17 +645,46 @@ function SessionWithChildren({
         onArchive={onArchive}
         onSessionSelect={onSessionSelect}
         onSessionRenamed={onSessionRenamed}
+        childSummary={childSummary}
+        childrenOpen={childrenOpen}
+        childrenId={childrenId}
+        onChildrenToggle={() => setChildrenOpen((open) => !open)}
       />
-      <ChildSessionTree
-        parentId={session.id}
-        childrenMap={childrenMap}
-        currentSessionId={currentSessionId}
-        isMobile={isMobile}
-        onSessionSelect={onSessionSelect}
-        visitedIds={new Set([session.id])}
-      />
+      {childrenOpen && (
+        <div id={childrenId}>
+          <ChildSessionTree
+            parentId={session.id}
+            childrenMap={childrenMap}
+            currentSessionId={currentSessionId}
+            isMobile={isMobile}
+            onSessionSelect={onSessionSelect}
+            visitedIds={new Set([session.id])}
+          />
+        </div>
+      )}
     </>
   );
+}
+
+function descendantSummary(parentId: string, childrenMap: Map<string, SessionItem[]>) {
+  let count = 0;
+  let activeCount = 0;
+  const visitedIds = new Set([parentId]);
+  const pending = [...(childrenMap.get(parentId) ?? [])];
+
+  while (pending.length > 0) {
+    const child = pending.pop();
+    if (!child || visitedIds.has(child.id)) continue;
+
+    visitedIds.add(child.id);
+    count += 1;
+    if (child.status === "created" || child.status === "active") {
+      activeCount += 1;
+    }
+    pending.push(...(childrenMap.get(child.id) ?? []));
+  }
+
+  return { count, activeCount };
 }
 
 function ChildSessionTree({
@@ -704,6 +744,10 @@ function SessionListItem({
   onArchive,
   onSessionSelect,
   onSessionRenamed,
+  childSummary,
+  childrenOpen,
+  childrenId,
+  onChildrenToggle,
 }: {
   session: SessionItem;
   environmentName?: string;
@@ -712,6 +756,10 @@ function SessionListItem({
   onArchive: (sessionId: string) => Promise<void>;
   onSessionSelect?: () => void;
   onSessionRenamed: (sessionId: string, title: string) => void;
+  childSummary: { count: number; activeCount: number };
+  childrenOpen: boolean;
+  childrenId: string;
+  onChildrenToggle: () => void;
 }) {
   const timestamp = session.updatedAt || session.createdAt;
   const relativeTime = formatRelativeTime(timestamp);
@@ -734,6 +782,9 @@ function SessionListItem({
   const longPressTimerRef = useRef<number | null>(null);
   const longPressTriggeredRef = useRef(false);
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+  const childSessionLabel = `${childSummary.count} child session${childSummary.count === 1 ? "" : "s"}`;
+  const childActivityLabel =
+    childSummary.activeCount > 0 ? `, ${childSummary.activeCount} active` : "";
 
   useEffect(() => {
     if (!isRenaming) {
@@ -887,7 +938,7 @@ function SessionListItem({
                   handleCancelRename();
                 }
               }}
-              className="w-full text-sm bg-transparent text-foreground outline-none focus:ring-inset focus:ring-ring font-medium pr-8"
+              className={`w-full bg-transparent text-sm font-medium text-foreground outline-none focus:ring-inset focus:ring-ring ${childSummary.count > 0 ? "pr-20" : "pr-8"}`}
             />
             <div className="flex items-center gap-1 mt-0.5 text-xs text-muted-foreground">
               <span>{relativeTime}</span>
@@ -917,7 +968,7 @@ function SessionListItem({
             onTouchMove={handleTouchMove}
             onTouchEnd={handleTouchEnd}
             onTouchCancel={handleTouchEnd}
-            className="block pr-8"
+            className={childSummary.count > 0 ? "block pr-20" : "block pr-8"}
           >
             <div className="flex items-center gap-1.5 text-sm font-medium text-foreground">
               {prDisplay && (
@@ -951,6 +1002,28 @@ function SessionListItem({
               )}
             </div>
           </Link>
+        )}
+
+        {childSummary.count > 0 && (
+          <button
+            type="button"
+            aria-expanded={childrenOpen}
+            aria-controls={childrenId}
+            aria-label={`${childrenOpen ? "Collapse" : "Expand"} ${childSessionLabel} for ${displayTitle}${childActivityLabel}`}
+            onClick={onChildrenToggle}
+            className="absolute right-9 top-2 flex h-6 items-center gap-0.5 rounded px-1 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <ChevronRightIcon
+              className={`h-3.5 w-3.5 transition-transform ${childrenOpen ? "rotate-90" : ""}`}
+            />
+            <span>{childSummary.count}</span>
+            {childSummary.activeCount > 0 && (
+              <span
+                className="h-1.5 w-1.5 rounded-full bg-accent"
+                title={`${childSummary.activeCount} active`}
+              />
+            )}
+          </button>
         )}
 
         <div className="absolute inset-y-0 right-2 flex items-start pt-2">
