@@ -38,6 +38,9 @@ a commit rather than a branch so two builds of the same source produce the same 
 `github-bot`'s PR review prompt (`packages/github-bot/src/prompts.ts`) invokes `lazar-review` by
 name, which is the same divergence reaching a second package.
 
+Modal, Vercel, and OpenComputer include the installer in their image fingerprints. Daytona excludes
+shell files, so each harness pin bump also advances its `SANDBOX_VERSION`.
+
 ### 2. Daytona is the provider we actually run
 
 Upstream ships several providers and we retain all of them; the ones we do not run diverge only
