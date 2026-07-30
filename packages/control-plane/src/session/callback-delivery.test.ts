@@ -54,4 +54,24 @@ describe("deliverWithRetry", () => {
     expect(send).toHaveBeenCalledTimes(2);
     expect(send.mock.calls.every(([signal]) => signal instanceof AbortSignal)).toBe(true);
   });
+
+  it("retries when a failed response body never completes", async () => {
+    vi.useFakeTimers();
+    const stalledBody = new ReadableStream({
+      start() {},
+    });
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(stalledBody, { status: 503 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const onFailure = vi.fn(async (failure: { response?: Response }) => {
+      await failure.response?.text();
+    });
+
+    const delivery = deliverWithRetry(send, async () => {}, onFailure);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await expect(delivery).resolves.toBe(true);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
 });

@@ -13,20 +13,28 @@ export async function deliverWithRetry(
 ): Promise<boolean> {
   for (let attempt = 1; attempt <= CALLBACK_ATTEMPTS; attempt++) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), CALLBACK_ATTEMPT_TIMEOUT_MS);
-    let failure: DeliveryFailure;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => {
+        controller.abort();
+        reject(controller.signal.reason);
+      }, CALLBACK_ATTEMPT_TIMEOUT_MS);
+    });
     try {
-      const response = await send(controller.signal);
-      if (response.ok) return true;
-      failure = { attempt, response };
-    } catch (error) {
-      failure = { attempt, error };
+      let failure: DeliveryFailure;
+      try {
+        const response = await Promise.race([send(controller.signal), timedOut]);
+        if (response.ok) return true;
+        failure = { attempt, response };
+      } catch (error) {
+        failure = { attempt, error };
+      }
+      await Promise.race([Promise.resolve().then(() => onFailure(failure)), timedOut]).catch(
+        () => undefined
+      );
     } finally {
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
     }
-    await Promise.resolve()
-      .then(() => onFailure(failure))
-      .catch(() => undefined);
 
     if (attempt < CALLBACK_ATTEMPTS) await sleep(CALLBACK_RETRY_DELAY_MS);
   }
