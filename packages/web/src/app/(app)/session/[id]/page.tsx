@@ -50,6 +50,7 @@ function SessionPageContent() {
     authError,
     connectionError,
     sessionState,
+    sandboxError,
     events,
     participants,
     artifacts,
@@ -156,6 +157,7 @@ function SessionPageContent() {
     <div className="h-full flex flex-col">
       <SessionHeader
         sessionState={sessionState}
+        sandboxError={sandboxError}
         fallbackSessionInfo={fallbackSessionInfo}
         connected={connected}
         connecting={connecting}

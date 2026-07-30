@@ -21,6 +21,7 @@ export interface HistoryCursor {
 export interface SessionSocketState {
   replaying: boolean;
   sessionState: SessionState | null;
+  sandboxError: string | null;
   events: SandboxEvent[];
   participants: ParticipantPresence[];
   artifacts: Artifact[];
@@ -33,6 +34,7 @@ export interface SessionSocketState {
 export const initialSessionSocketState: SessionSocketState = {
   replaying: true,
   sessionState: null,
+  sandboxError: null,
   events: [],
   participants: [],
   artifacts: [],
@@ -210,6 +212,7 @@ function reduceServerMessage(
           isCompacting: message.state.isCompacting ?? false,
           totalCost: message.state.totalCost ?? 0,
         },
+        sandboxError: message.spawnError ?? null,
         artifacts: message.artifacts.map(toUiArtifact),
         currentParticipantId: message.participantId || state.currentParticipantId,
         events: mergePromptSnapshotEvents(
@@ -246,10 +249,13 @@ function reduceServerMessage(
       };
 
     case "sandbox_warming":
-      return updateSessionState(state, (prev) => ({ ...prev, sandboxStatus: "warming" }));
+      return updateSessionState({ ...state, sandboxError: null }, (prev) => ({
+        ...prev,
+        sandboxStatus: "warming",
+      }));
 
     case "sandbox_spawning":
-      return updateSessionState(state, (prev) => ({
+      return updateSessionState({ ...state, sandboxError: null }, (prev) => ({
         ...prev,
         sandboxStatus: "spawning",
         ...CLEARED_SANDBOX_ACCESS_STATE,
@@ -262,19 +268,25 @@ function reduceServerMessage(
         message.status === "stale" ||
         message.status === "stopped" ||
         message.status === "failed";
-      return updateSessionState(state, (prev) => ({
-        ...prev,
-        sandboxStatus: message.status,
-        ...(shouldClearAccessState && CLEARED_SANDBOX_ACCESS_STATE),
-        ...(isReplacementStart && { sandboxDashboardUrl: undefined }),
-      }));
+      return updateSessionState(
+        { ...state, sandboxError: message.status === "failed" ? state.sandboxError : null },
+        (prev) => ({
+          ...prev,
+          sandboxStatus: message.status,
+          ...(shouldClearAccessState && CLEARED_SANDBOX_ACCESS_STATE),
+          ...(isReplacementStart && { sandboxDashboardUrl: undefined }),
+        })
+      );
     }
 
     case "sandbox_ready":
-      return updateSessionState(state, (prev) => ({ ...prev, sandboxStatus: "ready" }));
+      return updateSessionState({ ...state, sandboxError: null }, (prev) => ({
+        ...prev,
+        sandboxStatus: "ready",
+      }));
 
     case "sandbox_error":
-      return updateSessionState(state, (prev) => ({
+      return updateSessionState({ ...state, sandboxError: message.error }, (prev) => ({
         ...prev,
         sandboxStatus: "failed",
         ...CLEARED_SANDBOX_ACCESS_STATE,

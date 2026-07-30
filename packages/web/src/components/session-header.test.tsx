@@ -24,6 +24,7 @@ describe("SessionHeader", () => {
     render(
       <SessionHeader
         sessionState={null}
+        sandboxError={null}
         fallbackSessionInfo={{ repoOwner: null, repoName: null, title: "Incident sweep" }}
         connected={false}
         connecting={true}
@@ -44,6 +45,7 @@ describe("SessionHeader", () => {
     render(
       <SessionHeader
         sessionState={null}
+        sandboxError={null}
         fallbackSessionInfo={{
           repoOwner: "open-inspect",
           repoName: "a-repository-name-that-does-not-fit-on-a-narrow-phone",
@@ -69,5 +71,37 @@ describe("SessionHeader", () => {
     expect(
       screen.getByRole("button", { name: "Toggle session details" }).parentElement
     ).toHaveClass("shrink-0");
+  });
+
+  it("shows the sandbox failure reason", () => {
+    render(
+      <SessionHeader
+        sessionState={{
+          id: "session-1",
+          title: "Broken sandbox",
+          repoOwner: "open-inspect",
+          repoName: "background-agents",
+          baseBranch: "main",
+          branchName: "fix/sandbox",
+          status: "active",
+          sandboxStatus: "failed",
+          messageCount: 0,
+          createdAt: 1,
+        }}
+        sandboxError="Total disk limit exceeded"
+        fallbackSessionInfo={{ repoOwner: null, repoName: null, title: null }}
+        connected={true}
+        connecting={false}
+        participants={[]}
+        isDetailsOpen={false}
+        detailsButtonRef={createRef<HTMLButtonElement>()}
+        onToggleDetails={vi.fn()}
+        renameSession={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Sandbox failed: Total disk limit exceeded"
+    );
   });
 });
