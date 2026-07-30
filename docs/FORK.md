@@ -272,6 +272,17 @@ state handling while validating its own query and mutation responses.
 This fork needs the boundary checks without changing its existing webhook and issue-start behavior,
 so future syncs must port Linear client changes selectively rather than replace the package.
 
+### 20. Child session trees default to collapsed in the sidebar
+
+`packages/web/src/components/session-sidebar.tsx` hides a parent's full descendant tree until its
+disclosure control is opened. The control reports the descendant count and active-child signal, and
+matching descendants open again whenever the search query changes. The collapse, activity roll-up,
+and search-reset behavior is pinned by `packages/web/src/components/session-sidebar.test.tsx`.
+
+**Why.** Agent fan-out can create enough child rows to make the sidebar hard to scan. Keeping the
+tree collapsed preserves parent-focused navigation while still surfacing active work and search
+matches that would otherwise be hidden.
+
 ## Where we match upstream against our own docs
 
 The list above is where we differ from upstream. This is the inverse: a place where matching
