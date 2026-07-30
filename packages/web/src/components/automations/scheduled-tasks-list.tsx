@@ -5,6 +5,13 @@ import { useState } from "react";
 import useSWR from "swr";
 import type { ListScheduledTasksResponse, ScheduledTask } from "@open-inspect/shared";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 
 const fetcher = async (url: string): Promise<ListScheduledTasksResponse> => {
   const response = await fetch(url);
@@ -78,10 +85,38 @@ function ScheduledTaskRow({
 }) {
   const run = task.invocation?.runs[0];
   const scheduledAt = task.automation.nextRunAt ?? task.invocation?.scheduledAt;
+  const repositories = task.automation.repositories
+    .map((repository) => `${repository.repoOwner}/${repository.repoName}`)
+    .join(", ");
   return (
     <article className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
       <div className="min-w-0">
-        <p className="truncate text-sm font-medium text-foreground">{task.automation.name}</p>
+        <Dialog>
+          <DialogTrigger asChild>
+            <button
+              type="button"
+              className="block max-w-full truncate text-left text-sm font-medium text-foreground hover:underline"
+              title="View full prompt"
+            >
+              {task.automation.name}
+            </button>
+          </DialogTrigger>
+          <DialogContent className="max-h-[85vh] max-w-2xl overflow-hidden">
+            <DialogTitle>{task.automation.name}</DialogTitle>
+            <DialogDescription>
+              {repositories ? `Scheduled for ${repositories}.` : "Scheduled prompt details."}
+            </DialogDescription>
+            <div className="overflow-y-auto whitespace-pre-wrap break-words border border-border-muted bg-muted/30 p-4 text-sm text-foreground">
+              {task.automation.instructions}
+            </div>
+          </DialogContent>
+        </Dialog>
+        {repositories && (
+          <p className="mt-1 truncate text-xs text-muted-foreground">
+            {task.automation.repositories.length === 1 ? "Repository" : "Repositories"}:{" "}
+            {repositories}
+          </p>
+        )}
         <p className="mt-1 text-xs text-muted-foreground">
           {task.state}
           {scheduledAt ? ` · due ${formatDate(scheduledAt, task.automation.scheduleTz)}` : ""}
