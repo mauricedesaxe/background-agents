@@ -144,7 +144,7 @@ describe("Archive cascade to child sessions", () => {
     expect((await store.get(child))?.status).toBe("archived");
   });
 
-  it("archives a healthy sibling even when another child cannot be archived", async () => {
+  it("archives indexed children even when their Durable Object is missing", async () => {
     const store = new SessionIndexStore(env.DB);
     const parent = uniq("parent");
     const healthy = uniq("healthy");
@@ -172,8 +172,8 @@ describe("Archive cascade to child sessions", () => {
 
     await archiveParent(parent);
 
-    // The parent and the healthy sibling still archive despite the broken child.
     await waitForD1Status(store, parent, "archived");
     await waitForD1Status(store, healthy, "archived");
+    await waitForD1Status(store, brokenChild, "archived");
   });
 });

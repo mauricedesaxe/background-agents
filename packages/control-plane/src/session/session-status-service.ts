@@ -15,6 +15,7 @@ import type { SessionStatus } from "../types";
 import type { SessionRow } from "./types";
 import type { SessionRepository } from "./repository";
 import type { SessionMessenger } from "./messenger";
+import { epochMs, nowMs, type EpochMs } from "../time";
 
 /** Statuses that indicate a session is finished — metrics are synced to D1 on these transitions. */
 const TERMINAL_STATUSES: SessionStatus[] = ["completed", "failed", "cancelled"];
@@ -36,26 +37,52 @@ export class SessionStatusService {
    * refreshed in the same-status case).
    */
   async transition(status: SessionStatus): Promise<boolean> {
+    return this.applyTransition(status, false);
+  }
+
+  async unarchive(): Promise<boolean> {
+    return this.applyTransition("active", true);
+  }
+
+  private async applyTransition(status: SessionStatus, restoreArchivedSession: boolean) {
     const session = this.repository.getSession();
     if (!session) return false;
 
     const publicSessionId = this.getPublicSessionId(session);
     if (session.status === status) {
-      await this.syncSessionIndexStatus(publicSessionId, status, session.updated_at).catch(
-        (error) =>
-          this.logSessionIndexStatusSyncError(publicSessionId, status, session.updated_at, error)
+      const updatedAt = epochMs(session.updated_at);
+      await this.syncSessionIndexStatus(
+        publicSessionId,
+        status,
+        updatedAt,
+        restoreArchivedSession
+      ).catch((error) =>
+        this.logSessionIndexStatusSyncError(publicSessionId, status, updatedAt, error)
       );
+      if (status === "archived") {
+        await this.archiveDescendantIndexRows(publicSessionId, updatedAt);
+        this.cascadeArchiveToChildren(publicSessionId);
+      }
       if (TERMINAL_STATUSES.includes(status)) {
         this.syncSessionMetrics(publicSessionId);
       }
       return false;
     }
 
-    const updatedAt = Math.max(Date.now(), session.updated_at + 1);
+    const updatedAt = epochMs(Math.max(nowMs(), session.updated_at + 1));
     this.repository.updateSessionStatus(session.id, status, updatedAt);
-    await this.syncSessionIndexStatus(publicSessionId, status, updatedAt).catch((error) =>
+    await this.syncSessionIndexStatus(
+      publicSessionId,
+      status,
+      updatedAt,
+      restoreArchivedSession
+    ).catch((error) =>
       this.logSessionIndexStatusSyncError(publicSessionId, status, updatedAt, error)
     );
+
+    if (status === "archived") {
+      await this.archiveDescendantIndexRows(publicSessionId, updatedAt);
+    }
 
     this.messenger.broadcast({ type: "session_status", status });
 
@@ -66,10 +93,6 @@ export class SessionStatusService {
     // Notify parent session (if this is a child) so its UI can refresh
     this.notifyParentOfStatusChange(session, publicSessionId, status);
 
-    // Archiving a session cascades to its child/sub-task sessions so they leave
-    // the sidebar too. Gated on "archived" (only ever set by the archive paths),
-    // this fires exactly once per real transition regardless of which entrypoint
-    // archived the session; each archived child cascades to its own children.
     if (status === "archived") {
       this.cascadeArchiveToChildren(publicSessionId);
     }
@@ -78,11 +101,9 @@ export class SessionStatusService {
   }
 
   /**
-   * Archive every child of the given session by calling each child DO's trusted
-   * archive endpoint. Fire-and-forget and best-effort per child (a failing or
-   * evicted child DO is logged, not retried, and never fails the parent's
-   * archive), mirroring notifyParentOfChildUpdate. Children already archived are
-   * skipped so a re-archive doesn't re-walk an already-archived subtree.
+   * Reconcile each child's Durable Object after the index subtree has already
+   * been archived. Every child is called because its local state and sandbox
+   * may still be active even though its index row is now archived.
    */
   private cascadeArchiveToChildren(parentSessionId: string): void {
     if (!this.sessionIndex || !this.sessions) return;
@@ -94,25 +115,23 @@ export class SessionStatusService {
         .listByParent(parentSessionId)
         .then((children) =>
           Promise.all(
-            children
-              .filter((child) => child.status !== "archived")
-              .map((child) => {
-                const childDoId = sessionBinding.idFromName(child.id);
-                return sessionBinding
-                  .get(childDoId)
-                  .fetch(
-                    new Request(buildSessionInternalUrl(SessionInternalPaths.archiveCascade), {
-                      method: "POST",
-                    })
-                  )
-                  .catch((error) => {
-                    this.log.error("cascade_archive.child_failed", {
-                      parent_id: parentSessionId,
-                      child_id: child.id,
-                      error,
-                    });
+            children.map((child) => {
+              const childDoId = sessionBinding.idFromName(child.id);
+              return sessionBinding
+                .get(childDoId)
+                .fetch(
+                  new Request(buildSessionInternalUrl(SessionInternalPaths.archiveCascade), {
+                    method: "POST",
+                  })
+                )
+                .catch((error) => {
+                  this.log.error("cascade_archive.child_failed", {
+                    parent_id: parentSessionId,
+                    child_id: child.id,
+                    error,
                   });
-              })
+                });
+            })
           )
         )
         .then(() => undefined)
@@ -123,6 +142,20 @@ export class SessionStatusService {
           });
         })
     );
+  }
+
+  private async archiveDescendantIndexRows(
+    parentSessionId: string,
+    updatedAt: EpochMs
+  ): Promise<void> {
+    if (!this.sessionIndex) return;
+
+    await this.sessionIndex.archiveDescendants(parentSessionId, updatedAt).catch((error) => {
+      this.log.error("cascade_archive.index_failed", {
+        parent_id: parentSessionId,
+        error,
+      });
+    });
   }
 
   /**
@@ -208,16 +241,21 @@ export class SessionStatusService {
   private async syncSessionIndexStatus(
     sessionId: string,
     status: SessionStatus,
-    updatedAt: number
+    updatedAt: EpochMs,
+    restoreArchivedSession: boolean
   ): Promise<void> {
     if (!this.sessionIndex) return;
+    if (restoreArchivedSession) {
+      await this.sessionIndex.restoreArchivedSession(sessionId, updatedAt);
+      return;
+    }
     await this.sessionIndex.updateStatus(sessionId, status, updatedAt);
   }
 
   private logSessionIndexStatusSyncError(
     sessionId: string,
     status: SessionStatus,
-    updatedAt: number,
+    updatedAt: EpochMs,
     error: unknown
   ): void {
     this.log.error("session_index.update_status.background_error", {

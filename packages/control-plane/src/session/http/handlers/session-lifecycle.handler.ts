@@ -487,7 +487,7 @@ export function createSessionLifecycleHandler(
         );
       }
 
-      await deps.statusService.transition("active");
+      await deps.statusService.unarchive();
 
       return Response.json({ status: "active" });
     },
@@ -510,15 +510,10 @@ export function createSessionLifecycleHandler(
         return Response.json({ status: "archived" });
       }
 
-      // Already archived — no-op, and no re-cascade to descendants.
-      if (session.status === "archived") {
-        return Response.json({ status: "archived" });
-      }
-
       // Only running sessions have execution to stop; terminal-but-not-archived
       // children (completed/failed/cancelled) just need the status flip so they
       // leave the sidebar.
-      if (!TERMINAL_STATUSES.has(session.status)) {
+      if (session.status !== "archived" && !TERMINAL_STATUSES.has(session.status)) {
         await deps.stopExecution({ suppressStatusReconcile: true });
       }
 

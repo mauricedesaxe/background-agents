@@ -59,6 +59,9 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
       : {
           updateStatus: vi.fn(async () => true),
           updateMetrics: vi.fn(async () => true),
+          archiveDescendants: vi.fn(async () => 0),
+          restoreArchivedSession: vi.fn(async () => true),
+          listByParent: vi.fn(async () => []),
         };
 
   const waitUntil = vi.fn();
@@ -164,6 +167,48 @@ describe("SessionStatusService.transition", () => {
     expect(h.sessionIndex!.updateMetrics).toHaveBeenCalledWith(
       "public-session-1",
       expect.any(Object)
+    );
+  });
+
+  it("reopens child spawning when an archived session is restored", async () => {
+    const h = harness({ session: createSession({ status: "archived" }) });
+
+    expect(await h.service.unarchive()).toBe(true);
+
+    expect(h.sessionIndex!.restoreArchivedSession).toHaveBeenCalledWith(
+      "public-session-1",
+      expect.any(Number)
+    );
+    expect(h.sessionIndex!.updateStatus).not.toHaveBeenCalled();
+  });
+
+  it("archives descendant index rows before broadcasting the parent archive", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+
+    await h.service.transition("archived");
+
+    const updatedAt = h.repository.updateSessionStatus.mock.calls[0][2] as number;
+    expect(h.sessionIndex!.archiveDescendants).toHaveBeenCalledWith("public-session-1", updatedAt);
+    expect(h.sessionIndex!.archiveDescendants.mock.invocationCallOrder[0]).toBeLessThan(
+      h.broadcast.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("retries descendant reconciliation when the session is already archived", async () => {
+    const h = harness({ session: createSession({ status: "archived" }) });
+    h.sessionIndex!.archiveDescendants.mockRejectedValueOnce(
+      new Error("d1 down")
+    ).mockResolvedValueOnce(1);
+
+    expect(await h.service.transition("archived")).toBe(false);
+    expect(await h.service.transition("archived")).toBe(false);
+
+    expect(h.sessionIndex!.archiveDescendants).toHaveBeenCalledTimes(2);
+    expect(h.sessionIndex!.archiveDescendants).toHaveBeenLastCalledWith("public-session-1", 2000);
+    expect(h.sessionIndex!.listByParent).toHaveBeenCalledTimes(2);
+    expect(h.log.error).toHaveBeenCalledWith(
+      "cascade_archive.index_failed",
+      expect.objectContaining({ parent_id: "public-session-1" })
     );
   });
 

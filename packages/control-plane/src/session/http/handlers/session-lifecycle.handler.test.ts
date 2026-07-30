@@ -109,7 +109,8 @@ function createHandler() {
   const getPublicSessionId = vi.fn<(session: SessionRow) => string>();
   const getParticipantByUserId = vi.fn<(userId: string) => ParticipantRow | null>();
   const transition = vi.fn<(status: SessionRow["status"]) => Promise<boolean>>();
-  const statusService = { transition } as unknown as SessionStatusService;
+  const unarchive = vi.fn<() => Promise<boolean>>();
+  const statusService = { transition, unarchive } as unknown as SessionStatusService;
   const applySessionTitleUpdate = vi.fn((title: string) => ({ ok: true as const, title }));
   const stopExecution = vi.fn();
   const getSandboxSocket = vi.fn<() => WebSocket | null>();
@@ -172,6 +173,7 @@ function createHandler() {
     getPublicSessionId,
     getParticipantByUserId,
     transition,
+    unarchive,
     applySessionTitleUpdate,
     stopExecution,
     getSandboxSocket,
@@ -1013,10 +1015,10 @@ describe("createSessionLifecycleHandler", () => {
   });
 
   it("unarchives successfully for participant", async () => {
-    const { handler, getSession, getParticipantByUserId, transition } = createHandler();
+    const { handler, getSession, getParticipantByUserId, unarchive } = createHandler();
     getSession.mockReturnValue(createSession({ status: "archived" }));
     getParticipantByUserId.mockReturnValue(createParticipant());
-    transition.mockResolvedValue(true);
+    unarchive.mockResolvedValue(true);
 
     const response = await handler.unarchive(
       new Request("http://internal/internal/unarchive", {
@@ -1028,7 +1030,7 @@ describe("createSessionLifecycleHandler", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: "active" });
-    expect(transition).toHaveBeenCalledWith("active");
+    expect(unarchive).toHaveBeenCalled();
   });
 
   it("archiveCascade stops a running session then archives it, no participant check", async () => {
@@ -1073,7 +1075,7 @@ describe("createSessionLifecycleHandler", () => {
     expect(archiveSandbox).toHaveBeenCalledWith("session_archived");
   });
 
-  it("archiveCascade is a no-op when the session is already archived", async () => {
+  it("archiveCascade retries reconciliation when the session is already archived", async () => {
     const { handler, getSession, stopExecution, transition, archiveSandbox } = createHandler();
     getSession.mockReturnValue(createSession({ status: "archived" }));
 
@@ -1082,8 +1084,8 @@ describe("createSessionLifecycleHandler", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: "archived" });
     expect(stopExecution).not.toHaveBeenCalled();
-    expect(transition).not.toHaveBeenCalled();
-    expect(archiveSandbox).not.toHaveBeenCalled();
+    expect(transition).toHaveBeenCalledWith("archived");
+    expect(archiveSandbox).toHaveBeenCalledWith("session_archived");
   });
 
   it("archiveCascade treats a missing session as already archived", async () => {
