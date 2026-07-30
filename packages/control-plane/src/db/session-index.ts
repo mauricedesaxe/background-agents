@@ -70,6 +70,7 @@ export interface SessionEntry {
    * has no tracked PRs. Attached by list() for the global sidebar.
    */
   pullRequestSummary?: PullRequestSummary;
+  unread?: boolean;
 }
 
 interface SessionRepositoryRow {
@@ -119,7 +120,10 @@ export interface ListSessionsOptions {
   createdByUserIds?: readonly string[];
   limit?: number;
   offset?: number;
+  viewerUserId?: string;
 }
+
+export type SessionReadAction = "viewed" | "mark_read" | "mark_unread";
 
 export interface ListSessionsResult {
   sessions: SessionEntry[];
@@ -378,6 +382,7 @@ export class SessionIndexStore {
       createdByUserIds,
       limit = 50,
       offset = 0,
+      viewerUserId,
     } = options;
 
     const conditions: string[] = [];
@@ -432,7 +437,7 @@ export class SessionIndexStore {
       .all<SessionRow>();
 
     const rows = result.results || [];
-    const sessions = await this.decorateEntries(rows.slice(0, limit).map(toEntry));
+    const sessions = await this.decorateEntries(rows.slice(0, limit).map(toEntry), viewerUserId);
 
     return {
       sessions,
@@ -448,13 +453,19 @@ export class SessionIndexStore {
    * the field: consumers fall back to the scalar repo columns, and PR state
    * never influences session ordering (this only decorates paged rows).
    */
-  private async decorateEntries(sessions: SessionEntry[]): Promise<SessionEntry[]> {
+  private async decorateEntries(
+    sessions: SessionEntry[],
+    viewerUserId?: string
+  ): Promise<SessionEntry[]> {
     if (sessions.length === 0) return sessions;
     const sessionIds = sessions.map((session) => session.id);
 
-    const [repositoriesBySession, summariesBySession] = await Promise.all([
+    const [repositoriesBySession, summariesBySession, unreadBySession] = await Promise.all([
       this.repositoriesForSessions(sessionIds),
       new SessionPullRequestStore(this.db).summariesForSessions(sessionIds),
+      viewerUserId
+        ? this.unreadForSessions(sessionIds, viewerUserId)
+        : Promise.resolve(new Map<string, boolean>()),
     ]);
 
     return sessions.map((session) => {
@@ -464,8 +475,34 @@ export class SessionIndexStore {
         ...session,
         ...(repositories ? { repositories } : {}),
         ...(pullRequestSummary ? { pullRequestSummary } : {}),
+        ...(viewerUserId ? { unread: unreadBySession.get(session.id) ?? false } : {}),
       };
     });
+  }
+
+  private async unreadForSessions(
+    sessionIds: readonly string[],
+    userId: string
+  ): Promise<Map<string, boolean>> {
+    const placeholders = sessionIds.map(() => "?").join(", ");
+    const result = await this.db
+      .prepare(
+        `SELECT sessions.id,
+           CASE WHEN read_state.manually_unread = 1 OR (
+             sessions.latest_output_message_id IS NOT NULL AND (
+               read_state.read_output_message_id IS NULL
+               OR read_state.read_output_message_id != sessions.latest_output_message_id
+             )
+           ) THEN 1 ELSE 0 END AS unread
+         FROM sessions
+         LEFT JOIN session_read_states AS read_state
+           ON read_state.session_id = sessions.id AND read_state.user_id = ?
+         WHERE sessions.id IN (${placeholders})`
+      )
+      .bind(userId, ...sessionIds)
+      .all<{ id: string; unread: number }>();
+
+    return new Map((result.results ?? []).map((row) => [row.id, row.unread === 1]));
   }
 
   /** Repository lists for the given sessions, in one query. */
@@ -522,6 +559,80 @@ export class SessionIndexStore {
       .run();
 
     return (result.meta?.changes ?? 0) > 0;
+  }
+
+  async recordOutput(id: string, messageId: string, completedAt: number): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE sessions
+         SET latest_output_message_id = ?, latest_output_at = ?
+         WHERE id = ? AND (latest_output_at IS NULL OR latest_output_at <= ?)`
+      )
+      .bind(messageId, completedAt, id, completedAt)
+      .run();
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
+  async updateReadState(
+    sessionId: string,
+    userId: string,
+    action: SessionReadAction
+  ): Promise<boolean | null> {
+    const session = await this.db
+      .prepare("SELECT latest_output_message_id FROM sessions WHERE id = ?")
+      .bind(sessionId)
+      .first<{ latest_output_message_id: string | null }>();
+    if (!session) return null;
+
+    const now = Date.now();
+    if (action === "mark_unread") {
+      await this.db
+        .prepare(
+          `INSERT INTO session_read_states
+             (user_id, session_id, read_output_message_id, manually_unread, updated_at)
+           VALUES (?, ?, NULL, 1, ?)
+           ON CONFLICT(user_id, session_id) DO UPDATE SET
+             manually_unread = 1,
+             updated_at = excluded.updated_at`
+        )
+        .bind(userId, sessionId, now)
+        .run();
+      return true;
+    }
+
+    if (action === "viewed") {
+      await this.db
+        .prepare(
+          `INSERT INTO session_read_states
+             (user_id, session_id, read_output_message_id, manually_unread, updated_at)
+           VALUES (?, ?, ?, 0, ?)
+           ON CONFLICT(user_id, session_id) DO UPDATE SET
+             read_output_message_id = CASE
+               WHEN session_read_states.manually_unread = 0
+               THEN excluded.read_output_message_id
+               ELSE session_read_states.read_output_message_id
+             END,
+             updated_at = excluded.updated_at`
+        )
+        .bind(userId, sessionId, session.latest_output_message_id, now)
+        .run();
+    } else {
+      await this.db
+        .prepare(
+          `INSERT INTO session_read_states
+             (user_id, session_id, read_output_message_id, manually_unread, updated_at)
+           VALUES (?, ?, ?, 0, ?)
+           ON CONFLICT(user_id, session_id) DO UPDATE SET
+             read_output_message_id = excluded.read_output_message_id,
+             manually_unread = 0,
+             updated_at = excluded.updated_at`
+        )
+        .bind(userId, sessionId, session.latest_output_message_id, now)
+        .run();
+    }
+
+    const unread = await this.unreadForSessions([sessionId], userId);
+    return unread.get(sessionId) ?? false;
   }
 
   async updateMetrics(

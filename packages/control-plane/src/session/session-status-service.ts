@@ -136,6 +136,21 @@ export class SessionStatusService {
     await this.transition(nextStatus);
   }
 
+  async recordCompletedOutput(messageId: string, completedAt: number): Promise<void> {
+    if (!this.sessionIndex) return;
+    const session = this.repository.getSession();
+    if (!session) return;
+
+    const sessionId = this.getPublicSessionId(session);
+    await this.sessionIndex.recordOutput(sessionId, messageId, completedAt).catch((error) => {
+      this.log.error("session_index.record_output.background_error", {
+        session_id: sessionId,
+        message_id: messageId,
+        error,
+      });
+    });
+  }
+
   /**
    * Fire-and-forget notification to the parent session so its connected
    * clients can refresh the child-sessions list in real time.

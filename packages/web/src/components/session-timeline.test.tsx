@@ -2,7 +2,7 @@
 /// <reference types="@testing-library/jest-dom" />
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import * as matchers from "@testing-library/jest-dom/matchers";
 import type { SandboxEvent } from "@/types/session";
 import { EventItem } from "./session-timeline";
@@ -97,5 +97,45 @@ describe("EventItem", () => {
     );
 
     expect(screen.getByText("Queued #2")).toBeInTheDocument();
+  });
+});
+
+describe("SessionTimeline", () => {
+  it("reports completed output as viewed while the latest output is visible", async () => {
+    class MockIntersectionObserver {
+      observe() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("IntersectionObserver", MockIntersectionObserver);
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const { SessionTimeline } = await import("./session-timeline");
+    const onLatestOutputViewed = vi.fn();
+    const event: SandboxEvent = {
+      type: "execution_complete",
+      messageId: "message-1",
+      success: true,
+      sandboxId: "sandbox-1",
+      timestamp: 1_700_000_000,
+    };
+
+    render(
+      <SessionTimeline
+        events={[event]}
+        sessionId="session-1"
+        currentParticipantId={null}
+        isProcessing={false}
+        promptQueue={[]}
+        loadingHistory={false}
+        showSkeleton={false}
+        onLoadOlder={vi.fn()}
+        onOpenMedia={vi.fn()}
+        onLatestOutputViewed={onLatestOutputViewed}
+      />
+    );
+
+    await waitFor(() => expect(onLatestOutputViewed).toHaveBeenCalledWith("message-1"));
   });
 });

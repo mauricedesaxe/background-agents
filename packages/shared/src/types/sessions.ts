@@ -72,6 +72,8 @@ export interface Session {
    * overlap or when the session has no tracked PRs.
    */
   pullRequestSummary?: PullRequestSummary;
+  /** Whether the current user has unseen agent output or explicitly deferred this session. */
+  unread?: boolean;
 }
 
 export interface SessionMessage {
