@@ -5,11 +5,10 @@ import { useSession } from "next-auth/react";
 import { revokeAndSignOut } from "@/lib/sign-out";
 
 /**
- * Check interval for web session token renewal. It stays inside the control
- * plane's 60-second recovery window so a stale NextAuth cookie is repaired
- * before reuse is classified as token theft.
+ * Check interval for web session token renewal. It stays inside the access
+ * token renewal window so rotation completes before expiry.
  */
-const WEB_SESSION_CHECK_INTERVAL_MS = 30 * 1000;
+const WEB_SESSION_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
 /**
  * Confirms that NextAuth and the control-plane token pair form a usable web

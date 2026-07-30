@@ -23,7 +23,10 @@ describe("Providers", () => {
     // A focus refetch would make /api/auth/session a second session-cookie
     // writer racing the oi-refresh rotation write; the rotation machinery
     // depends on oi-refresh being the only focus/interval-triggered writer.
-    const sessionProvider = findByType(Providers({ children: null }), SessionProvider);
+    const sessionProvider = findByType(
+      Providers({ children: null, session: null }),
+      SessionProvider
+    );
     expect(sessionProvider).toBeDefined();
     expect(
       (sessionProvider as ReactElement<{ refetchOnWindowFocus?: boolean }>).props
@@ -32,9 +35,16 @@ describe("Providers", () => {
 
   it("places application children behind the web-session gate", () => {
     const child = <div>Protected application</div>;
-    const gate = findByType(Providers({ children: child }), WebSessionGate);
+    const gate = findByType(Providers({ children: child, session: null }), WebSessionGate);
 
     expect(gate).toBeDefined();
     expect((gate as ReactElement<{ children?: ReactNode }>).props.children).toBe(child);
+  });
+
+  it("hydrates NextAuth without a client session-cookie rewrite", () => {
+    const session = { user: { name: "Ada" }, expires: "2099-01-01T00:00:00.000Z" };
+    const sessionProvider = findByType(Providers({ children: null, session }), SessionProvider);
+
+    expect((sessionProvider as ReactElement<{ session?: unknown }>).props.session).toBe(session);
   });
 });

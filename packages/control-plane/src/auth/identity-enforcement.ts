@@ -49,7 +49,7 @@ const SPAWNING_FORBIDDEN_FIELDS = [
  */
 const FORBIDDEN_IDENTITY_FIELDS: Record<IdentityRoute, readonly string[]> = {
   "session-create": SPAWNING_FORBIDDEN_FIELDS,
-  "ws-token": ["userId", "scmToken", "scmRefreshToken", "scmUserId"],
+  "ws-token": SPAWNING_FORBIDDEN_FIELDS,
   prompt: ["authorId"],
   "session-lifecycle": ["userId"],
   "automation-create": SPAWNING_FORBIDDEN_FIELDS,

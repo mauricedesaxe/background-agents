@@ -34,10 +34,7 @@ afterEach(() => {
 });
 
 describe("WebSessionGate", () => {
-  it("waits for the SessionProvider's own session fetch before checking", () => {
-    // Mount-time sequencing: the one /api/auth/session cookie write must land
-    // before the first rotation write, or the two could interleave stale over
-    // fresh. Waiting for "authenticated" is what orders them.
+  it("waits for the hydrated SessionProvider before checking", () => {
     const { rerender } = render(<WebSessionGate />);
     expect(fetchSpy).not.toHaveBeenCalled();
 

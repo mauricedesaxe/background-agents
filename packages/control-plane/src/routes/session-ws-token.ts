@@ -1,12 +1,14 @@
 import { applyIdentityEnforcement } from "../auth/identity-enforcement";
+import { UserStore } from "../db/user-store";
 import { SessionInternalPaths } from "../session/contracts";
+import { resolveGitHubEnrichment } from "../session/identity";
 import type { Env } from "../types";
 import { error, parseJsonBody, parsePattern, type Route } from "./shared";
 import { sessionRoute, type SessionRouteContext } from "./session-route";
 
 async function handleSessionWsToken(
   request: Request,
-  _env: Env,
+  env: Env,
   match: RegExpMatchArray,
   ctx: SessionRouteContext
 ): Promise<Response> {
@@ -27,6 +29,10 @@ async function handleSessionWsToken(
   const enforcement = applyIdentityEnforcement(ctx, "ws-token", body);
   if (enforcement.rejection) return enforcement.rejection;
   const userId = enforcement.enforced.participantUserId;
+  const canonicalUserId = enforcement.enforced.canonicalUserId;
+  const enrichment = canonicalUserId
+    ? await resolveGitHubEnrichment(env, ctx.db, new UserStore(ctx.db), canonicalUserId)
+    : null;
 
   return ctx.metrics.time("do_fetch", () =>
     ctx.sessionRuntime.fetch(sessionId, SessionInternalPaths.wsToken, {
@@ -34,10 +40,14 @@ async function handleSessionWsToken(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         userId,
-        scmLogin: body.scmLogin,
-        scmName: body.scmName,
+        scmUserId: enrichment?.scmUserId,
+        scmLogin: enrichment?.scmLogin,
+        scmName: enrichment?.displayName,
         authName: body.authName,
-        scmEmail: body.scmEmail,
+        scmEmail: enrichment?.email,
+        scmTokenEncrypted: enrichment?.accessTokenEncrypted,
+        scmRefreshTokenEncrypted: enrichment?.refreshTokenEncrypted,
+        scmTokenExpiresAt: enrichment?.tokenExpiresAt,
       }),
     })
   );

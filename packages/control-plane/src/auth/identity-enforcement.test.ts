@@ -137,7 +137,7 @@ describe("applyIdentityEnforcement — forbidden-field rejection", () => {
 
   it("rejects every spawning-route identity and credential field", () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    for (const route of ["session-create", "automation-create"] as const) {
+    for (const route of ["session-create", "ws-token", "automation-create"] as const) {
       for (const field of [
         "userId",
         "spawnSource",
