@@ -286,7 +286,7 @@ describe("buildGroupedSessionList", () => {
     expect(grouped.hasFilteredSessions).toBe(false);
   });
 
-  it("keeps a child visible when its parent has not loaded yet", () => {
+  it("promotes a child whose parent is absent from the current page", () => {
     const orphan = session("orphan", {
       parentSessionId: "parent-on-later-page",
       spawnSource: "agent",

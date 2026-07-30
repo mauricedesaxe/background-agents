@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { ParentSessionSpawnRejectedError, SessionIndexStore } from "./session-index";
 import type { SessionEntry } from "./session-index";
+import { epochMs } from "../time";
 
 type SessionRow = {
   id: string;
@@ -52,6 +53,7 @@ const QUERY_PATTERNS = {
   SELECT_COUNT: /^SELECT COUNT\(\*\) as count FROM sessions\b/,
   SELECT_LIST: /^SELECT \* FROM sessions\b.*ORDER BY updated_at DESC LIMIT/,
   UPDATE_STATUS: /^UPDATE sessions SET status = \?/,
+  RESTORE_ARCHIVED_SESSION: /^UPDATE sessions SET status = 'active', spawn_closed = 0/,
   UPDATE_UPDATED_AT: /^UPDATE sessions SET updated_at = \?/,
   UPDATE_TITLE: /^UPDATE sessions SET title = \?/,
   UPDATE_TITLE_IF_NEWER:
@@ -61,6 +63,7 @@ const QUERY_PATTERNS = {
   SELECT_BY_PARENT:
     /^SELECT \* FROM sessions WHERE parent_session_id = \? ORDER BY created_at DESC$/,
   SELECT_DESCENDANTS: /^WITH RECURSIVE descendants/,
+  ARCHIVE_DESCENDANTS: /^WITH RECURSIVE subtree.*status = CASE/,
   CLOSE_SPAWNING: /^WITH RECURSIVE subtree.*UPDATE sessions SET spawn_closed/,
   SELECT_1_CHILD: /^SELECT 1 FROM sessions WHERE id = \? AND parent_session_id = \?$/,
   SELECT_CAN_INITIALIZE: /^SELECT spawn_closed FROM sessions WHERE id = \?$/,
@@ -290,8 +293,24 @@ class FakeD1Database {
       return { meta: { changes: 0 } };
     }
 
-    if (QUERY_PATTERNS.CLOSE_SPAWNING.test(normalized)) {
-      const [rootId] = args as [string];
+    if (QUERY_PATTERNS.RESTORE_ARCHIVED_SESSION.test(normalized)) {
+      const [updatedAt, id, maxUpdatedAt] = args as [number, string, number];
+      const row = this.rows.get(id);
+      if (row && row.updated_at <= maxUpdatedAt) {
+        row.status = "active";
+        row.spawn_closed = 0;
+        row.updated_at = updatedAt;
+        return { meta: { changes: 1 } };
+      }
+      return { meta: { changes: 0 } };
+    }
+
+    if (
+      QUERY_PATTERNS.ARCHIVE_DESCENDANTS.test(normalized) ||
+      QUERY_PATTERNS.CLOSE_SPAWNING.test(normalized)
+    ) {
+      const [rootId, , , archivedAt] = args as [string, string?, string?, number?];
+      const archivesDescendants = QUERY_PATTERNS.ARCHIVE_DESCENDANTS.test(normalized);
       let currentIds = [rootId];
       const visited = new Set<string>();
       while (currentIds.length > 0) {
@@ -300,7 +319,13 @@ class FakeD1Database {
           if (visited.has(id)) continue;
           visited.add(id);
           const row = this.rows.get(id);
-          if (row) row.spawn_closed = 1;
+          if (row) {
+            row.spawn_closed = 1;
+            if (archivesDescendants && id !== rootId) {
+              row.status = "archived";
+              row.updated_at = Math.max(row.updated_at + 1, archivedAt ?? 0);
+            }
+          }
           nextIds.push(
             ...Array.from(this.rows.values())
               .filter((candidate) => candidate.parent_session_id === id)
@@ -934,6 +959,55 @@ describe("SessionIndexStore", () => {
       it("returns empty array when no children exist", async () => {
         const children = await store.listByParent("no-children");
         expect(children).toEqual([]);
+      });
+    });
+
+    describe("archiveDescendants", () => {
+      it("archives the full descendant tree and closes it to new children", async () => {
+        await store.updateStatus("child-2", "active");
+        await store.create(
+          makeSession({
+            id: "grandchild-1",
+            status: "active",
+            parentSessionId: "child-2",
+            spawnSource: "agent",
+            spawnDepth: 2,
+          })
+        );
+
+        await store.archiveDescendants(parentId, epochMs(5000));
+
+        expect((await store.get(parentId))?.status).not.toBe("archived");
+        expect((await store.get("child-1"))?.status).toBe("archived");
+        expect((await store.get("child-2"))?.status).toBe("archived");
+        expect((await store.get("grandchild-1"))?.status).toBe("archived");
+        await expect(
+          store.create(
+            makeSession({
+              id: "late-child",
+              parentSessionId: parentId,
+              spawnSource: "agent",
+              spawnDepth: 1,
+            })
+          )
+        ).rejects.toBeInstanceOf(ParentSessionSpawnRejectedError);
+      });
+
+      it("reopens the archived parent when it is restored", async () => {
+        await store.archiveDescendants(parentId, epochMs(5000));
+
+        await store.restoreArchivedSession(parentId, epochMs(6000));
+
+        await expect(
+          store.create(
+            makeSession({
+              id: "new-child",
+              parentSessionId: parentId,
+              spawnSource: "agent",
+              spawnDepth: 1,
+            })
+          )
+        ).resolves.toBeUndefined();
       });
     });
 
