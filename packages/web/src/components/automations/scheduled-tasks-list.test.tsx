@@ -163,6 +163,31 @@ describe("ScheduledTasksList", () => {
     expect(screen.queryByRole("button", { name: "Inspect deployment" })).not.toBeInTheDocument();
   });
 
+  it("shows an unavailable repository when an environment cannot be resolved", () => {
+    useEnvironments.mockReturnValue({ environments: [], loading: false });
+    useSWR.mockReturnValue({
+      data: {
+        tasks: [
+          {
+            ...task,
+            automation: {
+              ...task.automation,
+              repositories: [],
+              environmentIds: ["env_missing"],
+            },
+          },
+        ],
+      },
+      error: null,
+      isLoading: false,
+      mutate,
+    });
+
+    render(<ScheduledTasksList />);
+
+    expect(screen.getByText("Repository unavailable")).toBeInTheDocument();
+  });
+
   it("shows cancellation failures", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 500 })));
     render(<ScheduledTasksList />);

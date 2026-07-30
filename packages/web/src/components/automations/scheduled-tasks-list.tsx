@@ -105,6 +105,8 @@ function ScheduledTaskRow({
     (repository) => formatRepoLabel(repository.repoOwner, repository.repoName)
   );
   const repositories = repositoryLabels.join(", ");
+  const repositoryUnavailable =
+    task.automation.environmentIds.length > 0 && environmentRepositories.length === 0;
   return (
     <article className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
       <div className="min-w-0">
@@ -121,7 +123,11 @@ function ScheduledTaskRow({
           <DialogContent className="max-h-[85vh] max-w-2xl overflow-hidden">
             <DialogTitle>{task.automation.name}</DialogTitle>
             <DialogDescription>
-              {repositories ? `Scheduled for ${repositories}.` : "Scheduled prompt details."}
+              {repositories
+                ? `Scheduled for ${repositories}.`
+                : repositoryUnavailable
+                  ? "Scheduled repository unavailable."
+                  : "Scheduled prompt details."}
             </DialogDescription>
             <div className="overflow-y-auto whitespace-pre-wrap break-words border border-border-muted bg-muted/30 p-4 text-sm text-foreground">
               {task.automation.instructions}
@@ -132,6 +138,9 @@ function ScheduledTaskRow({
           <p className="mt-1 truncate text-xs text-muted-foreground">
             {repositoryLabels.length === 1 ? "Repository" : "Repositories"}: {repositories}
           </p>
+        )}
+        {repositoryUnavailable && (
+          <p className="mt-1 text-xs text-muted-foreground">Repository unavailable</p>
         )}
         <p className="mt-1 text-xs text-muted-foreground">
           {task.state}
