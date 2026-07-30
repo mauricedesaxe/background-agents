@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type RefObject } from "react";
 import { CollapsedSidebarControls, useSidebarContext } from "@/components/sidebar-layout";
+import { ErrorBanner } from "@/components/ui/error-banner";
 import type { useSessionSocket } from "@/hooks/use-session-socket";
 import { formatRepoLabel } from "@/lib/repo-label";
 
@@ -9,6 +10,7 @@ type SessionSocketState = ReturnType<typeof useSessionSocket>;
 
 export type SessionHeaderProps = {
   sessionState: SessionSocketState["sessionState"];
+  sandboxError: string | null;
   fallbackSessionInfo: {
     repoOwner: string | null;
     repoName: string | null;
@@ -25,6 +27,7 @@ export type SessionHeaderProps = {
 
 export function SessionHeader({
   sessionState,
+  sandboxError,
   fallbackSessionInfo,
   connected,
   connecting,
@@ -168,6 +171,11 @@ export function SessionHeader({
           </div>
         </div>
       </div>
+      {sessionState?.sandboxStatus === "failed" && sandboxError && (
+        <ErrorBanner role="alert" className="rounded-none border-x-0 border-b-0 py-2">
+          <span className="font-medium">Sandbox failed:</span> {sandboxError}
+        </ErrorBanner>
+      )}
     </header>
   );
 }

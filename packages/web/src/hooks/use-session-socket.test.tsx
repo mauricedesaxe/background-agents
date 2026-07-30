@@ -282,6 +282,17 @@ describe("useSessionSocket", () => {
     expect(result.current.promptQueue).toEqual([queuedPrompt]);
   });
 
+  it("restores the sandbox failure reason from subscription", async () => {
+    const { result, socket } = await openSubscribedHook();
+    const subscribed = createSubscribedMessage();
+    subscribed.state = createSessionState({ sandboxStatus: "failed" });
+    subscribed.spawnError = "Total disk limit exceeded";
+
+    act(() => socket.receive(subscribed));
+
+    expect(result.current.sandboxError).toBe("Total disk limit exceeded");
+  });
+
   it("confirms a pending delivery from the queue snapshot after reconnect", async () => {
     const { result, socket } = await openSubscribedHook({ isProcessing: true });
     const delivery = result.current.sendPrompt("Run the tests next");
@@ -1197,6 +1208,7 @@ describe("useSessionSocket", () => {
 
     await waitFor(() => {
       expect(result.current.sessionState?.sandboxStatus).toBe("failed");
+      expect(result.current.sandboxError).toBe("spawn failed");
       expect(result.current.sessionState?.sandboxDashboardUrl).toBe(
         "https://provider.example/new-sandbox"
       );

@@ -47,6 +47,7 @@ interface UseSessionSocketReturn {
   authError: string | null;
   connectionError: string | null;
   sessionState: SessionState | null;
+  sandboxError: string | null;
   messages: Message[];
   events: SandboxEvent[];
   participants: ParticipantPresence[];
@@ -368,6 +369,7 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
     authError: transport.authError,
     connectionError: transport.connectionError,
     sessionState: state.sessionState,
+    sandboxError: state.sandboxError,
     messages: NO_MESSAGES,
     events: state.events,
     participants: state.participants,
