@@ -238,8 +238,13 @@ describe("SessionSidebar", () => {
 
   it("reveals matching descendants while searching", async () => {
     const parent = createSession(1);
-    const child = createSession(2, {
+    const firstChild = createSession(2, {
       title: "Needle child",
+      parentSessionId: parent.id,
+      spawnSource: "agent",
+    });
+    const secondChild = createSession(3, {
+      title: "Another match",
       parentSessionId: parent.id,
       spawnSource: "agent",
     });
@@ -248,7 +253,10 @@ describe("SessionSidebar", () => {
       <SWRConfig
         value={{
           fallback: {
-            [SIDEBAR_SESSIONS_KEY]: { sessions: [parent, child], hasMore: false },
+            [SIDEBAR_SESSIONS_KEY]: {
+              sessions: [parent, firstChild, secondChild],
+              hasMore: false,
+            },
           },
           dedupingInterval: 0,
           revalidateOnFocus: false,
@@ -266,6 +274,19 @@ describe("SessionSidebar", () => {
     });
 
     expect(screen.getByText("Needle child")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Collapse 1 child session/ })).toHaveAttribute(
+      "aria-expanded",
+      "true"
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Collapse 1 child session/ }));
+    expect(screen.queryByText("Needle child")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Search sessions..."), {
+      target: { value: "Another match" },
+    });
+
+    expect(screen.getByText("Another match")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Collapse 1 child session/ })).toHaveAttribute(
       "aria-expanded",
       "true"
