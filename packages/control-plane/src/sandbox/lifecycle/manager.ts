@@ -18,6 +18,7 @@ import {
 import type { SandboxStatus } from "../../types";
 import { epochMs, nowMs, type EpochMs } from "../../time";
 import { sessionHasRepository, type SandboxRow, type SessionRow } from "../../session/types";
+import { getSandboxAutoArchiveIntervalMinutes } from "../../session/auto-archive-policy";
 import {
   SandboxProviderError,
   type SandboxProvider,
@@ -523,6 +524,10 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         prebuiltImageId,
         prebuiltImageSha,
         timeoutSeconds,
+        autoArchiveIntervalMinutes:
+          session.spawn_source === "automation"
+            ? getSandboxAutoArchiveIntervalMinutes(session.spawn_source)
+            : undefined,
         branch: session.base_branch,
         codeServerEnabled,
         agentSlackNotifyEnabled,
@@ -1262,15 +1267,15 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
    * Archive the sandbox so it stops holding disk while staying restorable.
    *
    * Unlike terminateSandbox this runs even on an already-dead (stopped) row: a
-   * stopped Daytona workspace still holds its 3 GiB of disk, and freeing that
+   * stopped Daytona workspace still holds its disk, and freeing that
    * disk is the whole point of archiving. A live row is marked stopped first,
    * since archiving stops the VM.
    *
-   * Best-effort: a provider that can't archive, a row with no provider id, or a
-   * failed archive call all leave the session archived without surfacing an
-   * error to the caller.
+   * Provider failures are logged and swallowed by default. Lifecycle paths that
+   * must keep the session retryable pass throwOnFailure and only mark the
+   * session archived after this succeeds.
    */
-  async archiveSandbox(reason: string): Promise<void> {
+  async archiveSandbox(reason: string, options: { throwOnFailure?: boolean } = {}): Promise<void> {
     if (!this.canArchiveProviderSandbox()) {
       return;
     }
@@ -1294,6 +1299,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         reason,
         error: error instanceof Error ? error.message : String(error),
       });
+      if (options.throwOnFailure) throw error;
     }
   }
 

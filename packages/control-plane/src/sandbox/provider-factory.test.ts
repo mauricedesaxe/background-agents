@@ -60,7 +60,7 @@ describe("createSandboxProviderFromEnv", () => {
     );
   });
 
-  it("defaults the Daytona auto-archive interval to 1440 minutes when unset", () => {
+  it("defaults the Daytona auto-archive interval to 720 minutes when unset", () => {
     const env = createEnv({
       DAYTONA_API_URL: "https://daytona.test",
       DAYTONA_API_KEY: "daytona-key",
@@ -70,7 +70,7 @@ describe("createSandboxProviderFromEnv", () => {
     createSandboxProviderFromEnv(env, "daytona");
 
     expect(vi.mocked(createDaytonaRestClient)).toHaveBeenCalledWith(
-      expect.objectContaining({ autoArchiveIntervalMinutes: 1440 })
+      expect.objectContaining({ autoArchiveIntervalMinutes: 720 })
     );
   });
 });

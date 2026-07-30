@@ -16,9 +16,11 @@ import type { SessionRow } from "./types";
 import type { SessionRepository } from "./repository";
 import type { SessionMessenger } from "./messenger";
 import { epochMs, nowMs, type EpochMs } from "../time";
+import { getSessionAutoArchiveDelayMs } from "./auto-archive-policy";
 
 /** Statuses that indicate a session is finished — metrics are synced to D1 on these transitions. */
 const TERMINAL_STATUSES: SessionStatus[] = ["completed", "failed", "cancelled"];
+const CHILD_ARCHIVE_ATTEMPTS = 3;
 
 export class SessionStatusService {
   constructor(
@@ -27,7 +29,8 @@ export class SessionStatusService {
     private readonly repository: SessionRepository,
     private readonly messenger: SessionMessenger,
     private readonly sessionIndex: SessionIndexStore | null,
-    private readonly sessions: DurableObjectNamespace | null
+    private readonly sessions: DurableObjectNamespace | null,
+    private readonly archiveSandbox: (reason: string) => Promise<void>
   ) {}
 
   /**
@@ -65,6 +68,7 @@ export class SessionStatusService {
       }
       if (TERMINAL_STATUSES.includes(status)) {
         this.syncSessionMetrics(publicSessionId);
+        await this.scheduleAutoArchive(session.spawn_source, session.updated_at);
       }
       return false;
     }
@@ -88,6 +92,7 @@ export class SessionStatusService {
 
     if (TERMINAL_STATUSES.includes(status)) {
       this.syncSessionMetrics(publicSessionId);
+      await this.scheduleAutoArchive(session.spawn_source, updatedAt);
     }
 
     // Notify parent session (if this is a child) so its UI can refresh
@@ -117,14 +122,7 @@ export class SessionStatusService {
           Promise.all(
             children.map((child) => {
               const childDoId = sessionBinding.idFromName(child.id);
-              return sessionBinding
-                .get(childDoId)
-                .fetch(
-                  new Request(buildSessionInternalUrl(SessionInternalPaths.archiveCascade), {
-                    method: "POST",
-                  })
-                )
-                .catch((error) => {
+              return this.archiveChildWithRetry(sessionBinding.get(childDoId)).catch((error) => {
                   this.log.error("cascade_archive.child_failed", {
                     parent_id: parentSessionId,
                     child_id: child.id,
@@ -158,6 +156,24 @@ export class SessionStatusService {
     });
   }
 
+  private async archiveChildWithRetry(child: DurableObjectStub): Promise<void> {
+    for (let attempt = 1; attempt <= CHILD_ARCHIVE_ATTEMPTS; attempt += 1) {
+      try {
+        const response = await child.fetch(
+          new Request(buildSessionInternalUrl(SessionInternalPaths.archiveCascade), {
+            method: "POST",
+          })
+        );
+        if (response.ok) return;
+        if (attempt === CHILD_ARCHIVE_ATTEMPTS) {
+          throw new Error(`Child archive returned HTTP ${response.status}`);
+        }
+      } catch (error) {
+        if (attempt === CHILD_ARCHIVE_ATTEMPTS) throw error;
+      }
+    }
+  }
+
   /**
    * After an execution finishes, settle the session status: back to active
    * when more prompts are queued, otherwise completed/failed by outcome.
@@ -182,6 +198,20 @@ export class SessionStatusService {
         error,
       });
     });
+  }
+
+  async handleAutoArchiveAlarm(now: number): Promise<void> {
+    const session = this.repository.getSession();
+    if (!session || !TERMINAL_STATUSES.includes(session.status)) return;
+
+    const deadlineAt = session.updated_at + getSessionAutoArchiveDelayMs(session.spawn_source);
+    if (now < deadlineAt) {
+      await this.scheduleAlarmNoLaterThan(deadlineAt);
+      return;
+    }
+
+    await this.archiveSandbox("session_auto_archived");
+    await this.transition("archived");
   }
 
   /**
@@ -292,5 +322,20 @@ export class SessionStatusService {
           });
         })
     );
+  }
+
+  private async scheduleAutoArchive(
+    spawnSource: SessionRow["spawn_source"],
+    terminalAt: number
+  ): Promise<void> {
+    const deadlineAt = terminalAt + getSessionAutoArchiveDelayMs(spawnSource);
+    await this.scheduleAlarmNoLaterThan(deadlineAt);
+  }
+
+  private async scheduleAlarmNoLaterThan(deadlineAt: number): Promise<void> {
+    const currentAlarm = await this.ctx.storage.getAlarm();
+    if (!currentAlarm || deadlineAt < currentAlarm) {
+      await this.ctx.storage.setAlarm(deadlineAt);
+    }
   }
 }

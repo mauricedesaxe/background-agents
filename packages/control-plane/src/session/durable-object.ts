@@ -499,7 +499,8 @@ export class SessionDO extends DurableObject<Env> {
         getSandboxSocket: () => this.wsManager.getSandboxSocket(),
         sendToSandbox: (ws, message) => this.wsManager.send(ws, message),
         terminateSandbox: (reason) => this.lifecycleManager.terminateSandbox(reason),
-        archiveSandbox: (reason) => this.lifecycleManager.archiveSandbox(reason),
+        archiveSandboxStrict: (reason) =>
+          this.lifecycleManager.archiveSandbox(reason, { throwOnFailure: true }),
       });
     }
 
@@ -593,6 +594,7 @@ export class SessionDO extends DurableObject<Env> {
         repository: this.repository,
         messageQueue: this.messageQueue,
         lifecycleManager: this.lifecycleManager,
+        statusService: this.statusService,
         executionTimeoutMs: this.executionTimeoutMs,
         now: () => Date.now(),
         log: this.log,
@@ -638,7 +640,8 @@ export class SessionDO extends DurableObject<Env> {
         this.repository,
         this.messenger,
         this.db ? new SessionIndexStore(this.db) : null,
-        this.env.SESSION ?? null
+        this.env.SESSION ?? null,
+        (reason) => this.lifecycleManager.archiveSandbox(reason, { throwOnFailure: true })
       );
     }
 

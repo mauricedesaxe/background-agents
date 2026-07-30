@@ -3,11 +3,13 @@ import { evaluateExecutionTimeout } from "../../sandbox/lifecycle/decisions";
 import type { SandboxLifecycleManager } from "../../sandbox/lifecycle/manager";
 import type { SessionMessageQueue } from "../message-queue";
 import type { SessionRepository } from "../repository";
+import type { SessionStatusService } from "../session-status-service";
 
 export interface AlarmHandlerDeps {
   repository: Pick<SessionRepository, "getProcessingMessageWithStartedAt">;
   messageQueue: Pick<SessionMessageQueue, "failStuckProcessingMessage" | "failStuckPendingMessage">;
   lifecycleManager: Pick<SandboxLifecycleManager, "handleAlarm">;
+  statusService: Pick<SessionStatusService, "handleAutoArchiveAlarm">;
   executionTimeoutMs: number;
   now: () => number;
   /** Session-scoped logger — alarms run outside any request, so there is no request correlation. */
@@ -57,6 +59,8 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
       // never connected. Self-guards (still pending, no sandbox, not processing,
       // aged out), so it's safe to run on every alarm regardless of what armed it.
       await deps.messageQueue.failStuckPendingMessage();
+
+      await deps.statusService.handleAutoArchiveAlarm(deps.now());
 
       await deps.lifecycleManager.handleAlarm();
     },
