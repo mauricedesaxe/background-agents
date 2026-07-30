@@ -50,7 +50,7 @@ function makeEnv(controlPlaneFetch: ReturnType<typeof vi.fn>) {
     DEPLOYMENT_NAME: "test",
     DEFAULT_MODEL: "anthropic/claude-haiku-4-5",
     LOG_LEVEL: "error",
-    INTERNAL_CALLBACK_SECRET: "internal-secret",
+    SERVICE_AUTH_SECRET: "github-service-secret",
     CONTROL_PLANE: { fetch: controlPlaneFetch },
   } as unknown as Env;
 }

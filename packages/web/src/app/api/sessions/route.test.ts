@@ -5,21 +5,16 @@ vi.mock("next-auth", () => ({
   getServerSession: vi.fn(),
 }));
 
-vi.mock("next-auth/jwt", () => ({
-  getToken: vi.fn(),
-}));
-
 vi.mock("@/lib/auth", () => ({
   authOptions: {},
 }));
 
 vi.mock("@/lib/control-plane", () => ({
-  controlPlaneFetch: vi.fn(),
+  controlPlaneUserFetch: vi.fn(),
 }));
 
 import { getServerSession } from "next-auth";
-import { getToken } from "next-auth/jwt";
-import { controlPlaneFetch } from "@/lib/control-plane";
+import { controlPlaneUserFetch } from "@/lib/control-plane";
 import { clearCurrentUserIdCacheForTests } from "@/lib/current-user";
 import { GET, POST } from "./route";
 
@@ -36,7 +31,7 @@ function postRequest(body: unknown) {
 }
 
 function controlPlaneBody(callIndex = 0): Record<string, unknown> {
-  const options = vi.mocked(controlPlaneFetch).mock.calls[callIndex]?.[1];
+  const options = vi.mocked(controlPlaneUserFetch).mock.calls[callIndex]?.[1];
   return JSON.parse(String(options?.body)) as Record<string, unknown>;
 }
 
@@ -53,12 +48,12 @@ describe("sessions API route", () => {
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({ error: "Unauthorized" });
-    expect(controlPlaneFetch).not.toHaveBeenCalled();
+    expect(controlPlaneUserFetch).not.toHaveBeenCalled();
   });
 
   it("forwards allowed session query params", async () => {
     vi.mocked(getServerSession).mockResolvedValue({ user: { id: "12345" } } as never);
-    vi.mocked(controlPlaneFetch).mockResolvedValue(
+    vi.mocked(controlPlaneUserFetch).mockResolvedValue(
       Response.json({ sessions: [], hasMore: false }, { status: 200 })
     );
 
@@ -68,7 +63,7 @@ describe("sessions API route", () => {
       )
     );
 
-    expect(controlPlaneFetch).toHaveBeenCalledWith(
+    expect(controlPlaneUserFetch).toHaveBeenCalledWith(
       "/sessions?limit=10&offset=20&excludeStatus=archived&createdBy=0123456789abcdef0123456789abcdef"
     );
     expect(response.status).toBe(200);
@@ -85,7 +80,7 @@ describe("sessions API route", () => {
         image: "https://avatars.githubusercontent.com/u/12345",
       },
     } as never);
-    vi.mocked(controlPlaneFetch)
+    vi.mocked(controlPlaneUserFetch)
       .mockResolvedValueOnce(Response.json({ userId: "0123456789abcdef0123456789abcdef" }))
       .mockResolvedValueOnce(Response.json({ sessions: [], hasMore: false }, { status: 200 }));
 
@@ -93,16 +88,10 @@ describe("sessions API route", () => {
       request("/api/sessions?limit=50&offset=0&excludeStatus=archived&createdBy=me")
     );
 
-    expect(controlPlaneFetch).toHaveBeenNthCalledWith(1, "/provider-identities/github/12345", {
+    expect(controlPlaneUserFetch).toHaveBeenNthCalledWith(1, "/provider-identities/github/12345", {
       method: "PUT",
-      body: JSON.stringify({
-        providerLogin: "ada",
-        providerEmail: "ada@example.com",
-        displayName: "Ada Lovelace",
-        avatarUrl: "https://avatars.githubusercontent.com/u/12345",
-      }),
     });
-    expect(controlPlaneFetch).toHaveBeenNthCalledWith(
+    expect(controlPlaneUserFetch).toHaveBeenNthCalledWith(
       2,
       "/sessions?limit=50&offset=0&excludeStatus=archived&createdBy=0123456789abcdef0123456789abcdef"
     );
@@ -116,7 +105,7 @@ describe("sessions API route", () => {
 
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toEqual({ error: "User id unavailable" });
-    expect(controlPlaneFetch).not.toHaveBeenCalled();
+    expect(controlPlaneUserFetch).not.toHaveBeenCalled();
   });
 
   it("resolves createdBy=me for a Google user via the google provider route", async () => {
@@ -129,26 +118,20 @@ describe("sessions API route", () => {
         provider: "google",
       },
     } as never);
-    vi.mocked(controlPlaneFetch)
+    vi.mocked(controlPlaneUserFetch)
       .mockResolvedValueOnce(Response.json({ userId: "0123456789abcdef0123456789abcdef" }))
       .mockResolvedValueOnce(Response.json({ sessions: [], hasMore: false }, { status: 200 }));
 
     const response = await GET(request("/api/sessions?limit=50&createdBy=me"));
 
-    expect(controlPlaneFetch).toHaveBeenNthCalledWith(
+    expect(controlPlaneUserFetch).toHaveBeenNthCalledWith(
       1,
       "/provider-identities/google/google-sub-1",
       {
         method: "PUT",
-        body: JSON.stringify({
-          providerLogin: undefined,
-          providerEmail: "pm@gmail.com",
-          displayName: "Pat PM",
-          avatarUrl: "https://lh3.googleusercontent.com/a/pat",
-        }),
       }
     );
-    expect(controlPlaneFetch).toHaveBeenNthCalledWith(
+    expect(controlPlaneUserFetch).toHaveBeenNthCalledWith(
       2,
       "/sessions?limit=50&createdBy=0123456789abcdef0123456789abcdef"
     );
@@ -165,7 +148,7 @@ describe("sessions API route", () => {
         image: "https://avatars.githubusercontent.com/u/12345",
       },
     } as never);
-    vi.mocked(controlPlaneFetch)
+    vi.mocked(controlPlaneUserFetch)
       .mockResolvedValueOnce(Response.json({ userId: "0123456789abcdef0123456789abcdef" }))
       .mockResolvedValueOnce(Response.json({ sessions: [], hasMore: false }, { status: 200 }));
 
@@ -173,16 +156,10 @@ describe("sessions API route", () => {
       request("/api/sessions?createdBy=ffffffffffffffffffffffffffffffff&createdBy=me&limit=25")
     );
 
-    expect(controlPlaneFetch).toHaveBeenNthCalledWith(1, "/provider-identities/github/12345", {
+    expect(controlPlaneUserFetch).toHaveBeenNthCalledWith(1, "/provider-identities/github/12345", {
       method: "PUT",
-      body: JSON.stringify({
-        providerLogin: "ada",
-        providerEmail: "ada@example.com",
-        displayName: "Ada Lovelace",
-        avatarUrl: "https://avatars.githubusercontent.com/u/12345",
-      }),
     });
-    expect(controlPlaneFetch).toHaveBeenNthCalledWith(
+    expect(controlPlaneUserFetch).toHaveBeenNthCalledWith(
       2,
       "/sessions?limit=25&createdBy=ffffffffffffffffffffffffffffffff&createdBy=0123456789abcdef0123456789abcdef"
     );
@@ -199,7 +176,7 @@ describe("sessions API route", () => {
         image: "https://avatars.githubusercontent.com/u/12345",
       },
     } as never);
-    vi.mocked(controlPlaneFetch)
+    vi.mocked(controlPlaneUserFetch)
       .mockResolvedValueOnce(Response.json({ userId: "0123456789abcdef0123456789abcdef" }))
       .mockResolvedValueOnce(Response.json({ sessions: [], hasMore: true }, { status: 200 }))
       .mockResolvedValueOnce(Response.json({ sessions: [], hasMore: false }, { status: 200 }));
@@ -207,21 +184,15 @@ describe("sessions API route", () => {
     await GET(request("/api/sessions?limit=50&offset=0&excludeStatus=archived&createdBy=me"));
     await GET(request("/api/sessions?limit=50&offset=50&excludeStatus=archived&createdBy=me"));
 
-    expect(controlPlaneFetch).toHaveBeenCalledTimes(3);
-    expect(controlPlaneFetch).toHaveBeenNthCalledWith(1, "/provider-identities/github/12345", {
+    expect(controlPlaneUserFetch).toHaveBeenCalledTimes(3);
+    expect(controlPlaneUserFetch).toHaveBeenNthCalledWith(1, "/provider-identities/github/12345", {
       method: "PUT",
-      body: JSON.stringify({
-        providerLogin: "ada",
-        providerEmail: "ada@example.com",
-        displayName: "Ada Lovelace",
-        avatarUrl: "https://avatars.githubusercontent.com/u/12345",
-      }),
     });
-    expect(controlPlaneFetch).toHaveBeenNthCalledWith(
+    expect(controlPlaneUserFetch).toHaveBeenNthCalledWith(
       2,
       "/sessions?limit=50&offset=0&excludeStatus=archived&createdBy=0123456789abcdef0123456789abcdef"
     );
-    expect(controlPlaneFetch).toHaveBeenNthCalledWith(
+    expect(controlPlaneUserFetch).toHaveBeenNthCalledWith(
       3,
       "/sessions?limit=50&offset=50&excludeStatus=archived&createdBy=0123456789abcdef0123456789abcdef"
     );
@@ -239,10 +210,10 @@ describe("sessions API route (POST)", () => {
     const response = await POST(postRequest({ repoOwner: "o", repoName: "r" }));
 
     expect(response.status).toBe(401);
-    expect(controlPlaneFetch).not.toHaveBeenCalled();
+    expect(controlPlaneUserFetch).not.toHaveBeenCalled();
   });
 
-  it("sends auth* and scm* for a GitHub session", async () => {
+  it("sends auth* display and scm* attribution for a GitHub session — never identity or credentials", async () => {
     vi.mocked(getServerSession).mockResolvedValue({
       user: {
         id: "12345",
@@ -253,43 +224,44 @@ describe("sessions API route (POST)", () => {
         provider: "github",
       },
     } as never);
-    vi.mocked(getToken).mockResolvedValue({
-      accessToken: "gho_abc",
-      refreshToken: "ghr_def",
-      accessTokenExpiresAt: 1_700_000_000_000,
-    } as never);
-    vi.mocked(controlPlaneFetch).mockResolvedValue(Response.json({ id: "sess1" }, { status: 201 }));
+    vi.mocked(controlPlaneUserFetch).mockResolvedValue(
+      Response.json({ id: "sess1" }, { status: 201 })
+    );
 
     const response = await POST(postRequest({ repoOwner: "o", repoName: "r", model: "m" }));
 
     expect(response.status).toBe(201);
-    expect(controlPlaneFetch).toHaveBeenCalledWith(
+    expect(controlPlaneUserFetch).toHaveBeenCalledWith(
       "/sessions",
       expect.objectContaining({ method: "POST" })
     );
-    expect(controlPlaneBody()).toMatchObject({
+    const sent = controlPlaneBody();
+    expect(sent).toMatchObject({
       repoOwner: "o",
       repoName: "r",
       model: "m",
-      spawnSource: "user",
-      userId: "12345",
-      authProvider: "github",
-      authUserId: "12345",
       authEmail: "ada@example.com",
       authName: "Ada Lovelace",
       authAvatarUrl: "https://avatars.githubusercontent.com/u/12345",
-      scmUserId: "12345",
       scmLogin: "ada",
       scmName: "Ada Lovelace",
       scmEmail: "ada@example.com",
       scmAvatarUrl: "https://avatars.githubusercontent.com/u/12345",
-      scmToken: "gho_abc",
-      scmRefreshToken: "ghr_def",
-      scmTokenExpiresAt: 1_700_000_000_000,
     });
+    // Forbidden under strict identity enforcement: the control plane derives
+    // these from the Bearer principal, so the web must not send them.
+    expect(sent.userId).toBeUndefined();
+    expect(sent.spawnSource).toBeUndefined();
+    expect(sent.authProvider).toBeUndefined();
+    expect(sent.authUserId).toBeUndefined();
+    expect(sent.actorUserId).toBeUndefined();
+    expect(sent.scmUserId).toBeUndefined();
+    expect(sent.scmToken).toBeUndefined();
+    expect(sent.scmRefreshToken).toBeUndefined();
+    expect(sent.scmTokenExpiresAt).toBeUndefined();
   });
 
-  it("sends auth* but no scm* for a Google session (no token leak)", async () => {
+  it("sends auth* display but no scm* for a Google session", async () => {
     vi.mocked(getServerSession).mockResolvedValue({
       user: {
         id: "google-sub-1",
@@ -299,20 +271,21 @@ describe("sessions API route (POST)", () => {
         provider: "google",
       },
     } as never);
-    // A token on the JWT must not bleed into scm* for a Google session.
-    vi.mocked(getToken).mockResolvedValue({ accessToken: "ya29.google" } as never);
-    vi.mocked(controlPlaneFetch).mockResolvedValue(Response.json({ id: "sess2" }, { status: 201 }));
+    vi.mocked(controlPlaneUserFetch).mockResolvedValue(
+      Response.json({ id: "sess2" }, { status: 201 })
+    );
 
     const response = await POST(postRequest({ repoOwner: "o", repoName: "r", model: "m" }));
 
     expect(response.status).toBe(201);
     const sent = controlPlaneBody();
     expect(sent).toMatchObject({
-      authProvider: "google",
-      authUserId: "google-sub-1",
       authEmail: "pm@gmail.com",
-      userId: "google-sub-1",
+      authName: "Pat PM",
     });
+    expect(sent.userId).toBeUndefined();
+    expect(sent.authProvider).toBeUndefined();
+    expect(sent.authUserId).toBeUndefined();
     expect(sent.scmUserId).toBeUndefined();
     expect(sent.scmToken).toBeUndefined();
     expect(sent.scmLogin).toBeUndefined();
@@ -323,8 +296,9 @@ describe("sessions API route (POST)", () => {
     vi.mocked(getServerSession).mockResolvedValue({
       user: { id: "12345", provider: "github" },
     } as never);
-    vi.mocked(getToken).mockResolvedValue(null);
-    vi.mocked(controlPlaneFetch).mockResolvedValue(Response.json({ id: "sess3" }, { status: 201 }));
+    vi.mocked(controlPlaneUserFetch).mockResolvedValue(
+      Response.json({ id: "sess3" }, { status: 201 })
+    );
 
     const response = await POST(postRequest({ environmentId: "env-1", model: "m" }));
 
@@ -340,8 +314,9 @@ describe("sessions API route (POST)", () => {
     vi.mocked(getServerSession).mockResolvedValue({
       user: { id: "12345", provider: "github" },
     } as never);
-    vi.mocked(getToken).mockResolvedValue(null);
-    vi.mocked(controlPlaneFetch).mockResolvedValue(Response.json({ id: "sess4" }, { status: 201 }));
+    vi.mocked(controlPlaneUserFetch).mockResolvedValue(
+      Response.json({ id: "sess4" }, { status: 201 })
+    );
 
     const repositories = [
       { repoOwner: "acme", repoName: "backend" },
@@ -359,8 +334,9 @@ describe("sessions API route (POST)", () => {
     vi.mocked(getServerSession).mockResolvedValue({
       user: { id: "12345", provider: "github" },
     } as never);
-    vi.mocked(getToken).mockResolvedValue(null);
-    vi.mocked(controlPlaneFetch).mockResolvedValue(Response.json({ id: "sess5" }, { status: 201 }));
+    vi.mocked(controlPlaneUserFetch).mockResolvedValue(
+      Response.json({ id: "sess5" }, { status: 201 })
+    );
 
     const response = await POST(
       postRequest({
@@ -375,10 +351,11 @@ describe("sessions API route (POST)", () => {
     expect(response.status).toBe(201);
     const sent = controlPlaneBody();
     expect(sent.environmentId).toBe("env-1");
-    // Identity fields stay server-derived.
-    expect(sent.userId).toBe("12345");
-    expect(sent.spawnSource).toBe("user");
+    // Client-asserted identity never reaches the control plane — under strict
+    // enforcement the body carries no identity fields at all.
+    expect(sent.userId).toBeUndefined();
+    expect(sent.spawnSource).toBeUndefined();
     expect(sent.scmToken).toBeUndefined();
-    expect(sent.authUserId).toBe("12345");
+    expect(sent.authUserId).toBeUndefined();
   });
 });

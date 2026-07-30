@@ -5,21 +5,16 @@ vi.mock("next-auth", () => ({
   getServerSession: vi.fn(),
 }));
 
-vi.mock("next-auth/jwt", () => ({
-  getToken: vi.fn(),
-}));
-
 vi.mock("@/lib/auth", () => ({
   authOptions: {},
 }));
 
 vi.mock("@/lib/control-plane", () => ({
-  controlPlaneFetch: vi.fn(),
+  controlPlaneUserFetch: vi.fn(),
 }));
 
 import { getServerSession } from "next-auth";
-import { getToken } from "next-auth/jwt";
-import { controlPlaneFetch } from "@/lib/control-plane";
+import { controlPlaneUserFetch } from "@/lib/control-plane";
 import { POST } from "./route";
 
 function request() {
@@ -31,7 +26,7 @@ function params(id: string) {
 }
 
 function sentBody(): Record<string, unknown> {
-  const options = vi.mocked(controlPlaneFetch).mock.calls[0]?.[1];
+  const options = vi.mocked(controlPlaneUserFetch).mock.calls[0]?.[1];
   return JSON.parse(String(options?.body)) as Record<string, unknown>;
 }
 
@@ -46,10 +41,10 @@ describe("ws-token API route", () => {
     const response = await POST(request(), params("sess1"));
 
     expect(response.status).toBe(401);
-    expect(controlPlaneFetch).not.toHaveBeenCalled();
+    expect(controlPlaneUserFetch).not.toHaveBeenCalled();
   });
 
-  it("sends scm* credentials for a GitHub user", async () => {
+  it("sends scm* attribution for a GitHub user — never userId or credentials (forbidden under strict)", async () => {
     vi.mocked(getServerSession).mockResolvedValue({
       user: {
         id: "12345",
@@ -60,37 +55,27 @@ describe("ws-token API route", () => {
         provider: "github",
       },
     } as never);
-    vi.mocked(getToken).mockResolvedValue({
-      accessToken: "gho_abc",
-      refreshToken: "ghr_def",
-      accessTokenExpiresAt: 1_700_000_000_000,
-    } as never);
-    vi.mocked(controlPlaneFetch).mockResolvedValue(
+    vi.mocked(controlPlaneUserFetch).mockResolvedValue(
       Response.json({ token: "ws-tok" }, { status: 200 })
     );
 
     const response = await POST(request(), params("sess1"));
 
     expect(response.status).toBe(200);
-    expect(controlPlaneFetch).toHaveBeenCalledWith(
+    expect(controlPlaneUserFetch).toHaveBeenCalledWith(
       "/sessions/sess1/ws-token",
       expect.objectContaining({ method: "POST" })
     );
     expect(sentBody()).toEqual({
-      userId: "12345",
       authName: "Ada Lovelace",
-      scmUserId: "12345",
       scmLogin: "ada",
       scmName: "Ada Lovelace",
       scmEmail: "ada@example.com",
       scmAvatarUrl: "https://avatars.githubusercontent.com/u/12345",
-      scmToken: "gho_abc",
-      scmRefreshToken: "ghr_def",
-      scmTokenExpiresAt: 1_700_000_000_000,
     });
   });
 
-  it("omits scm* entirely for a Google user — identity survives via userId, no token leak", async () => {
+  it("omits scm* entirely for a Google user — identity comes from the Bearer principal", async () => {
     vi.mocked(getServerSession).mockResolvedValue({
       user: {
         id: "google-sub-1",
@@ -100,15 +85,13 @@ describe("ws-token API route", () => {
         provider: "google",
       },
     } as never);
-    // Even if the JWT carried a token, a Google session must send no scm*.
-    vi.mocked(getToken).mockResolvedValue({ accessToken: "ya29.google" } as never);
-    vi.mocked(controlPlaneFetch).mockResolvedValue(
+    vi.mocked(controlPlaneUserFetch).mockResolvedValue(
       Response.json({ token: "ws-tok" }, { status: 200 })
     );
 
     const response = await POST(request(), params("sess2"));
 
     expect(response.status).toBe(200);
-    expect(sentBody()).toEqual({ userId: "google-sub-1", authName: "Pat PM" });
+    expect(sentBody()).toEqual({ authName: "Pat PM" });
   });
 });

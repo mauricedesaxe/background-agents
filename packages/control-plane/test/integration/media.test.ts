@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { SELF, env } from "cloudflare:test";
-import { generateInternalToken } from "../../src/auth/internal";
-import { initNamedSession, queryDO, seedMessage, seedSandboxAuthHash } from "./helpers";
+import {
+  initNamedSession,
+  queryDO,
+  seedMessage,
+  seedSandboxAuthHash,
+  serviceFetch,
+} from "./helpers";
 
 const PNG_SIGNATURE = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const SVG_BYTES = new TextEncoder().encode(
@@ -11,11 +16,6 @@ const MP4_BYTES = Uint8Array.from([
   0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0x00, 0x00, 0x02, 0x00,
   0x69, 0x73, 0x6f, 0x6d, 0x69, 0x73, 0x6f, 0x32,
 ]);
-
-async function internalAuthHeaders(): Promise<Record<string, string>> {
-  const token = await generateInternalToken(env.INTERNAL_CALLBACK_SECRET!);
-  return { Authorization: `Bearer ${token}` };
-}
 
 async function seedProcessingMessage(
   stub: DurableObjectStub,
@@ -224,11 +224,8 @@ describe("session media routes", () => {
     });
     const uploadBody = await uploadResponse.json<{ artifactId: string; objectKey: string }>();
 
-    const response = await SELF.fetch(
-      `https://test.local/sessions/${sessionName}/media/${uploadBody.artifactId}`,
-      {
-        headers: await internalAuthHeaders(),
-      }
+    const response = await serviceFetch(
+      `https://test.local/sessions/${sessionName}/media/${uploadBody.artifactId}`
     );
 
     expect(response.status).toBe(200);
@@ -262,11 +259,8 @@ describe("session media routes", () => {
     });
     const uploadBody = await uploadResponse.json<{ artifactId: string; objectKey: string }>();
 
-    const response = await SELF.fetch(
-      `https://test.local/sessions/${sessionName}/media/${uploadBody.artifactId}`,
-      {
-        headers: await internalAuthHeaders(),
-      }
+    const response = await serviceFetch(
+      `https://test.local/sessions/${sessionName}/media/${uploadBody.artifactId}`
     );
 
     expect(response.status).toBe(200);
@@ -409,11 +403,8 @@ describe("session media routes", () => {
     });
     const uploadBody = await uploadResponse.json<{ artifactId: string; objectKey: string }>();
 
-    const response = await SELF.fetch(
-      `https://test.local/sessions/${sessionName}/media/${uploadBody.artifactId}`,
-      {
-        headers: await internalAuthHeaders(),
-      }
+    const response = await serviceFetch(
+      `https://test.local/sessions/${sessionName}/media/${uploadBody.artifactId}`
     );
 
     expect(response.status).toBe(200);
@@ -437,11 +428,8 @@ describe("session media routes", () => {
 
     const uploadBody = await uploadVideo(sessionName, token);
 
-    const response = await SELF.fetch(
-      `https://test.local/sessions/${sessionName}/media/${uploadBody.artifactId}`,
-      {
-        headers: await internalAuthHeaders(),
-      }
+    const response = await serviceFetch(
+      `https://test.local/sessions/${sessionName}/media/${uploadBody.artifactId}`
     );
 
     expect(response.status).toBe(200);
@@ -463,11 +451,10 @@ describe("session media routes", () => {
 
     const uploadBody = await uploadVideo(sessionName, token);
 
-    const response = await SELF.fetch(
+    const response = await serviceFetch(
       `https://test.local/sessions/${sessionName}/media/${uploadBody.artifactId}`,
       {
         headers: {
-          ...(await internalAuthHeaders()),
           Range: "bytes=4-11",
         },
       }
@@ -495,11 +482,10 @@ describe("session media routes", () => {
 
     const uploadBody = await uploadVideo(sessionName, token);
 
-    const response = await SELF.fetch(
+    const response = await serviceFetch(
       `https://test.local/sessions/${sessionName}/media/${uploadBody.artifactId}`,
       {
         headers: {
-          ...(await internalAuthHeaders()),
           Range: "bytes=1-2-3",
         },
       }
@@ -534,11 +520,8 @@ describe("session media routes", () => {
 
     await env.MEDIA_BUCKET.delete(uploadBody.objectKey);
 
-    const response = await SELF.fetch(
-      `https://test.local/sessions/${sessionName}/media/${uploadBody.artifactId}`,
-      {
-        headers: await internalAuthHeaders(),
-      }
+    const response = await serviceFetch(
+      `https://test.local/sessions/${sessionName}/media/${uploadBody.artifactId}`
     );
 
     expect(response.status).toBe(404);
@@ -573,11 +556,8 @@ describe("session media routes", () => {
     );
     expect(createArtifactResponse.status).toBe(200);
 
-    const response = await SELF.fetch(
-      `https://test.local/sessions/${sessionName}/media/artifact-legacy`,
-      {
-        headers: await internalAuthHeaders(),
-      }
+    const response = await serviceFetch(
+      `https://test.local/sessions/${sessionName}/media/artifact-legacy`
     );
 
     expect(response.status).toBe(200);
@@ -606,11 +586,8 @@ describe("session media routes", () => {
     );
     expect(createArtifactResponse.status).toBe(200);
 
-    const response = await SELF.fetch(
-      `https://test.local/sessions/${sessionName}/media/artifact-branch`,
-      {
-        headers: await internalAuthHeaders(),
-      }
+    const response = await serviceFetch(
+      `https://test.local/sessions/${sessionName}/media/artifact-branch`
     );
 
     expect(response.status).toBe(404);

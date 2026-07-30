@@ -39,7 +39,8 @@ function createTestHarness(overrides?: { env?: Partial<CallbackServiceEnv> }) {
   const sleep = vi.fn(async () => {});
 
   const env: CallbackServiceEnv = {
-    INTERNAL_CALLBACK_SECRET: "test-secret",
+    SERVICE_AUTH_SECRET_SLACK_BOT: "test-secret",
+    SERVICE_AUTH_SECRET_LINEAR_BOT: "test-secret",
     SLACK_BOT: slackBot,
     LINEAR_BOT: linearBot,
     ...overrides?.env,
@@ -79,9 +80,14 @@ describe("CallbackNotificationService", () => {
 
       await harness.service.notifyComplete("msg-1", true);
 
-      expect(harness.log.debug).toHaveBeenCalledWith(
-        "No callback context for message, skipping notification",
-        expect.objectContaining({ message_id: "msg-1" })
+      expect(harness.log.info).toHaveBeenCalledWith(
+        "callback.complete_delivery",
+        expect.objectContaining({
+          session_id: "session-123",
+          message_id: "msg-1",
+          outcome: "rejected",
+          reject_reason: "no_callback_context",
+        })
       );
       expect(
         (harness.slackBot as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch
@@ -101,8 +107,13 @@ describe("CallbackNotificationService", () => {
       ).not.toHaveBeenCalled();
     });
 
-    it("skips when no INTERNAL_CALLBACK_SECRET", async () => {
-      const h = createTestHarness({ env: { INTERNAL_CALLBACK_SECRET: undefined } });
+    it("skips when the destination bot's signing secret is unbound", async () => {
+      const h = createTestHarness({
+        env: {
+          SERVICE_AUTH_SECRET_SLACK_BOT: undefined,
+          SERVICE_AUTH_SECRET_LINEAR_BOT: undefined,
+        },
+      });
       vi.mocked(h.repository.getMessageCallbackContext).mockReturnValue({
         callback_context: JSON.stringify({ channel: "C123" }),
         source: "slack",
@@ -126,9 +137,14 @@ describe("CallbackNotificationService", () => {
 
       await h.service.notifyComplete("msg-1", true);
 
-      expect(h.log.debug).toHaveBeenCalledWith(
-        "No callback binding for source, skipping notification",
-        expect.objectContaining({ message_id: "msg-1", source: "slack" })
+      expect(h.log.info).toHaveBeenCalledWith(
+        "callback.complete_delivery",
+        expect.objectContaining({
+          message_id: "msg-1",
+          source: "slack",
+          outcome: "rejected",
+          reject_reason: "no_binding",
+        })
       );
     });
 
@@ -167,8 +183,14 @@ describe("CallbackNotificationService", () => {
       expect(body.timestamp).toEqual(expect.any(Number));
 
       expect(harness.log.info).toHaveBeenCalledWith(
-        "Callback succeeded",
-        expect.objectContaining({ message_id: "msg-1", source: "slack" })
+        "callback.complete_delivery",
+        expect.objectContaining({
+          message_id: "msg-1",
+          source: "slack",
+          outcome: "success",
+          attempts: 1,
+          retries: 0,
+        })
       );
     });
 
@@ -189,8 +211,8 @@ describe("CallbackNotificationService", () => {
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(harness.log.info).toHaveBeenCalledWith(
-        "Callback succeeded",
-        expect.objectContaining({ message_id: "msg-1" })
+        "callback.complete_delivery",
+        expect.objectContaining({ message_id: "msg-1", attempts: 2, retries: 1 })
       );
     });
 
@@ -287,8 +309,8 @@ describe("CallbackNotificationService", () => {
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(harness.log.error).toHaveBeenCalledWith(
-        "callback.started",
-        expect.objectContaining({ message_id: "msg-1", outcome: "failed" })
+        "callback.started_delivery",
+        expect.objectContaining({ message_id: "msg-1", outcome: "error", attempts: 2 })
       );
     });
 
@@ -418,7 +440,12 @@ describe("CallbackNotificationService", () => {
     });
 
     it("skips when no secret configured", async () => {
-      const h = createTestHarness({ env: { INTERNAL_CALLBACK_SECRET: undefined } });
+      const h = createTestHarness({
+        env: {
+          SERVICE_AUTH_SECRET_SLACK_BOT: undefined,
+          SERVICE_AUTH_SECRET_LINEAR_BOT: undefined,
+        },
+      });
       vi.mocked(h.repository.getMessageCallbackContext).mockReturnValue({
         callback_context: JSON.stringify({ channel: "C123" }),
         source: "slack",
@@ -716,8 +743,14 @@ describe("CallbackNotificationService", () => {
 
       await h.service.notifyComplete("msg-1", true);
 
-      expect(h.log.warn).toHaveBeenCalledWith(
-        "No SCHEDULER_CALLBACK binding, skipping automation notification"
+      expect(h.log.info).toHaveBeenCalledWith(
+        "callback.complete_delivery",
+        expect.objectContaining({
+          message_id: "msg-1",
+          source: "automation",
+          outcome: "rejected",
+          reject_reason: "no_binding",
+        })
       );
     });
 
@@ -748,8 +781,13 @@ describe("CallbackNotificationService", () => {
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(h.log.info).toHaveBeenCalledWith(
-        "Automation callback succeeded",
-        expect.objectContaining({ automation_id: "auto-1" })
+        "callback.complete_delivery",
+        expect.objectContaining({
+          message_id: "msg-1",
+          source: "automation",
+          attempts: 2,
+          retries: 1,
+        })
       );
     });
 

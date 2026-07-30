@@ -216,6 +216,10 @@ and the rename touches the same lines. Take upstream's _parameter list_ and keep
 
 ### 15. Follow-up prompts remain usable while a session runs
 
+An acknowledgement carrying a server-generated message ID confirms the sole pending delivery on the
+requesting socket. This keeps retries safe while old and new control-plane versions overlap; the
+acknowledgement is never broadcast or correlated across requesters.
+
 **Why.** The control plane already persisted and drained pending prompts in order, but the web
 client disabled delivery while processing and ignored the acknowledgement. Users had to hold
 complete work in an unsubmitted textarea until the active run ended, and a disconnected send cleared

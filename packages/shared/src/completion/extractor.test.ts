@@ -338,7 +338,11 @@ describe("extractAgentResponse", () => {
       },
     };
 
-    const response = await extractAgentResponse({ fetcher }, "session-1", "msg-1");
+    const response = await extractAgentResponse(
+      { fetcher, auth: { service: "slack-bot", secret: "test-secret" } },
+      "session-1",
+      "msg-1"
+    );
 
     expect(response.artifacts).toEqual([
       {

@@ -6,7 +6,7 @@ import { OUTBOUND_REQUEST_TIMEOUT_MS } from "../request-options";
 function makeEnv(fetch: ReturnType<typeof vi.fn>): Env {
   return {
     CONTROL_PLANE: { fetch } as unknown as Fetcher,
-    INTERNAL_CALLBACK_SECRET: "test-secret",
+    SERVICE_AUTH_SECRET: "test-secret",
     LOG_LEVEL: "error",
   } as Env;
 }

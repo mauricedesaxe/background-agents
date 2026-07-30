@@ -10,7 +10,8 @@ import type { Env } from "./types";
 import type { Logger } from "./logger";
 import { createLogger, parseLogLevel } from "./logger";
 import { verifyWebhookSignature } from "./verify";
-import { normalizeGitHubEvent, buildInternalAuthHeaders } from "@open-inspect/shared";
+import { normalizeGitHubEvent } from "@open-inspect/shared";
+import { signedControlPlaneFetch } from "./internal-auth";
 import {
   issueCommentPayloadSchema,
   pullRequestOpenedPayloadSchema,
@@ -224,11 +225,11 @@ async function forwardNormalizedEvent(
 
   try {
     const body = JSON.stringify(normalizedEvent);
-    const authHeaders = await buildInternalAuthHeaders(env.INTERNAL_CALLBACK_SECRET, traceId);
-    const response = await env.CONTROL_PLANE.fetch("https://internal/internal/github-event", {
+    const response = await signedControlPlaneFetch(env, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders },
+      url: "https://internal/internal/github-event",
       body,
+      traceId,
     });
     if (!response.ok) {
       log.warn("webhook.github_event_forward_failed", {
