@@ -60,7 +60,12 @@ describe("pre-exchange web session composition", () => {
     });
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => POST())
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input) === "/api/auth/oi-revoke") {
+          return new Response(null, { status: 204 });
+        }
+        return POST();
+      })
     );
 
     render(
