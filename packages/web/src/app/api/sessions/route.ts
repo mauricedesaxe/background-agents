@@ -1,10 +1,9 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
-import { getToken } from "next-auth/jwt";
 import { authOptions } from "@/lib/auth";
-import { buildAuthIdentity, buildScmCredentials } from "@/lib/build-auth-identity";
-import { controlPlaneFetch } from "@/lib/control-plane";
+import { buildAuthDisplay, buildScmAttribution } from "@/lib/build-auth-identity";
+import { controlPlaneUserFetch } from "@/lib/control-plane";
 import {
   buildControlPlanePath,
   SESSION_CONTROL_PLANE_QUERY_PARAMS,
@@ -48,7 +47,7 @@ export async function GET(request: NextRequest) {
     );
 
     const fetchStart = Date.now();
-    const response = await controlPlaneFetch(path);
+    const response = await controlPlaneUserFetch(path);
     const fetchMs = Date.now() - fetchStart;
     const data = await response.json();
     const totalMs = Date.now() - routeStart;
@@ -73,12 +72,12 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
 
-    const jwt = await getToken({ req: request });
-
-    // Explicitly pick allowed fields from client body and derive identity
-    // from the server-side NextAuth session (not client-supplied data)
+    // Explicitly pick allowed fields from the client body. Identity
+    // (userId/spawnSource/authProvider/authUserId/SCM credentials) is derived
+    // by the control plane from the authenticated Bearer principal and is
+    // rejected in the body under strict enforcement — send only the
+    // display/attribution blocks, which stay body-carried by design.
     const user = session.user;
-    const userId = user.id || user.email || "anonymous";
 
     const sessionBody = {
       repoOwner: body.repoOwner,
@@ -92,16 +91,13 @@ export async function POST(request: NextRequest) {
       // side): a named environment or an ad-hoc repository list.
       environmentId: body.environmentId,
       repositories: body.repositories,
-      spawnSource: "user" as const,
-      userId,
-      // Provider-agnostic auth identity (GitHub or Google) resolves the
-      // canonical user; GitHub-only scm* carries SCM credentials + attribution
-      // and is empty for Google.
-      ...buildAuthIdentity(user),
-      ...buildScmCredentials(user, jwt),
+      // Display-only auth block (GitHub or Google); GitHub-only scm*
+      // attribution is empty for Google.
+      ...buildAuthDisplay(user),
+      ...buildScmAttribution(user),
     };
 
-    const response = await controlPlaneFetch("/sessions", {
+    const response = await controlPlaneUserFetch("/sessions", {
       method: "POST",
       body: JSON.stringify(sessionBody),
     });

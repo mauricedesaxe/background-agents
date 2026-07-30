@@ -3,6 +3,7 @@ import { sessionPromptRoutes } from "./session-prompt";
 import type { RequestContext } from "./shared";
 import type { SqlDatabase } from "../db/sql-database";
 import type { Env } from "../types";
+import type { Principal } from "../auth/principal";
 
 const runtimeFetch = vi.fn();
 
@@ -21,10 +22,21 @@ function getHandler(method: string, path: string) {
 }
 
 function createCtx(): RequestContext {
+  const principal: Principal = {
+    kind: "user",
+    user: {
+      provider: "github",
+      providerUserId: "42",
+      canonicalUserId: "user-1",
+      participantUserId: "user-1",
+    },
+    tokenId: "token-1",
+  };
   return {
     trace_id: "trace-1",
     request_id: "req-1",
     db: {} as SqlDatabase,
+    principal,
     metrics: {
       d1Queries: [],
       spans: {},

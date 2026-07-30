@@ -3,7 +3,8 @@
  */
 
 import type { Env } from "./types";
-import { verifyInternalToken } from "./auth/internal";
+import { authenticate, isAuthError } from "./auth/authenticate";
+import type { Principal } from "./auth/principal";
 import {
   resolveScmProviderFromEnv,
   SourceControlProviderError,
@@ -22,6 +23,7 @@ import {
   error,
   HttpError,
 } from "./routes/shared";
+import { authTokenRoutes } from "./routes/auth-tokens";
 import { integrationSettingsRoutes } from "./routes/integration-settings";
 import { modelPreferencesRoutes } from "./routes/model-preferences";
 import { reposRoutes } from "./routes/repos";
@@ -137,15 +139,17 @@ function isPublicRoute(path: string): boolean {
 /**
  * Check if a path matches any sandbox auth route pattern.
  */
-function isSandboxAuthRoute(path: string): boolean {
+function isSandboxAuthRoute(path: string, _method: string): boolean {
   return SANDBOX_AUTH_ROUTES.some((pattern) => pattern.test(path));
 }
 
 function isScmAgnosticRoute(path: string): boolean {
   return (
+    // Token issuance is identity work, independent of the SCM provider.
+    /^\/auth\/tokens\/(exchange|refresh)$/.test(path) ||
     /^\/analytics\/(summary|timeseries|breakdown|pull-requests)$/.test(path) ||
-    // Identity upserts are independent of the SCM provider. Only the known auth
-    // providers are agnostic; an unimplemented SCM (e.g. gitlab) still 501s.
+    // Identity resolution is independent of the SCM provider. Only the known
+    // auth providers are agnostic; an unimplemented SCM (e.g. gitlab) still 501s.
     /^\/provider-identities\/(github|slack|linear|google)\/[^/]+$/.test(path) ||
     /^\/sessions\/[^/]+\/tunnel-urls$/.test(path) ||
     // Boards are unrelated to the SCM provider.
@@ -207,6 +211,9 @@ function enforceImplementedScmProvider(
  * Validate sandbox authentication by checking with the Durable Object.
  * The DO stores the expected sandbox auth token.
  *
+ * On success, sets the sandbox principal on the request context — this is
+ * the single place a sandbox principal is assembled.
+ *
  * @param request - The incoming request
  * @param env - Environment bindings
  * @param sessionId - Session ID extracted from path
@@ -250,42 +257,38 @@ async function verifySandboxAuth(
     return error("Unauthorized: Invalid sandbox token", 401);
   }
 
+  ctx.principal = { kind: "sandbox", sessionId };
   return null; // Auth passed
 }
 
 /**
- * Require internal API authentication for service-to-service calls.
- * Fails closed: returns error response if secret is not configured or token is invalid.
- *
- * @param request - The incoming request
- * @param env - Environment bindings
- * @param ctx - Request correlation context
- * @returns null if authentication passes, or an error Response to return immediately
+ * Emit the per-request `auth.principal` line: who is acting, as a verified
+ * identity — never token material.
  */
-async function requireInternalAuth(
-  request: Request,
-  env: Env,
-  ctx: RequestContext
-): Promise<Response | null> {
-  if (!env.INTERNAL_CALLBACK_SECRET) {
-    logger.error("INTERNAL_CALLBACK_SECRET not configured - rejecting request", {
-      event: "auth.misconfigured",
-      request_id: ctx.request_id,
-      trace_id: ctx.trace_id,
-    });
-    return error("Internal authentication not configured", 500);
+function logPrincipal(principal: Principal, ctx: RequestContext, path: string): void {
+  const fields: Record<string, string | undefined> = { principal_kind: principal.kind };
+  switch (principal.kind) {
+    case "service":
+      // Kept as a log key for dashboard continuity; per-service is the only
+      // service scheme since the shared bearer's retirement.
+      fields.auth_scheme = "per-service";
+      fields.service = principal.service;
+      fields.actor = principal.actor?.participantUserId;
+      break;
+    case "sandbox":
+      fields.session_id = principal.sessionId;
+      break;
+    case "user":
+      fields.user_id = principal.user.canonicalUserId ?? undefined;
+      break;
   }
-
-  const isValid = await verifyInternalToken(
-    request.headers.get("Authorization"),
-    env.INTERNAL_CALLBACK_SECRET
-  );
-
-  if (!isValid) {
-    return error("Unauthorized", 401);
-  }
-
-  return null; // Auth passed
+  logger.info("auth.principal", {
+    event: "auth.principal",
+    ...fields,
+    http_path: path,
+    request_id: ctx.request_id,
+    trace_id: ctx.trace_id,
+  });
 }
 
 /**
@@ -298,6 +301,9 @@ const routes: Route[] = [
     pattern: parsePattern("/health"),
     handler: async () => json({ status: "healthy", service: "open-inspect-control-plane" }),
   },
+
+  // Token issuance (exchange + refresh; web service principal only)
+  ...authTokenRoutes,
 
   // Session management
   ...sessionRoutes,
@@ -403,40 +409,35 @@ export async function handleRequest(
 
   // Require authentication for non-public routes
   if (!isPublicRoute(path)) {
-    const acceptsSandboxAuth = isSandboxAuthRoute(path);
-    // First try HMAC auth (for web app, slack bot, etc.)
-    const hmacAuthError = await requireInternalAuth(request, env, ctx);
-    let authError = hmacAuthError;
+    let authError: Response | null;
 
-    if (hmacAuthError) {
-      // HMAC auth failed - check if this route accepts sandbox auth
-      if (acceptsSandboxAuth) {
-        // Extract session ID from path (e.g., /sessions/abc123/pr -> abc123)
-        const sessionIdMatch = path.match(/^\/sessions\/([^/]+)\//);
-        if (sessionIdMatch) {
-          const sessionId = sessionIdMatch[1];
-          const sandboxAuthError = await verifySandboxAuth(request, env, sessionId, ctx);
-          if (!sandboxAuthError) {
-            authError = null;
-          } else {
-            authError = sandboxAuthError;
-          }
-        }
+    // Session id for sandbox auth (e.g., /sessions/abc123/pr -> abc123)
+    const sandboxSessionId = path.match(/^\/sessions\/([^/]+)\//)?.[1] ?? null;
+
+    const authResult = await authenticate(request, env, ctx);
+
+    if (isAuthError(authResult)) {
+      authError = error(authResult.reason, authResult.status);
+
+      if (
+        authResult.failedScheme === "none" &&
+        isSandboxAuthRoute(path, method) &&
+        sandboxSessionId
+      ) {
+        authError = await verifySandboxAuth(request, env, sandboxSessionId, ctx);
       }
+    } else {
+      authError = null;
+      ctx.principal = authResult.principal;
+      request = authResult.request;
     }
 
     if (authError) {
-      if (hmacAuthError?.status === 401) {
-        const clientIP = request.headers.get("CF-Connecting-IP") || "unknown";
-        logger.warn("Auth failed: HMAC", {
-          event: "auth.hmac_failed",
-          http_path: path,
-          client_ip: clientIP,
-          request_id: ctx.request_id,
-          trace_id: ctx.trace_id,
-        });
-      }
       return withCorsAndTraceHeaders(authError, ctx);
+    }
+
+    if (ctx.principal) {
+      logPrincipal(ctx.principal, ctx, path);
     }
   }
 

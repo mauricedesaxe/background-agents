@@ -203,13 +203,15 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
         }
         toast.error(message.message);
       } else if (message.type === "prompt_queued") {
+        const pendingDelivery = pendingPromptDeliveryRef.current;
+        const deliveryRequestId = pendingDelivery?.requestId ?? message.messageId;
         const retryable = retryablePromptRef.current;
         setPromptQueue((current) => {
           if (message.status && message.status !== "pending") {
             return current.filter((prompt) => prompt.messageId !== message.messageId);
           }
           const existing = current.find((prompt) => prompt.messageId === message.messageId);
-          if (!existing && retryable?.requestId !== message.messageId) return current;
+          if (!existing && retryable?.requestId !== deliveryRequestId) return current;
           const accepted = existing ?? {
             messageId: message.messageId,
             content: retryable!.content,
@@ -221,7 +223,7 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
             { ...accepted, position: message.position ?? accepted.position },
           ].sort((left, right) => left.position - right.position);
         });
-        finishPromptDelivery(message.messageId, { ok: true }, true);
+        finishPromptDelivery(deliveryRequestId, { ok: true }, true);
       } else if (message.type === "prompt_rejected") {
         finishPromptDelivery(message.requestId, { ok: false, error: message.message }, true);
       } else if (message.type === "prompt_queue") {

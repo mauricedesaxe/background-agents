@@ -1,18 +1,26 @@
 /**
  * Single chokepoint for the auth-provider discriminator on the web side.
  *
- * Every request body we send to the control plane separates two concerns:
+ * Under identity enforcement the control plane derives WHO the caller is
+ * (userId, authProvider/authUserId, SCM credentials) from the authenticated
+ * Bearer principal and rejects those fields in identity-route bodies. What the
+ * web still sends over the wire is display-only:
  *
- * - `auth*` — provider-agnostic authentication identity ("who logged in").
- *   Populated for BOTH GitHub and Google; resolves the canonical D1 user.
- * - `scm*` — GitHub-only SCM credentials + git-commit attribution. Populated
- *   ONLY for GitHub; a Google session carries no `scm*` at all.
+ * - `auth*` display block (`buildAuthDisplay`) — email/name/avatar for BOTH
+ *   GitHub and Google.
+ * - `scm*` attribution block (`buildScmAttribution`) — GitHub-only
+ *   login/name/email/avatar for git-commit attribution; a Google session
+ *   carries no `scm*` at all.
+ *
+ * `buildAuthIdentity` normalizes the provider/id pair used in the
+ * provider-identity resolution path. The pair is carried in the URL only; the
+ * control plane authorizes it against the Bearer principal.
  *
  * Keeping the `provider === "github"` decision in this one module is the whole
  * point of the 4B split — otherwise the branch sprawls across every route and
- * a Google token can leak into the SCM path. Both `sessions` and `ws-token`
- * routes build their bodies from these helpers and never branch on provider
- * themselves.
+ * GitHub-only fields can leak into a Google request. The `sessions`,
+ * `ws-token`, and `automations` routes build their bodies from these helpers
+ * and never branch on provider themselves.
  */
 
 export type AuthProvider = "github" | "google";
@@ -38,26 +46,19 @@ export interface AuthIdentityUser {
 export interface AuthIdentity {
   authProvider: AuthProvider;
   authUserId?: string;
+}
+
+export interface AuthDisplay {
   authEmail?: string;
   authName?: string;
   authAvatarUrl?: string;
 }
 
-export interface ScmTokenSource {
-  accessToken?: string;
-  refreshToken?: string;
-  accessTokenExpiresAt?: number;
-}
-
-export interface ScmCredentials {
-  scmUserId?: string;
+export interface ScmAttribution {
   scmLogin?: string;
   scmName?: string;
   scmEmail?: string;
   scmAvatarUrl?: string;
-  scmToken?: string;
-  scmRefreshToken?: string;
-  scmTokenExpiresAt?: number;
 }
 
 /**
@@ -71,13 +72,24 @@ export function resolveAuthProvider(user: AuthIdentityUser | null | undefined): 
 }
 
 /**
- * Provider-agnostic identity block. Sent for every provider so the control
- * plane can resolve the canonical user via `/provider-identities/:provider/:id`.
+ * Provider-scoped identity reference used to resolve the canonical user via
+ * `/provider-identities/:provider/:id`. The values select the URL; no request
+ * body is sent, and the control plane requires an exactly matching user token.
  */
 export function buildAuthIdentity(user: AuthIdentityUser | null | undefined): AuthIdentity {
   return {
     authProvider: resolveAuthProvider(user),
     authUserId: user?.id ?? undefined,
+  };
+}
+
+/**
+ * Display-only auth block for identity-route bodies. The control plane keeps
+ * these body-carried by design; the identifying fields (`authProvider`,
+ * `authUserId`) come from the Bearer principal and must not be sent.
+ */
+export function buildAuthDisplay(user: AuthIdentityUser | null | undefined): AuthDisplay {
+  return {
     authEmail: user?.email ?? undefined,
     authName: user?.name ?? undefined,
     authAvatarUrl: user?.image ?? undefined,
@@ -85,27 +97,24 @@ export function buildAuthIdentity(user: AuthIdentityUser | null | undefined): Au
 }
 
 /**
- * GitHub SCM credentials + git-commit attribution. Returns an empty object for
- * non-GitHub providers (e.g. Google) so their request bodies carry no `scm*`
- * fields and no OAuth token — the credential-leak gate the F1/F2 findings call
- * for, enforced here at the single source rather than at each call site.
+ * GitHub-only git-commit attribution (display fields, no credentials). Returns
+ * an empty object for non-GitHub providers (e.g. Google) so their request
+ * bodies carry no `scm*` fields at all — the provider gate the F1/F2 findings
+ * call for, enforced here at the single source rather than at each call site.
+ *
+ * SCM credentials (`scmUserId`/`scmToken`/`scmRefreshToken`/expiry) are never
+ * sent: the control plane derives them from the authenticated principal's
+ * token store and strict enforcement rejects them in the body.
  */
-export function buildScmCredentials(
-  user: AuthIdentityUser | null | undefined,
-  tokens: ScmTokenSource | null | undefined
-): ScmCredentials {
+export function buildScmAttribution(user: AuthIdentityUser | null | undefined): ScmAttribution {
   if (resolveAuthProvider(user) !== "github") {
     return {};
   }
 
   return {
-    scmUserId: user?.id ?? undefined,
     scmLogin: user?.login ?? undefined,
     scmName: user?.name ?? undefined,
     scmEmail: user?.email ?? undefined,
     scmAvatarUrl: user?.image ?? undefined,
-    scmToken: tokens?.accessToken,
-    scmRefreshToken: tokens?.refreshToken,
-    scmTokenExpiresAt: tokens?.accessTokenExpiresAt,
   };
 }

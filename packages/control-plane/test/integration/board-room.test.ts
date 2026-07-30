@@ -6,8 +6,6 @@ import { boardSchema } from "../../src/board/schema";
 import { epochMs } from "../../src/time";
 import { getTlsyncProtocolVersion } from "@tldraw/sync-core";
 
-const INSPECTION_SECRET = "test-encryption-key-32chars-long!";
-
 /**
  * Exercises the BoardRoom Durable Object directly (the worker board routes just
  * forward to it). Proves the tldraw `TLSocketRoom` boots under workerd, persists
@@ -158,7 +156,7 @@ describe("board WebSocket auth hop (integration)", () => {
         boardId: "b-inspect",
         expiresAtMs: epochMs(Date.now() + 60_000),
       },
-      INSPECTION_SECRET
+      env.TOKEN_ENCRYPTION_KEY
     );
     const res = await SELF.fetch(
       `https://example.com/sessions/s-inspect/board/b-inspect/ws?sessionId=peer-1&token=${encodeURIComponent(token)}`,
@@ -220,7 +218,7 @@ describe("board WebSocket auth hop (integration)", () => {
       {
         token: await mintBoardInspectionToken(
           { ...validScope, expiresAtMs: epochMs(Date.now() - 1) },
-          INSPECTION_SECRET
+          env.TOKEN_ENCRYPTION_KEY
         ),
         sessionId: validScope.sessionId,
         boardId: validScope.boardId,
@@ -228,7 +226,7 @@ describe("board WebSocket auth hop (integration)", () => {
       {
         token: await mintBoardInspectionToken(
           { ...validScope, expiresAtMs: epochMs(Date.now() + 60_000) },
-          INSPECTION_SECRET
+          env.TOKEN_ENCRYPTION_KEY
         ),
         sessionId: "another-session",
         boardId: validScope.boardId,
@@ -236,7 +234,7 @@ describe("board WebSocket auth hop (integration)", () => {
       {
         token: await mintBoardInspectionToken(
           { ...validScope, expiresAtMs: epochMs(Date.now() + 60_000) },
-          INSPECTION_SECRET
+          env.TOKEN_ENCRYPTION_KEY
         ),
         sessionId: validScope.sessionId,
         boardId: "another-board",

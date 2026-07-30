@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { controlPlaneFetch } from "@/lib/control-plane";
+import { controlPlaneUserFetch } from "@/lib/control-plane";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const session = await getServerSession(authOptions);
@@ -20,14 +20,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       return NextResponse.json({ error: "content is required" }, { status: 400 });
     }
 
-    const user = session.user;
-    const userId = user.id || user.email || "anonymous";
-
-    const response = await controlPlaneFetch(`/sessions/${sessionId}/prompt`, {
+    // authorId is derived by the control plane from the Bearer principal and
+    // is rejected in the body under strict enforcement.
+    const response = await controlPlaneUserFetch(`/sessions/${sessionId}/prompt`, {
       method: "POST",
       body: JSON.stringify({
         content,
-        authorId: userId,
         source: "web",
         model,
         reasoningEffort,

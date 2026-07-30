@@ -21,6 +21,8 @@ export type {
   ResolvedSessionAttachment,
 } from "./session-attachments";
 
+export { formatGitHubNoreplyEmail, githubLoginSchema } from "./github-identity";
+
 export { clientMessageSchema } from "./websocket";
 export type { ClientMessage } from "./websocket";
 
@@ -151,7 +153,6 @@ export type {
 } from "./session-diffs";
 
 export {
-  userPreferencesRequestSchema,
   linearCallbackContextSchema,
   linearStartCallbackSchema,
   createSessionRequestSchema,
@@ -165,7 +166,6 @@ export {
 } from "./session-api";
 export type {
   UserPreferences,
-  UserPreferencesRequest,
   SlackCallbackContext,
   LinearCallbackContext,
   LinearStartCallback,

@@ -13,7 +13,6 @@ import {
   sendPromptResponseSchema,
   spawnChildSessionRequestSchema,
   spawnContextSchema,
-  userPreferencesRequestSchema,
 } from ".";
 
 describe("boundary schemas", () => {
@@ -518,25 +517,6 @@ describe("boundary schemas", () => {
 
     it("rejects an unknown message type", () => {
       const result = serverMessageSchema.safeParse({ type: "unexpected" });
-
-      expect(result.success).toBe(false);
-    });
-  });
-
-  describe("userPreferencesRequestSchema", () => {
-    it("parses a valid user preferences request", () => {
-      const result = userPreferencesRequestSchema.safeParse({
-        model: "anthropic/claude-sonnet-4-6",
-        reasoningEffort: "high",
-      });
-
-      expect(result.success).toBe(true);
-    });
-
-    it("rejects malformed preference fields", () => {
-      const result = userPreferencesRequestSchema.safeParse({
-        model: 123,
-      });
 
       expect(result.success).toBe(false);
     });

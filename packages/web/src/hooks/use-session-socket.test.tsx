@@ -254,6 +254,24 @@ describe("useSessionSocket", () => {
     expect(result.current.promptQueue).toEqual([queuedPrompt]);
   });
 
+  it("accepts a server-generated prompt ID from an older control plane", async () => {
+    const { result, socket } = await openSubscribedHook({ isProcessing: true });
+    const delivery = result.current.sendPrompt("Run the tests next");
+
+    act(() => {
+      socket.receive({ type: "prompt_queued", messageId: "server-id", position: 2 });
+    });
+
+    await expect(delivery).resolves.toEqual({ ok: true });
+    expect(result.current.promptQueue).toEqual([
+      expect.objectContaining({
+        messageId: "server-id",
+        content: "Run the tests next",
+        position: 2,
+      }),
+    ]);
+  });
+
   it("restores queued prompt state from subscription", async () => {
     const { result, socket } = await openSubscribedHook({ isProcessing: true });
     const subscribed = createSubscribedMessage();

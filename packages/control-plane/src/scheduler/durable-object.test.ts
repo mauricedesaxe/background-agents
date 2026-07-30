@@ -2040,7 +2040,7 @@ describe("SchedulerDO", () => {
       const scheduler = createSchedulerDO(
         createEnv({
           SLACK_BOT: { fetch: slackFetch } as unknown as Fetcher,
-          INTERNAL_CALLBACK_SECRET: "test-secret",
+          SERVICE_AUTH_SECRET_SLACK_BOT: "test-secret",
         })
       );
 
@@ -2109,7 +2109,7 @@ describe("SchedulerDO", () => {
       const scheduler = createSchedulerDO(
         createEnv({
           SLACK_BOT: { fetch: slackFetch } as unknown as Fetcher,
-          INTERNAL_CALLBACK_SECRET: "test-secret",
+          SERVICE_AUTH_SECRET_SLACK_BOT: "test-secret",
         })
       );
 

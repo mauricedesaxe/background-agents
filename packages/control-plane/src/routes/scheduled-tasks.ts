@@ -29,20 +29,16 @@ const MAX_TASK_NAME_LENGTH = 80;
 const executionInstantSchema = z.string().datetime({ offset: true });
 const logger = createLogger("router:scheduled-tasks");
 
-interface ScheduledTaskIdentity {
-  ownerUserId: string;
-  participantUserId: string;
-}
-
 async function handleCreateScheduledTask(
   request: Request,
   env: Env,
   _match: RegExpMatchArray,
   ctx: RequestContext
 ): Promise<Response> {
-  const body = await parseJsonBody<CreateScheduledTaskRequest & ScheduledTaskIdentity>(request);
+  const body = await parseJsonBody<CreateScheduledTaskRequest>(request);
   if (body instanceof Response) return body;
-  if (!body.ownerUserId || !body.participantUserId) return error("Owner identity is required", 400);
+  const ownerUserId = authenticatedOwnerUserId(ctx);
+  if (ownerUserId instanceof Response) return ownerUserId;
   if (!body.instructions?.trim()) return error("instructions is required", 400);
   if (body.instructions.length > MAX_INSTRUCTIONS_LENGTH) {
     return error(`instructions must be at most ${MAX_INSTRUCTIONS_LENGTH} characters`, 400);
@@ -119,8 +115,8 @@ async function handleCreateScheduledTask(
     enabled: 1,
     next_run_at: executeAt,
     consecutive_failures: 0,
-    created_by: body.participantUserId,
-    user_id: body.ownerUserId,
+    created_by: ownerUserId,
+    user_id: ownerUserId,
     created_at: now,
     updated_at: now,
     deleted_at: null,
@@ -139,27 +135,28 @@ async function handleCreateScheduledTask(
 }
 
 async function handleListScheduledTasks(
-  request: Request,
+  _request: Request,
   _env: Env,
   _match: RegExpMatchArray,
   ctx: RequestContext
 ): Promise<Response> {
-  const ownerUserId = new URL(request.url).searchParams.get("ownerUserId");
-  if (!ownerUserId) return error("ownerUserId is required", 400);
+  const ownerUserId = authenticatedOwnerUserId(ctx);
+  if (ownerUserId instanceof Response) return ownerUserId;
   const store = new AutomationStore(ctx.db);
   const rows = await store.listOnceForOwner(ownerUserId);
   return json({ tasks: await Promise.all(rows.map((row) => scheduledTaskView(store, row))) });
 }
 
 async function handleGetScheduledTask(
-  request: Request,
+  _request: Request,
   _env: Env,
   match: RegExpMatchArray,
   ctx: RequestContext
 ): Promise<Response> {
-  const ownerUserId = new URL(request.url).searchParams.get("ownerUserId");
+  const ownerUserId = authenticatedOwnerUserId(ctx);
+  if (ownerUserId instanceof Response) return ownerUserId;
   const id = match.groups?.id;
-  if (!ownerUserId || !id) return error("Task and owner are required", 400);
+  if (!id) return error("Task is required", 400);
   const store = new AutomationStore(ctx.db);
   const row = await store.getByIdForOwner(id, ownerUserId);
   if (!row || row.trigger_type !== "once") return error("Scheduled task not found", 404);
@@ -167,20 +164,20 @@ async function handleGetScheduledTask(
 }
 
 async function handleCancelScheduledTask(
-  request: Request,
+  _request: Request,
   _env: Env,
   match: RegExpMatchArray,
   ctx: RequestContext
 ): Promise<Response> {
-  const body = await parseJsonBody<{ ownerUserId?: string }>(request);
-  if (body instanceof Response) return body;
+  const ownerUserId = authenticatedOwnerUserId(ctx);
+  if (ownerUserId instanceof Response) return ownerUserId;
   const id = match.groups?.id;
-  if (!body.ownerUserId || !id) return error("Task and owner are required", 400);
+  if (!id) return error("Task is required", 400);
   const store = new AutomationStore(ctx.db);
-  const row = await store.getByIdForOwner(id, body.ownerUserId);
+  const row = await store.getByIdForOwner(id, ownerUserId);
   if (!row || row.trigger_type !== "once") return error("Scheduled task not found", 404);
-  if (!(await store.cancelOnce(id, body.ownerUserId))) {
-    const current = await store.getByIdForOwner(id, body.ownerUserId);
+  if (!(await store.cancelOnce(id, ownerUserId))) {
+    const current = await store.getByIdForOwner(id, ownerUserId);
     if (!current) return error("Scheduled task not found", 404);
     return json(
       {
@@ -191,6 +188,13 @@ async function handleCancelScheduledTask(
     );
   }
   return json({ task: await scheduledTaskView(store, (await store.getById(id))!) });
+}
+
+function authenticatedOwnerUserId(ctx: RequestContext): string | Response {
+  if (ctx.principal?.kind !== "user" || !ctx.principal.user.canonicalUserId) {
+    return error("User authentication required", 403);
+  }
+  return ctx.principal.user.canonicalUserId;
 }
 
 async function scheduledTaskView(

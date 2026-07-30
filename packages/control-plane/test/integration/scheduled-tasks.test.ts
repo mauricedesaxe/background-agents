@@ -33,6 +33,16 @@ async function call(
     trace_id: "trace-1",
     request_id: "request-1",
     db: env.DB,
+    principal: {
+      kind: "user",
+      user: {
+        provider: "github",
+        providerUserId: "42",
+        canonicalUserId: "usr_owner",
+        participantUserId: "usr_owner",
+      },
+      tokenId: "token-1",
+    },
     metrics: {
       d1Queries: [],
       spans: {},
@@ -87,8 +97,6 @@ describe("scheduled task routes (D1 integration)", () => {
       instructions: "Inspect the deployment",
       executeAt,
       scheduleTz: "Europe/London",
-      ownerUserId: "usr_owner",
-      participantUserId: "github-user",
     });
 
     expect(response.status).toBe(201);
@@ -109,8 +117,6 @@ describe("scheduled task routes (D1 integration)", () => {
       instructions: "Inspect the deployment",
       executeAt,
       scheduleTz,
-      ownerUserId: "usr_owner",
-      participantUserId: "github-user",
     });
 
     expect(response.status).toBe(400);
@@ -124,9 +130,7 @@ describe("scheduled task routes (D1 integration)", () => {
     await store.create(onceAutomation());
     await store.create(onceAutomation({ id: "other-task", user_id: "other-owner" }));
 
-    const response = await call("GET", "/scheduled-tasks", undefined, {
-      ownerUserId: "usr_owner",
-    });
+    const response = await call("GET", "/scheduled-tasks");
 
     expect(response.status).toBe(200);
     const result = await response.json<{ tasks: Array<{ automation: { id: string } }> }>();
@@ -218,9 +222,7 @@ describe("scheduled task routes (D1 integration)", () => {
       consumeOnce: { dueAt: automation.next_run_at!, now },
     });
 
-    const response = await call("POST", `/scheduled-tasks/${automation.id}/cancel`, {
-      ownerUserId: "usr_owner",
-    });
+    const response = await call("POST", `/scheduled-tasks/${automation.id}/cancel`);
 
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({
@@ -234,8 +236,6 @@ describe("scheduled task routes (D1 integration)", () => {
       instructions: "Inspect the deployment",
       executeAt: new Date(Date.now() + 60_000).toISOString(),
       scheduleTz: "UTC",
-      ownerUserId: "usr_owner",
-      participantUserId: "github-user",
       repositories: [{ repoOwner: "acme", repoName: "api" }],
       environmentIds: ["env_1"],
     });
@@ -248,8 +248,6 @@ describe("scheduled task routes (D1 integration)", () => {
       instructions: "Inspect both deployments",
       executeAt: new Date(Date.now() + 60_000).toISOString(),
       scheduleTz: "UTC",
-      ownerUserId: "usr_owner",
-      participantUserId: "github-user",
       repositories: [
         { repoOwner: "acme", repoName: "api" },
         { repoOwner: "vendor", repoName: "api" },
