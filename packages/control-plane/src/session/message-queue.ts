@@ -416,6 +416,7 @@ export class SessionMessageQueue {
       timestamp: now / 1000,
     };
     this.repository.upsertExecutionCompleteEvent(messageId, syntheticExecutionComplete, now);
+    await this.sessionStatus.recordCompletedOutput(messageId, now);
     this.messenger.broadcast({ type: "sandbox_event", event: syntheticExecutionComplete });
     this.messenger.broadcast({ type: "processing_status", isProcessing: false });
     this.broadcastPromptQueue();
@@ -462,6 +463,7 @@ export class SessionMessageQueue {
       timestamp: now / 1000,
     };
     this.repository.upsertExecutionCompleteEvent(processingMessage.id, syntheticEvent, now);
+    await this.sessionStatus.recordCompletedOutput(processingMessage.id, now);
     this.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });
     this.messenger.broadcast({ type: "processing_status", isProcessing: false });
     this.broadcastPromptQueue();
@@ -517,6 +519,7 @@ export class SessionMessageQueue {
       timestamp: now / 1000,
     };
     this.repository.upsertExecutionCompleteEvent(pending.id, syntheticEvent, now);
+    await this.sessionStatus.recordCompletedOutput(pending.id, now);
 
     this.log.warn("prompt.pending_timeout", {
       event: "prompt.pending_timeout",

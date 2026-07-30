@@ -108,6 +108,7 @@ export function SessionTimeline({
   showSkeleton,
   onLoadOlder,
   onOpenMedia,
+  onLatestOutputViewed,
 }: {
   events: SandboxEvent[];
   sessionId: string;
@@ -118,6 +119,7 @@ export function SessionTimeline({
   showSkeleton: boolean;
   onLoadOlder: () => void;
   onOpenMedia: (artifactId: string) => void;
+  onLatestOutputViewed?: (messageId: string) => void;
 }) {
   const groupedEvents = useMemo(() => dedupeAndGroupEvents(events), [events]);
   const queuePositions = useMemo(
@@ -131,6 +133,13 @@ export function SessionTimeline({
   const isPrependingRef = useRef(false);
   const prevScrollHeightRef = useRef(0);
   const isNearBottomRef = useRef(true);
+  const latestOutputMessageId = useMemo(() => {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event?.type === "execution_complete" && event.messageId) return event.messageId;
+    }
+    return null;
+  }, [events]);
 
   const handleScroll = useCallback(() => {
     hasScrolledRef.current = true;
@@ -177,6 +186,19 @@ export function SessionTimeline({
       messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
     }
   }, [events]);
+
+  useEffect(() => {
+    if (!latestOutputMessageId || !onLatestOutputViewed) return;
+
+    const reportVisibleOutput = () => {
+      if (document.visibilityState === "visible" && isNearBottomRef.current) {
+        onLatestOutputViewed(latestOutputMessageId);
+      }
+    };
+    reportVisibleOutput();
+    document.addEventListener("visibilitychange", reportVisibleOutput);
+    return () => document.removeEventListener("visibilitychange", reportVisibleOutput);
+  }, [latestOutputMessageId, onLatestOutputViewed]);
 
   return (
     <div

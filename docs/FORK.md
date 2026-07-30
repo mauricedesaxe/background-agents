@@ -283,6 +283,19 @@ and search-reset behavior is pinned by `packages/web/src/components/session-side
 tree collapsed preserves parent-focused navigation while still surfacing active work and search
 matches that would otherwise be hidden.
 
+### 21. Session unread state is per user and message-scoped
+
+Completed and failed turns project their latest message id into the D1 session index. A separate
+per-user read cursor drives the sidebar's unread dot, manual read/unread actions, and
+child-to-parent visual rollup. Viewing the latest output clears automatic unread state but never
+clears a manual unread marker. External completion notifications do not change this state.
+
+**Why.** Several background sessions can finish while the user is elsewhere. Session status cannot
+represent whether one participant has reviewed the latest response, and a global read flag would let
+one participant clear another's inbox. Future syncs must preserve the completion projection in both
+normal and synthetic failure paths, the `9005_session_read_states.sql` migration, and the sidebar's
+desktop and mobile actions.
+
 ## Where we match upstream against our own docs
 
 The list above is where we differ from upstream. This is the inverse: a place where matching

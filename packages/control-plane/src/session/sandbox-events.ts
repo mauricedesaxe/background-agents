@@ -215,6 +215,7 @@ export class SessionSandboxEventProcessor {
       if (isStillProcessing) {
         const status = event.success ? "completed" : "failed";
         this.repository.updateMessageCompletion(completionMessageId, status, now);
+        await this.statusService.recordCompletedOutput(completionMessageId, now);
 
         const timestamps = this.repository.getMessageTimestamps(completionMessageId);
         const totalDurationMs = timestamps ? now - timestamps.created_at : undefined;

@@ -16,7 +16,9 @@ import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "reac
 import { TerminalPanel } from "@/components/terminal-panel";
 import { archiveSession } from "@/lib/archive-session";
 import {
+  applyUnreadUpdate,
   isArchivedSessionListKey,
+  isSessionListKey,
   isUnarchivedSessionListKey,
   removeSessionFromList,
   type SessionListResponse,
@@ -27,6 +29,7 @@ import { resolveModelPreference, type ModelPreference } from "@/lib/model-select
 import { useEnabledModels } from "@/hooks/use-enabled-models";
 import type { ComboboxGroup } from "@/components/ui/combobox";
 import { appendTranscript } from "@/lib/transcription";
+import { updateSessionReadState } from "@/lib/session-read-state";
 
 type SessionState = ReturnType<typeof useSessionSocket>["sessionState"];
 
@@ -105,6 +108,25 @@ function SessionPageContent() {
 
   const [selectedMediaArtifactId, setSelectedMediaArtifactId] = useState<string | null>(null);
   const [openBoard, setOpenBoard] = useState<OpenBoard | null>(null);
+  const viewedOutputRef = useRef<string | null>(null);
+  const handleLatestOutputViewed = useCallback(
+    async (messageId: string) => {
+      if (viewedOutputRef.current === messageId) return;
+      viewedOutputRef.current = messageId;
+      try {
+        const unread = await updateSessionReadState(sessionId, "viewed");
+        await mutate<SessionListResponse>(
+          isSessionListKey,
+          (current) => applyUnreadUpdate(current, sessionId, unread),
+          { revalidate: false }
+        );
+      } catch (error) {
+        viewedOutputRef.current = null;
+        console.error("Failed to mark session output as viewed", error);
+      }
+    },
+    [sessionId]
+  );
 
   const isBelowLg = useMediaQuery("(max-width: 1023px)");
   const isPhone = useMediaQuery("(max-width: 767px)");
@@ -198,6 +220,7 @@ function SessionPageContent() {
                 showSkeleton={showTimelineSkeleton}
                 onLoadOlder={loadOlderEvents}
                 onOpenMedia={setSelectedMediaArtifactId}
+                onLatestOutputViewed={(messageId) => void handleLatestOutputViewed(messageId)}
               />
             </Panel>
 

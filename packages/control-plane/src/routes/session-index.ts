@@ -1,5 +1,5 @@
 import { isCanonicalUserId, type SessionStatus } from "@open-inspect/shared";
-import { SessionIndexStore } from "../db/session-index";
+import { SessionIndexStore, type SessionReadAction } from "../db/session-index";
 import { error, json, parsePattern, type RequestContext, type Route } from "./shared";
 import type { Env } from "../types";
 
@@ -76,12 +76,56 @@ async function handleListSessions(
   }
 
   const store = new SessionIndexStore(ctx.db);
-  const result = await store.list({ status, excludeStatus, createdByUserIds, limit, offset });
+  const viewerUserId = ctx.principal?.kind === "user" ? ctx.principal.user.canonicalUserId : null;
+  const result = await store.list({
+    status,
+    excludeStatus,
+    createdByUserIds,
+    limit,
+    offset,
+    viewerUserId: viewerUserId ?? undefined,
+  });
 
   return json({
     sessions: result.sessions,
     hasMore: result.hasMore,
   });
+}
+
+const SESSION_READ_ACTIONS: SessionReadAction[] = ["viewed", "mark_read", "mark_unread"];
+
+async function handleUpdateReadState(
+  request: Request,
+  _env: Env,
+  match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  const sessionId = match.groups?.id;
+  if (!sessionId) return error("Session ID required");
+
+  const userId = ctx.principal?.kind === "user" ? ctx.principal.user.canonicalUserId : null;
+  if (!userId) return error("User identity required", 403);
+
+  let body: { action?: unknown };
+  try {
+    body = (await request.json()) as { action?: unknown };
+  } catch {
+    return error("Invalid request body", 400);
+  }
+  if (
+    typeof body.action !== "string" ||
+    !SESSION_READ_ACTIONS.includes(body.action as SessionReadAction)
+  ) {
+    return error("Invalid read-state action", 400);
+  }
+
+  const unread = await new SessionIndexStore(ctx.db).updateReadState(
+    sessionId,
+    userId,
+    body.action as SessionReadAction
+  );
+  if (unread === null) return error("Session not found", 404);
+  return json({ sessionId, unread });
 }
 
 async function handleDeleteSession(
@@ -101,5 +145,10 @@ async function handleDeleteSession(
 
 export const sessionIndexRoutes: Route[] = [
   { method: "GET", pattern: parsePattern("/sessions"), handler: handleListSessions },
+  {
+    method: "PATCH",
+    pattern: parsePattern("/sessions/:id/read-state"),
+    handler: handleUpdateReadState,
+  },
   { method: "DELETE", pattern: parsePattern("/sessions/:id"), handler: handleDeleteSession },
 ];

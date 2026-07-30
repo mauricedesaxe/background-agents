@@ -293,6 +293,33 @@ describe("SessionSidebar", () => {
     );
   });
 
+  it("shows unread sessions and rolls unread children up to their parent", async () => {
+    const parent = createSession(1, { unread: false });
+    const child = createSession(2, {
+      title: "Unread child",
+      parentSessionId: parent.id,
+      spawnSource: "agent",
+      unread: true,
+    });
+
+    render(
+      <SWRConfig
+        value={{
+          fallback: {
+            [SIDEBAR_SESSIONS_KEY]: { sessions: [parent, child], hasMore: false },
+          },
+          dedupingInterval: 0,
+          revalidateOnFocus: false,
+        }}
+      >
+        <SessionSidebar />
+      </SWRConfig>
+    );
+
+    expect(await screen.findByTestId(`session-unread-${parent.id}`)).toBeInTheDocument();
+    expect(screen.getByTestId(`session-unread-${child.id}`)).toBeInTheDocument();
+  });
+
   it("defaults to manual sessions and switches to automatic roots with their children", async () => {
     const manual = createSession(1, { title: "Manual session" });
     const automatic = createSession(2, {
@@ -931,6 +958,81 @@ describe("SessionSidebar", () => {
 
     expect(screen.getByText("Rename")).toBeInTheDocument();
     expect(screen.getByText("Archive")).toBeInTheDocument();
+  });
+
+  it("sends the mark-read action from the mobile menu", async () => {
+    mockUseIsMobile.mockReturnValue(true);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/sessions/session-1/read-state" && init?.method === "PATCH") {
+        return jsonResponse({ sessionId: "session-1", unread: false });
+      }
+      throw new Error(`Unexpected fetch for ${String(input)}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <SWRConfig
+        value={{
+          fallback: {
+            [SIDEBAR_SESSIONS_KEY]: {
+              sessions: [createSession(1, { unread: true })],
+              hasMore: false,
+            },
+          },
+          dedupingInterval: 0,
+          revalidateOnFocus: false,
+        }}
+      >
+        <SessionSidebar />
+      </SWRConfig>
+    );
+
+    const link = await screen.findByRole("link", { name: /session 1/i });
+    vi.useFakeTimers();
+    fireEvent.touchStart(link, { touches: [{ clientX: 20, clientY: 20 }] });
+    act(() => vi.advanceTimersByTime(MOBILE_LONG_PRESS_MS));
+    vi.useRealTimers();
+    fireEvent.click(screen.getByText("Mark as read"));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/sessions/session-1/read-state", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "mark_read" }),
+      });
+    });
+  });
+
+  it("opens unread child actions on mobile long press", async () => {
+    mockUseIsMobile.mockReturnValue(true);
+    const parent = createSession(1);
+    const child = createSession(2, {
+      title: "Unread child",
+      parentSessionId: parent.id,
+      spawnSource: "agent",
+      unread: true,
+    });
+
+    render(
+      <SWRConfig
+        value={{
+          fallback: {
+            [SIDEBAR_SESSIONS_KEY]: { sessions: [parent, child], hasMore: false },
+          },
+          dedupingInterval: 0,
+          revalidateOnFocus: false,
+        }}
+      >
+        <SessionSidebar />
+      </SWRConfig>
+    );
+
+    const link = await screen.findByRole("link", { name: /unread child/i });
+    vi.useFakeTimers();
+    fireEvent.touchStart(link, { touches: [{ clientX: 20, clientY: 20 }] });
+    act(() => vi.advanceTimersByTime(MOBILE_LONG_PRESS_MS));
+
+    expect(screen.getByText("Mark as read")).toBeInTheDocument();
   });
 
   it("archives a session from the sidebar actions menu", async () => {

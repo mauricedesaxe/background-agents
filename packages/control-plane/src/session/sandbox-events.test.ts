@@ -68,7 +68,10 @@ function createProcessor() {
   const broadcast = vi.fn((_message: ServerMessage) => {});
   const messenger = { broadcast, sendToSandbox: vi.fn(() => true) };
   const triggerSnapshot = vi.fn(async (_reason: string) => {});
-  const statusService = { reconcileAfterExecution: vi.fn(async (_success: boolean) => {}) };
+  const statusService = {
+    reconcileAfterExecution: vi.fn(async (_success: boolean) => {}),
+    recordCompletedOutput: vi.fn(async (_messageId: string, _completedAt: number) => {}),
+  };
   const scheduleInactivityCheck = vi.fn(async () => {});
   const processMessageQueue = vi.fn(async () => {});
   const updateLastActivity = vi.fn();
@@ -437,6 +440,7 @@ describe("SessionSandboxEventProcessor", () => {
       "completed",
       expect.any(Number)
     );
+    expect(h.statusService.recordCompletedOutput).toHaveBeenCalledWith("msg-1", expect.any(Number));
     expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
     expect(h.statusService.reconcileAfterExecution).toHaveBeenCalledWith(true);

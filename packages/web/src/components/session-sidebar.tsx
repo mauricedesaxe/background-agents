@@ -12,7 +12,7 @@ import {
   type TouchEvent,
 } from "react";
 import { useSession } from "next-auth/react";
-import useSWR, { mutate } from "swr";
+import useSWR, { mutate, useSWRConfig } from "swr";
 import { ArchiveSessionDialog } from "@/components/archive-session-dialog";
 import { archiveSession } from "@/lib/archive-session";
 import { revokeAndSignOut } from "@/lib/sign-out";
@@ -21,6 +21,7 @@ import { PullRequestStateIcon } from "@/components/pr-state-icon";
 import { formatRelativeTime } from "@/lib/time";
 import {
   applyTitleUpdate,
+  applyUnreadUpdate,
   buildGroupedSessionList,
   buildSessionsPageKey,
   CURRENT_USER_CREATED_BY,
@@ -60,6 +61,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { Session } from "@open-inspect/shared";
+import { updateSessionReadState } from "@/lib/session-read-state";
 
 export type SessionItem = Session;
 
@@ -120,6 +122,7 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
   const loadingMoreRef = useRef(false);
   const sessionListVersionRef = useRef(0);
   const isMobile = useIsMobile();
+  const { mutate: mutateSidebarCache } = useSWRConfig();
 
   const sidebarSessionsKey = useMemo(() => {
     if (!authSession) return null;
@@ -323,6 +326,27 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
     [sidebarSessionsKey]
   );
 
+  const handleReadStateChanged = useCallback(
+    (sessionId: string, unread: boolean) => {
+      setExtraSessions((prev) =>
+        prev.map((session) => (session.id === sessionId ? { ...session, unread } : session))
+      );
+      if (sidebarSessionsKey) {
+        void mutateSidebarCache<SessionListResponse>(
+          sidebarSessionsKey,
+          (currentData) => applyUnreadUpdate(currentData, sessionId, unread),
+          { revalidate: false }
+        );
+      }
+      void mutate<SessionListResponse>(
+        isUnarchivedSessionListKey,
+        (currentData) => applyUnreadUpdate(currentData, sessionId, unread),
+        { revalidate: false }
+      );
+    },
+    [mutateSidebarCache, sidebarSessionsKey]
+  );
+
   return (
     <aside className="w-72 h-dvh flex flex-col border-r border-border-muted bg-background">
       {/* Header */}
@@ -479,6 +503,7 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
                 onSessionSelect={onSessionSelect}
                 onSessionRenamed={handleSessionRenamed}
                 revealDescendants={searchQuery.trim().length > 0}
+                onReadStateChanged={handleReadStateChanged}
               />
             ))}
 
@@ -505,6 +530,7 @@ function SessionRepositoryGroupSection({
   onSessionSelect,
   onSessionRenamed,
   revealDescendants,
+  onReadStateChanged,
 }: {
   group: SessionRepositoryGroup;
   revealInactive: boolean;
@@ -516,6 +542,7 @@ function SessionRepositoryGroupSection({
   onSessionSelect?: () => void;
   onSessionRenamed: (sessionId: string, title: string) => void;
   revealDescendants: boolean;
+  onReadStateChanged: (sessionId: string, unread: boolean) => void;
 }) {
   const [inactiveOpen, setInactiveOpen] = useState(revealInactive);
 
@@ -533,6 +560,7 @@ function SessionRepositoryGroupSection({
       onSessionSelect={onSessionSelect}
       onSessionRenamed={onSessionRenamed}
       revealDescendants={revealDescendants}
+      onReadStateChanged={onReadStateChanged}
     />
   );
 
@@ -620,6 +648,7 @@ function SessionWithChildren({
   onSessionSelect,
   onSessionRenamed,
   revealDescendants,
+  onReadStateChanged,
 }: {
   session: SessionItem;
   environmentName?: string;
@@ -630,11 +659,12 @@ function SessionWithChildren({
   onSessionSelect?: () => void;
   onSessionRenamed: (sessionId: string, title: string) => void;
   revealDescendants: boolean;
+  onReadStateChanged: (sessionId: string, unread: boolean) => void;
 }) {
   const [childrenOpen, setChildrenOpen] = useState(revealDescendants);
   const childSummary = descendantSummary(session.id, childrenMap);
   const childrenId = `session-children-${session.id}`;
-
+  const hasUnreadSignal = subtreeHasUnread(session, childrenMap, new Set());
   return (
     <>
       <SessionListItem
@@ -649,6 +679,8 @@ function SessionWithChildren({
         childrenOpen={childrenOpen}
         childrenId={childrenId}
         onChildrenToggle={() => setChildrenOpen((open) => !open)}
+        onReadStateChanged={onReadStateChanged}
+        hasUnreadSignal={hasUnreadSignal}
       />
       {childrenOpen && (
         <div id={childrenId}>
@@ -658,6 +690,7 @@ function SessionWithChildren({
             currentSessionId={currentSessionId}
             isMobile={isMobile}
             onSessionSelect={onSessionSelect}
+            onReadStateChanged={onReadStateChanged}
             visitedIds={new Set([session.id])}
           />
         </div>
@@ -693,6 +726,7 @@ function ChildSessionTree({
   currentSessionId,
   isMobile,
   onSessionSelect,
+  onReadStateChanged,
   visitedIds,
   depth = 1,
 }: {
@@ -701,6 +735,7 @@ function ChildSessionTree({
   currentSessionId: string | null;
   isMobile: boolean;
   onSessionSelect?: () => void;
+  onReadStateChanged: (sessionId: string, unread: boolean) => void;
   visitedIds: Set<string>;
   depth?: number;
 }) {
@@ -720,6 +755,7 @@ function ChildSessionTree({
           isActive={child.id === currentSessionId}
           isMobile={isMobile}
           onSessionSelect={onSessionSelect}
+          onReadStateChanged={onReadStateChanged}
           depth={depth}
         />
         <ChildSessionTree
@@ -728,6 +764,7 @@ function ChildSessionTree({
           currentSessionId={currentSessionId}
           isMobile={isMobile}
           onSessionSelect={onSessionSelect}
+          onReadStateChanged={onReadStateChanged}
           visitedIds={nextVisitedIds}
           depth={depth + 1}
         />
@@ -748,6 +785,8 @@ function SessionListItem({
   childrenOpen,
   childrenId,
   onChildrenToggle,
+  onReadStateChanged,
+  hasUnreadSignal,
 }: {
   session: SessionItem;
   environmentName?: string;
@@ -760,6 +799,8 @@ function SessionListItem({
   childrenOpen: boolean;
   childrenId: string;
   onChildrenToggle: () => void;
+  onReadStateChanged: (sessionId: string, unread: boolean) => void;
+  hasUnreadSignal: boolean;
 }) {
   const timestamp = session.updatedAt || session.createdAt;
   const relativeTime = formatRelativeTime(timestamp);
@@ -818,6 +859,19 @@ function SessionListItem({
   const handleStartArchive = () => {
     setIsActionsOpen(false);
     setShowArchiveDialog(true);
+  };
+
+  const handleReadStateAction = async () => {
+    setIsActionsOpen(false);
+    try {
+      const unread = await updateSessionReadState(
+        session.id,
+        session.unread ? "mark_read" : "mark_unread"
+      );
+      onReadStateChanged(session.id, unread);
+    } catch (error) {
+      console.error("Failed to update session read state", error);
+    }
   };
 
   const handleConfirmArchive = async () => {
@@ -970,7 +1024,12 @@ function SessionListItem({
             onTouchCancel={handleTouchEnd}
             className={childSummary.count > 0 ? "block pr-20" : "block pr-8"}
           >
-            <div className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+            <div
+              className={`flex items-center gap-1.5 text-sm text-foreground ${
+                hasUnreadSignal ? "font-semibold" : "font-medium"
+              }`}
+            >
+              {hasUnreadSignal && <UnreadDot sessionId={session.id} />}
               {prDisplay && (
                 <PullRequestStateIcon state={prDisplay.state} label={prDisplay.label} />
               )}
@@ -1052,6 +1111,9 @@ function SessionListItem({
                 }
               }}
             >
+              <DropdownMenuItem onSelect={() => void handleReadStateAction()}>
+                {session.unread ? "Mark as read" : "Mark as unread"}
+              </DropdownMenuItem>
               <DropdownMenuItem onSelect={handleStartRename}>Rename</DropdownMenuItem>
               <DropdownMenuItem onClick={handleStartArchive} disabled={isArchiving}>
                 <ArchiveIcon className="w-4 h-4" />
@@ -1076,35 +1138,156 @@ function ChildSessionListItem({
   isActive,
   isMobile,
   onSessionSelect,
+  onReadStateChanged,
   depth,
 }: {
   session: SessionItem;
   isActive: boolean;
   isMobile: boolean;
   onSessionSelect?: () => void;
+  onReadStateChanged: (sessionId: string, unread: boolean) => void;
   depth: number;
 }) {
   const timestamp = session.updatedAt || session.createdAt;
   const relativeTime = formatRelativeTime(timestamp);
   const displayTitle = session.title || "Sub-task";
   const paddingLeftRem = 1.75 + Math.max(depth - 1, 0) * 1;
+  const [isActionsOpen, setIsActionsOpen] = useState(false);
+  const longPressTimerRef = useRef<number | null>(null);
+  const longPressTriggeredRef = useRef(false);
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+  const handleReadStateAction = async () => {
+    setIsActionsOpen(false);
+    try {
+      const unread = await updateSessionReadState(
+        session.id,
+        session.unread ? "mark_read" : "mark_unread"
+      );
+      onReadStateChanged(session.id, unread);
+    } catch (error) {
+      console.error("Failed to update session read state", error);
+    }
+  };
+  const clearLongPressTimer = useCallback(() => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }, []);
+  const handleTouchStart = useCallback(
+    (event: TouchEvent<HTMLAnchorElement>) => {
+      if (!isMobile) return;
+      const touch = event.touches[0];
+      if (!touch) return;
+
+      longPressTriggeredRef.current = false;
+      touchStartRef.current = { x: touch.clientX, y: touch.clientY };
+      clearLongPressTimer();
+      longPressTimerRef.current = window.setTimeout(() => {
+        longPressTriggeredRef.current = true;
+        setIsActionsOpen(true);
+      }, MOBILE_LONG_PRESS_MS);
+    },
+    [clearLongPressTimer, isMobile]
+  );
+  const handleTouchMove = useCallback(
+    (event: TouchEvent<HTMLAnchorElement>) => {
+      const start = touchStartRef.current;
+      const touch = event.touches[0];
+      if (!isMobile || !start || !touch) return;
+      if (
+        Math.hypot(touch.clientX - start.x, touch.clientY - start.y) >
+        MOBILE_LONG_PRESS_MOVE_THRESHOLD_PX
+      ) {
+        clearLongPressTimer();
+      }
+    },
+    [clearLongPressTimer, isMobile]
+  );
+  const handleTouchEnd = useCallback(() => {
+    clearLongPressTimer();
+    touchStartRef.current = null;
+  }, [clearLongPressTimer]);
+  useEffect(() => () => clearLongPressTimer(), [clearLongPressTimer]);
   return (
-    <Link
-      href={buildSessionHref(session)}
-      onClick={() => {
-        if (isMobile) {
-          onSessionSelect?.();
-        }
-      }}
-      className={`block pr-4 py-1.5 border-l-2 transition ${
-        isActive ? "border-l-accent bg-accent-muted" : "border-l-transparent hover:bg-muted"
-      }`}
-      style={{ paddingLeft: `${paddingLeftRem}rem` }}
-    >
-      <div className="flex items-center gap-1.5 text-xs">
-        <span className="shrink-0 text-muted-foreground">{relativeTime}</span>
-        <span className="truncate font-medium text-foreground">{displayTitle}</span>
+    <div className="group relative">
+      <Link
+        href={buildSessionHref(session)}
+        onClick={(event) => {
+          if (longPressTriggeredRef.current) {
+            event.preventDefault();
+            longPressTriggeredRef.current = false;
+            return;
+          }
+          if (isMobile) {
+            onSessionSelect?.();
+          }
+        }}
+        onContextMenu={(event) => {
+          if (isMobile) event.preventDefault();
+        }}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onTouchCancel={handleTouchEnd}
+        className={`block pr-10 py-1.5 border-l-2 transition ${
+          isActive ? "border-l-accent bg-accent-muted" : "border-l-transparent hover:bg-muted"
+        }`}
+        style={{ paddingLeft: `${paddingLeftRem}rem` }}
+      >
+        <div className="flex items-center gap-1.5 text-xs">
+          {session.unread && <UnreadDot sessionId={session.id} />}
+          <span className="shrink-0 text-muted-foreground">{relativeTime}</span>
+          <span className="truncate font-medium text-foreground">{displayTitle}</span>
+        </div>
+      </Link>
+      <div className="absolute inset-y-0 right-2 flex items-center">
+        <DropdownMenu open={isActionsOpen} onOpenChange={setIsActionsOpen}>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label="Child session actions"
+              aria-hidden={isMobile ? "true" : undefined}
+              tabIndex={isMobile ? -1 : undefined}
+              className={`flex h-6 w-6 items-center justify-center text-muted-foreground transition hover:text-foreground ${
+                isMobile
+                  ? "pointer-events-none opacity-0"
+                  : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+              }`}
+            >
+              <MoreIcon className="h-3.5 w-3.5" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onSelect={() => void handleReadStateAction()}>
+              {session.unread ? "Mark as read" : "Mark as unread"}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
-    </Link>
+    </div>
+  );
+}
+
+function UnreadDot({ sessionId }: { sessionId: string }) {
+  return (
+    <span
+      data-testid={`session-unread-${sessionId}`}
+      aria-label="Unread"
+      className="h-2 w-2 shrink-0 rounded-full bg-accent"
+    />
+  );
+}
+
+function subtreeHasUnread(
+  session: SessionItem,
+  childrenMap: Map<string, SessionItem[]>,
+  visitedIds: Set<string>
+): boolean {
+  if (session.unread) return true;
+  if (visitedIds.has(session.id)) return false;
+  visitedIds.add(session.id);
+  return (childrenMap.get(session.id) ?? []).some((child) =>
+    subtreeHasUnread(child, childrenMap, visitedIds)
   );
 }

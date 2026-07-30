@@ -132,6 +132,7 @@ function buildQueue() {
   const sessionStatus = {
     transition: vi.fn(async (_status: string) => true),
     reconcileAfterExecution: vi.fn(async (_success: boolean) => {}),
+    recordCompletedOutput: vi.fn(async (_messageId: string, _completedAt: number) => {}),
   };
   const spawnSandbox = vi.fn(async () => {});
   const sandboxLifecycle = {
@@ -553,6 +554,7 @@ describe("SessionMessageQueue", () => {
       expect.objectContaining({ type: "execution_complete", success: false }),
       expect.any(Number)
     );
+    expect(h.sessionStatus.recordCompletedOutput).toHaveBeenCalledWith("msg-9", expect.any(Number));
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
     expect(h.wsManager.close).toHaveBeenCalledWith(sandboxWs, 1012, "Stop confirmation timed out");
     expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
