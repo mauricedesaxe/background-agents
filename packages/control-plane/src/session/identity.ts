@@ -79,27 +79,24 @@ export async function resolveGitHubEnrichment(
   const githubIdentity = identities.find((i) => i.provider === "github");
   if (!githubIdentity) return null;
 
-  const [user, tokens] = await Promise.all([
-    userStore.getUserById(userId),
-    env.TOKEN_ENCRYPTION_KEY
-      ? new UserScmTokenStore(db, env.TOKEN_ENCRYPTION_KEY).getEncryptedTokens(
-          githubIdentity.providerUserId
-        )
-      : null,
-  ]);
+  const tokens = env.TOKEN_ENCRYPTION_KEY
+    ? await new UserScmTokenStore(db, env.TOKEN_ENCRYPTION_KEY).getEncryptedTokens(
+        githubIdentity.providerUserId
+      )
+    : null;
 
   const authorIdentity = resolveGitAuthorIdentity({
     scmProvider: "github",
     scmUserId: githubIdentity.providerUserId,
     scmLogin: githubIdentity.providerLogin,
-    scmName: user?.displayName,
+    scmName: githubIdentity.providerLogin,
     scmEmail: githubIdentity.providerEmail,
   });
 
   return {
     scmUserId: githubIdentity.providerUserId,
     scmLogin: githubIdentity.providerLogin ?? undefined,
-    displayName: user?.displayName ?? githubIdentity.providerLogin ?? undefined,
+    displayName: githubIdentity.providerLogin ?? undefined,
     email: authorIdentity?.email ?? undefined,
     accessTokenEncrypted: tokens?.accessTokenEncrypted,
     refreshTokenEncrypted: tokens?.refreshTokenEncrypted,

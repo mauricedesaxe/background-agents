@@ -45,13 +45,10 @@ export function WebSessionGate({ children }: { children?: ReactNode }) {
         if (cancelled) return;
         if (response.status === 401 && !signingOutRef.current) {
           signingOutRef.current = true;
-          try {
-            await revokeAndSignOut();
-          } catch {
-            if (!cancelled) {
-              signingOutRef.current = false;
-              setWebSessionStatus("temporarily_unavailable");
-            }
+          const signedOut = await revokeAndSignOut();
+          if (!signedOut && !cancelled) {
+            signingOutRef.current = false;
+            setWebSessionStatus("temporarily_unavailable");
           }
           return;
         }

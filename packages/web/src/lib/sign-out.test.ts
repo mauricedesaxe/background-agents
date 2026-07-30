@@ -17,7 +17,7 @@ describe("revokeAndSignOut", () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await revokeAndSignOut();
+    await expect(revokeAndSignOut()).resolves.toBe(true);
 
     expect(fetchMock).toHaveBeenCalledWith("/api/auth/oi-revoke", { method: "POST" });
     expect(fetchMock.mock.invocationCallOrder[0]).toBeLessThan(
@@ -27,14 +27,14 @@ describe("revokeAndSignOut", () => {
 
   it("retains the browser session when revocation is unavailable", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
-    await revokeAndSignOut();
+    await expect(revokeAndSignOut()).resolves.toBe(false);
     expect(mocks.signOut).not.toHaveBeenCalled();
     expect(mocks.toastError).toHaveBeenCalledWith("Couldn't sign out securely. Please try again.");
   });
 
   it("retains the browser session when revocation is rejected", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 503 })));
-    await revokeAndSignOut();
+    await expect(revokeAndSignOut()).resolves.toBe(false);
     expect(mocks.signOut).not.toHaveBeenCalled();
     expect(mocks.toastError).toHaveBeenCalledTimes(1);
   });
