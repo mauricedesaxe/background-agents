@@ -293,7 +293,7 @@ describe("handleCreateSession D1 ordering", () => {
             providerEmail: "private@example.com",
           },
         ],
-        getUserById: async () => ({ id: "user-1", displayName: "Trusted Ada" }),
+        getUserById: async () => ({ id: "user-1", displayName: "Caller Controlled Name" }),
       } as never;
     });
     const initFetch = vi.fn(async (request: Request) => {
@@ -303,7 +303,7 @@ describe("handleCreateSession D1 ordering", () => {
         spawnSource: "slack-bot",
         scmUserId: "2002",
         scmLogin: "ada",
-        scmName: "Trusted Ada",
+        scmName: "ada",
         scmEmail: "2002+ada@users.noreply.github.com",
         scmTokenEncrypted: null,
         scmRefreshTokenEncrypted: null,
@@ -314,6 +314,7 @@ describe("handleCreateSession D1 ordering", () => {
     const response = await createSessionRequestWithBody(createEnv(initFetch), {
       title: "Attributed session",
       model: "anthropic/claude-haiku-4-5",
+      actorDisplayName: "Caller Controlled Name",
     });
 
     expect(response.status).toBe(201);

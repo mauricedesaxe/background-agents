@@ -135,6 +135,32 @@ describe("POST /api/auth/oi-refresh", () => {
     });
   });
 
+  it("repairs a stale NextAuth cookie with the persisted rotation winner", async () => {
+    tokenFetch.mockResolvedValue(new Response(JSON.stringify(FRESH_PAIR), { status: 200 }));
+    const staleJwt = await encodeSession({
+      oiAccessToken: "oi_at_stale_writer",
+      oiAccessTokenExpiresAt: Date.now() - 60_000,
+      oiRefreshToken: "oi_rt_consumed",
+    });
+    const store = fakeCookieStore({ [SECURE_COOKIE]: staleJwt });
+
+    const response = await POST();
+
+    expect(response.status).toBe(200);
+    expect(tokenFetch).toHaveBeenCalledWith("/auth/tokens/refresh", {
+      method: "POST",
+      body: JSON.stringify({ refreshToken: "oi_rt_consumed" }),
+    });
+    const written = store.sets.find(
+      (entry) => entry.name === SECURE_COOKIE && entry.options.maxAge > 0
+    );
+    const decoded = await decode({ token: written!.value, secret: SECRET });
+    expect(decoded).toMatchObject({
+      oiAccessToken: FRESH_PAIR.accessToken,
+      oiRefreshToken: FRESH_PAIR.refreshToken,
+    });
+  });
+
   it("does not write when the pair is still fresh", async () => {
     const jwt = await encodeSession({
       oiAccessToken: "oi_at_live",

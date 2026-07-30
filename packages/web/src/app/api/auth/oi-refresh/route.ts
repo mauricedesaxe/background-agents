@@ -9,10 +9,8 @@
  *
  * The client calls this route on mount, on window focus, and on an interval
  * comfortably inside the renew window (see `WebSessionGate`).
- * Concurrent refresh requests from multiple tabs are safe within the control
- * plane's refresh-reuse grace window; the remaining stale-writer race is
- * documented in `renewWebSessionTokens` and requires the Phase B cookie
- * redesign.
+ * Concurrent refresh requests and stale NextAuth cookie writers recover the
+ * same winning pair from the control plane within its reuse grace window.
  */
 
 import { NextResponse } from "next/server";

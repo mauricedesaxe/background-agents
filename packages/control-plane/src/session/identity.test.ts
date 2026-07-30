@@ -148,6 +148,7 @@ describe("resolveGitHubEnrichment", () => {
     // The SCM identifier is the GitHub provider id — never the Google sub.
     expect(enrichment!.scmUserId).toBe("gh-42");
     expect(enrichment!.scmLogin).toBe("pm-dev");
+    expect(enrichment!.displayName).toBe("pm-dev");
     // No token-encryption key configured → no token material leaks in.
     expect(enrichment!.accessTokenEncrypted).toBeUndefined();
   });

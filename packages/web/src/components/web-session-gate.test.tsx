@@ -7,13 +7,13 @@ import { WebSessionGate } from "./web-session-gate";
 
 const mocks = vi.hoisted(() => ({
   status: "loading",
-  signOut: vi.fn(),
+  revokeAndSignOut: vi.fn(),
 }));
 
 vi.mock("next-auth/react", () => ({
   useSession: () => ({ status: mocks.status }),
-  signOut: mocks.signOut,
 }));
+vi.mock("@/lib/sign-out", () => ({ revokeAndSignOut: mocks.revokeAndSignOut }));
 
 let fetchSpy: ReturnType<typeof vi.fn>;
 
@@ -23,7 +23,7 @@ function setVisibilityState(state: DocumentVisibilityState): void {
 
 beforeEach(() => {
   mocks.status = "loading";
-  mocks.signOut.mockReset();
+  mocks.revokeAndSignOut.mockReset().mockResolvedValue(true);
   fetchSpy = vi.fn().mockResolvedValue(new Response("{}"));
   vi.stubGlobal("fetch", fetchSpy);
 });
@@ -53,24 +53,22 @@ describe("WebSessionGate", () => {
 
     render(<WebSessionGate />);
 
-    await waitFor(() => expect(mocks.signOut).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mocks.revokeAndSignOut).toHaveBeenCalledTimes(1));
   });
 
   it("can retry sign-out when NextAuth's first sign-out request fails", async () => {
     mocks.status = "authenticated";
     fetchSpy.mockResolvedValue(Response.json({ error: "Unauthorized" }, { status: 401 }));
-    mocks.signOut
-      .mockRejectedValueOnce(new Error("sign-out request failed"))
-      .mockResolvedValueOnce(undefined);
+    mocks.revokeAndSignOut.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
 
     render(<WebSessionGate />);
 
     expect(await screen.findByText("Authentication temporarily unavailable")).toBeTruthy();
-    expect(mocks.signOut).toHaveBeenCalledTimes(1);
+    expect(mocks.revokeAndSignOut).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
 
-    await waitFor(() => expect(mocks.signOut).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mocks.revokeAndSignOut).toHaveBeenCalledTimes(2));
   });
 
   it("holds authenticated children until web-session validity is confirmed", async () => {
@@ -109,7 +107,7 @@ describe("WebSessionGate", () => {
     );
 
     expect(await screen.findByText("Authentication temporarily unavailable")).toBeTruthy();
-    expect(mocks.signOut).not.toHaveBeenCalled();
+    expect(mocks.revokeAndSignOut).not.toHaveBeenCalled();
     expect(screen.queryByText("Protected application")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
