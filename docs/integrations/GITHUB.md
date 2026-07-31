@@ -97,7 +97,8 @@ comment on the PR.
 ### Current Branch Behavior
 
 PR comment sessions start from the PR head branch, so implementation requests can update the
-existing PR.
+existing PR. Commands on pull requests from forks receive a visible skip response because the
+sandbox cannot safely update a fork head through the base repository checkout.
 
 Each accepted GitHub webhook starts a new Open-Inspect session. GitHub comments do not continue an
 existing session the way Slack thread replies do. The agent still reads the current PR conversation

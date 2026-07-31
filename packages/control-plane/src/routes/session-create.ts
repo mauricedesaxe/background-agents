@@ -85,12 +85,12 @@ async function handleCreateSession(
     // (design §7.6); environment_id records provenance on the session.
     const envInputs = await resolveEnvironmentTarget(
       new EnvironmentStore(ctx.db),
-      body.environmentId
+      body.environmentId,
+      body.branch && body.branchRepository
+        ? { ...body.branchRepository, branch: body.branch }
+        : undefined
     );
     repositories = await resolveSessionRepositories(env, envInputs, ctx, logger);
-    if (body.branch) {
-      repositories[0] = { ...repositories[0], baseBranch: body.branch };
-    }
     environmentId = body.environmentId;
   } else if (body.repositories) {
     repositories = await resolveSessionRepositories(env, body.repositories, ctx, logger);
@@ -190,7 +190,7 @@ async function handleCreateSession(
     repoName,
     repoId,
     defaultBranch,
-    branch: body.branch,
+    branch: body.environmentId ? undefined : body.branch,
     repositories,
     environmentId,
     title: body.title,

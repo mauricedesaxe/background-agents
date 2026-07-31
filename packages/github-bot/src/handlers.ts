@@ -106,10 +106,12 @@ async function sendPrompt(
 
 export function extractAuthorizedCommand(body: string, botUsername: string): string | null {
   const slashCommand = /^\/open-inspect(?:\s+(.+))?$/i;
-  const mention = new RegExp(`@${escapeRegExp(botUsername)}(?![\\w-])`, "gi");
+  const mention = new RegExp(`@${escapeRegExp(botUsername)}(?![\\w-])`, "i");
   let fence: "```" | "~~~" | null = null;
+  const lines = body.split(/\r?\n/);
 
-  for (const line of body.split(/\r?\n/)) {
+  for (const [index, line] of lines.entries()) {
+    if (/^(?: {4}|\t)/.test(line)) continue;
     const trimmed = line.trimStart();
     if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
       const marker = trimmed.startsWith("```") ? "```" : "~~~";
@@ -119,14 +121,21 @@ export function extractAuthorizedCommand(body: string, botUsername: string): str
     if (fence || trimmed.startsWith(">")) continue;
 
     const slashMatch = slashCommand.exec(trimmed);
-    const slashInstruction = slashMatch?.[1]?.trim();
+    const slashInstruction = slashMatch
+      ? [slashMatch[1] ?? "", ...lines.slice(index + 1)].join("\n").trim()
+      : "";
     if (slashInstruction) return slashInstruction;
 
-    if (mention.test(trimmed)) {
-      const mentionInstruction = trimmed.replace(mention, "").trim();
+    const mentionMatch = mention.exec(trimmed);
+    if (mentionMatch) {
+      const mentionInstruction = [
+        trimmed.slice(mentionMatch.index + mentionMatch[0].length),
+        ...lines.slice(index + 1),
+      ]
+        .join("\n")
+        .trim();
       if (mentionInstruction) return mentionInstruction;
     }
-    mention.lastIndex = 0;
   }
 
   return null;
@@ -225,8 +234,15 @@ async function postCommandStatus(
   await postIssueComment(ghToken, owner, repoName, issueNumber, body, resolveAppName(env));
 }
 
-function withBranch(target: SessionTargetFields, branch: string): SessionTargetFields {
-  return { ...target, branch };
+function withBranch(
+  target: SessionTargetFields,
+  branch: string,
+  repoOwner: string,
+  repoName: string
+): SessionTargetFields {
+  return "environmentId" in target
+    ? { ...target, branch, branchRepository: { repoOwner, repoName } }
+    : { ...target, branch };
 }
 
 export async function handleReviewRequested(
@@ -500,15 +516,22 @@ export async function handleIssueComment(
     issue_number: issue.number,
     command_target: kind,
   };
-  fireAndForgetReaction(
-    log,
-    ghToken,
-    `https://api.github.com/repos/${owner}/${repoName}/issues/comments/${comment.id}/reactions`,
-    resolveAppName(env),
-    meta
-  );
 
   try {
+    const pullRequest = issue.pull_request
+      ? await fetchPullRequest(ghToken, owner, repoName, issue.number, resolveAppName(env))
+      : null;
+    if (pullRequest?.isCrossRepository) {
+      await postCommandStatus(
+        env,
+        ghToken,
+        owner,
+        repoName,
+        issue.number,
+        "Open Inspect cannot safely update fork pull requests yet. Run the command on a branch in the base repository."
+      );
+      return { outcome: "skipped", skip_reason: "fork_pull_request" };
+    }
     const resolvedTarget = await resolveSessionTarget(env, log, {
       owner,
       repoName,
@@ -517,12 +540,16 @@ export async function handleIssueComment(
       ghToken,
       traceId,
     });
-    const pullRequest = issue.pull_request
-      ? await fetchPullRequest(ghToken, owner, repoName, issue.number, resolveAppName(env))
-      : null;
     const branch = pullRequest?.head ?? repo.default_branch;
+    fireAndForgetReaction(
+      log,
+      ghToken,
+      `https://api.github.com/repos/${owner}/${repoName}/issues/comments/${comment.id}/reactions`,
+      resolveAppName(env),
+      meta
+    );
     const sessionId = await createSession(env, traceId, {
-      target: withBranch(resolvedTarget, branch),
+      target: withBranch(resolvedTarget, branch, owner, repoName),
       title: `GitHub: ${issue.pull_request ? "PR" : "Issue"} #${issue.number} command`,
       model: config.model,
       reasoningEffort: config.reasoningEffort,
@@ -541,6 +568,8 @@ export async function handleIssueComment(
           author: pullRequest.author,
           base: pullRequest.base,
           head: pullRequest.head,
+          headSha: pullRequest.headSha,
+          headRepository: pullRequest.headRepository,
           command,
           commenter: sender.login,
           isPublic: !repo.private,
@@ -652,15 +681,33 @@ export async function handleReviewComment(
   const { ghToken } = gating;
 
   const meta = { trace_id: traceId, repo: repoFullName, pull_number: pr.number };
-  fireAndForgetReaction(
-    log,
-    ghToken,
-    `https://api.github.com/repos/${owner}/${repoName}/pulls/comments/${comment.id}/reactions`,
-    resolveAppName(env),
-    meta
-  );
 
   try {
+    const pullRequest = await fetchPullRequest(
+      ghToken,
+      owner,
+      repoName,
+      pr.number,
+      resolveAppName(env)
+    );
+    if (pullRequest.isCrossRepository) {
+      await postCommandStatus(
+        env,
+        ghToken,
+        owner,
+        repoName,
+        pr.number,
+        "Open Inspect cannot safely update fork pull requests yet. Run the command on a branch in the base repository."
+      );
+      return { outcome: "skipped", skip_reason: "fork_pull_request" };
+    }
+    fireAndForgetReaction(
+      log,
+      ghToken,
+      `https://api.github.com/repos/${owner}/${repoName}/pulls/comments/${comment.id}/reactions`,
+      resolveAppName(env),
+      meta
+    );
     const target = withBranch(
       await resolveSessionTarget(env, log, {
         owner,
@@ -670,7 +717,9 @@ export async function handleReviewComment(
         ghToken,
         traceId,
       }),
-      pr.head.ref
+      pullRequest.head,
+      owner,
+      repoName
     );
     const sessionId = await createSession(env, traceId, {
       target,
@@ -685,9 +734,13 @@ export async function handleReviewComment(
       owner,
       repo: repoName,
       number: pr.number,
-      title: pr.title,
-      base: pr.base.ref,
-      head: pr.head.ref,
+      title: pullRequest.title,
+      body: pullRequest.body,
+      author: pullRequest.author,
+      base: pullRequest.base,
+      head: pullRequest.head,
+      headSha: pullRequest.headSha,
+      headRepository: pullRequest.headRepository,
       command,
       commenter: sender.login,
       isPublic: !repo.private,

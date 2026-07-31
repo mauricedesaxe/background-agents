@@ -187,9 +187,19 @@ describe("createSessionRequestSchema environmentId (three-way exclusivity)", () 
     const result = createSessionRequestSchema.safeParse({
       environmentId: "env_abc123",
       branch: "main",
+      branchRepository: { repoOwner: "acme", repoName: "app" },
     });
 
     expect(result.success).toBe(true);
+  });
+
+  it("rejects an environment branch override without its repository identity", () => {
+    const result = createSessionRequestSchema.safeParse({
+      environmentId: "env_abc123",
+      branch: "main",
+    });
+
+    expect(result.success).toBe(false);
   });
 
   it("rejects environmentId combined with a repositories list", () => {

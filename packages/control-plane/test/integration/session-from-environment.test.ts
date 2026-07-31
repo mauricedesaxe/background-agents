@@ -85,6 +85,21 @@ describe("sessions from environments", () => {
       ]);
     });
 
+    it("applies a branch override to a secondary trigger repository", async () => {
+      await seedEnvironment("env_fs", "Full Stack", [WEB, API]);
+
+      const inputs = await resolveEnvironmentTarget(new EnvironmentStore(env.DB), "env_fs", {
+        repoOwner: "ACME",
+        repoName: "API",
+        branch: "feature/api-fix",
+      });
+
+      expect(inputs).toEqual([
+        { repoOwner: "acme", repoName: "web", baseBranch: "main" },
+        { repoOwner: "acme", repoName: "api", baseBranch: "feature/api-fix" },
+      ]);
+    });
+
     it("raises 404 for a missing environment", async () => {
       await expect(
         resolveEnvironmentTarget(new EnvironmentStore(env.DB), "env_missing")
