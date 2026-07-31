@@ -13,8 +13,12 @@ const pullRequestResponseSchema = z.object({
   title: z.string(),
   body: z.string().nullable(),
   user: z.object({ login: z.string() }),
-  head: z.object({ ref: z.string() }),
-  base: z.object({ ref: z.string() }),
+  head: z.object({
+    ref: z.string(),
+    sha: z.string(),
+    repo: z.object({ full_name: z.string() }).nullable(),
+  }),
+  base: z.object({ ref: z.string(), repo: z.object({ full_name: z.string() }) }),
 });
 
 export interface GitHubAppConfig {
@@ -222,7 +226,11 @@ export async function fetchPullRequest(
   body: string | null;
   author: string;
   head: string;
+  headSha: string;
+  headRepository: string | null;
   base: string;
+  baseRepository: string;
+  isCrossRepository: boolean;
 }> {
   const response = await fetch(
     `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}`,
@@ -240,11 +248,18 @@ export async function fetchPullRequest(
   }
   const parsed = pullRequestResponseSchema.safeParse(await response.json());
   if (!parsed.success) throw new Error("Failed to fetch pull request: invalid response");
+  const headRepository = parsed.data.head.repo?.full_name ?? null;
+  const baseRepository = parsed.data.base.repo.full_name;
   return {
     title: parsed.data.title,
     body: parsed.data.body,
     author: parsed.data.user.login,
     head: parsed.data.head.ref,
+    headSha: parsed.data.head.sha,
+    headRepository,
     base: parsed.data.base.ref,
+    baseRepository,
+    isCrossRepository:
+      headRepository === null || headRepository.toLowerCase() !== baseRepository.toLowerCase(),
   };
 }

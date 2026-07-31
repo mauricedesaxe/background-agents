@@ -186,6 +186,8 @@ export function buildPullRequestActionPrompt(params: {
   author?: string;
   base?: string;
   head?: string;
+  headSha?: string;
+  headRepository?: string | null;
   filePath?: string;
   diffHunk?: string;
   commentId?: number;
@@ -203,6 +205,8 @@ export function buildPullRequestActionPrompt(params: {
     author,
     base,
     head,
+    headSha,
+    headRepository,
     filePath,
     diffHunk,
     commentId,
@@ -241,7 +245,14 @@ export function buildPullRequestActionPrompt(params: {
       prDetails += `\n${buildUntrustedUserContentBlock({
         source: "github_pr_branches",
         author: "github",
-        content: `base: ${base}\nhead: ${head}`,
+        content: [
+          `base: ${base}`,
+          `head: ${head}`,
+          headSha ? `head SHA: ${headSha}` : null,
+          headRepository ? `head repository: ${headRepository}` : null,
+        ]
+          .filter((line): line is string => line !== null)
+          .join("\n"),
       })}`;
     }
   }

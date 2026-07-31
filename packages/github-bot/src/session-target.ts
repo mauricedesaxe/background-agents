@@ -24,7 +24,11 @@ import type { ResolvedGitHubConfig } from "./utils/integration-config";
  */
 export type SessionTargetFields =
   | { repoOwner: string; repoName: string; branch?: string }
-  | { environmentId: string; branch?: string };
+  | {
+      environmentId: string;
+      branch?: string;
+      branchRepository?: { repoOwner: string; repoName: string };
+    };
 
 const metadataResponseSchema = z.object({
   metadata: z.object({ defaultEnvironmentId: z.string().optional() }).nullable(),

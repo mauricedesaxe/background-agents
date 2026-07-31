@@ -83,6 +83,7 @@ interface CreateSessionRepositoryFields {
   repoOwner?: string | null;
   repoName?: string | null;
   branch?: string;
+  branchRepository?: { repoOwner: string; repoName: string } | null;
   environmentId?: string | null;
 }
 
@@ -91,11 +92,11 @@ function hasMatchingRepositoryIdentifiers(data: CreateSessionRepositoryFields): 
 }
 
 function hasRepositoryForBranch(data: CreateSessionRepositoryFields): boolean {
-  return (
-    hasRepositoryIdentifier(data.repoOwner) ||
-    hasRepositoryIdentifier(data.environmentId) ||
-    !data.branch?.trim()
-  );
+  const hasBranch = Boolean(data.branch?.trim());
+  const hasBranchRepository = data.branchRepository != null;
+  if (!hasBranch) return !hasBranchRepository;
+  if (hasRepositoryIdentifier(data.repoOwner)) return !hasBranchRepository;
+  return hasRepositoryIdentifier(data.environmentId) && hasBranchRepository;
 }
 
 function hasScalarRepositoryTarget(data: CreateSessionRepositoryFields): boolean {
@@ -123,6 +124,9 @@ const createSessionRequestBaseSchema = z.object({
   model: z.string().optional(),
   reasoningEffort: z.string().optional(),
   branch: z.string().optional(),
+  branchRepository: z
+    .object({ repoOwner: z.string().trim().min(1), repoName: z.string().trim().min(1) })
+    .nullish(),
   /**
    * Ordered repository list ([0] = primary). Mutually exclusive with the
    * scalar repoOwner/repoName fields and environmentId.
@@ -143,7 +147,7 @@ export const createSessionRequestSchema = createSessionRequestBaseSchema
     path: ["repoName"],
   })
   .refine(hasRepositoryForBranch, {
-    message: "branch requires repoOwner/repoName or environmentId",
+    message: "branch requires a scalar repository or an identified environment repository",
     path: ["branch"],
   })
   .refine(hasExclusiveSessionTarget, {
@@ -164,7 +168,7 @@ export const createSessionInputSchema = createSessionRequestBaseSchema
     path: ["repoName"],
   })
   .refine(hasRepositoryForBranch, {
-    message: "branch requires repoOwner/repoName or environmentId",
+    message: "branch requires a scalar repository or an identified environment repository",
     path: ["branch"],
   })
   .refine(hasExclusiveSessionTarget, {

@@ -19,7 +19,11 @@ vi.mock("../src/github-auth", () => ({
     body: "Adds Redis caching",
     author: "alice",
     head: "feature/cache",
+    headSha: "abc123",
+    headRepository: "acme/widgets",
     base: "main",
+    baseRepository: "acme/widgets",
+    isCrossRepository: false,
   }),
 }));
 
@@ -227,7 +231,11 @@ beforeEach(() => {
     body: "Adds Redis caching",
     author: "alice",
     head: "feature/cache",
+    headSha: "abc123",
+    headRepository: "acme/widgets",
     base: "main",
+    baseRepository: "acme/widgets",
+    isCrossRepository: false,
   });
   vi.mocked(getGitHubConfig).mockResolvedValue({ ...defaultConfig });
 });
@@ -620,10 +628,46 @@ describe("handleIssueComment", () => {
     expect(promptSendBody(getControlPlaneFetch(env)).content).toContain("review this PR");
   });
 
+  it("visibly rejects commands that would update a fork PR", async () => {
+    vi.mocked(fetchPullRequest).mockResolvedValue({
+      title: "Add caching",
+      body: "Adds Redis caching",
+      author: "contributor",
+      head: "main",
+      headSha: "fork-sha",
+      headRepository: "contributor/widgets",
+      base: "main",
+      baseRepository: "acme/widgets",
+      isCrossRepository: true,
+    });
+    const env = createMockEnv();
+    const log = createMockLogger();
+    const payload: IssueCommentPayload = {
+      ...issueCommentPayload,
+      comment: { ...issueCommentPayload.comment, body: "/open-inspect review this PR" },
+    };
+
+    const result = await handleIssueComment(env, log, payload, "trace-fork-pr");
+
+    expect(result).toEqual({ outcome: "skipped", skip_reason: "fork_pull_request" });
+    expect(postIssueComment).toHaveBeenCalledWith(
+      "test-installation-token",
+      "acme",
+      "widgets",
+      42,
+      expect.stringContaining("fork pull requests"),
+      "Open-Inspect"
+    );
+    expect(postReaction).not.toHaveBeenCalled();
+    expect(getControlPlaneFetch(env)).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["mid-sentence", "Could someone /open-inspect investigate this?"],
     ["quoted", "> /open-inspect investigate this"],
     ["fenced", "```\n/open-inspect investigate this\n```"],
+    ["space-indented", "    /open-inspect investigate this"],
+    ["tab-indented", "\t/open-inspect investigate this"],
   ])("ignores %s command examples", async (_label, body) => {
     const env = createMockEnv();
     const log = createMockLogger();
@@ -636,6 +680,23 @@ describe("handleIssueComment", () => {
 
     expect(result).toEqual({ outcome: "skipped", skip_reason: "no_mention" });
     expect(generateInstallationToken).not.toHaveBeenCalled();
+  });
+
+  it("preserves multiline instructions after a full bot mention", async () => {
+    const env = createMockEnv();
+    const log = createMockLogger();
+    const payload: IssueCommentPayload = {
+      ...issueCommentPayload,
+      comment: {
+        ...issueCommentPayload.comment,
+        body: "@test-bot[bot]\nfix the error handling\nand add a regression test",
+      },
+    };
+
+    await handleIssueComment(env, log, payload, "trace-multiline-mention");
+
+    const prompt = promptSendBody(getControlPlaneFetch(env)).content;
+    expect(prompt).toContain("fix the error handling\nand add a regression test");
   });
 
   it("returns early if no @mention", async () => {
@@ -1368,5 +1429,6 @@ describe("default environment targets", () => {
     const sessionBody = sessionCreateBody(getControlPlaneFetch(env));
     expect(sessionBody.environmentId).toBe("env_abc");
     expect(sessionBody.branch).toBe("feature/cache");
+    expect(sessionBody.branchRepository).toEqual({ repoOwner: "acme", repoName: "widgets" });
   });
 });
