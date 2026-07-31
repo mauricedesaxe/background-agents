@@ -75,7 +75,12 @@ const pullRequestOpenedBody = JSON.stringify({
     head: { ref: "feature/test", sha: "abc123", repo: { id: 1 } },
     base: { ref: "main", repo: { id: 1 } },
   },
-  repository: { owner: { login: "test" }, name: "repo", private: false },
+  repository: {
+    owner: { login: "test" },
+    name: "repo",
+    private: false,
+    default_branch: "main",
+  },
   sender: { login: "alice", id: 1, avatar_url: "https://example.test/a.png" },
 });
 

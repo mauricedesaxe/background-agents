@@ -88,6 +88,9 @@ async function handleCreateSession(
       body.environmentId
     );
     repositories = await resolveSessionRepositories(env, envInputs, ctx, logger);
+    if (body.branch) {
+      repositories[0] = { ...repositories[0], baseBranch: body.branch };
+    }
     environmentId = body.environmentId;
   } else if (body.repositories) {
     repositories = await resolveSessionRepositories(env, body.repositories, ctx, logger);

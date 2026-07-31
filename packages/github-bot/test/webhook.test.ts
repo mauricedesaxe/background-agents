@@ -1,5 +1,21 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import type { Env } from "../src/types";
+import type * as Handlers from "../src/handlers";
+
+const { handleIssueCommentMock } = vi.hoisted(() => ({
+  handleIssueCommentMock: vi.fn().mockResolvedValue({
+    outcome: "processed",
+    session_id: "session-123",
+    message_id: "message-123",
+    handler_action: "command",
+  }),
+}));
+
+vi.mock("../src/handlers", async (importOriginal) => ({
+  ...(await importOriginal<Handlers>()),
+  handleIssueComment: handleIssueCommentMock,
+}));
+
 import app from "../src/index";
 
 /** Generate a valid GitHub webhook signature for a given secret and body. */
@@ -63,6 +79,10 @@ async function flushWaitUntil(ctx: ReturnType<typeof makeCtx>, callIndex = 0): P
 }
 
 describe("POST /webhooks/github", () => {
+  beforeEach(() => {
+    handleIssueCommentMock.mockClear();
+  });
+
   it("returns 401 for invalid signature", async () => {
     const body = '{"action":"created"}';
     const res = await app.fetch(
@@ -258,6 +278,65 @@ describe("POST /webhooks/github", () => {
     expect(ctx.waitUntil).toHaveBeenCalledOnce();
     await flushWaitUntil(ctx);
   });
+
+  it.each([
+    ["issue", undefined, "/open-inspect investigate this bug"],
+    [
+      "pull request",
+      { url: "https://api.github.com/repos/test/repo/pulls/42" },
+      "/open-inspect review this PR",
+    ],
+  ])(
+    "dispatches a /open-inspect command from a %s comment",
+    async (_kind, pullRequest, command) => {
+      const body = JSON.stringify({
+        action: "created",
+        issue: {
+          number: 42,
+          title: "Investigate stale cache",
+          body: "The cache sometimes serves old data.",
+          ...(pullRequest ? { pull_request: pullRequest } : {}),
+        },
+        comment: { id: 99, body: command, user: { login: "alice" } },
+        repository: {
+          owner: { login: "test" },
+          name: "repo",
+          private: false,
+          default_branch: "main",
+        },
+        sender: {
+          login: "alice",
+          id: 123,
+          avatar_url: "https://avatars.githubusercontent.com/u/123",
+        },
+      });
+      const signature = await sign(SECRET, body);
+      const ctx = makeCtx();
+
+      const response = await app.fetch(
+        new Request("http://localhost/webhooks/github", {
+          method: "POST",
+          body,
+          headers: {
+            "X-Hub-Signature-256": signature,
+            "X-GitHub-Event": "issue_comment",
+          },
+        }),
+        makeEnv(),
+        ctx
+      );
+      await flushWaitUntil(ctx);
+
+      expect(response.status).toBe(200);
+      expect(handleIssueCommentMock).toHaveBeenCalledOnce();
+      const dispatchedPayload = handleIssueCommentMock.mock.calls[0][2];
+      expect(dispatchedPayload).toMatchObject({
+        issue: { number: 42 },
+        comment: { body: command },
+      });
+      expect(dispatchedPayload.issue.pull_request).toEqual(pullRequest);
+    }
+  );
 
   it("forwards closed pull request lifecycle fields to the control plane", async () => {
     const body = JSON.stringify({

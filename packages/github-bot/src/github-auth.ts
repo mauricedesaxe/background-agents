@@ -9,6 +9,14 @@ const installationTokenResponseSchema = z.object({
   token: z.string(),
 });
 
+const pullRequestResponseSchema = z.object({
+  title: z.string(),
+  body: z.string().nullable(),
+  user: z.object({ login: z.string() }),
+  head: z.object({ ref: z.string() }),
+  base: z.object({ ref: z.string() }),
+});
+
 export interface GitHubAppConfig {
   appId: string;
   privateKey: string;
@@ -173,4 +181,70 @@ export async function postReaction(
   } catch {
     return false;
   }
+}
+
+export async function postIssueComment(
+  token: string,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  body: string,
+  userAgent: string = DEFAULT_APP_NAME
+): Promise<boolean> {
+  try {
+    const response = await fetch(
+      `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}/comments`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          "User-Agent": userAgent,
+        },
+        body: JSON.stringify({ body }),
+      }
+    );
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function fetchPullRequest(
+  token: string,
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  userAgent: string = DEFAULT_APP_NAME
+): Promise<{
+  title: string;
+  body: string | null;
+  author: string;
+  head: string;
+  base: string;
+}> {
+  const response = await fetch(
+    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": userAgent,
+      },
+    }
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch pull request: ${response.status}`);
+  }
+  const parsed = pullRequestResponseSchema.safeParse(await response.json());
+  if (!parsed.success) throw new Error("Failed to fetch pull request: invalid response");
+  return {
+    title: parsed.data.title,
+    body: parsed.data.body,
+    author: parsed.data.user.login,
+    head: parsed.data.head.ref,
+    base: parsed.data.base.ref,
+  };
 }

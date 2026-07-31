@@ -1,8 +1,8 @@
 # GitHub Integration
 
-Open-Inspect's GitHub integration lets your team start agent work from pull requests. The GitHub Bot
-can automatically review new PRs and respond when you mention it in PR comments or inline review
-threads.
+Open-Inspect's GitHub integration lets your team start agent work from issues and pull requests. The
+GitHub Bot can automatically review new PRs and respond to `/open-inspect` commands or full bot
+mentions.
 
 This guide is for people using the GitHub integration day to day. If you are installing the GitHub
 App or deploying the bot worker, start with
@@ -15,28 +15,29 @@ App or deploying the bot worker, start with
 
 1. Make sure the GitHub App is installed on the repository.
 2. To get an automatic review, open a non-draft PR in a repository where auto-review is enabled.
-3. To ask for analysis or a reply, mention the bot in a PR comment:
+3. To ask for work on an issue or PR, start a comment line with the short command:
    ```text
-   @my-app[bot] can you explain why the checkout test is failing?
+   /open-inspect investigate why the checkout test is failing
    ```
-4. For line-specific discussion, mention the bot in an inline PR review comment.
-5. Watch for the eyes reaction, which means the bot accepted the request.
-6. Open the Open-Inspect web app to watch the full session.
+4. The full `@my-app[bot]` mention remains supported when you know it. GitHub may not autocomplete
+   the App bot account.
+5. For line-specific discussion, use the command in an inline PR review comment.
+6. Watch for the eyes reaction, which means the bot accepted the request.
+7. Open the Open-Inspect web app to watch the full session.
 
 ---
 
 ## Supported Workflows
 
-| Workflow                  | How it works                                                               |
-| ------------------------- | -------------------------------------------------------------------------- |
-| Auto-review new PRs       | Review non-draft PRs when they are opened, if auto-review is enabled       |
-| Respond to PR comments    | Mention the bot in a PR conversation comment                               |
-| Respond to review threads | Mention the bot in an inline review comment                                |
-| Post back to GitHub       | Submit a PR review, reply to a review thread, or post a PR summary comment |
-| Customize behavior        | Set repository scope, trigger users, models, and custom instructions       |
-
-Open-Inspect does not use GitHub slash commands today, and it does not support requesting the GitHub
-App bot through the PR reviewer picker. Use auto-review or `@mention` comments instead.
+| Workflow                  | How it works                                                         |
+| ------------------------- | -------------------------------------------------------------------- |
+| Auto-review new PRs       | Review non-draft PRs when they are opened, if auto-review is enabled |
+| Investigate an issue      | Run `/open-inspect investigate this bug` on an issue                 |
+| Implement an issue        | Ask the agent to implement it and open a linked PR                   |
+| Respond to PR comments    | Run `/open-inspect <instruction>` in a PR conversation               |
+| Respond to review threads | Run the command in an inline review comment                          |
+| Post back to GitHub       | Submit a PR review, issue result, thread reply, or PR summary        |
+| Customize behavior        | Set repository scope, trigger users, models, and custom instructions |
 
 ---
 
@@ -67,38 +68,43 @@ comments when useful.
 
 ---
 
-## `@Mention` Actions
+## Comment Commands
 
 ### PR Conversation Comments
 
-Mention the GitHub App bot in a PR conversation comment to ask for analysis, a follow-up answer, or
-a GitHub reply:
+Start a PR conversation comment with `/open-inspect` to ask for analysis, implementation, or a
+GitHub reply:
 
 ```text
-@my-app[bot] can you explain why this retry path is failing?
+/open-inspect can you explain why this retry path is failing?
 ```
 
-Open-Inspect strips the bot mention before sending the request to the agent. The rest of the comment
-becomes the prompt.
+The full bot mention is a compatible trigger. Open-Inspect removes either trigger before sending the
+authorized instruction to the agent.
+
+### Issues
+
+Issue commands start from the repository default branch. Investigation requests post findings
+without changing code. Implementation requests can create a branch through the managed
+`create-pull-request` tool and link the resulting PR on the issue. They do not close the issue.
 
 ### Inline Review Threads
 
-When you mention the bot in a PR review thread, Open-Inspect includes the file path and diff context
+When you run the command in a PR review thread, Open-Inspect includes the file path and diff context
 from that thread. The agent can reply directly to the review thread and can also post a summary
 comment on the PR.
 
 ### Current Branch Behavior
 
-Comment-triggered sessions currently start from the repository default branch, not the PR head
-branch. Use them for responses and review-thread discussion rather than asking the agent to push
-commits to the existing PR branch.
+PR comment sessions start from the PR head branch, so implementation requests can update the
+existing PR.
 
 Each accepted GitHub webhook starts a new Open-Inspect session. GitHub comments do not continue an
 existing session the way Slack thread replies do. The agent still reads the current PR conversation
 when it needs context.
 
-Comment-triggered actions only run on pull requests. Mentions on ordinary GitHub issues are ignored.
-Comments from the bot itself are also ignored so the bot does not respond to its own output.
+Commands must begin a non-quoted comment line. Quoted examples, fenced code blocks, mid-sentence
+`/open-inspect` text, edited comments, and comments from the bot itself are ignored.
 
 ---
 
@@ -115,8 +121,8 @@ For auto-review workflows, the agent posts the review result back to the PR. Dep
 finds, that may be a general review comment, an approval, a request for changes, or inline review
 comments.
 
-For `@mention` workflows, the agent posts a PR comment summarizing its response or answering the
-question. If the request came from an inline review thread, the agent may also reply in that thread.
+For comment-command workflows, the agent posts an issue or PR comment summarizing its response. If
+the request came from an inline review thread, the agent may also reply in that thread.
 
 GitHub does not receive the same managed completion message that Slack receives. After the initial
 eyes reaction, GitHub-facing output is written by the agent from inside the session. Use the
@@ -153,7 +159,7 @@ repository, event type, enabled state, and trigger conditions.
 | --------------------------- | ------------------------------------------------------------------------- |
 | Model and reasoning effort  | Model and reasoning depth for GitHub-started sessions, when configured    |
 | Code Review Instructions    | Extra guidance appended to PR review prompts                              |
-| Comment Action Instructions | Extra guidance appended to `@mention` action prompts                      |
+| Comment Action Instructions | Extra guidance appended to issue and PR command prompts                   |
 | Repository Overrides        | Per-repository overrides for model, reasoning, instructions, and behavior |
 
 Repository overrides take priority over global defaults for the repository they apply to. The web UI
@@ -178,19 +184,16 @@ override nor global default sets a model, sessions use the deployment default mo
 
 ### Bot Behavior
 
-- Auto-review skips draft PRs and PRs opened by the GitHub App bot. Manual `@mention` triggers are
-  still evaluated through the normal repository and user gates.
-- The bot ignores bot-authored comments, ordinary issue comments, and comments that do not mention
-  the bot.
+- Auto-review skips draft PRs and PRs opened by the GitHub App bot. Manual commands are still
+  evaluated through the normal repository and user gates.
+- The bot ignores bot-authored comments and comments without a valid command trigger.
 - If the bot cannot load its GitHub integration settings, it fails closed and does not start direct
   bot sessions.
 
 ### Prompt Safety
 
-- Initial prompts mark selected GitHub fields as untrusted. Code-review prompts wrap PR title,
-  author, branches, and description; comment-triggered prompts wrap the triggering comment.
-- Review-thread file and diff context, plus GitHub context later read by the agent, are not
-  separately transformed by the bot.
+- Initial prompts separate the authorized command from untrusted repository context. PR and issue
+  titles, descriptions, branches, authors, file locations, and diffs cannot override the command.
 - Webhooks are verified before Open-Inspect acts on them. Duplicate webhook deliveries are
   deduplicated so GitHub retries do not normally create duplicate direct bot sessions.
 
@@ -213,13 +216,14 @@ list.
 Auto-review only runs for newly opened, non-draft PRs. It is skipped for draft PRs, bot-authored
 PRs, disabled repositories, and users who are not allowed to trigger the bot.
 
-If a PR was converted from draft to ready for review, mention the bot in a PR comment instead.
+If a PR was converted from draft to ready for review, run `/open-inspect review this PR` in a PR
+comment instead.
 
-### A mention did not start a session
+### A command did not start a session
 
-Mentions must be in a pull request conversation comment or PR review thread. Mentions on ordinary
-GitHub issues are ignored. Use the bot's full GitHub username, including `[bot]`, such as
-`@my-app[bot]`.
+Put `/open-inspect <instruction>` at the start of a non-quoted line on an issue, PR conversation, or
+PR review thread. The full bot username, including `[bot]`, remains supported. Check the visible
+skip response for a disabled repository or unauthorized user.
 
 ### I see an eyes reaction but no follow-up
 

@@ -13,8 +13,18 @@ import type {
   ReviewCommentPayload,
 } from "./types";
 import type { Logger } from "./logger";
-import { generateInstallationToken, postReaction, checkSenderPermission } from "./github-auth";
-import { buildCodeReviewPrompt, buildCommentActionPrompt } from "./prompts";
+import {
+  generateInstallationToken,
+  postReaction,
+  postIssueComment,
+  checkSenderPermission,
+  fetchPullRequest,
+} from "./github-auth";
+import {
+  buildCodeReviewPrompt,
+  buildIssueActionPrompt,
+  buildPullRequestActionPrompt,
+} from "./prompts";
 import { resolveSessionTarget, type SessionTargetFields } from "./session-target";
 import { getGitHubConfig, type ResolvedGitHubConfig } from "./utils/integration-config";
 import { requestedReviewerPayloadSchema } from "./payload-schemas";
@@ -94,8 +104,32 @@ async function sendPrompt(
   return result.data.messageId;
 }
 
-function stripMention(body: string, botUsername: string): string {
-  return body.replace(new RegExp(`@${escapeRegExp(botUsername)}`, "gi"), "").trim();
+export function extractAuthorizedCommand(body: string, botUsername: string): string | null {
+  const slashCommand = /^\/open-inspect(?:\s+(.+))?$/i;
+  const mention = new RegExp(`@${escapeRegExp(botUsername)}(?![\\w-])`, "gi");
+  let fence: "```" | "~~~" | null = null;
+
+  for (const line of body.split(/\r?\n/)) {
+    const trimmed = line.trimStart();
+    if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+      const marker = trimmed.startsWith("```") ? "```" : "~~~";
+      fence = fence === marker ? null : fence === null ? marker : fence;
+      continue;
+    }
+    if (fence || trimmed.startsWith(">")) continue;
+
+    const slashMatch = slashCommand.exec(trimmed);
+    const slashInstruction = slashMatch?.[1]?.trim();
+    if (slashInstruction) return slashInstruction;
+
+    if (mention.test(trimmed)) {
+      const mentionInstruction = trimmed.replace(mention, "").trim();
+      if (mentionInstruction) return mentionInstruction;
+    }
+    mention.lastIndex = 0;
+  }
+
+  return null;
 }
 
 function fireAndForgetReaction(
@@ -119,6 +153,7 @@ type CallerGatingResult =
   | {
       allowed: false;
       reason: "sender_not_allowed" | "sender_insufficient_permission" | "permission_check_failed";
+      ghToken: string | null;
     };
 
 async function resolveCallerGating(
@@ -134,7 +169,7 @@ async function resolveCallerGating(
   if (config.allowedTriggerUsers !== null) {
     if (!config.allowedTriggerUsers.some((u) => u.toLowerCase() === senderLogin.toLowerCase())) {
       log.info("handler.sender_not_allowed", { trace_id: traceId, sender: senderLogin });
-      return { allowed: false, reason: "sender_not_allowed" };
+      return { allowed: false, reason: "sender_not_allowed", ghToken: null };
     }
   }
 
@@ -164,11 +199,34 @@ async function resolveCallerGating(
           repo: repoFullName,
         }
       );
-      return { allowed: false, reason };
+      return { allowed: false, reason, ghToken };
     }
   }
 
   return { allowed: true, ghToken };
+}
+
+async function postCommandStatus(
+  env: Env,
+  token: string | null,
+  owner: string,
+  repoName: string,
+  issueNumber: number,
+  body: string
+): Promise<void> {
+  const ghToken =
+    token ??
+    (await generateInstallationToken({
+      appId: env.GITHUB_APP_ID,
+      privateKey: env.GITHUB_APP_PRIVATE_KEY,
+      installationId: env.GITHUB_APP_INSTALLATION_ID,
+      userAgent: resolveAppName(env),
+    }));
+  await postIssueComment(ghToken, owner, repoName, issueNumber, body, resolveAppName(env));
+}
+
+function withBranch(target: SessionTargetFields, branch: string): SessionTargetFields {
+  return { ...target, branch };
 }
 
 export async function handleReviewRequested(
@@ -385,12 +443,13 @@ export async function handleIssueComment(
   const repoName = repo.name;
   const repoFullName = `${owner}/${repoName}`.toLowerCase();
 
-  if (!issue.pull_request) {
-    log.debug("handler.not_a_pr", { trace_id: traceId, issue_number: issue.number });
-    return { outcome: "skipped", skip_reason: "not_a_pr" };
+  if (sender.login === env.GITHUB_BOT_USERNAME) {
+    log.debug("handler.self_comment_ignored", { trace_id: traceId });
+    return { outcome: "skipped", skip_reason: "self_comment" };
   }
 
-  if (!comment.body.toLowerCase().includes(`@${env.GITHUB_BOT_USERNAME.toLowerCase()}`)) {
+  const command = extractAuthorizedCommand(comment.body, env.GITHUB_BOT_USERNAME);
+  if (!command) {
     log.debug("handler.no_mention", {
       trace_id: traceId,
       issue_number: issue.number,
@@ -399,15 +458,18 @@ export async function handleIssueComment(
     return { outcome: "skipped", skip_reason: "no_mention" };
   }
 
-  if (sender.login === env.GITHUB_BOT_USERNAME) {
-    log.debug("handler.self_comment_ignored", { trace_id: traceId });
-    return { outcome: "skipped", skip_reason: "self_comment" };
-  }
-
   const config = await getGitHubConfig(env, repoFullName, log);
 
   if (config.enabledRepos !== null && !config.enabledRepos.includes(repoFullName)) {
     log.debug("handler.repo_not_enabled", { trace_id: traceId, repo: repoFullName });
+    await postCommandStatus(
+      env,
+      null,
+      owner,
+      repoName,
+      issue.number,
+      "Open Inspect couldn't start this command because this repository is disabled in Settings > Integrations > GitHub."
+    );
     return { outcome: "skipped", skip_reason: "repo_not_enabled" };
   }
 
@@ -421,12 +483,23 @@ export async function handleIssueComment(
     traceId,
     repoFullName
   );
-  if (!gating.allowed) return { outcome: "skipped", skip_reason: gating.reason };
+  if (!gating.allowed) {
+    const reason =
+      gating.reason === "permission_check_failed"
+        ? "Open Inspect couldn't verify your repository permission. Please try again later."
+        : `Open Inspect couldn't start this command because @${sender.login} is not authorized to trigger it.`;
+    await postCommandStatus(env, gating.ghToken, owner, repoName, issue.number, reason);
+    return { outcome: "skipped", skip_reason: gating.reason };
+  }
   const { ghToken } = gating;
 
-  const commentBody = stripMention(comment.body, env.GITHUB_BOT_USERNAME);
-
-  const meta = { trace_id: traceId, repo: repoFullName, pull_number: issue.number };
+  const kind = issue.pull_request ? "pr" : "issue";
+  const meta = {
+    trace_id: traceId,
+    repo: repoFullName,
+    issue_number: issue.number,
+    command_target: kind,
+  };
   fireAndForgetReaction(
     log,
     ghToken,
@@ -435,52 +508,86 @@ export async function handleIssueComment(
     meta
   );
 
-  const target = await resolveSessionTarget(env, log, {
-    owner,
-    repoName,
-    senderLogin: sender.login,
-    config,
-    ghToken,
-    traceId,
-  });
-  const sessionId = await createSession(env, traceId, {
-    target,
-    title: `GitHub: PR #${issue.number} comment`,
-    model: config.model,
-    reasoningEffort: config.reasoningEffort,
-    scmUserId: String(sender.id),
-  });
-  log.info("session.created", { ...meta, session_id: sessionId, action: "comment" });
+  try {
+    const resolvedTarget = await resolveSessionTarget(env, log, {
+      owner,
+      repoName,
+      senderLogin: sender.login,
+      config,
+      ghToken,
+      traceId,
+    });
+    const pullRequest = issue.pull_request
+      ? await fetchPullRequest(ghToken, owner, repoName, issue.number, resolveAppName(env))
+      : null;
+    const branch = pullRequest?.head ?? repo.default_branch;
+    const sessionId = await createSession(env, traceId, {
+      target: withBranch(resolvedTarget, branch),
+      title: `GitHub: ${issue.pull_request ? "PR" : "Issue"} #${issue.number} command`,
+      model: config.model,
+      reasoningEffort: config.reasoningEffort,
+      scmUserId: String(sender.id),
+    });
+    const handlerAction = issue.pull_request ? "pr_command" : "issue_command";
+    log.info("session.created", { ...meta, session_id: sessionId, action: handlerAction });
 
-  const prompt = buildCommentActionPrompt({
-    owner,
-    repo: repoName,
-    number: issue.number,
-    title: issue.title,
-    commentBody,
-    commenter: sender.login,
-    isPublic: !repo.private,
-    commentActionInstructions: config.commentActionInstructions,
-  });
+    const prompt = pullRequest
+      ? buildPullRequestActionPrompt({
+          owner,
+          repo: repoName,
+          number: issue.number,
+          title: pullRequest.title,
+          body: pullRequest.body,
+          author: pullRequest.author,
+          base: pullRequest.base,
+          head: pullRequest.head,
+          command,
+          commenter: sender.login,
+          isPublic: !repo.private,
+          commentActionInstructions: config.commentActionInstructions,
+        })
+      : buildIssueActionPrompt({
+          owner,
+          repo: repoName,
+          number: issue.number,
+          title: issue.title,
+          body: issue.body,
+          command,
+          commenter: sender.login,
+          defaultBranch: repo.default_branch,
+          isPublic: !repo.private,
+          commentActionInstructions: config.commentActionInstructions,
+        });
 
-  const messageId = await sendPrompt(env, traceId, sessionId, {
-    content: prompt,
-    authorId: `github:${sender.id}`,
-  });
-  log.info("prompt.sent", {
-    ...meta,
-    session_id: sessionId,
-    message_id: messageId,
-    source: "github",
-    content_length: prompt.length,
-  });
+    const messageId = await sendPrompt(env, traceId, sessionId, {
+      content: prompt,
+      authorId: `github:${sender.id}`,
+    });
+    log.info("prompt.sent", {
+      ...meta,
+      session_id: sessionId,
+      message_id: messageId,
+      source: "github",
+      content_length: prompt.length,
+    });
 
-  return {
-    outcome: "processed",
-    session_id: sessionId,
-    message_id: messageId,
-    handler_action: "comment",
-  };
+    return {
+      outcome: "processed",
+      session_id: sessionId,
+      message_id: messageId,
+      handler_action: handlerAction,
+    };
+  } catch (error) {
+    await postCommandStatus(
+      env,
+      ghToken,
+      owner,
+      repoName,
+      issue.number,
+      "Open Inspect accepted this command but couldn't start the session. Please try again."
+    );
+    throw error;
+  }
 }
 
 export async function handleReviewComment(
@@ -494,7 +601,13 @@ export async function handleReviewComment(
   const repoName = repo.name;
   const repoFullName = `${owner}/${repoName}`.toLowerCase();
 
-  if (!comment.body.toLowerCase().includes(`@${env.GITHUB_BOT_USERNAME.toLowerCase()}`)) {
+  if (sender.login === env.GITHUB_BOT_USERNAME) {
+    log.debug("handler.self_comment_ignored", { trace_id: traceId });
+    return { outcome: "skipped", skip_reason: "self_comment" };
+  }
+
+  const command = extractAuthorizedCommand(comment.body, env.GITHUB_BOT_USERNAME);
+  if (!command) {
     log.debug("handler.no_mention", {
       trace_id: traceId,
       pull_number: pr.number,
@@ -503,15 +616,18 @@ export async function handleReviewComment(
     return { outcome: "skipped", skip_reason: "no_mention" };
   }
 
-  if (sender.login === env.GITHUB_BOT_USERNAME) {
-    log.debug("handler.self_comment_ignored", { trace_id: traceId });
-    return { outcome: "skipped", skip_reason: "self_comment" };
-  }
-
   const config = await getGitHubConfig(env, repoFullName, log);
 
   if (config.enabledRepos !== null && !config.enabledRepos.includes(repoFullName)) {
     log.debug("handler.repo_not_enabled", { trace_id: traceId, repo: repoFullName });
+    await postCommandStatus(
+      env,
+      null,
+      owner,
+      repoName,
+      pr.number,
+      "Open Inspect couldn't start this command because this repository is disabled in Settings > Integrations > GitHub."
+    );
     return { outcome: "skipped", skip_reason: "repo_not_enabled" };
   }
 
@@ -525,10 +641,15 @@ export async function handleReviewComment(
     traceId,
     repoFullName
   );
-  if (!gating.allowed) return { outcome: "skipped", skip_reason: gating.reason };
+  if (!gating.allowed) {
+    const reason =
+      gating.reason === "permission_check_failed"
+        ? "Open Inspect couldn't verify your repository permission. Please try again later."
+        : `Open Inspect couldn't start this command because @${sender.login} is not authorized to trigger it.`;
+    await postCommandStatus(env, gating.ghToken, owner, repoName, pr.number, reason);
+    return { outcome: "skipped", skip_reason: gating.reason };
+  }
   const { ghToken } = gating;
-
-  const commentBody = stripMention(comment.body, env.GITHUB_BOT_USERNAME);
 
   const meta = { trace_id: traceId, repo: repoFullName, pull_number: pr.number };
   fireAndForgetReaction(
@@ -539,55 +660,70 @@ export async function handleReviewComment(
     meta
   );
 
-  const target = await resolveSessionTarget(env, log, {
-    owner,
-    repoName,
-    senderLogin: sender.login,
-    config,
-    ghToken,
-    traceId,
-  });
-  const sessionId = await createSession(env, traceId, {
-    target,
-    title: `GitHub: PR #${pr.number} review comment`,
-    model: config.model,
-    reasoningEffort: config.reasoningEffort,
-    scmUserId: String(sender.id),
-  });
-  log.info("session.created", { ...meta, session_id: sessionId, action: "review_comment" });
+  try {
+    const target = withBranch(
+      await resolveSessionTarget(env, log, {
+        owner,
+        repoName,
+        senderLogin: sender.login,
+        config,
+        ghToken,
+        traceId,
+      }),
+      pr.head.ref
+    );
+    const sessionId = await createSession(env, traceId, {
+      target,
+      title: `GitHub: PR #${pr.number} review comment`,
+      model: config.model,
+      reasoningEffort: config.reasoningEffort,
+      scmUserId: String(sender.id),
+    });
+    log.info("session.created", { ...meta, session_id: sessionId, action: "review_comment" });
 
-  const prompt = buildCommentActionPrompt({
-    owner,
-    repo: repoName,
-    number: pr.number,
-    title: pr.title,
-    base: pr.base.ref,
-    head: pr.head.ref,
-    commentBody,
-    commenter: sender.login,
-    isPublic: !repo.private,
-    filePath: comment.path,
-    diffHunk: comment.diff_hunk,
-    commentId: comment.id,
-    commentActionInstructions: config.commentActionInstructions,
-  });
+    const prompt = buildPullRequestActionPrompt({
+      owner,
+      repo: repoName,
+      number: pr.number,
+      title: pr.title,
+      base: pr.base.ref,
+      head: pr.head.ref,
+      command,
+      commenter: sender.login,
+      isPublic: !repo.private,
+      filePath: comment.path,
+      diffHunk: comment.diff_hunk,
+      commentId: comment.id,
+      commentActionInstructions: config.commentActionInstructions,
+    });
 
-  const messageId = await sendPrompt(env, traceId, sessionId, {
-    content: prompt,
-    authorId: `github:${sender.id}`,
-  });
-  log.info("prompt.sent", {
-    ...meta,
-    session_id: sessionId,
-    message_id: messageId,
-    source: "github",
-    content_length: prompt.length,
-  });
+    const messageId = await sendPrompt(env, traceId, sessionId, {
+      content: prompt,
+      authorId: `github:${sender.id}`,
+    });
+    log.info("prompt.sent", {
+      ...meta,
+      session_id: sessionId,
+      message_id: messageId,
+      source: "github",
+      content_length: prompt.length,
+    });
 
-  return {
-    outcome: "processed",
-    session_id: sessionId,
-    message_id: messageId,
-    handler_action: "review_comment",
-  };
+    return {
+      outcome: "processed",
+      session_id: sessionId,
+      message_id: messageId,
+      handler_action: "review_comment",
+    };
+  } catch (error) {
+    await postCommandStatus(
+      env,
+      ghToken,
+      owner,
+      repoName,
+      pr.number,
+      "Open Inspect accepted this command but couldn't start the session. Please try again."
+    );
+    throw error;
+  }
 }
