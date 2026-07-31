@@ -213,7 +213,11 @@ async function authenticateServiceCredential(
 
   let nonceClaimed: boolean;
   try {
-    nonceClaimed = await new ServiceAuthNonceStore(ctx.db).claim(service, verification.nonce);
+    nonceClaimed = await new ServiceAuthNonceStore(ctx.db).claim(
+      service,
+      verification.nonce,
+      verification.timestampMs
+    );
   } catch (error) {
     logger.error("Service auth nonce claim failed", {
       event: "auth.nonce_claim_failed",
