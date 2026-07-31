@@ -83,6 +83,7 @@ interface CreateSessionRepositoryFields {
   repoOwner?: string | null;
   repoName?: string | null;
   branch?: string;
+  environmentId?: string | null;
 }
 
 function hasMatchingRepositoryIdentifiers(data: CreateSessionRepositoryFields): boolean {
@@ -90,15 +91,15 @@ function hasMatchingRepositoryIdentifiers(data: CreateSessionRepositoryFields): 
 }
 
 function hasRepositoryForBranch(data: CreateSessionRepositoryFields): boolean {
-  return hasRepositoryIdentifier(data.repoOwner) || !data.branch?.trim();
+  return (
+    hasRepositoryIdentifier(data.repoOwner) ||
+    hasRepositoryIdentifier(data.environmentId) ||
+    !data.branch?.trim()
+  );
 }
 
 function hasScalarRepositoryTarget(data: CreateSessionRepositoryFields): boolean {
-  return (
-    hasRepositoryIdentifier(data.repoOwner) ||
-    hasRepositoryIdentifier(data.repoName) ||
-    Boolean(data.branch?.trim())
-  );
+  return hasRepositoryIdentifier(data.repoOwner) || hasRepositoryIdentifier(data.repoName);
 }
 
 function hasExclusiveSessionTarget(
@@ -107,12 +108,6 @@ function hasExclusiveSessionTarget(
     environmentId?: string | null;
   }
 ): boolean {
-  // At most one target mode may be selected: a named environment
-  // (environmentId), an ad-hoc repository list (repositories), or the scalar
-  // repoOwner/repoName/branch form. Presence-based, not length-based: any
-  // provided array selects the list mode (sessionRepositoriesInputSchema
-  // separately rejects empty lists, so [] can never smuggle another mode
-  // through).
   const activeModes = [
     Boolean(data.repositories),
     hasRepositoryIdentifier(data.environmentId),
@@ -130,7 +125,7 @@ const createSessionRequestBaseSchema = z.object({
   branch: z.string().optional(),
   /**
    * Ordered repository list ([0] = primary). Mutually exclusive with the
-   * scalar repoOwner/repoName/branch fields and environmentId.
+   * scalar repoOwner/repoName fields and environmentId.
    */
   repositories: sessionRepositoriesInputSchema.optional(),
   /**
@@ -148,11 +143,11 @@ export const createSessionRequestSchema = createSessionRequestBaseSchema
     path: ["repoName"],
   })
   .refine(hasRepositoryForBranch, {
-    message: "branch requires repoOwner and repoName",
+    message: "branch requires repoOwner/repoName or environmentId",
     path: ["branch"],
   })
   .refine(hasExclusiveSessionTarget, {
-    message: "environmentId, repositories, and repoOwner/repoName/branch are mutually exclusive",
+    message: "environmentId, repositories, and repoOwner/repoName are mutually exclusive",
     path: ["repositories"],
   });
 
@@ -169,11 +164,11 @@ export const createSessionInputSchema = createSessionRequestBaseSchema
     path: ["repoName"],
   })
   .refine(hasRepositoryForBranch, {
-    message: "branch requires repoOwner and repoName",
+    message: "branch requires repoOwner/repoName or environmentId",
     path: ["branch"],
   })
   .refine(hasExclusiveSessionTarget, {
-    message: "environmentId, repositories, and repoOwner/repoName/branch are mutually exclusive",
+    message: "environmentId, repositories, and repoOwner/repoName are mutually exclusive",
     path: ["repositories"],
   });
 

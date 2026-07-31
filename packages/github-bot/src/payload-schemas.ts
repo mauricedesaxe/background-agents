@@ -13,6 +13,7 @@ const repositorySchema = z.object({
   owner: githubUserSchema,
   name: z.string(),
   private: z.boolean(),
+  default_branch: z.string(),
 });
 
 const webhookSummaryRepositorySchema = z.object({
@@ -53,6 +54,7 @@ export const issueCommentPayloadSchema = z.object({
   issue: z.object({
     number: z.number(),
     title: z.string(),
+    body: z.string().nullable(),
     pull_request: z.object({ url: z.string() }).optional(),
   }),
   comment: z.object({

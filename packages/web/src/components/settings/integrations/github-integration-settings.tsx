@@ -99,6 +99,8 @@ export function GitHubIntegrationSettings() {
         )}
       </Section>
 
+      <CommandExamples />
+
       <GlobalSettingsSection settings={settings} availableRepos={availableRepos} />
 
       <Section
@@ -113,6 +115,59 @@ export function GitHubIntegrationSettings() {
         />
       </Section>
     </div>
+  );
+}
+
+const COMMAND_EXAMPLES = [
+  { label: "Issue investigation", command: "/open-inspect investigate this bug" },
+  {
+    label: "Issue implementation",
+    command: "/open-inspect implement this issue and open a PR",
+  },
+  { label: "PR review", command: "/open-inspect review this PR" },
+  { label: "PR follow-up", command: "/open-inspect address the latest review feedback" },
+];
+
+function CommandExamples() {
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const copyCommand = async (label: string, command: string) => {
+    await navigator.clipboard.writeText(command);
+    setCopied(label);
+  };
+
+  return (
+    <Section
+      title="/open-inspect commands"
+      description="Start work from a normal issue or pull request comment."
+    >
+      <p className="text-sm text-muted-foreground mb-3">
+        GitHub may not autocomplete the App bot account. Use the short command instead, or type the
+        full bot mention if you already know it.
+      </p>
+      <div className="grid gap-2">
+        {COMMAND_EXAMPLES.map(({ label, command }) => (
+          <div
+            key={label}
+            className="flex items-center justify-between gap-3 border border-border rounded-sm px-3 py-2"
+          >
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-muted-foreground">{label}</p>
+              <code className="text-sm text-foreground break-all">{command}</code>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => copyCommand(label, command)}
+              aria-label={`Copy ${label.toLowerCase()} command`}
+            >
+              {copied === label ? "Copied" : "Copy"}
+            </Button>
+          </div>
+        ))}
+      </div>
+    </Section>
   );
 }
 

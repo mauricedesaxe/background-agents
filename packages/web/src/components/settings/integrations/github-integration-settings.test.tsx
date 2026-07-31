@@ -134,6 +134,30 @@ afterEach(() => {
 });
 
 describe("GitHubIntegrationSettings", () => {
+  it("shows copyable command examples for issues and pull requests", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    setupSWR({ global: null });
+
+    render(<GitHubIntegrationSettings />);
+
+    expect(screen.getByText("/open-inspect commands")).toBeInTheDocument();
+    expect(
+      screen.getByText(/GitHub may not autocomplete the App bot account/i)
+    ).toBeInTheDocument();
+    expect(screen.getByText("Issue investigation")).toBeInTheDocument();
+    expect(screen.getByText("Issue implementation")).toBeInTheDocument();
+    expect(screen.getByText("PR review")).toBeInTheDocument();
+    expect(screen.getByText("PR follow-up")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Copy issue investigation command" }));
+    expect(writeText).toHaveBeenCalledWith("/open-inspect investigate this bug");
+  });
+
   it("repo auto-review override without an explicit value seeds from global default when saved", async () => {
     const user = userEvent.setup();
     setupSWR({

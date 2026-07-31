@@ -183,13 +183,13 @@ describe("createSessionRequestSchema environmentId (three-way exclusivity)", () 
     expect(result.success).toBe(false);
   });
 
-  it("rejects environmentId combined with a scalar branch", () => {
+  it("accepts a branch override for the environment primary repository", () => {
     const result = createSessionRequestSchema.safeParse({
       environmentId: "env_abc123",
       branch: "main",
     });
 
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
   });
 
   it("rejects environmentId combined with a repositories list", () => {
