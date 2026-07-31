@@ -21,8 +21,8 @@ function getHandler(method: string, path: string) {
   throw new Error(`No route found for ${method} ${path}`);
 }
 
-function createCtx(): RequestContext {
-  const principal: Principal = {
+function createCtx(principalOverride?: Principal): RequestContext {
+  const principal: Principal = principalOverride ?? {
     kind: "user",
     user: {
       provider: "github",
@@ -46,7 +46,7 @@ function createCtx(): RequestContext {
   };
 }
 
-async function postPrompt(body: unknown): Promise<Response> {
+async function postPrompt(body: unknown, principal?: Principal): Promise<Response> {
   const path = "/sessions/session-1/prompt";
   const { handler, match } = getHandler("POST", path);
   return handler(
@@ -57,7 +57,7 @@ async function postPrompt(body: unknown): Promise<Response> {
     }),
     { DB: {} as D1Database } as Env,
     match,
-    createCtx()
+    createCtx(principal)
   );
 }
 
@@ -65,6 +65,11 @@ async function postPrompt(body: unknown): Promise<Response> {
 function forwardedAttachments(): unknown {
   const init = runtimeFetch.mock.calls.at(-1)?.[2] as RequestInit;
   return JSON.parse(String(init.body)).attachments;
+}
+
+function forwardedPrompt(): Record<string, unknown> {
+  const init = runtimeFetch.mock.calls.at(-1)?.[2] as RequestInit;
+  return JSON.parse(String(init.body)) as Record<string, unknown>;
 }
 
 describe("POST /sessions/:id/prompt attachment boundary", () => {
@@ -118,6 +123,43 @@ describe("POST /sessions/:id/prompt attachment boundary", () => {
 
   it("rejects attachments that are not a list", async () => {
     const response = await postPrompt({ content: "wrong type", attachments: "nope" });
+
+    expect(response.status).toBe(400);
+    expect(runtimeFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /sessions/:id/prompt callback ownership", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    runtimeFetch.mockResolvedValue(new Response(JSON.stringify({ messageId: "m1" })));
+  });
+
+  it("derives the message source from the authenticated bot", async () => {
+    const principal: Principal = { kind: "service", service: "slack-bot", actor: null };
+
+    const response = await postPrompt({ content: "work", source: "linear" }, principal);
+
+    expect(response.status).toBe(200);
+    expect(forwardedPrompt().source).toBe("slack");
+  });
+
+  it("rejects callback context owned by another bot", async () => {
+    const principal: Principal = { kind: "service", service: "slack-bot", actor: null };
+
+    const response = await postPrompt(
+      {
+        content: "work",
+        callbackContext: {
+          source: "linear",
+          issueId: "issue-1",
+          issueIdentifier: "ENG-1",
+          issueUrl: "https://linear.app/acme/issue/ENG-1",
+          model: "anthropic/claude-haiku-4-5",
+        },
+      },
+      principal
+    );
 
     expect(response.status).toBe(400);
     expect(runtimeFetch).not.toHaveBeenCalled();
