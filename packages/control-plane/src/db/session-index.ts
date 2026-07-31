@@ -401,6 +401,20 @@ export class SessionIndexStore {
       params.push(excludeStatus);
     }
 
+    const archivedSubtreesCte =
+      excludeStatus === "archived"
+        ? `WITH RECURSIVE archived_subtrees(id) AS (
+             SELECT id FROM sessions WHERE status = 'archived'
+             UNION
+             SELECT child.id
+             FROM sessions AS child
+             JOIN archived_subtrees ON child.parent_session_id = archived_subtrees.id
+           )`
+        : "";
+    if (archivedSubtreesCte) {
+      conditions.push("sessions.id NOT IN (SELECT id FROM archived_subtrees)");
+    }
+
     // Repo filters match against the membership table so a session is found
     // through ANY member, not just the scalar primary mirror. The scalar arm
     // is the fallback for pre-feature sessions without member rows.
@@ -435,7 +449,9 @@ export class SessionIndexStore {
 
     // Get paginated results
     const result = await this.db
-      .prepare(`SELECT * FROM sessions ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`)
+      .prepare(
+        `${archivedSubtreesCte} SELECT * FROM sessions ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`
+      )
       .bind(...params, limit + 1, offset)
       .all<SessionRow>();
 
