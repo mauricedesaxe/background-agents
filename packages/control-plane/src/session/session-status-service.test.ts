@@ -6,6 +6,7 @@ import type { SessionIndexStore } from "../db/session-index";
 import type { SessionRow, ArtifactRow } from "./types";
 import type { SessionRepository } from "./repository";
 import type { SessionMessenger } from "./messenger";
+import { SandboxProviderError } from "../sandbox/provider";
 
 function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
   return {
@@ -52,7 +53,7 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
         session.terminal_at = ["completed", "failed", "cancelled"].includes(status)
           ? (session.terminal_at ?? updatedAt)
           : null;
-        if (status === "archived") {
+        if (status === "active" || status === "archived") {
           session.archive_requested_at = null;
           session.archive_claimed_at = null;
         }
@@ -455,6 +456,40 @@ describe("SessionStatusService.handleAutoArchiveAlarm", () => {
     expect(h.archiveSandbox).toHaveBeenCalledTimes(2);
     expect(session.status).toBe("archived");
     expect(session.archive_requested_at).toBeNull();
+  });
+
+  it("does not retry permanent provider archive failures", async () => {
+    const terminalAt = 10_000;
+    const session = createSession({
+      status: "completed",
+      terminal_at: terminalAt,
+      updated_at: terminalAt,
+    });
+    const h = harness({ session });
+    h.archiveSandbox.mockRejectedValueOnce(
+      new SandboxProviderError("quota exhausted", "permanent")
+    );
+
+    await h.service.handleAutoArchiveAlarm(terminalAt + 12 * 60 * 60 * 1000);
+
+    expect(session.archive_claimed_at).toBeNull();
+    expect(session.archive_requested_at).toBeNull();
+    expect(h.setAlarm).toHaveBeenCalledTimes(1);
+  });
+
+  it("discards a failed archive request after the session resumes", async () => {
+    const session = createSession({
+      status: "active",
+      archive_requested_at: 10_000,
+      archive_claimed_at: null,
+    });
+    const h = harness({ session });
+
+    await h.service.handleAutoArchiveAlarm(Number.MAX_SAFE_INTEGER);
+
+    expect(h.repository.clearSessionArchiveClaim).toHaveBeenCalledWith("session-1", false);
+    expect(h.archiveSandbox).not.toHaveBeenCalled();
+    expect(session.status).toBe("active");
   });
 
   it("blocks resume while provider archival is in flight", async () => {
