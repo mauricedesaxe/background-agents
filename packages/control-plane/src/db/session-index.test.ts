@@ -51,7 +51,8 @@ const QUERY_PATTERNS = {
   DELETE_SESSION_REPOS: /^DELETE FROM session_repositories WHERE session_id = \?$/,
   SELECT_BY_ID: /^SELECT \* FROM sessions WHERE id = \?$/,
   SELECT_COUNT: /^SELECT COUNT\(\*\) as count FROM sessions\b/,
-  SELECT_LIST: /^SELECT \* FROM sessions\b.*ORDER BY updated_at DESC LIMIT/,
+  SELECT_LIST:
+    /^(?:WITH RECURSIVE archived_subtrees\b.*)?SELECT \* FROM sessions\b.*ORDER BY updated_at DESC LIMIT/,
   UPDATE_STATUS: /^UPDATE sessions SET status = \?/,
   RESTORE_ARCHIVED_SESSION: /^UPDATE sessions SET status = 'active', spawn_closed = 0/,
   UPDATE_UPDATED_AT: /^UPDATE sessions SET updated_at = \?/,
@@ -431,8 +432,31 @@ class FakeD1Database {
     let rows = Array.from(this.rows.values());
     let argIdx = 0;
 
+    if (query.startsWith("WITH RECURSIVE archived_subtrees")) {
+      const archivedSubtreeIds = new Set(
+        rows.filter((row) => row.status === "archived").map((row) => row.id)
+      );
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const row of rows) {
+          if (
+            !archivedSubtreeIds.has(row.id) &&
+            row.parent_session_id &&
+            archivedSubtreeIds.has(row.parent_session_id)
+          ) {
+            archivedSubtreeIds.add(row.id);
+            changed = true;
+          }
+        }
+      }
+      rows = rows.filter((row) => !archivedSubtreeIds.has(row.id));
+    }
+
     // Parse WHERE conditions
-    const whereMatch = query.match(/WHERE (.+?)(?:ORDER|LIMIT|$)/);
+    const listSelectIndex = query.lastIndexOf("SELECT * FROM sessions");
+    const selectQuery = listSelectIndex >= 0 ? query.slice(listSelectIndex) : query;
+    const whereMatch = selectQuery.match(/WHERE (.+?)(?:ORDER|LIMIT|$)/);
     if (whereMatch) {
       const conditions = whereMatch[1].trim();
 
@@ -727,6 +751,36 @@ describe("SessionIndexStore", () => {
       const result = await store.list({ excludeStatus: "archived" });
       expect(result.sessions).toHaveLength(2);
       expect(result.sessions.map((s) => s.id)).toEqual(["c", "a"]);
+    });
+
+    it("hides stale active descendants of archived sessions", async () => {
+      await store.create(makeSession({ id: "archived-parent", status: "active", updatedAt: 1000 }));
+      await store.create(
+        makeSession({
+          id: "stale-child",
+          status: "active",
+          parentSessionId: "archived-parent",
+          spawnSource: "agent",
+          spawnDepth: 1,
+          updatedAt: 2000,
+        })
+      );
+      await store.create(
+        makeSession({
+          id: "stale-grandchild",
+          status: "active",
+          parentSessionId: "stale-child",
+          spawnSource: "agent",
+          spawnDepth: 2,
+          updatedAt: 2500,
+        })
+      );
+      await store.create(makeSession({ id: "unrelated", status: "active", updatedAt: 3000 }));
+      await store.updateStatus("archived-parent", "archived", 4000);
+
+      const result = await store.list({ excludeStatus: "archived" });
+
+      expect(result.sessions.map((session) => session.id)).toEqual(["unrelated"]);
     });
 
     it("filters by creator user ids", async () => {

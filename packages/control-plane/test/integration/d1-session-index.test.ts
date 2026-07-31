@@ -227,6 +227,59 @@ describe("D1 SessionIndexStore", () => {
     expect(allResult.sessions.length).toBe(2);
   });
 
+  it("hides stale active descendants of archived sessions", async () => {
+    const store = new SessionIndexStore(env.DB);
+    const now = Date.now();
+
+    await store.create({
+      id: "archived-parent",
+      title: null,
+      repoOwner: "acme",
+      repoName: "api",
+      model: "anthropic/claude-haiku-4-5",
+      reasoningEffort: null,
+      baseBranch: null,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await store.create({
+      id: "stale-child",
+      title: null,
+      repoOwner: "acme",
+      repoName: "api",
+      model: "anthropic/claude-haiku-4-5",
+      reasoningEffort: null,
+      baseBranch: null,
+      status: "active",
+      parentSessionId: "archived-parent",
+      spawnSource: "agent",
+      spawnDepth: 1,
+      createdAt: now + 1,
+      updatedAt: now + 1,
+    });
+    await store.create({
+      id: "stale-grandchild",
+      title: null,
+      repoOwner: "acme",
+      repoName: "api",
+      model: "anthropic/claude-haiku-4-5",
+      reasoningEffort: null,
+      baseBranch: null,
+      status: "active",
+      parentSessionId: "stale-child",
+      spawnSource: "agent",
+      spawnDepth: 2,
+      createdAt: now + 2,
+      updatedAt: now + 2,
+    });
+    await store.updateStatus("archived-parent", "archived", now + 3);
+
+    const result = await store.list({ excludeStatus: "archived" });
+
+    expect(result.sessions).toEqual([]);
+  });
+
   it("stores and returns reasoning effort", async () => {
     const store = new SessionIndexStore(env.DB);
     const now = Date.now();
