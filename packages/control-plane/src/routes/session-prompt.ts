@@ -16,6 +16,13 @@ import { sessionRoute, type SessionRouteContext } from "./session-route";
 
 const logger = createLogger("router:session-prompt");
 
+function servicePromptSource(ctx: SessionRouteContext): "slack" | "linear" | null {
+  if (ctx.principal?.kind !== "service") return null;
+  if (ctx.principal.service === "slack-bot") return "slack";
+  if (ctx.principal.service === "linear-bot") return "linear";
+  return null;
+}
+
 function validateAttachments(raw: unknown): SessionAttachmentReference[] | Response | undefined {
   if (raw == null) return undefined;
   const result = sessionAttachmentReferencesSchema.safeParse(raw);
@@ -64,6 +71,7 @@ async function handleSessionPrompt(
   // anonymous. callbackContext is a completion notification channel — only
   // the bots that own callbacks may attach one.
   const authorId = enforcement.enforced.participantUserId ?? "anonymous";
+  const authenticatedSource = servicePromptSource(ctx);
   const callbackContext = mayAttachCallbackContext(ctx) ? body.callbackContext : undefined;
   if (callbackContext === undefined && body.callbackContext !== undefined) {
     logger.warn("Dropped callbackContext from unauthorized principal", {
@@ -71,6 +79,9 @@ async function handleSessionPrompt(
       request_id: ctx.request_id,
       trace_id: ctx.trace_id,
     });
+  }
+  if (callbackContext !== undefined && callbackContext.source !== authenticatedSource) {
+    return error("callbackContext source does not match authenticated service", 400);
   }
 
   let enrichment: GitHubEnrichment | undefined;
@@ -103,7 +114,7 @@ async function handleSessionPrompt(
       content: body.content,
       messageId: body.messageId,
       authorId,
-      source: body.source || "web",
+      source: authenticatedSource ?? body.source ?? "web",
       model: body.model,
       reasoningEffort: body.reasoningEffort,
       attachments,
