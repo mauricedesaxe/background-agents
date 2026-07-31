@@ -9,6 +9,7 @@ import { revokeAndSignOut } from "@/lib/sign-out";
  * token renewal window so rotation completes before expiry.
  */
 const WEB_SESSION_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const WEB_SESSION_FAILURE_RETRY_MS = 15 * 1000;
 
 /**
  * Confirms that NextAuth and the control-plane token pair form a usable web
@@ -35,6 +36,20 @@ export function WebSessionGate({ children }: { children?: ReactNode }) {
     if (status !== "authenticated") return;
     let cancelled = false;
     let checkInFlight = false;
+    let failureRetry: ReturnType<typeof setTimeout> | undefined;
+
+    const clearFailureRetry = () => {
+      if (failureRetry !== undefined) clearTimeout(failureRetry);
+      failureRetry = undefined;
+    };
+
+    const scheduleFailureRetry = () => {
+      if (failureRetry !== undefined) return;
+      failureRetry = setTimeout(() => {
+        failureRetry = undefined;
+        void checkWebSession();
+      }, WEB_SESSION_FAILURE_RETRY_MS);
+    };
 
     const checkWebSession = async () => {
       if (checkInFlight) return;
@@ -52,13 +67,16 @@ export function WebSessionGate({ children }: { children?: ReactNode }) {
           return;
         }
         if (response.ok) {
+          clearFailureRetry();
           setWebSessionStatus("ready");
           return;
         }
         setWebSessionStatus("temporarily_unavailable");
+        scheduleFailureRetry();
       } catch {
         if (!cancelled) {
           setWebSessionStatus("temporarily_unavailable");
+          scheduleFailureRetry();
         }
       } finally {
         checkInFlight = false;
@@ -74,6 +92,7 @@ export function WebSessionGate({ children }: { children?: ReactNode }) {
     document.addEventListener("visibilitychange", checkWhenVisible);
     return () => {
       cancelled = true;
+      clearFailureRetry();
       clearInterval(checkInterval);
       window.removeEventListener("focus", checkWhenVisible);
       document.removeEventListener("visibilitychange", checkWhenVisible);
