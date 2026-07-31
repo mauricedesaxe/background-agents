@@ -381,8 +381,12 @@ export class SessionRepository {
              WHEN ? IN ('completed', 'failed', 'cancelled') THEN COALESCE(terminal_at, ?)
              ELSE NULL
            END,
-           archive_requested_at = CASE WHEN ? = 'archived' THEN NULL ELSE archive_requested_at END,
-           archive_claimed_at = CASE WHEN ? = 'archived' THEN NULL ELSE archive_claimed_at END
+            archive_requested_at = CASE
+              WHEN ? IN ('active', 'archived') THEN NULL ELSE archive_requested_at
+            END,
+            archive_claimed_at = CASE
+              WHEN ? IN ('active', 'archived') THEN NULL ELSE archive_claimed_at
+            END
        WHERE id = ?`,
       status,
       updatedAt,

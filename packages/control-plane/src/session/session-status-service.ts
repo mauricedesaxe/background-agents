@@ -17,6 +17,7 @@ import type { SessionRepository } from "./repository";
 import type { SessionMessenger } from "./messenger";
 import { epochMs, nowMs, type EpochMs } from "../time";
 import { getSessionAutoArchiveDelayMs } from "./auto-archive-policy";
+import { SandboxProviderError } from "../sandbox/provider";
 
 /** Statuses that indicate a session is finished — metrics are synced to D1 on these transitions. */
 const TERMINAL_STATUSES: SessionStatus[] = ["completed", "failed", "cancelled"];
@@ -79,13 +80,16 @@ export class SessionStatusService {
       await this.transition("archived");
       return "archived";
     } catch (error) {
-      this.repository.clearSessionArchiveClaim(session.id, retryOnFailure);
+      const shouldRetry =
+        retryOnFailure &&
+        !(error instanceof SandboxProviderError && error.errorType === "permanent");
+      this.repository.clearSessionArchiveClaim(session.id, shouldRetry);
       this.log.error("session_archive.failed", {
         session_id: this.getPublicSessionId(session),
         reason,
         error,
       });
-      if (retryOnFailure) {
+      if (shouldRetry) {
         await this.scheduleAlarmNoLaterThan(claimedAt + ARCHIVE_RETRY_DELAY_MS);
       }
       return "failed";
@@ -259,6 +263,10 @@ export class SessionStatusService {
     }
 
     if (session.archive_requested_at != null) {
+      if (!TERMINAL_STATUSES.includes(session.status)) {
+        this.repository.clearSessionArchiveClaim(session.id, false);
+        return;
+      }
       if (
         session.archive_claimed_at != null &&
         now < session.archive_claimed_at + ARCHIVE_RETRY_DELAY_MS
