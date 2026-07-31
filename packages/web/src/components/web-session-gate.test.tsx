@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { WebSessionGate } from "./web-session-gate";
 
@@ -30,6 +30,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -111,6 +112,31 @@ describe("WebSessionGate", () => {
 
     expect(await screen.findByText("Protected application")).toBeTruthy();
     expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries ambiguous renewal failures inside the refresh-token reuse grace", async () => {
+    vi.useFakeTimers();
+    mocks.status = "authenticated";
+    fetchSpy
+      .mockRejectedValueOnce(new TypeError("network response lost"))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    render(
+      <WebSessionGate>
+        <div>Protected application</div>
+      </WebSessionGate>
+    );
+    await act(async () => {});
+
+    expect(screen.getByText("Authentication temporarily unavailable")).toBeTruthy();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15 * 1000);
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("Protected application")).toBeTruthy();
   });
 
   it("checks a newly authenticated session before revealing children again", async () => {
