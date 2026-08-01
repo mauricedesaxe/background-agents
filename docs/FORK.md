@@ -481,7 +481,7 @@ refactor changes. Keep new tests on that side of the line.
 
 ## Fork-only files
 
-**Fork-only files stay under `packages/`.** There are three deliberate exceptions outside it, and
+**Fork-only files stay under `packages/`.** There are four deliberate exceptions outside it, and
 each earns it the same way: upstream will never have the file, so it can never conflict during a
 sync.
 
@@ -489,6 +489,9 @@ sync.
 - **`.claude/agents/`.** Repo-local reviewer agents, auto-discovered by `lazar-review` locally and
   by the PR review bot. `fork-divergence-reviewer.md` is the one that keeps this document honest by
   checking its claims against the tree on every PR that touches them.
+- **`.opencode/`.** Sandbox-local OpenCode plugins, tools, and skills must use OpenCode's project
+  discovery paths. They bridge agent actions back to the control plane and provide the browser and
+  whiteboard workflows installed in Open-Inspect sandboxes.
 - **`terraform/d1/migrations/9xxx_*.sql`.** Fork-local D1 schema changes use the reserved 9000+
   range so upstream can keep allocating lower migration identifiers without silently shadowing ours.
   These files stay beside the migration runner that deploys them.
