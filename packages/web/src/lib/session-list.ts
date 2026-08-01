@@ -7,13 +7,13 @@ export const SESSIONS_API_PATH = "/api/sessions";
 export const CURRENT_USER_CREATED_BY = "me";
 export const SIDEBAR_SESSIONS_KEY = buildSessionsPageKey({
   excludeStatus: "archived",
-  limit: SESSIONS_PAGE_SIZE,
-  offset: 0,
+  mode: "tree",
 });
 
 export interface SessionListResponse {
   sessions: Session[];
   hasMore: boolean;
+  nextCursor?: string | null;
 }
 
 export type SessionSourceFilter = "manual" | "automatic";
@@ -61,6 +61,12 @@ export function buildGroupedSessionList(
     allChildren.set(session.parentSessionId, siblings);
   }
 
+  const treeActivities = new Map<string, number>();
+  for (const session of sorted) {
+    subtreeActivity(session.id, sessionsById, allChildren, treeActivities, new Set());
+  }
+  roots.sort((a, b) => (treeActivities.get(b.id) ?? 0) - (treeActivities.get(a.id) ?? 0));
+
   const query = searchQuery.trim().toLowerCase();
   const visibleIds = new Set<string>();
   const filteredRoots = roots.filter((root) => {
@@ -86,7 +92,7 @@ export function buildGroupedSessionList(
       inactiveSessions: [],
     };
 
-    if (isInactiveSession(sessionActivity(root), now)) {
+    if (isInactiveSession(treeActivities.get(root.id) ?? sessionActivity(root), now)) {
       group.inactiveSessions.push(root);
     } else {
       group.activeSessions.push(root);
@@ -96,7 +102,7 @@ export function buildGroupedSessionList(
 
   const groups = [...groupsByKey.values()]
     .filter((group) => group.activeSessions.length > 0 || query.length > 0)
-    .sort((a, b) => groupActivity(b) - groupActivity(a));
+    .sort((a, b) => groupActivity(b, treeActivities) - groupActivity(a, treeActivities));
 
   return {
     groups,
@@ -107,6 +113,33 @@ export function buildGroupedSessionList(
 
 function sessionActivity(session: Session) {
   return session.updatedAt || session.createdAt;
+}
+
+function subtreeActivity(
+  sessionId: string,
+  sessionsById: Map<string, Session>,
+  childrenMap: Map<string, Session[]>,
+  activities: Map<string, number>,
+  visiting: Set<string>
+): number {
+  const known = activities.get(sessionId);
+  if (known !== undefined) return known;
+
+  const session = sessionsById.get(sessionId);
+  const ownActivity = session ? sessionActivity(session) : 0;
+  if (visiting.has(sessionId)) return ownActivity;
+
+  visiting.add(sessionId);
+  let activity = ownActivity;
+  for (const child of childrenMap.get(sessionId) ?? []) {
+    activity = Math.max(
+      activity,
+      subtreeActivity(child.id, sessionsById, childrenMap, activities, visiting)
+    );
+  }
+  visiting.delete(sessionId);
+  activities.set(sessionId, activity);
+  return activity;
 }
 
 function addSubtreeIds(
@@ -181,28 +214,36 @@ function sessionRepositories(session: Session) {
   return [{ repoOwner: session.repoOwner, repoName: session.repoName }];
 }
 
-function groupActivity(group: SessionRepositoryGroup) {
+function groupActivity(group: SessionRepositoryGroup, treeActivities: Map<string, number>) {
   const newest = group.activeSessions[0] ?? group.inactiveSessions[0];
-  return newest ? sessionActivity(newest) : 0;
+  return newest ? (treeActivities.get(newest.id) ?? sessionActivity(newest)) : 0;
 }
 
 export function buildSessionsPageKey({
   limit = SESSIONS_PAGE_SIZE,
   offset = 0,
+  mode = "flat",
+  cursor,
   status,
   excludeStatus,
   createdBy,
 }: {
   limit?: number;
   offset?: number;
+  mode?: "flat" | "tree";
+  cursor?: string | null;
   status?: string;
   excludeStatus?: string;
   createdBy?: readonly string[];
 }) {
-  const searchParams = new URLSearchParams({
-    limit: String(limit),
-    offset: String(offset),
-  });
+  const searchParams = new URLSearchParams({ limit: String(limit) });
+
+  if (mode === "tree") {
+    searchParams.set("mode", mode);
+    if (cursor) searchParams.set("cursor", cursor);
+  } else {
+    searchParams.set("offset", String(offset));
+  }
 
   if (status) {
     searchParams.set("status", status);

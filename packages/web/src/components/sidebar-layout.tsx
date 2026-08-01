@@ -9,11 +9,13 @@ import { GlobalCommandMenu } from "./global-command-menu";
 import { useSidebar } from "@/hooks/use-sidebar";
 import { useIsMobile } from "@/hooks/use-media-query";
 import { useGlobalShortcuts } from "@/hooks/use-global-shortcuts";
-import { SIDEBAR_SESSIONS_KEY, type SessionListResponse } from "@/lib/session-list";
+import { buildSessionsPageKey, type SessionListResponse } from "@/lib/session-list";
 import { Button } from "@/components/ui/button";
 import { GitHubIcon, GoogleIcon, SearchIcon, SidebarIcon } from "@/components/ui/icons";
 import { APP_NAME, GOOGLE_LOGIN_ENABLED } from "@/lib/site-config";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
+
+const COMMAND_MENU_SESSIONS_KEY = buildSessionsPageKey({ excludeStatus: "archived" });
 
 interface SidebarContextValue {
   isOpen: boolean;
@@ -85,7 +87,7 @@ export function SidebarLayout({ children }: SidebarLayoutProps) {
 
   const { data: sessionsResponse } = useSWR<SessionListResponse>(
     status === "authenticated" && Boolean(session) && isCommandMenuOpen
-      ? SIDEBAR_SESSIONS_KEY
+      ? COMMAND_MENU_SESSIONS_KEY
       : null
   );
 

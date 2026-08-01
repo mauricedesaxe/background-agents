@@ -6,7 +6,7 @@ import type {
 } from "@open-inspect/shared";
 import { SessionPullRequestStore } from "./session-pull-request-store";
 import type { SqlDatabase } from "./sql-database";
-import type { EpochMs } from "../time";
+import { epochMs, type EpochMs } from "../time";
 
 const TERMINAL_STATUSES: readonly SessionStatus[] = [
   "completed",
@@ -121,7 +121,14 @@ export interface ListSessionsOptions {
   createdByUserIds?: readonly string[];
   limit?: number;
   offset?: number;
+  mode?: "flat" | "tree";
+  cursor?: SessionListCursor;
   viewerUserId?: string;
+}
+
+export interface SessionListCursor {
+  updatedAt: EpochMs;
+  id: string;
 }
 
 export type SessionReadUpdate =
@@ -131,6 +138,12 @@ export type SessionReadUpdate =
 export interface ListSessionsResult {
   sessions: SessionEntry[];
   hasMore: boolean;
+  nextCursor?: SessionListCursor | null;
+}
+
+interface TreeSessionRow extends SessionRow {
+  is_base: number;
+  candidate_count: number;
 }
 
 function toEntry(row: SessionRow): SessionEntry {
@@ -385,6 +398,8 @@ export class SessionIndexStore {
       createdByUserIds,
       limit = 50,
       offset = 0,
+      mode = "flat",
+      cursor,
       viewerUserId,
     } = options;
 
@@ -445,7 +460,73 @@ export class SessionIndexStore {
       params.push(...createdByUserIds);
     }
 
+    if (mode === "tree" && cursor) {
+      conditions.push("(updated_at < ? OR (updated_at = ? AND id < ?))");
+      params.push(cursor.updatedAt, cursor.updatedAt, cursor.id);
+    }
+
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    if (mode === "tree") {
+      const recursiveCtes = [
+        ...(archivedSubtreesCte ? [archivedSubtreesCte.replace("WITH RECURSIVE ", "")] : []),
+        `base_candidates AS (
+           SELECT * FROM sessions ${where}
+           ORDER BY updated_at DESC, id DESC
+           LIMIT ?
+         )`,
+        `base AS (
+           SELECT * FROM base_candidates
+           ORDER BY updated_at DESC, id DESC
+           LIMIT ?
+         )`,
+        `ancestors(id) AS (
+           SELECT parent_session_id FROM base WHERE parent_session_id IS NOT NULL
+           UNION
+           SELECT parent.parent_session_id
+           FROM sessions AS parent
+           JOIN ancestors ON parent.id = ancestors.id
+           WHERE parent.parent_session_id IS NOT NULL
+         )`,
+        `page_ids(id) AS (
+           SELECT id FROM base
+           UNION
+           SELECT id FROM ancestors
+         )`,
+      ];
+      const archiveClosureFilter = archivedSubtreesCte
+        ? "WHERE sessions.id NOT IN (SELECT id FROM archived_subtrees)"
+        : "";
+      const result = await this.db
+        .prepare(
+          `WITH RECURSIVE ${recursiveCtes.join(", ")}
+           SELECT sessions.*,
+                  CASE WHEN base.id IS NULL THEN 0 ELSE 1 END AS is_base,
+                  (SELECT COUNT(*) FROM base_candidates) AS candidate_count
+           FROM page_ids
+           JOIN sessions ON sessions.id = page_ids.id
+           LEFT JOIN base ON base.id = sessions.id
+           ${archiveClosureFilter}
+           ORDER BY sessions.updated_at DESC, sessions.id DESC`
+        )
+        .bind(...params, limit + 1, limit)
+        .all<TreeSessionRow>();
+
+      const rows = result.results ?? [];
+      const baseRows = rows.filter((row) => row.is_base === 1);
+      const hasMore = (rows[0]?.candidate_count ?? 0) > limit;
+      const lastBaseRow = baseRows.at(-1);
+      const sessions = await this.decorateEntries(rows.map(toEntry), viewerUserId);
+
+      return {
+        sessions,
+        hasMore,
+        nextCursor:
+          hasMore && lastBaseRow
+            ? { updatedAt: epochMs(lastBaseRow.updated_at), id: lastBaseRow.id }
+            : null,
+      };
+    }
 
     // Get paginated results
     const result = await this.db

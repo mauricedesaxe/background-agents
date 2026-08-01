@@ -1,6 +1,12 @@
 import { isCanonicalUserId, type SessionStatus } from "@open-inspect/shared";
-import { SessionIndexStore, type SessionReadUpdate } from "../db/session-index";
+import { z } from "zod";
+import {
+  SessionIndexStore,
+  type SessionListCursor,
+  type SessionReadUpdate,
+} from "../db/session-index";
 import { error, json, parsePattern, type RequestContext, type Route } from "./shared";
+import { epochMs } from "../time";
 import type { Env } from "../types";
 
 const SESSION_STATUSES: SessionStatus[] = [
@@ -11,6 +17,31 @@ const SESSION_STATUSES: SessionStatus[] = [
   "archived",
   "cancelled",
 ];
+const sessionListCursorSchema = z.tuple([z.number().int().nonnegative(), z.string().min(1)]);
+
+function encodeSessionListCursor(cursor: SessionListCursor): string {
+  const bytes = new TextEncoder().encode(JSON.stringify([cursor.updatedAt, cursor.id]));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function parseSessionListCursor(value: string): SessionListCursor | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
+
+  try {
+    const base64 = value.replaceAll("-", "+").replaceAll("_", "/");
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
+    const parsed = sessionListCursorSchema.safeParse(JSON.parse(decoded));
+    if (!parsed.success) return null;
+    return { updatedAt: epochMs(parsed.data[0]), id: parsed.data[1] };
+  } catch {
+    return null;
+  }
+}
 
 function parseSessionStatus(value: string | null): SessionStatus | undefined {
   if (!value) return undefined;
@@ -57,11 +88,24 @@ async function handleListSessions(
   const url = new URL(request.url);
   const limit = parsePaginationLimit(url.searchParams.get("limit"));
   const offset = parsePaginationOffset(url.searchParams.get("offset"));
+  const modeParam = url.searchParams.get("mode");
+  const mode = modeParam === null || modeParam === "flat" ? "flat" : modeParam;
+  const cursorParam = url.searchParams.get("cursor");
   const statusParam = url.searchParams.get("status");
   const excludeStatusParam = url.searchParams.get("excludeStatus");
   const status = parseSessionStatus(statusParam);
   const excludeStatus = parseSessionStatus(excludeStatusParam);
   const createdByUserIds = parseCreatedByFilters(url.searchParams);
+
+  if (mode !== "flat" && mode !== "tree") {
+    return error("Invalid mode", 400);
+  }
+
+  const cursor =
+    mode === "tree" && cursorParam !== null ? parseSessionListCursor(cursorParam) : undefined;
+  if (mode === "tree" && cursorParam !== null && !cursor) {
+    return error("Invalid cursor", 400);
+  }
 
   if (statusParam && !status) {
     return error("Invalid status", 400);
@@ -83,12 +127,17 @@ async function handleListSessions(
     createdByUserIds,
     limit,
     offset,
+    mode,
+    cursor: cursor ?? undefined,
     viewerUserId: viewerUserId ?? undefined,
   });
 
   return json({
     sessions: result.sessions,
     hasMore: result.hasMore,
+    ...(mode === "tree"
+      ? { nextCursor: result.nextCursor ? encodeSessionListCursor(result.nextCursor) : null }
+      : {}),
   });
 }
 

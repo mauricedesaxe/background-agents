@@ -117,7 +117,7 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
   const [hasMorePages, setHasMorePages] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const offsetRef = useRef(0);
+  const cursorRef = useRef<string | null>(null);
   const hasMoreRef = useRef(false);
   const loadingMoreRef = useRef(false);
   const sessionListVersionRef = useRef(0);
@@ -130,6 +130,7 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
     return buildSessionsPageKey({
       excludeStatus: "archived",
       createdBy: sessionCreatorFilter === "mine" ? [CURRENT_USER_CREATED_BY] : undefined,
+      mode: "tree",
     });
   }, [authSession, sessionCreatorFilter]);
 
@@ -157,12 +158,12 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
     loadingMoreRef.current = false;
 
     const nextHasMore = data?.hasMore ?? false;
-    const nextOffset = data ? firstPageSessions.length : 0;
+    const nextCursor = data?.nextCursor ?? null;
 
     setHasMorePages(nextHasMore);
-    offsetRef.current = nextOffset;
+    cursorRef.current = nextCursor;
     hasMoreRef.current = nextHasMore;
-  }, [sidebarSessionsKey, data, firstPageSessions.length]);
+  }, [sidebarSessionsKey, data]);
 
   const loadMoreSessions = useCallback(async () => {
     if (!authSession || !sidebarSessionsKey || loadingMoreRef.current || !hasMoreRef.current) {
@@ -178,7 +179,8 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
         buildSessionsPageKey({
           excludeStatus: "archived",
           createdBy: sessionCreatorFilter === "mine" ? [CURRENT_USER_CREATED_BY] : undefined,
-          offset: offsetRef.current,
+          mode: "tree",
+          cursor: cursorRef.current,
         })
       );
 
@@ -195,7 +197,7 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
 
       setExtraSessions((prev) => mergeUniqueSessions(prev, fetched));
       setHasMorePages(page.hasMore);
-      offsetRef.current += fetched.length;
+      cursorRef.current = page.nextCursor ?? null;
       hasMoreRef.current = page.hasMore;
     } catch (error) {
       console.error("Failed to fetch additional sessions:", error);

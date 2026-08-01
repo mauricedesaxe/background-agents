@@ -53,6 +53,7 @@ const QUERY_PATTERNS = {
   SELECT_COUNT: /^SELECT COUNT\(\*\) as count FROM sessions\b/,
   SELECT_LIST:
     /^(?:WITH RECURSIVE archived_subtrees\b.*)?SELECT \* FROM sessions\b.*ORDER BY updated_at DESC LIMIT/,
+  SELECT_TREE: /^WITH RECURSIVE .*base_candidates AS .*SELECT sessions\.\*, CASE/,
   UPDATE_STATUS: /^UPDATE sessions SET status = \?/,
   RESTORE_ARCHIVED_SESSION: /^UPDATE sessions SET status = 'active', spawn_closed = 0/,
   UPDATE_UPDATED_AT: /^UPDATE sessions SET updated_at = \?/,
@@ -131,6 +132,54 @@ class FakeD1Database {
 
   all(query: string, args: unknown[]) {
     const normalized = normalizeQuery(query);
+
+    if (QUERY_PATTERNS.SELECT_TREE.test(normalized)) {
+      const allArgs = [...args];
+      const limit = allArgs.pop() as number;
+      const candidateLimit = allArgs.pop() as number;
+      let filtered = this.applyWhereConditions(normalized, allArgs);
+      if (normalized.includes("updated_at < ? OR (updated_at = ? AND id < ?)")) {
+        const [updatedAt, , id] = allArgs.slice(-3) as [number, number, string];
+        filtered = filtered.filter(
+          (row) => row.updated_at < updatedAt || (row.updated_at === updatedAt && row.id < id)
+        );
+      }
+
+      const candidates = filtered
+        .sort((a, b) => b.updated_at - a.updated_at || b.id.localeCompare(a.id))
+        .slice(0, candidateLimit);
+      const base = candidates.slice(0, limit);
+      const pageIds = new Set(base.map((row) => row.id));
+      const pending = base
+        .map((row) => row.parent_session_id)
+        .filter((id): id is string => id !== null);
+      while (pending.length > 0) {
+        const id = pending.pop()!;
+        if (pageIds.has(id)) continue;
+        const ancestor = this.rows.get(id);
+        if (!ancestor) continue;
+        pageIds.add(id);
+        if (ancestor.parent_session_id) pending.push(ancestor.parent_session_id);
+      }
+
+      const allowedIds = new Set(
+        this.applyWhereConditions(
+          normalized.startsWith("WITH RECURSIVE archived_subtrees")
+            ? "WITH RECURSIVE archived_subtrees SELECT * FROM sessions"
+            : "SELECT * FROM sessions",
+          []
+        ).map((row) => row.id)
+      );
+      const baseIds = new Set(base.map((row) => row.id));
+      return Array.from(pageIds)
+        .filter((id) => allowedIds.has(id))
+        .map((id) => ({
+          ...this.rows.get(id)!,
+          is_base: baseIds.has(id) ? 1 : 0,
+          candidate_count: candidates.length,
+        }))
+        .sort((a, b) => b.updated_at - a.updated_at || b.id.localeCompare(a.id));
+    }
 
     if (QUERY_PATTERNS.SELECT_LIST.test(normalized)) {
       // Parse WHERE conditions and LIMIT/OFFSET from args
@@ -858,6 +907,103 @@ describe("SessionIndexStore", () => {
       const page3 = await store.list({ limit: 2, offset: 4 });
       expect(page3.sessions).toHaveLength(1);
       expect(page3.hasMore).toBe(false);
+    });
+
+    it("paginates tree base rows deterministically while returning complete ancestor closure", async () => {
+      await store.create(makeSession({ id: "grandparent", updatedAt: 100 }));
+      await store.create(
+        makeSession({
+          id: "parent",
+          parentSessionId: "grandparent",
+          spawnSource: "agent",
+          spawnDepth: 1,
+          updatedAt: 200,
+        })
+      );
+      await store.create(
+        makeSession({
+          id: "child",
+          parentSessionId: "parent",
+          spawnSource: "agent",
+          spawnDepth: 2,
+          updatedAt: 500,
+        })
+      );
+      await store.create(makeSession({ id: "tie-a", updatedAt: 400 }));
+      await store.create(makeSession({ id: "tie-z", updatedAt: 400 }));
+      await store.create(makeSession({ id: "filler", updatedAt: 300 }));
+      await store.create(makeSession({ id: "other", updatedAt: 150 }));
+
+      const page1 = await store.list({ mode: "tree", limit: 3 });
+      expect(page1.sessions.map((session) => session.id)).toEqual([
+        "child",
+        "tie-z",
+        "tie-a",
+        "parent",
+        "grandparent",
+      ]);
+      expect(page1.hasMore).toBe(true);
+      expect(page1.nextCursor).toEqual({ updatedAt: 400, id: "tie-a" });
+
+      const page2 = await store.list({ mode: "tree", limit: 3, cursor: page1.nextCursor! });
+      expect(page2.sessions.map((session) => session.id)).toEqual([
+        "filler",
+        "parent",
+        "other",
+        "grandparent",
+      ]);
+      expect(page2.nextCursor).toEqual({ updatedAt: 150, id: "other" });
+
+      const page3 = await store.list({ mode: "tree", limit: 3, cursor: page2.nextCursor! });
+      expect(page3.sessions.map((session) => session.id)).toEqual(["grandparent"]);
+      expect(page3.hasMore).toBe(false);
+      expect(page3.nextCursor).toBeNull();
+    });
+
+    it("returns required tree ancestors outside the creator filter", async () => {
+      await store.create(makeSession({ id: "bob-parent", userId: "bob", updatedAt: 100 }));
+      await store.create(
+        makeSession({
+          id: "alice-child",
+          parentSessionId: "bob-parent",
+          spawnSource: "agent",
+          spawnDepth: 1,
+          userId: "alice",
+          updatedAt: 200,
+        })
+      );
+
+      const result = await store.list({
+        mode: "tree",
+        createdByUserIds: ["alice"],
+        limit: 1,
+      });
+
+      expect(result.sessions.map((session) => session.id)).toEqual(["alice-child", "bob-parent"]);
+      expect(result.hasMore).toBe(false);
+    });
+
+    it("excludes archived subtrees from tree base rows and closure", async () => {
+      await store.create(makeSession({ id: "archived-root", updatedAt: 100 }));
+      await store.create(
+        makeSession({
+          id: "stale-child",
+          parentSessionId: "archived-root",
+          spawnSource: "agent",
+          spawnDepth: 1,
+          updatedAt: 500,
+        })
+      );
+      await store.create(makeSession({ id: "visible", updatedAt: 300 }));
+      await store.updateStatus("archived-root", "archived", 600);
+
+      const result = await store.list({
+        mode: "tree",
+        excludeStatus: "archived",
+        limit: 10,
+      });
+
+      expect(result.sessions.map((session) => session.id)).toEqual(["visible"]);
     });
 
     it("derives hasMore without counting", async () => {

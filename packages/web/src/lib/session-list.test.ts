@@ -50,6 +50,18 @@ describe("buildSessionsPageKey", () => {
       "/api/sessions?limit=50&offset=0&excludeStatus=archived&createdBy=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&createdBy=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     );
   });
+
+  it("uses opaque cursors for tree pages without adding an offset", () => {
+    expect(
+      buildSessionsPageKey({
+        excludeStatus: "archived",
+        mode: "tree",
+        cursor: "opaque/cursor+value",
+      })
+    ).toBe(
+      "/api/sessions?limit=50&mode=tree&cursor=opaque%2Fcursor%2Bvalue&excludeStatus=archived"
+    );
+  });
 });
 
 describe("isSessionListKey", () => {
@@ -300,6 +312,115 @@ describe("buildGroupedSessionList", () => {
     });
 
     expect(grouped.groups[0].activeSessions.map(({ id }) => id)).toEqual([orphan.id]);
+  });
+
+  it("keeps an old root active when its child is active recently", () => {
+    const parent = session("parent", { updatedAt: inactive });
+    const child = session("child", {
+      parentSessionId: parent.id,
+      spawnSource: "agent",
+      updatedAt: recent,
+    });
+
+    const grouped = buildGroupedSessionList([parent, child], {
+      sourceFilter: "manual",
+      searchQuery: "",
+      now,
+    });
+
+    expect(grouped.groups[0].activeSessions.map(({ id }) => id)).toEqual([parent.id]);
+  });
+
+  it("keeps an old root active when its child completed recently", () => {
+    const parent = session("parent", { updatedAt: inactive });
+    const child = session("child", {
+      parentSessionId: parent.id,
+      spawnSource: "agent",
+      status: "completed",
+      updatedAt: recent,
+    });
+
+    const grouped = buildGroupedSessionList([parent, child], {
+      sourceFilter: "manual",
+      searchQuery: "",
+      now,
+    });
+
+    expect(grouped.groups[0].activeSessions.map(({ id }) => id)).toEqual([parent.id]);
+  });
+
+  it("keeps a recent root active when its child is old", () => {
+    const parent = session("parent", { updatedAt: recent });
+    const child = session("child", {
+      parentSessionId: parent.id,
+      spawnSource: "agent",
+      updatedAt: inactive,
+    });
+
+    const grouped = buildGroupedSessionList([parent, child], {
+      sourceFilter: "manual",
+      searchQuery: "",
+      now,
+    });
+
+    expect(grouped.groups[0].activeSessions.map(({ id }) => id)).toEqual([parent.id]);
+  });
+
+  it("orders roots by newest activity anywhere in their subtrees", () => {
+    const oldParent = session("old-parent", { updatedAt: inactive });
+    const recentChild = session("recent-child", {
+      parentSessionId: oldParent.id,
+      spawnSource: "agent",
+      updatedAt: recent,
+    });
+    const newerRoot = session("newer-root", { updatedAt: recent - 1 });
+
+    const grouped = buildGroupedSessionList([newerRoot, oldParent, recentChild], {
+      sourceFilter: "manual",
+      searchQuery: "",
+      now,
+    });
+
+    expect(grouped.groups[0].activeSessions.map(({ id }) => id)).toEqual([
+      oldParent.id,
+      newerRoot.id,
+    ]);
+  });
+
+  it("classifies a tree from the root source and repository", () => {
+    const parent = session("parent", { repoName: "root-repo", updatedAt: inactive });
+    const child = session("child", {
+      parentSessionId: parent.id,
+      spawnSource: "automation",
+      repoName: "child-repo",
+      updatedAt: recent,
+    });
+
+    const manual = buildGroupedSessionList([parent, child], {
+      sourceFilter: "manual",
+      searchQuery: "",
+      now,
+    });
+    const automatic = buildGroupedSessionList([parent, child], {
+      sourceFilter: "automatic",
+      searchQuery: "",
+      now,
+    });
+
+    expect(manual.groups.map(({ label }) => label)).toEqual(["open-inspect/root-repo"]);
+    expect(automatic.groups).toEqual([]);
+  });
+
+  it("terminates subtree activity traversal on a cycle", () => {
+    const grouped = buildGroupedSessionList(
+      [
+        session("a", { parentSessionId: "b", updatedAt: recent }),
+        session("b", { parentSessionId: "a", updatedAt: inactive }),
+      ],
+      { sourceFilter: "manual", searchQuery: "", now }
+    );
+
+    expect(grouped.groups).toEqual([]);
   });
 });
 

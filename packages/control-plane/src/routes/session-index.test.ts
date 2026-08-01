@@ -73,6 +73,9 @@ describe("session index routes", () => {
       createdByUserIds: [],
       limit: 50,
       offset: 0,
+      mode: "flat",
+      cursor: undefined,
+      viewerUserId: undefined,
     });
   });
 
@@ -86,6 +89,9 @@ describe("session index routes", () => {
       createdByUserIds: [],
       limit: 100,
       offset: 0,
+      mode: "flat",
+      cursor: undefined,
+      viewerUserId: undefined,
     });
   });
 
@@ -101,6 +107,9 @@ describe("session index routes", () => {
       createdByUserIds: ["0123456789abcdef0123456789abcdef"],
       limit: 50,
       offset: 0,
+      mode: "flat",
+      cursor: undefined,
+      viewerUserId: undefined,
     });
   });
 
@@ -111,4 +120,37 @@ describe("session index routes", () => {
     await expect(response.json()).resolves.toEqual({ error: "Invalid createdBy" });
     expect(mockSessionIndexStore.list).not.toHaveBeenCalled();
   });
+
+  it("round-trips an opaque tree cursor", async () => {
+    mockSessionIndexStore.list.mockResolvedValueOnce({
+      sessions: [],
+      hasMore: true,
+      nextCursor: { updatedAt: 1234, id: "session/with unicode \u2713" },
+    });
+
+    const firstResponse = await listSessions("?mode=tree&limit=2");
+    const firstPage = (await firstResponse.json()) as { nextCursor: string };
+    expect(firstPage.nextCursor).toEqual(expect.any(String));
+
+    mockSessionIndexStore.list.mockClear();
+    await listSessions(`?mode=tree&limit=2&cursor=${encodeURIComponent(firstPage.nextCursor)}`);
+
+    expect(mockSessionIndexStore.list).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "tree",
+        cursor: { updatedAt: 1234, id: "session/with unicode \u2713" },
+      })
+    );
+  });
+
+  it.each(["", "not-a-cursor", "WzAsIsMoIl0"])(
+    "rejects malformed tree cursor %j before querying the store",
+    async (cursor) => {
+      const response = await listSessions(`?mode=tree&cursor=${cursor}`);
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({ error: "Invalid cursor" });
+      expect(mockSessionIndexStore.list).not.toHaveBeenCalled();
+    }
+  );
 });

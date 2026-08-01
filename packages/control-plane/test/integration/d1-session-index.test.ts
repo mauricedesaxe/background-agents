@@ -3,6 +3,7 @@ import { env } from "cloudflare:test";
 import { SessionIndexStore, type SessionEntry } from "../../src/db/session-index";
 import { SessionPullRequestStore } from "../../src/db/session-pull-request-store";
 import { cleanD1Tables } from "./cleanup";
+import { serviceFetch } from "./helpers";
 
 describe("D1 SessionIndexStore", () => {
   beforeEach(cleanD1Tables);
@@ -278,6 +279,115 @@ describe("D1 SessionIndexStore", () => {
     const result = await store.list({ excludeStatus: "archived" });
 
     expect(result.sessions).toEqual([]);
+  });
+
+  it("paginates tree rows through the HTTP route with recursive ancestor closure", async () => {
+    const store = new SessionIndexStore(env.DB);
+    const create = (entry: Partial<SessionEntry> & Pick<SessionEntry, "id" | "updatedAt">) =>
+      store.create({
+        title: entry.id,
+        repoOwner: "acme",
+        repoName: "api",
+        model: "anthropic/claude-haiku-4-5",
+        reasoningEffort: null,
+        baseBranch: null,
+        status: "active",
+        createdAt: entry.updatedAt,
+        ...entry,
+      });
+
+    await create({ id: "grandparent", updatedAt: 100 });
+    await create({
+      id: "parent",
+      parentSessionId: "grandparent",
+      spawnSource: "agent",
+      spawnDepth: 1,
+      updatedAt: 200,
+    });
+    await create({
+      id: "child",
+      parentSessionId: "parent",
+      spawnSource: "agent",
+      spawnDepth: 2,
+      updatedAt: 500,
+    });
+    await create({ id: "tie-a", updatedAt: 400 });
+    await create({ id: "tie-z", updatedAt: 400 });
+    await create({ id: "filler", updatedAt: 300 });
+    await create({ id: "other", updatedAt: 150 });
+    await create({ id: "archived-root", updatedAt: 50 });
+    await create({
+      id: "stale-archived-child",
+      parentSessionId: "archived-root",
+      spawnSource: "agent",
+      spawnDepth: 1,
+      updatedAt: 600,
+    });
+    await store.updateStatus("archived-root", "archived", 700);
+
+    const firstResponse = await serviceFetch(
+      "https://test.local/sessions?mode=tree&limit=3&excludeStatus=archived"
+    );
+    expect(firstResponse.status).toBe(200);
+    const first = (await firstResponse.json()) as {
+      sessions: SessionEntry[];
+      hasMore: boolean;
+      nextCursor: string | null;
+    };
+    expect(first.sessions.map(({ id }) => id)).toEqual([
+      "child",
+      "tie-z",
+      "tie-a",
+      "parent",
+      "grandparent",
+    ]);
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursor).toEqual(expect.any(String));
+
+    const secondResponse = await serviceFetch(
+      `https://test.local/sessions?mode=tree&limit=3&excludeStatus=archived&cursor=${encodeURIComponent(first.nextCursor!)}`
+    );
+    const second = (await secondResponse.json()) as typeof first;
+    expect(second.sessions.map(({ id }) => id)).toEqual([
+      "filler",
+      "parent",
+      "other",
+      "grandparent",
+    ]);
+    expect(second.hasMore).toBe(true);
+
+    const thirdResponse = await serviceFetch(
+      `https://test.local/sessions?mode=tree&limit=3&excludeStatus=archived&cursor=${encodeURIComponent(second.nextCursor!)}`
+    );
+    const third = (await thirdResponse.json()) as typeof first;
+    expect(third.sessions.map(({ id }) => id)).toEqual(["grandparent"]);
+    expect(third.hasMore).toBe(false);
+    expect(third.nextCursor).toBeNull();
+
+    await create({
+      id: "filtered-parent",
+      userId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      updatedAt: 800,
+    });
+    await create({
+      id: "filtered-child",
+      parentSessionId: "filtered-parent",
+      spawnSource: "agent",
+      spawnDepth: 1,
+      userId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      updatedAt: 900,
+    });
+
+    const closureOnlyResponse = await serviceFetch(
+      "https://test.local/sessions?mode=tree&limit=1&createdBy=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    const closureOnlyPage = (await closureOnlyResponse.json()) as typeof first;
+    expect(closureOnlyPage.sessions.map(({ id }) => id)).toEqual([
+      "filtered-child",
+      "filtered-parent",
+    ]);
+    expect(closureOnlyPage.hasMore).toBe(false);
+    expect(closureOnlyPage.nextCursor).toBeNull();
   });
 
   it("stores and returns reasoning effort", async () => {
