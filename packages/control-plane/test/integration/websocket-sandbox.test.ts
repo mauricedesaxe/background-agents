@@ -230,6 +230,38 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     sandboxWs!.close();
   });
 
+  it("refuses legacy readiness when an existing conversation is expected", async () => {
+    const name = `ws-sandbox-ready-legacy-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    await seedSandboxAuth(stub, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+      status: "connecting",
+    });
+    await queryDO(stub, "UPDATE session SET opencode_session_id = ?", "ses_expected");
+    const { ws: sandboxWs } = await openSandboxWs(name, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+    });
+    sandboxWs!.accept();
+    sandboxWs!.send(
+      JSON.stringify({
+        type: "ready",
+        sandboxId: SANDBOX_ID,
+        opencodeSessionId: "ses_expected",
+        timestamp: Date.now() / 1000,
+      })
+    );
+
+    await waitForSandboxStatus(stub, "failed");
+    const events = await queryDO<{ type: string }>(
+      stub,
+      "SELECT type FROM events WHERE type = 'context_unavailable'"
+    );
+    expect(events).toEqual([{ type: "context_unavailable" }]);
+    sandboxWs!.close();
+  });
+
   it("sandbox WS message is stored as event", async () => {
     const name = `ws-sandbox-event-${Date.now()}`;
     const { stub } = await initNamedSession(name);

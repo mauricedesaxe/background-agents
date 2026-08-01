@@ -942,8 +942,7 @@ class AgentBridge:
             if had_error:
                 outcome = "error"
 
-            if not had_error:
-                await self._save_checkpoint_or_warn(message_id=message_id)
+            await self._save_checkpoint_or_warn(message_id=message_id)
 
             # Drain everything the agent produced before the terminal event, so
             # execution_complete always lands last.
