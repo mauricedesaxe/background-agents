@@ -122,6 +122,7 @@ class SandboxSupervisor:
     SIDECAR_TIMEOUT_SECONDS = 5
     MCP_PACKAGE_INSTALL_TIMEOUT_SECONDS = 180
     CONTEXT_RESTORE_TIMEOUT_SECONDS = 30
+    CONTEXT_CHECKPOINT_GENERATIONS = 2
 
     # OOM-killer bias (Linux oom_score_adj, range -1000..1000; lower = less
     # likely to be killed). Under memory pressure from a build/test workload we
@@ -1387,87 +1388,102 @@ class SandboxSupervisor:
         checkpoint_url = f"{self.control_plane_url}/sessions/{session_id}/checkpoint"
         try:
             async with httpx.AsyncClient(timeout=self.CONTEXT_RESTORE_TIMEOUT_SECONDS) as client:
-                response = await client.get(
-                    checkpoint_url,
-                    headers={"Authorization": f"Bearer {self.sandbox_token}"},
-                )
-            checkpoint = response.content
-            if (
-                response.status_code != 200
-                or response.headers.get("X-OpenCode-Session-ID") != expected_session_id
-                or not self._checkpoint_matches(checkpoint, expected_session_id)
-            ):
-                self._mark_context_unavailable()
-                return
-
-            checkpoint_path: Path | None = None
-            try:
-                with tempfile.NamedTemporaryFile(
-                    prefix="opencode-checkpoint-", suffix=".json", delete=False
-                ) as checkpoint_file:
-                    checkpoint_file.write(checkpoint)
-                    checkpoint_path = Path(checkpoint_file.name)
-                checkpoint_path.chmod(0o600)
-
-                import_process = await asyncio.create_subprocess_exec(
-                    "opencode",
-                    "import",
-                    str(checkpoint_path),
-                    "--pure",
-                    cwd=workdir,
-                    env=env,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                try:
-                    _, import_stderr = await asyncio.wait_for(
-                        import_process.communicate(), timeout=self.CONTEXT_RESTORE_TIMEOUT_SECONDS
+                for generation in range(self.CONTEXT_CHECKPOINT_GENERATIONS):
+                    response = await client.get(
+                        checkpoint_url,
+                        params={"generation": generation},
+                        headers={"Authorization": f"Bearer {self.sandbox_token}"},
                     )
-                except TimeoutError:
-                    import_process.kill()
-                    await import_process.wait()
-                    self._mark_context_unavailable()
-                    return
-                if import_process.returncode != 0:
-                    detail = import_stderr.decode(errors="replace").strip()
-                    self.log.error("opencode.context_import_failed", detail=detail)
-                    self._mark_context_unavailable()
-                    return
+                    if response.status_code == 404:
+                        break
+                    checkpoint = response.content
+                    if (
+                        response.status_code != 200
+                        or response.headers.get("X-OpenCode-Session-ID") != expected_session_id
+                        or not self._checkpoint_matches(checkpoint, expected_session_id)
+                    ):
+                        continue
 
-                verify_process = await asyncio.create_subprocess_exec(
-                    "opencode",
-                    "export",
-                    expected_session_id,
-                    "--pure",
-                    cwd=workdir,
-                    env=env,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                try:
-                    verify_stdout, _ = await asyncio.wait_for(
-                        verify_process.communicate(), timeout=self.CONTEXT_RESTORE_TIMEOUT_SECONDS
+                    checkpoint_path: Path | None = None
+                    try:
+                        with tempfile.NamedTemporaryFile(
+                            prefix="opencode-checkpoint-", suffix=".json", delete=False
+                        ) as checkpoint_file:
+                            checkpoint_file.write(checkpoint)
+                            checkpoint_path = Path(checkpoint_file.name)
+                        checkpoint_path.chmod(0o600)
+
+                        import_process = await asyncio.create_subprocess_exec(
+                            "opencode",
+                            "import",
+                            str(checkpoint_path),
+                            "--pure",
+                            cwd=workdir,
+                            env=env,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                        try:
+                            _, import_stderr = await asyncio.wait_for(
+                                import_process.communicate(),
+                                timeout=self.CONTEXT_RESTORE_TIMEOUT_SECONDS,
+                            )
+                        except TimeoutError:
+                            import_process.kill()
+                            await import_process.wait()
+                            self._mark_context_unavailable()
+                            return
+                        if import_process.returncode != 0:
+                            detail = import_stderr.decode(errors="replace").strip()
+                            self.log.error(
+                                "opencode.context_import_failed",
+                                generation=generation,
+                                detail=detail,
+                            )
+                            continue
+
+                        verify_process = await asyncio.create_subprocess_exec(
+                            "opencode",
+                            "export",
+                            expected_session_id,
+                            "--pure",
+                            cwd=workdir,
+                            env=env,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                        try:
+                            verify_stdout, _ = await asyncio.wait_for(
+                                verify_process.communicate(),
+                                timeout=self.CONTEXT_RESTORE_TIMEOUT_SECONDS,
+                            )
+                        except TimeoutError:
+                            verify_process.kill()
+                            await verify_process.wait()
+                            self._mark_context_unavailable()
+                            return
+                        if verify_process.returncode != 0 or not self._checkpoints_equal(
+                            checkpoint, verify_stdout
+                        ):
+                            self._mark_context_unavailable()
+                            return
+                    finally:
+                        if checkpoint_path:
+                            checkpoint_path.unlink(missing_ok=True)
+
+                    os.environ["OPENCODE_CONTEXT_STATUS"] = "restored"
+                    self.log.info(
+                        "opencode.context_restored",
+                        opencode_session_id=expected_session_id,
+                        generation=generation,
                     )
-                except TimeoutError:
-                    verify_process.kill()
-                    await verify_process.wait()
-                    self._mark_context_unavailable()
                     return
-                if verify_process.returncode != 0 or not self._checkpoints_equal(
-                    checkpoint, verify_stdout
-                ):
-                    self._mark_context_unavailable()
-                    return
-            finally:
-                if checkpoint_path:
-                    checkpoint_path.unlink(missing_ok=True)
         except Exception as error:
             self.log.error("opencode.context_restore_failed", exc=error)
             self._mark_context_unavailable()
             return
 
-        os.environ["OPENCODE_CONTEXT_STATUS"] = "restored"
-        self.log.info("opencode.context_restored", opencode_session_id=expected_session_id)
+        self._mark_context_unavailable()
 
     def _mark_context_unavailable(self) -> None:
         os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
