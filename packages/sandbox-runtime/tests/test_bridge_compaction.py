@@ -164,6 +164,39 @@ async def test_session_error_reports_specific_compaction_failure(bridge: AgentBr
 
 
 @pytest.mark.asyncio
+async def test_failed_reattach_rejects_compaction_without_running_model(
+    bridge: AgentBridge,
+) -> None:
+    class UnexpectedHttpClient:
+        def stream(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("compaction must not open the event stream")
+
+        async def post(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("compaction must not invoke the model")
+
+    bridge.http_client = UnexpectedHttpClient()  # type: ignore[assignment]
+    bridge.opencode_session_error = "Prior OpenCode conversation is unavailable"
+    sent: list[dict[str, Any]] = []
+
+    async def capture(event: dict[str, Any]) -> None:
+        sent.append(event)
+
+    bridge._send_event = capture  # type: ignore[method-assign]
+
+    await bridge._handle_context_compaction(
+        {"requestId": "compact-blocked", "model": "openai/gpt-5.6-sol"}
+    )
+
+    assert sent == [
+        {
+            "type": "context_compaction_failed",
+            "requestId": "compact-blocked",
+            "error": "Prior OpenCode conversation is unavailable",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_compaction_timeout_aborts_opencode(bridge: AgentBridge) -> None:
     class HangingResponse(MockSSEResponse):
         async def aiter_text(self) -> AsyncIterator[str]:

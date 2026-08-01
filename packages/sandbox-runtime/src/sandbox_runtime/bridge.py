@@ -970,6 +970,9 @@ class AgentBridge:
     async def _handle_context_compaction(self, cmd: dict[str, Any]) -> None:
         request_id = str(cmd.get("requestId") or "unknown")
         model = str(cmd.get("model") or "")
+        if self.opencode_session_error:
+            await self._send_compaction_failure(request_id, self.opencode_session_error)
+            return
         if not self.http_client:
             raise RuntimeError("OpenCode client is not ready")
         if not self.opencode_session_id:
