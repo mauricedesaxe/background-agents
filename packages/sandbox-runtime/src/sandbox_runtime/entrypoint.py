@@ -1346,7 +1346,6 @@ class SandboxSupervisor:
         self.log.info("opencode.ready")
 
     async def _restore_opencode_context(self, workdir: Path, env: dict[str, str]) -> None:
-        """Restore a missing expected native conversation before OpenCode starts."""
         expected_session_id = os.environ.get("OPENCODE_SESSION_ID") or None
         if not expected_session_id:
             os.environ["OPENCODE_CONTEXT_STATUS"] = "fresh"
@@ -1383,7 +1382,7 @@ class SandboxSupervisor:
 
         checkpoint_url = f"{self.control_plane_url}/sessions/{session_id}/checkpoint"
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=self.CONTEXT_RESTORE_TIMEOUT_SECONDS) as client:
                 response = await client.get(
                     checkpoint_url,
                     headers={"Authorization": f"Bearer {self.sandbox_token}"},
@@ -1430,6 +1429,31 @@ class SandboxSupervisor:
                     self.log.error("opencode.context_import_failed", detail=detail)
                     os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
                     return
+
+                verify_process = await asyncio.create_subprocess_exec(
+                    "opencode",
+                    "export",
+                    expected_session_id,
+                    "--pure",
+                    cwd=workdir,
+                    env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    verify_stdout, _ = await asyncio.wait_for(
+                        verify_process.communicate(), timeout=self.CONTEXT_RESTORE_TIMEOUT_SECONDS
+                    )
+                except TimeoutError:
+                    verify_process.kill()
+                    await verify_process.wait()
+                    os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
+                    return
+                if verify_process.returncode != 0 or not self._checkpoints_equal(
+                    checkpoint, verify_stdout
+                ):
+                    os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
+                    return
             finally:
                 if checkpoint_path:
                     checkpoint_path.unlink(missing_ok=True)
@@ -1452,6 +1476,13 @@ class SandboxSupervisor:
             and isinstance(parsed.get("info"), dict)
             and parsed["info"].get("id") == expected_session_id
         )
+
+    @staticmethod
+    def _checkpoints_equal(expected: bytes, actual: bytes) -> bool:
+        try:
+            return json.loads(expected) == json.loads(actual)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return False
 
     async def _forward_opencode_logs(self) -> None:
         """Forward OpenCode stdout to supervisor stdout."""

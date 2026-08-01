@@ -178,7 +178,12 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
       })
     );
 
-    expect((await sandboxMessages).some((message) => message.type === "prompt")).toBe(false);
+    const controlMessages = await sandboxMessages;
+    expect(controlMessages.some((message) => message.type === "prompt")).toBe(false);
+    expect(controlMessages).toContainEqual({
+      type: "ack",
+      ackId: "context_unavailable:ses_missing",
+    });
     expect(await failed).toContainEqual({
       type: "sandbox_event",
       event: expect.objectContaining({
@@ -192,6 +197,32 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
 
     sandboxWs!.close();
     clientWs.close();
+  });
+
+  it("refuses fresh readiness when an existing conversation is expected", async () => {
+    const name = `ws-sandbox-ready-mismatch-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    await seedSandboxAuth(stub, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+      status: "connecting",
+    });
+    await queryDO(stub, "UPDATE session SET opencode_session_id = ?", "ses_expected");
+    const { ws: sandboxWs } = await openSandboxWs(name, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+    });
+    sandboxWs!.accept();
+    sendSandboxReady(sandboxWs!, SANDBOX_ID, "fresh");
+    await waitForSandboxStatus(stub, "failed");
+
+    const state = await queryDO<{ opencode_session_id: string }>(
+      stub,
+      "SELECT opencode_session_id FROM session"
+    );
+    expect(state).toEqual([{ opencode_session_id: "ses_expected" }]);
+
+    sandboxWs!.close();
   });
 
   it("sandbox WS message is stored as event", async () => {

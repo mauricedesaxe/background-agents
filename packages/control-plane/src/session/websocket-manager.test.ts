@@ -6,7 +6,10 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { SessionWebSocketManagerImpl } from "./websocket-manager";
+import {
+  ACTIVE_SANDBOX_CONNECTION_STORAGE_KEY,
+  SessionWebSocketManagerImpl,
+} from "./websocket-manager";
 import type { WebSocketManagerConfig } from "./websocket-manager";
 import type { Logger } from "../logger";
 import type { ClientInfo } from "../types";
@@ -50,6 +53,7 @@ function createFakeWebSocket(readyState = WebSocket.OPEN): WebSocket {
 /** Type for the fake DurableObjectState with test helpers. */
 interface FakeCtx {
   sockets: Map<WebSocket, string[]>;
+  stored: Map<string, unknown>;
   state: DurableObjectState;
 }
 
@@ -58,6 +62,7 @@ interface FakeCtx {
  */
 function createFakeCtx(): FakeCtx {
   const sockets = new Map<WebSocket, string[]>();
+  const stored = new Map<string, unknown>();
 
   const state = {
     acceptWebSocket(ws: WebSocket, tags: string[]) {
@@ -70,12 +75,23 @@ function createFakeCtx(): FakeCtx {
       return Array.from(sockets.keys());
     },
     setWebSocketAutoResponse: vi.fn(),
-    storage: { setAlarm: vi.fn() },
+    storage: {
+      setAlarm: vi.fn(),
+      get: vi.fn((key: string) => Promise.resolve(stored.get(key))),
+      put: vi.fn((key: string, value: unknown) => {
+        stored.set(key, value);
+        return Promise.resolve();
+      }),
+      delete: vi.fn((key: string) => {
+        stored.delete(key);
+        return Promise.resolve(true);
+      }),
+    },
     id: { toString: () => "test-do-id" },
     waitUntil: vi.fn(),
   } as unknown as DurableObjectState;
 
-  return { sockets, state };
+  return { sockets, stored, state };
 }
 
 /** Create a minimal mock Logger. */
@@ -186,7 +202,14 @@ function createManager() {
 
   const manager = new SessionWebSocketManagerImpl(fakeCtx.state, mockRepo.repo, log, TEST_CONFIG);
 
-  return { manager, sockets: fakeCtx.sockets, state: fakeCtx.state, mockRepo, log };
+  return {
+    manager,
+    sockets: fakeCtx.sockets,
+    stored: fakeCtx.stored,
+    state: fakeCtx.state,
+    mockRepo,
+    log,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +406,21 @@ describe("SessionWebSocketManagerImpl", () => {
 
       expect(manager.getSandboxSocket()).toBeNull();
       expect(ws.close).toHaveBeenCalledWith(1000, "Sandbox terminated");
+    });
+  });
+
+  describe("isCurrentSandboxSocket", () => {
+    it("rejects a stale connection after hibernation", async () => {
+      const { manager, stored } = createManager();
+      const stale = createFakeWebSocket();
+      const active = createFakeWebSocket();
+      manager.acceptAndSetSandboxSocket(stale, "sb-1", "connection-old");
+      manager.acceptAndSetSandboxSocket(active, "sb-1", "connection-new");
+      manager.clearSandboxSocket();
+      stored.set(ACTIVE_SANDBOX_CONNECTION_STORAGE_KEY, "connection-new");
+
+      expect(await manager.isCurrentSandboxSocket(stale)).toBe(false);
+      expect(await manager.isCurrentSandboxSocket(active)).toBe(true);
     });
   });
 

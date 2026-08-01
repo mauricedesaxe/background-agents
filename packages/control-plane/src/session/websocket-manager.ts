@@ -19,8 +19,10 @@ export type WsKind = "client" | "sandbox";
 
 /** Result of parsing a WebSocket's Cloudflare hibernation tags. */
 export type ParsedTags =
-  | { kind: "sandbox"; sandboxId?: string }
+  | { kind: "sandbox"; sandboxId?: string; connectionId?: string }
   | { kind: "client"; wsId?: string };
+
+export const ACTIVE_SANDBOX_CONNECTION_STORAGE_KEY = "active-sandbox-connection-id";
 
 /** Configuration for the WebSocket manager. */
 export interface WebSocketManagerConfig {
@@ -39,7 +41,11 @@ export interface SessionWebSocketManager {
    * Accept a sandbox WebSocket, close any existing sandbox socket, and set
    * as the active sandbox connection.
    */
-  acceptAndSetSandboxSocket(ws: WebSocket, sandboxId?: string): { replaced: boolean };
+  acceptAndSetSandboxSocket(
+    ws: WebSocket,
+    sandboxId?: string,
+    connectionId?: string
+  ): { replaced: boolean };
 
   /** Parse a WebSocket's tags to determine its kind and identity. */
   classify(ws: WebSocket): ParsedTags;
@@ -50,8 +56,7 @@ export interface SessionWebSocketManager {
    */
   getSandboxSocket(): WebSocket | null;
 
-  /** Whether an event came from the currently active sandbox connection. */
-  isCurrentSandboxSocket(ws: WebSocket): boolean;
+  isCurrentSandboxSocket(ws: WebSocket): Promise<boolean>;
 
   /** Clear the in-memory sandbox socket reference. */
   clearSandboxSocket(): void;
@@ -109,8 +114,16 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
     this.ctx.acceptWebSocket(ws, [`wsid:${wsId}`]);
   }
 
-  acceptAndSetSandboxSocket(ws: WebSocket, sandboxId?: string): { replaced: boolean } {
-    const tags = ["sandbox", ...(sandboxId ? [`sid:${sandboxId}`] : [])];
+  acceptAndSetSandboxSocket(
+    ws: WebSocket,
+    sandboxId?: string,
+    connectionId?: string
+  ): { replaced: boolean } {
+    const tags = [
+      "sandbox",
+      ...(sandboxId ? [`sid:${sandboxId}`] : []),
+      ...(connectionId ? [`cid:${connectionId}`] : []),
+    ];
     this.ctx.acceptWebSocket(ws, tags);
 
     let replaced = false;
@@ -137,7 +150,12 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
     const tags = this.ctx.getTags(ws);
     if (tags.includes("sandbox")) {
       const sidTag = tags.find((t) => t.startsWith("sid:"));
-      return { kind: "sandbox", sandboxId: sidTag?.slice(4) };
+      const connectionTag = tags.find((t) => t.startsWith("cid:"));
+      return {
+        kind: "sandbox",
+        sandboxId: sidTag?.slice(4),
+        ...(connectionTag ? { connectionId: connectionTag.slice(4) } : {}),
+      };
     }
     const wsIdTag = tags.find((t) => t.startsWith("wsid:"));
     return { kind: "client", wsId: wsIdTag?.slice(5) };
@@ -192,8 +210,14 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
     return null;
   }
 
-  isCurrentSandboxSocket(ws: WebSocket): boolean {
-    return this.sandboxWs === null || this.sandboxWs === ws;
+  async isCurrentSandboxSocket(ws: WebSocket): Promise<boolean> {
+    if (this.sandboxWs !== null) return this.sandboxWs === ws;
+    const parsed = this.classify(ws);
+    if (parsed.kind !== "sandbox" || !parsed.connectionId) return false;
+    const activeConnectionId = await this.ctx.storage.get<string>(
+      ACTIVE_SANDBOX_CONNECTION_STORAGE_KEY
+    );
+    return parsed.connectionId === activeConnectionId;
   }
 
   clearSandboxSocket(): void {

@@ -66,7 +66,11 @@ import { SessionRepository } from "./repository";
 import { resolveParticipantName } from "./participant-name";
 import { validateReasoningEffort } from "./reasoning-effort";
 import { parseTunnelUrls } from "./tunnel-urls";
-import { SessionWebSocketManagerImpl, type SessionWebSocketManager } from "./websocket-manager";
+import {
+  ACTIVE_SANDBOX_CONNECTION_STORAGE_KEY,
+  SessionWebSocketManagerImpl,
+  type SessionWebSocketManager,
+} from "./websocket-manager";
 import { SessionPullRequestStore } from "../db/session-pull-request-store";
 import { PullRequestCreationClaims, SessionPullRequestService } from "./pull-request-service";
 import { refreshSessionPullRequests } from "./pull-request-refresh";
@@ -1003,10 +1007,13 @@ export class SessionDO extends DurableObject<Env> {
       const sandboxId = request.headers.get("X-Sandbox-ID");
 
       if (isSandbox) {
+        const connectionId = crypto.randomUUID();
         const { replaced } = this.wsManager.acceptAndSetSandboxSocket(
           server,
-          sandboxId ?? undefined
+          sandboxId ?? undefined,
+          connectionId
         );
+        await this.ctx.storage.put(ACTIVE_SANDBOX_CONNECTION_STORAGE_KEY, connectionId);
 
         this.updateSandboxStatus("connecting");
         this.broadcast({ type: "sandbox_status", status: "connecting" });
@@ -1058,12 +1065,14 @@ export class SessionDO extends DurableObject<Env> {
 
     try {
       if (kind === "sandbox") {
+        if (!(await this.wsManager.isCurrentSandboxSocket(ws))) return;
         const wasActive = this.wsManager.clearSandboxSocketIfMatch(ws);
         if (!wasActive) {
           // sandboxWs points to a different socket — this close is for a replaced connection.
           this.log.debug("Ignoring close for replaced sandbox socket", { code });
           return;
         }
+        await this.ctx.storage.delete(ACTIVE_SANDBOX_CONNECTION_STORAGE_KEY);
 
         const isNormalClose = code === 1000 || code === 1001;
         if (isNormalClose) {
@@ -1156,14 +1165,40 @@ export class SessionDO extends DurableObject<Env> {
     const event = this.parseWebSocketMessage(message, "sandbox", sandboxEventSchema);
     if (!event) return;
 
+    if (
+      (event.type === "ready" ||
+        event.type === "opencode_session_created" ||
+        event.type === "context_unavailable") &&
+      !(await this.wsManager.isCurrentSandboxSocket(ws))
+    ) {
+      return;
+    }
+
     if (event.type === "ready") {
-      if (!this.wsManager.isCurrentSandboxSocket(ws)) return;
+      const expectedSessionId = this.getSession()?.opencode_session_id;
+      const resumed =
+        event.contextStatus === "existing" ||
+        event.contextStatus === "restored" ||
+        (event.contextStatus === undefined && event.opencodeSessionId === expectedSessionId);
+      if (expectedSessionId && (event.opencodeSessionId !== expectedSessionId || !resumed)) {
+        await this.handleContextUnavailable(
+          `OpenCode session ${expectedSessionId} was not restored; refusing to continue without its conversation context`
+        );
+        return;
+      }
       this.persistOpencodeSessionId(event.opencodeSessionId);
       await this.markSandboxContextReady(event.contextStatus);
     } else if (event.type === "opencode_session_created") {
+      const expectedSessionId = this.getSession()?.opencode_session_id;
+      if (expectedSessionId && event.opencodeSessionId !== expectedSessionId) {
+        await this.handleContextUnavailable(
+          `OpenCode created session ${event.opencodeSessionId} while ${expectedSessionId} was expected`
+        );
+        return;
+      }
       this.persistOpencodeSessionId(event.opencodeSessionId);
     } else if (event.type === "context_unavailable") {
-      if (!this.wsManager.isCurrentSandboxSocket(ws)) return;
+      if (event.ackId) this.wsManager.send(ws, { type: "ack", ackId: event.ackId });
       await this.handleContextUnavailable(event.error);
     }
 

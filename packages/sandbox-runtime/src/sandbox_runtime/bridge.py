@@ -984,8 +984,7 @@ class AgentBridge:
                 duration_ms=duration_ms,
             )
 
-    async def _save_checkpoint(self) -> None:
-        """Export the idle native OpenCode conversation and promote it remotely."""
+    async def _export_and_upload_checkpoint(self) -> None:
         if not self.opencode_session_id or not self.http_client:
             raise RuntimeError("OpenCode session is not ready for checkpointing")
 
@@ -1041,7 +1040,7 @@ class AgentBridge:
 
     async def _save_checkpoint_or_warn(self, *, message_id: str | None = None) -> None:
         try:
-            await self._save_checkpoint()
+            await self._export_and_upload_checkpoint()
         except Exception as e:
             self.log.warn("opencode.checkpoint_failed", exc=e, message_id=message_id)
             await self._send_event(
@@ -1180,6 +1179,7 @@ class AgentBridge:
         )
 
         await self._save_session_id()
+        os.environ["OPENCODE_CONTEXT_STATUS"] = "existing"
         await self._send_event(
             {
                 "type": "opencode_session_created",

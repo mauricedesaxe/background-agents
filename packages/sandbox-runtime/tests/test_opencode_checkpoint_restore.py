@@ -34,6 +34,7 @@ async def test_restores_checkpoint_before_opencode_server_starts(tmp_path: Path)
     checkpoint = json.dumps({"info": {"id": "ses_expected"}, "messages": []}).encode()
     missing_export = _process(1)
     imported = _process(0)
+    verified = _process(0, stdout=checkpoint)
     response = MagicMock(
         status_code=200,
         content=checkpoint,
@@ -48,7 +49,7 @@ async def test_restores_checkpoint_before_opencode_server_starts(tmp_path: Path)
         patch.dict(os.environ, {"OPENCODE_SESSION_ID": "ses_expected"}, clear=False),
         patch(
             "sandbox_runtime.entrypoint.asyncio.create_subprocess_exec",
-            AsyncMock(side_effect=[missing_export, imported]),
+            AsyncMock(side_effect=[missing_export, imported, verified]),
         ) as create_process,
         patch("sandbox_runtime.entrypoint.httpx.AsyncClient", return_value=client),
     ):
@@ -60,6 +61,39 @@ async def test_restores_checkpoint_before_opencode_server_starts(tmp_path: Path)
     assert import_args[:2] == ("opencode", "import")
     assert import_args[-1] == "--pure"
     assert not Path(import_args[2]).exists()
+
+
+@pytest.mark.asyncio
+async def test_rejects_an_import_that_drops_native_conversation_state(tmp_path: Path) -> None:
+    supervisor = _make_supervisor()
+    checkpoint = json.dumps(
+        {
+            "info": {"id": "ses_expected"},
+            "messages": [{"info": {"id": "msg-1", "role": "assistant"}, "parts": []}],
+        }
+    ).encode()
+    lossy_export = json.dumps({"info": {"id": "ses_expected"}, "messages": []}).encode()
+    response = MagicMock(
+        status_code=200,
+        content=checkpoint,
+        headers={"X-OpenCode-Session-ID": "ses_expected"},
+    )
+    client = AsyncMock()
+    client.get = AsyncMock(return_value=response)
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = None
+
+    with (
+        patch.dict(os.environ, {"OPENCODE_SESSION_ID": "ses_expected"}, clear=False),
+        patch(
+            "sandbox_runtime.entrypoint.asyncio.create_subprocess_exec",
+            AsyncMock(side_effect=[_process(1), _process(0), _process(0, stdout=lossy_export)]),
+        ),
+        patch("sandbox_runtime.entrypoint.httpx.AsyncClient", return_value=client),
+    ):
+        await supervisor._restore_opencode_context(tmp_path, {})
+
+        assert os.environ["OPENCODE_CONTEXT_STATUS"] == "unavailable"
 
 
 @pytest.mark.asyncio
