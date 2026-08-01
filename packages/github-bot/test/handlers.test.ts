@@ -699,6 +699,23 @@ describe("handleIssueComment", () => {
     expect(prompt).toContain("fix the error handling\nand add a regression test");
   });
 
+  it("preserves command text before a bot mention", async () => {
+    const env = createMockEnv();
+    const log = createMockLogger();
+    const payload: IssueCommentPayload = {
+      ...issueCommentPayload,
+      comment: {
+        ...issueCommentPayload.comment,
+        body: "Do not @test-bot[bot] modify this PR",
+      },
+    };
+
+    await handleIssueComment(env, log, payload, "trace-midline-mention");
+
+    const prompt = promptSendBody(getControlPlaneFetch(env)).content;
+    expect(prompt).toContain("Do not modify this PR");
+  });
+
   it("returns early if no @mention", async () => {
     const env = createMockEnv();
     const log = createMockLogger();

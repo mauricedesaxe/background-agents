@@ -128,8 +128,10 @@ export function extractAuthorizedCommand(body: string, botUsername: string): str
 
     const mentionMatch = mention.exec(trimmed);
     if (mentionMatch) {
+      const beforeMention = trimmed.slice(0, mentionMatch.index).trimEnd();
+      const afterMention = trimmed.slice(mentionMatch.index + mentionMatch[0].length).trimStart();
       const mentionInstruction = [
-        trimmed.slice(mentionMatch.index + mentionMatch[0].length),
+        [beforeMention, afterMention].filter(Boolean).join(" "),
         ...lines.slice(index + 1),
       ]
         .join("\n")
