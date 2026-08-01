@@ -171,7 +171,9 @@ async function handleCheckpointDownload(
         "X-Checkpoint-SHA256": generation.checksum,
         "X-OpenCode-Session-ID": generation.opencodeSessionId,
         "X-OpenCode-Version": generation.opencodeVersion,
-        "X-Checkpoint-Generation": String(requestedGeneration),
+        ...(manifest.generations.length > requestedGeneration + 1
+          ? { "X-Checkpoint-Next-Generation": String(requestedGeneration + 1) }
+          : {}),
       },
     });
   }

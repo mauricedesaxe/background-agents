@@ -126,7 +126,10 @@ async def test_falls_back_when_the_newest_checkpoint_import_is_rejected(tmp_path
             MagicMock(
                 status_code=200,
                 content=latest,
-                headers={"X-OpenCode-Session-ID": "ses_expected"},
+                headers={
+                    "X-OpenCode-Session-ID": "ses_expected",
+                    "X-Checkpoint-Next-Generation": "1",
+                },
             ),
             MagicMock(
                 status_code=200,
@@ -158,8 +161,8 @@ async def test_falls_back_when_the_newest_checkpoint_import_is_rejected(tmp_path
         assert os.environ["OPENCODE_CONTEXT_STATUS"] == "restored"
 
     assert [call.kwargs["params"] for call in client.get.await_args_list] == [
-        {"generation": 0},
-        {"generation": 1},
+        {"generation": "0"},
+        {"generation": "1"},
     ]
 
 

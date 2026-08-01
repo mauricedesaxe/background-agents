@@ -83,13 +83,20 @@ describe("session checkpoints", () => {
     expect((await putCheckpoint(sessionName, previous)).status).toBe(201);
     expect((await putCheckpoint(sessionName, latest)).status).toBe(201);
 
+    const newestRestore = await SELF.fetch(
+      `https://test.local/sessions/${sessionName}/checkpoint`,
+      { headers: { Authorization: `Bearer ${SANDBOX_TOKEN}` } }
+    );
+    expect(newestRestore.headers.get("X-Checkpoint-Next-Generation")).toBe("1");
+    expect(await newestRestore.text()).toBe(latest);
+
     const restore = await SELF.fetch(
       `https://test.local/sessions/${sessionName}/checkpoint?generation=1`,
       { headers: { Authorization: `Bearer ${SANDBOX_TOKEN}` } }
     );
 
     expect(restore.status).toBe(200);
-    expect(restore.headers.get("X-Checkpoint-Generation")).toBe("1");
+    expect(restore.headers.get("X-Checkpoint-Next-Generation")).toBeNull();
     expect(await restore.text()).toBe(previous);
   });
 
