@@ -66,6 +66,31 @@ async def test_checkpoint_failure_does_not_turn_completed_work_into_a_retry() ->
 
 
 @pytest.mark.asyncio
+async def test_failed_turn_checkpoints_tool_history_before_completion() -> None:
+    bridge = _make_bridge()
+    observed: list[str] = []
+
+    async def stream(*_args, **_kwargs):
+        yield {"type": "tool_call", "tool": "write", "input": {}}
+        yield {"type": "error", "error": "model disconnected"}
+
+    async def send(event):
+        if event["type"] == "execution_complete":
+            observed.append("complete")
+
+    bridge._stream_opencode_response_sse = stream
+    bridge._configure_git_identity = AsyncMock()
+    bridge._export_and_upload_checkpoint = AsyncMock(
+        side_effect=lambda: observed.append("checkpoint")
+    )
+    bridge._send_event = send
+
+    await bridge._handle_prompt({"messageId": "msg-1", "content": "continue"})
+
+    assert observed == ["checkpoint", "complete"]
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_upload_uses_native_export_without_replaying_messages() -> None:
     bridge = _make_bridge()
     checkpoint = json.dumps({"info": {"id": "ses_checkpoint"}, "messages": []}).encode()

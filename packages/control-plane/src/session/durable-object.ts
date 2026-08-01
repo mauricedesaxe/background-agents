@@ -1168,10 +1168,7 @@ export class SessionDO extends DurableObject<Env> {
 
     if (event.type === "ready") {
       const expectedSessionId = this.getSession()?.opencode_session_id;
-      const resumed =
-        event.contextStatus === "existing" ||
-        event.contextStatus === "restored" ||
-        (event.contextStatus === undefined && event.opencodeSessionId === expectedSessionId);
+      const resumed = event.contextStatus === "existing" || event.contextStatus === "restored";
       if (expectedSessionId && (event.opencodeSessionId !== expectedSessionId || !resumed)) {
         await this.recordContextUnavailable(ws, {
           type: "context_unavailable",
@@ -1237,7 +1234,7 @@ export class SessionDO extends DurableObject<Env> {
     await this.scheduleInactivityCheck();
     this.log.info("opencode.context_ready", {
       event: "opencode.context_ready",
-      context_status: contextStatus ?? "legacy_verified",
+      context_status: contextStatus ?? "fresh",
     });
     await this.processMessageQueue();
   }

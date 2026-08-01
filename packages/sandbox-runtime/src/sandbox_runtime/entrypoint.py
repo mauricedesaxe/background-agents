@@ -1388,13 +1388,13 @@ class SandboxSupervisor:
         checkpoint_url = f"{self.control_plane_url}/sessions/{session_id}/checkpoint"
         try:
             async with httpx.AsyncClient(timeout=self.CONTEXT_RESTORE_TIMEOUT_SECONDS) as client:
-                generation = "0"
-                attempted_generations: set[str] = set()
-                while generation not in attempted_generations:
-                    attempted_generations.add(generation)
+                generation_token = "0"
+                attempted_generation_tokens: set[str] = set()
+                while generation_token not in attempted_generation_tokens:
+                    attempted_generation_tokens.add(generation_token)
                     response = await client.get(
                         checkpoint_url,
-                        params={"generation": generation},
+                        params={"generation": generation_token},
                         headers={"Authorization": f"Bearer {self.sandbox_token}"},
                     )
                     if response.status_code == 404:
@@ -1408,12 +1408,12 @@ class SandboxSupervisor:
                     ):
                         if next_generation is None:
                             break
-                        generation = next_generation
+                        generation_token = next_generation
                         continue
 
                     outcome = await self._restore_checkpoint_generation(
                         checkpoint,
-                        generation,
+                        generation_token,
                         expected_session_id,
                         workdir,
                         env,
@@ -1423,12 +1423,12 @@ class SandboxSupervisor:
                         self.log.info(
                             "opencode.context_restored",
                             opencode_session_id=expected_session_id,
-                            generation=generation,
+                            generation=generation_token,
                         )
                         return
                     if outcome == "unavailable" or next_generation is None:
                         break
-                    generation = next_generation
+                    generation_token = next_generation
         except Exception as error:
             self.log.error("opencode.context_restore_failed", exc=error)
             self._mark_context_unavailable()
@@ -1439,7 +1439,7 @@ class SandboxSupervisor:
     async def _restore_checkpoint_generation(
         self,
         checkpoint: bytes,
-        generation: str,
+        generation_token: str,
         expected_session_id: str,
         workdir: Path,
         env: dict[str, str],
@@ -1476,7 +1476,7 @@ class SandboxSupervisor:
                 detail = import_stderr.decode(errors="replace").strip()
                 self.log.error(
                     "opencode.context_import_failed",
-                    generation=generation,
+                    generation=generation_token,
                     detail=detail,
                 )
                 return "rejected"
