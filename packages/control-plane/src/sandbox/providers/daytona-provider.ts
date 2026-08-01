@@ -143,10 +143,13 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       const state = sandbox.state;
       if ((state === "error" || state === "build_failed") && sandbox.recoverable) {
         await this.client.recoverSandbox(config.providerObjectId);
-      } else if (state !== "started") {
+      } else if (state === "started") {
+        await this.retryAcrossStateSettle(() => this.client.stopSandbox(config.providerObjectId));
+        await this.retryAcrossStateSettle(() => this.client.startSandbox(config.providerObjectId));
+      } else {
         // Covers stopped, archived, and non-recoverable error states —
         // Daytona's start endpoint handles the state transition internally.
-        await this.client.startSandbox(config.providerObjectId);
+        await this.retryAcrossStateSettle(() => this.client.startSandbox(config.providerObjectId));
       }
 
       // Tunnel URL generation runs after start so a preview-URL failure
@@ -280,8 +283,6 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       SESSION_CONFIG: JSON.stringify(sessionConfig),
     });
 
-    // Reattach to a prior OpenCode conversation on resume; the bridge verifies
-    // the id and falls back to a fresh session if it no longer exists.
     if (config.opencodeSessionId) {
       envVars.OPENCODE_SESSION_ID = config.opencodeSessionId;
     }

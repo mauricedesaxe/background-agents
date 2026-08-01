@@ -518,8 +518,6 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         provider,
         model: modelId,
         userEnvVars,
-        // Reattach to the prior OpenCode conversation if this session already
-        // has one; the bridge verifies it and falls back to fresh if it's gone.
         opencodeSessionId: session.opencode_session_id ?? undefined,
         prebuiltImageId,
         prebuiltImageSha,
@@ -818,8 +816,6 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         provider,
         model: modelId,
         userEnvVars,
-        // Reattach to the prior OpenCode conversation on resume; the bridge
-        // verifies the id still exists and falls back to a fresh session if not.
         opencodeSessionId: session.opencode_session_id ?? undefined,
         timeoutSeconds,
         branch: session.base_branch,
