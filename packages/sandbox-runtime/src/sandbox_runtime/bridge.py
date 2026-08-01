@@ -962,6 +962,7 @@ class AgentBridge:
             if pump is not None:
                 # Deliver any output salvaged before the failure, then complete.
                 self._log_dropped_events(message_id, await pump.aclose())
+                await self._save_checkpoint_or_warn(message_id=message_id)
             await self._send_event(
                 {
                     "type": "execution_complete",

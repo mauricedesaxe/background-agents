@@ -1419,6 +1419,7 @@ class SandboxSupervisor:
                         env,
                     )
                     if outcome == "restored":
+                        self.context_unavailable_file.unlink(missing_ok=True)
                         os.environ["OPENCODE_CONTEXT_STATUS"] = "restored"
                         self.log.info(
                             "opencode.context_restored",
@@ -1446,6 +1447,7 @@ class SandboxSupervisor:
     ) -> Literal["restored", "rejected", "unavailable"]:
         checkpoint_path: Path | None = None
         try:
+            self.context_unavailable_file.write_text("importing")
             with tempfile.NamedTemporaryFile(
                 prefix="opencode-checkpoint-", suffix=".json", delete=False
             ) as checkpoint_file:
@@ -1503,7 +1505,7 @@ class SandboxSupervisor:
             if verify_process.returncode != 0 or not self._checkpoints_equal(
                 checkpoint, verify_stdout
             ):
-                return "unavailable"
+                return "rejected"
             return "restored"
         finally:
             if checkpoint_path:
