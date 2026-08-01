@@ -1,5 +1,6 @@
 import { env, SELF } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
+import { cleanD1Tables } from "./cleanup";
 import { initNamedSession, seedSandboxAuthHash } from "./helpers";
 
 const SANDBOX_TOKEN = "checkpoint-sandbox-token";
@@ -34,6 +35,8 @@ async function putCheckpoint(sessionName: string, body: string): Promise<Respons
 }
 
 describe("session checkpoints", () => {
+  beforeEach(cleanD1Tables);
+
   it("stores and restores an authenticated native OpenCode export", async () => {
     const sessionName = `checkpoint-${Date.now()}`;
     await seedSession(sessionName);
@@ -69,6 +72,24 @@ describe("session checkpoints", () => {
       headers: { Authorization: `Bearer ${SANDBOX_TOKEN}` },
     });
     expect(restore.status).toBe(200);
+    expect(await restore.text()).toBe(previous);
+  });
+
+  it("serves the previous valid generation after a rejected newest import", async () => {
+    const sessionName = `checkpoint-generation-${Date.now()}`;
+    await seedSession(sessionName);
+    const previous = exportBody("msg-previous");
+    const latest = exportBody("msg-latest");
+    expect((await putCheckpoint(sessionName, previous)).status).toBe(201);
+    expect((await putCheckpoint(sessionName, latest)).status).toBe(201);
+
+    const restore = await SELF.fetch(
+      `https://test.local/sessions/${sessionName}/checkpoint?generation=1`,
+      { headers: { Authorization: `Bearer ${SANDBOX_TOKEN}` } }
+    );
+
+    expect(restore.status).toBe(200);
+    expect(restore.headers.get("X-Checkpoint-Generation")).toBe("1");
     expect(await restore.text()).toBe(previous);
   });
 

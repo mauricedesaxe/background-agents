@@ -139,20 +139,30 @@ async function handleCheckpointUpload(
 }
 
 async function handleCheckpointDownload(
-  _request: Request,
+  request: Request,
   env: Env,
   match: RegExpMatchArray
 ): Promise<Response> {
   const sessionId = match.groups?.id;
   if (!sessionId) return error("Session ID required");
+  const requestedGeneration = Number(new URL(request.url).searchParams.get("generation") ?? 0);
+  if (
+    !Number.isInteger(requestedGeneration) ||
+    requestedGeneration < 0 ||
+    requestedGeneration >= CHECKPOINT_GENERATIONS_TO_KEEP
+  ) {
+    return error("Checkpoint generation is invalid", 400);
+  }
 
   const storage = createMediaObjectStorage(env);
   const manifest = await readManifest(storage, sessionId);
+  let validGeneration = 0;
   for (const generation of manifest.generations) {
     const object = await storage.get(generationKey(sessionId, generation.checksum));
     if (!object || object.size !== generation.byteLength) continue;
     const bytes = new Uint8Array(await new Response(object.body).arrayBuffer());
     if ((await sha256(bytes)) !== generation.checksum) continue;
+    if (validGeneration++ !== requestedGeneration) continue;
 
     return new Response(bytes, {
       headers: {
@@ -161,6 +171,7 @@ async function handleCheckpointDownload(
         "X-Checkpoint-SHA256": generation.checksum,
         "X-OpenCode-Session-ID": generation.opencodeSessionId,
         "X-OpenCode-Version": generation.opencodeVersion,
+        "X-Checkpoint-Generation": String(requestedGeneration),
       },
     });
   }
