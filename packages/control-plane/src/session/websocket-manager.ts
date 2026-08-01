@@ -114,15 +114,16 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
     ws.serializeAttachment({ activeSandboxConnection: true });
 
     let replaced = false;
-    if (this.sandboxWs && this.sandboxWs !== ws) {
-      this.sandboxWs.serializeAttachment({ activeSandboxConnection: false });
+    for (const existing of this.ctx.getWebSockets()) {
+      if (existing === ws || this.classify(existing).kind !== "sandbox") continue;
+      existing.serializeAttachment({ activeSandboxConnection: false });
       try {
-        if (this.sandboxWs.readyState === WebSocket.OPEN) {
-          this.sandboxWs.close(1000, "New sandbox connecting");
+        if (existing.readyState === WebSocket.OPEN) {
+          existing.close(1000, "New sandbox connecting");
           replaced = true;
         }
       } catch {
-        // Ignore errors closing old WebSocket
+        continue;
       }
     }
 
