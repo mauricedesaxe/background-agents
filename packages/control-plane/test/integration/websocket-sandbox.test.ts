@@ -221,6 +221,11 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
       "SELECT opencode_session_id FROM session"
     );
     expect(state).toEqual([{ opencode_session_id: "ses_expected" }]);
+    const events = await queryDO<{ type: string }>(
+      stub,
+      "SELECT type FROM events WHERE type = 'context_unavailable'"
+    );
+    expect(events).toEqual([{ type: "context_unavailable" }]);
 
     sandboxWs!.close();
   });

@@ -97,6 +97,25 @@ class TestSessionReattach:
         assert bridge.opencode_session_error is not None
 
     @pytest.mark.asyncio
+    async def test_blocks_session_that_failed_checkpoint_graph_verification(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "OPENCODE_SESSION_ID": "oc-env",
+                "OPENCODE_CONTEXT_STATUS": "unavailable",
+            },
+            clear=False,
+        ):
+            bridge = _make_bridge()
+            bridge.http_client = _ok_client()
+            await bridge._load_session_id()
+
+        assert bridge.opencode_session_error == (
+            "OpenCode session oc-env failed checkpoint verification; "
+            "refusing to continue without its complete conversation context"
+        )
+
+    @pytest.mark.asyncio
     async def test_failed_reattach_rejects_prompt_without_running_agent(self) -> None:
         bridge = _make_bridge()
         bridge.opencode_session_id = "oc-env"
