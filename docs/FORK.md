@@ -276,12 +276,16 @@ so future syncs must port Linear client changes selectively rather than replace 
 
 `packages/web/src/components/session-sidebar.tsx` hides a parent's full descendant tree until its
 disclosure control is opened. The control reports the descendant count and active-child signal, and
-matching descendants open again whenever the search query changes. The collapse, activity roll-up,
-and search-reset behavior is pinned by `packages/web/src/components/session-sidebar.test.tsx`.
+matching descendants open again whenever the search query changes. Its dedicated tree-list mode
+keyset-paginates base sessions while returning their complete ancestor closure; flat consumers keep
+offset pagination. Migration `9008_session_tree_pagination_indexes.sql` supports the composite
+cursor order. The collapse, activity roll-up, pagination, and search-reset behavior is pinned by
+`packages/web/src/components/session-sidebar.test.tsx` and the control-plane D1 integration tests.
 
 **Why.** Agent fan-out can create enough child rows to make the sidebar hard to scan. Keeping the
 tree collapsed preserves parent-focused navigation while still surfacing active work and search
-matches that would otherwise be hidden.
+matches that would otherwise be hidden. Preserving ancestor closure prevents a recent child from
+appearing as a standalone root until pagination happens to load its older parent.
 
 ### 21. Session unread state is per user and message-scoped
 

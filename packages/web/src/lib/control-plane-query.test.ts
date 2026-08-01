@@ -43,4 +43,12 @@ describe("buildControlPlanePath", () => {
       "/sessions?status=running&excludeStatus=archived&createdBy=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     );
   });
+
+  it("forwards tree pagination mode and cursor", () => {
+    const searchParams = new URLSearchParams("mode=tree&cursor=opaque-cursor&offset=50&debug=true");
+
+    expect(
+      buildControlPlanePath("/sessions", searchParams, SESSION_CONTROL_PLANE_QUERY_PARAMS)
+    ).toBe("/sessions?offset=50&mode=tree&cursor=opaque-cursor");
+  });
 });

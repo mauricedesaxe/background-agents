@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import * as matchers from "@testing-library/jest-dom/matchers";
-import { SWRConfig } from "swr";
+import { SWRConfig, useSWRConfig } from "swr";
 import { MOBILE_LONG_PRESS_MS, SessionSidebar } from "./session-sidebar";
 import {
   buildSessionsPageKey,
@@ -92,6 +92,15 @@ function jsonResponse(body: unknown) {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function RevalidateFirstPageButton() {
+  const { mutate } = useSWRConfig();
+  return (
+    <button type="button" onClick={() => void mutate(SIDEBAR_SESSIONS_KEY)}>
+      Revalidate first page
+    </button>
+  );
 }
 
 describe("SessionSidebar", () => {
@@ -546,16 +555,21 @@ describe("SessionSidebar", () => {
   it("loads the next page when scrolled near the bottom", async () => {
     const firstPage = Array.from({ length: 50 }, (_, index) => createSession(index + 1));
     const secondPage = Array.from({ length: 5 }, (_, index) => createSession(index + 51));
+    const secondPageKey = buildSessionsPageKey({
+      excludeStatus: "archived",
+      mode: "tree",
+      cursor: "page-1-cursor",
+    });
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
 
       if (url === SIDEBAR_SESSIONS_KEY) {
-        return jsonResponse({ sessions: firstPage, hasMore: true });
+        return jsonResponse({ sessions: firstPage, hasMore: true, nextCursor: "page-1-cursor" });
       }
 
-      if (url === buildSessionsPageKey({ excludeStatus: "archived", offset: 50 })) {
-        return jsonResponse({ sessions: secondPage, hasMore: false });
+      if (url === secondPageKey) {
+        return jsonResponse({ sessions: secondPage, hasMore: false, nextCursor: null });
       }
 
       throw new Error(`Unexpected fetch for ${url}`);
@@ -605,20 +619,111 @@ describe("SessionSidebar", () => {
 
     expect(await screen.findByText("Session 55")).toBeInTheDocument();
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        buildSessionsPageKey({ excludeStatus: "archived", offset: 50 })
-      );
+      expect(fetchMock).toHaveBeenCalledWith(secondPageKey);
     });
+  });
+
+  it("keeps closure children classified after pagination and first-page revalidation", async () => {
+    const now = Date.now();
+    const parent = createSession(1, { title: "Closure parent", updatedAt: now - 10_000 });
+    const child = createSession(2, {
+      title: "Recent child",
+      parentSessionId: parent.id,
+      spawnSource: "agent",
+      spawnDepth: 1,
+      updatedAt: now,
+    });
+    const firstPage = {
+      sessions: [child, parent],
+      hasMore: true,
+      nextCursor: "tree-page-1",
+    };
+    const secondPageKey = buildSessionsPageKey({
+      excludeStatus: "archived",
+      mode: "tree",
+      cursor: "tree-page-1",
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === SIDEBAR_SESSIONS_KEY) {
+        return jsonResponse({ ...firstPage, sessions: [...firstPage.sessions] });
+      }
+      if (String(input) === secondPageKey) {
+        return jsonResponse({
+          sessions: [parent, createSession(3, { title: "Second-page root" })],
+          hasMore: false,
+          nextCursor: null,
+        });
+      }
+      throw new Error(`Unexpected fetch for ${String(input)}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { container } = render(
+      <SWRConfig
+        value={{
+          provider: () => new Map(),
+          fallback: { [SIDEBAR_SESSIONS_KEY]: firstPage },
+          dedupingInterval: 0,
+          revalidateOnFocus: false,
+          revalidateOnMount: false,
+          fetcher: async (url: string) => {
+            const response = await fetch(url);
+            return response.json();
+          },
+        }}
+      >
+        <SessionSidebar />
+        <RevalidateFirstPageButton />
+      </SWRConfig>
+    );
+
+    expect(await screen.findByText("Closure parent")).toBeInTheDocument();
+    expect(screen.queryByText("Recent child")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Expand 1 child session for Closure parent, 1 active",
+      })
+    ).toBeInTheDocument();
+
+    const scrollContainer = container.querySelector(".overflow-y-auto") as HTMLDivElement;
+    Object.defineProperty(scrollContainer, "scrollHeight", { configurable: true, value: 2000 });
+    Object.defineProperty(scrollContainer, "clientHeight", { configurable: true, value: 400 });
+    Object.defineProperty(scrollContainer, "scrollTop", { configurable: true, value: 1705 });
+    fireEvent.scroll(scrollContainer);
+
+    expect(await screen.findByText("Second-page root")).toBeInTheDocument();
+    expect(screen.getAllByText("Closure parent")).toHaveLength(1);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Expand 1 child session for Closure parent, 1 active",
+      })
+    );
+    expect(await screen.findByText("Recent child")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Revalidate first page" }));
+
+    await waitFor(() => expect(screen.queryByText("Second-page root")).not.toBeInTheDocument());
+    expect(screen.getAllByText("Closure parent")).toHaveLength(1);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Expand 1 child session for Closure parent, 1 active",
+      })
+    );
+    expect(await screen.findByText("Recent child")).toBeInTheDocument();
   });
 
   it("loads another page when the selected source leaves the viewport empty", async () => {
     const firstPage = Array.from({ length: 50 }, (_, index) => createSession(index + 1));
-    const secondPageKey = buildSessionsPageKey({ excludeStatus: "archived", offset: 50 });
+    const secondPageKey = buildSessionsPageKey({
+      excludeStatus: "archived",
+      mode: "tree",
+      cursor: "page-1-cursor",
+    });
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
 
       if (url === SIDEBAR_SESSIONS_KEY) {
-        return jsonResponse({ sessions: firstPage, hasMore: true });
+        return jsonResponse({ sessions: firstPage, hasMore: true, nextCursor: "page-1-cursor" });
       }
 
       if (url === secondPageKey) {
@@ -630,6 +735,7 @@ describe("SessionSidebar", () => {
             }),
           ],
           hasMore: false,
+          nextCursor: null,
         });
       }
 
@@ -682,6 +788,7 @@ describe("SessionSidebar", () => {
     const mineKey = buildSessionsPageKey({
       excludeStatus: "archived",
       createdBy: [CURRENT_USER_CREATED_BY],
+      mode: "tree",
     });
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -801,10 +908,15 @@ describe("SessionSidebar", () => {
 
   it("ignores stale load-more results after the creator filter changes", async () => {
     const firstPage = Array.from({ length: 50 }, (_, index) => createSession(index + 1));
-    const allNextPageKey = buildSessionsPageKey({ excludeStatus: "archived", offset: 50 });
+    const allNextPageKey = buildSessionsPageKey({
+      excludeStatus: "archived",
+      mode: "tree",
+      cursor: "all-page-1-cursor",
+    });
     const mineKey = buildSessionsPageKey({
       excludeStatus: "archived",
       createdBy: [CURRENT_USER_CREATED_BY],
+      mode: "tree",
     });
     let resolveAllNextPage!: (response: Response) => void;
     const allNextPage = new Promise<Response>((resolve) => {
@@ -815,7 +927,11 @@ describe("SessionSidebar", () => {
       const url = String(input);
 
       if (url === SIDEBAR_SESSIONS_KEY) {
-        return jsonResponse({ sessions: firstPage, hasMore: true });
+        return jsonResponse({
+          sessions: firstPage,
+          hasMore: true,
+          nextCursor: "all-page-1-cursor",
+        });
       }
 
       if (url === allNextPageKey) {
