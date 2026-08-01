@@ -468,7 +468,7 @@ describe("evaluateSpawnDecision", () => {
     expect(decision.action).toBe("spawn");
   });
 
-  it("does not resume for failed status even with providerObjectId", () => {
+  it('returns "resume" after a failed connection when provider state still exists', () => {
     const now = Date.now();
     const state: SandboxState = {
       status: "failed",
@@ -480,8 +480,7 @@ describe("evaluateSpawnDecision", () => {
 
     const decision = evaluateSpawnDecision(state, config, now, false, true);
 
-    // "failed" is not a resume-eligible status — should fall through to spawn
-    expect(decision.action).toBe("spawn");
+    expect(decision).toEqual({ action: "resume", providerObjectId: "daytona-abc123" });
   });
 });
 

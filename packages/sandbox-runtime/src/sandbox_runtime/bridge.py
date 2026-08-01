@@ -366,9 +366,7 @@ class AgentBridge:
 
         # Session state
         self.opencode_session_id: str | None = None
-        # Control-plane-provided id for reattaching to a prior conversation on
-        # resume. Preferred over the on-disk cache; verified before use so a
-        # stale id (e.g. full sandbox recreate) falls back to a fresh session.
+        self.opencode_session_error: str | None = None
         self.provided_opencode_session_id: str | None = (
             os.environ.get("OPENCODE_SESSION_ID") or None
         )
@@ -882,6 +880,9 @@ class AgentBridge:
         )
 
         try:
+            if self.opencode_session_error:
+                raise RuntimeError(self.opencode_session_error)
+
             scm_name = author_data.get("scmName")
             scm_email = author_data.get("scmEmail")
             await self._configure_git_identity(
@@ -1090,6 +1091,13 @@ class AgentBridge:
         )
 
         await self._save_session_id()
+        await self._send_event(
+            {
+                "type": "ready",
+                "sandboxId": self.sandbox_id,
+                "opencodeSessionId": self.opencode_session_id,
+            }
+        )
 
     def _normalize_forwardable_session_title(self, title: object) -> str | None:
         if not isinstance(title, str):
@@ -2334,8 +2342,8 @@ class AgentBridge:
 
         Prefers the control-plane-provided OPENCODE_SESSION_ID (reattach on
         resume) over the on-disk cache, then verifies the session still exists
-        via OpenCode. A missing/absent id, or one that no longer exists, leaves
-        ``opencode_session_id`` unset so a fresh session is created as before.
+        via OpenCode. A missing expected session blocks prompts rather than
+        silently becoming a blank conversation.
         """
         candidate: str | None = None
         source: str | None = None
@@ -2369,13 +2377,28 @@ class AgentBridge:
                     timeout=self.OPENCODE_REQUEST_TIMEOUT,
                 )
                 if resp.status_code != 200:
-                    self.log.info(
+                    error_message = (
+                        f"OpenCode session {self.opencode_session_id} is unavailable; "
+                        "refusing to continue without its conversation context"
+                    )
+                    self.log.error(
                         "opencode.session.invalid",
                         opencode_session_id=self.opencode_session_id,
+                        source=source,
+                        status_code=resp.status_code,
                     )
-                    self.opencode_session_id = None
-            except Exception:
-                self.opencode_session_id = None
+                    self.opencode_session_error = error_message
+            except Exception as e:
+                self.log.error(
+                    "opencode.session.verify_error",
+                    exc=e,
+                    opencode_session_id=self.opencode_session_id,
+                    source=source,
+                )
+                self.opencode_session_error = (
+                    f"OpenCode session {self.opencode_session_id} is unavailable; "
+                    "refusing to continue without its conversation context"
+                )
 
     async def _save_session_id(self) -> None:
         """Save OpenCode session ID to file for persistence."""

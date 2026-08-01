@@ -189,6 +189,7 @@ export type SpawnAction =
  * Evaluate what spawn action to take.
  *
  * This function encapsulates the complex spawn decision logic:
+ * - Resume provider-owned state if available and sandbox is stopped/stale/failed
  * - Restore from snapshot if available and sandbox is stopped/stale/failed
  * - Skip if already spawning/connecting
  * - Skip if ready with active WebSocket
@@ -228,7 +229,7 @@ export function evaluateSpawnDecision(
   if (
     supportsPersistentResume &&
     state.providerObjectId &&
-    (state.status === "stopped" || state.status === "stale")
+    (state.status === "stopped" || state.status === "stale" || state.status === "failed")
   ) {
     return { action: "resume", providerObjectId: state.providerObjectId };
   }
