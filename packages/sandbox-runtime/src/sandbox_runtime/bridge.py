@@ -325,6 +325,7 @@ class AgentBridge:
         "push_error",
         "context_compacted",
         "context_compaction_failed",
+        "context_unavailable",
     }
     # Events whose payload is cumulative, so a later one supersedes an earlier
     # one. These are safe to drop first under stream backpressure.
@@ -531,13 +532,26 @@ class AgentBridge:
                 self.ws = ws
                 self.log.info("bridge.connect", outcome="success")
 
-                await self._send_event(
-                    {
-                        "type": "ready",
-                        "sandboxId": self.sandbox_id,
-                        "opencodeSessionId": self.opencode_session_id,
-                    }
-                )
+                if self.opencode_session_error and self.opencode_session_id:
+                    await self._send_event(
+                        {
+                            "type": "context_unavailable",
+                            "opencodeSessionId": self.opencode_session_id,
+                            "error": self.opencode_session_error,
+                        }
+                    )
+                else:
+                    context_status = os.environ.get("OPENCODE_CONTEXT_STATUS")
+                    if context_status not in {"fresh", "existing", "restored"}:
+                        context_status = "existing" if self.opencode_session_id else "fresh"
+                    await self._send_event(
+                        {
+                            "type": "ready",
+                            "sandboxId": self.sandbox_id,
+                            "opencodeSessionId": self.opencode_session_id,
+                            "contextStatus": context_status,
+                        }
+                    )
 
                 await self._drain_boot_warnings()
 
@@ -928,6 +942,9 @@ class AgentBridge:
             if had_error:
                 outcome = "error"
 
+            if not had_error:
+                await self._save_checkpoint_or_warn(message_id=message_id)
+
             # Drain everything the agent produced before the terminal event, so
             # execution_complete always lands last.
             self._log_dropped_events(message_id, await pump.aclose())
@@ -965,6 +982,74 @@ class AgentBridge:
                 reasoning_effort=reasoning_effort,
                 outcome=outcome,
                 duration_ms=duration_ms,
+            )
+
+    async def _save_checkpoint(self) -> None:
+        """Export the idle native OpenCode conversation and promote it remotely."""
+        if not self.opencode_session_id or not self.http_client:
+            raise RuntimeError("OpenCode session is not ready for checkpointing")
+
+        process = await asyncio.create_subprocess_exec(
+            "opencode",
+            "export",
+            self.opencode_session_id,
+            "--pure",
+            cwd=os.environ.get("OPENCODE_WORKDIR") or None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=self.OPENCODE_REQUEST_TIMEOUT
+            )
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            raise RuntimeError("OpenCode checkpoint export timed out") from None
+
+        if process.returncode != 0:
+            detail = stderr.decode(errors="replace").strip()
+            raise RuntimeError(
+                "OpenCode checkpoint export failed" + (f": {detail}" if detail else "")
+            )
+
+        try:
+            exported = json.loads(stdout)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise RuntimeError("OpenCode checkpoint export returned invalid JSON") from e
+        info = exported.get("info") if isinstance(exported, dict) else None
+        if not isinstance(info, dict) or info.get("id") != self.opencode_session_id:
+            raise RuntimeError("OpenCode checkpoint export returned the wrong session")
+
+        response = await self.http_client.put(
+            f"{self.control_plane_url}/sessions/{self.session_id}/checkpoint",
+            content=stdout,
+            headers={
+                "Authorization": f"Bearer {self.auth_token}",
+                "Content-Type": "application/json",
+                "X-OpenCode-Session-ID": self.opencode_session_id,
+                "X-OpenCode-Version": os.environ.get("OPENCODE_VERSION", "unknown"),
+            },
+            timeout=self.HTTP_DEFAULT_TIMEOUT,
+        )
+        response.raise_for_status()
+        self.log.info(
+            "opencode.checkpoint_saved",
+            opencode_session_id=self.opencode_session_id,
+            byte_length=len(stdout),
+        )
+
+    async def _save_checkpoint_or_warn(self, *, message_id: str | None = None) -> None:
+        try:
+            await self._save_checkpoint()
+        except Exception as e:
+            self.log.warn("opencode.checkpoint_failed", exc=e, message_id=message_id)
+            await self._send_event(
+                {
+                    "type": "warning",
+                    "scope": "checkpoint",
+                    "message": "Conversation checkpoint failed; the previous checkpoint remains available",
+                }
             )
 
     async def _handle_context_compaction(self, cmd: dict[str, Any]) -> None:
@@ -1023,6 +1108,7 @@ class AgentBridge:
                         if props.get("sessionID") != self.opencode_session_id:
                             continue
                         if event_type == "session.compacted":
+                            await self._save_checkpoint_or_warn()
                             await self._send_event(
                                 {
                                     "type": "context_compacted",
@@ -1096,7 +1182,7 @@ class AgentBridge:
         await self._save_session_id()
         await self._send_event(
             {
-                "type": "ready",
+                "type": "opencode_session_created",
                 "sandboxId": self.sandbox_id,
                 "opencodeSessionId": self.opencode_session_id,
             }

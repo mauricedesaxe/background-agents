@@ -1,0 +1,104 @@
+import json
+import os
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from sandbox_runtime.entrypoint import SandboxSupervisor
+
+
+def _make_supervisor() -> SandboxSupervisor:
+    env = {
+        "SANDBOX_ID": "sandbox-1",
+        "CONTROL_PLANE_URL": "https://control.example",
+        "SANDBOX_AUTH_TOKEN": "token-1",
+        "OPENCODE_SESSION_ID": "ses_expected",
+        "SESSION_CONFIG": json.dumps({"session_id": "session-1"}),
+        "REPO_OWNER": "",
+        "REPO_NAME": "",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        return SandboxSupervisor()
+
+
+def _process(returncode: int, stdout: bytes = b"", stderr: bytes = b"") -> MagicMock:
+    process = MagicMock(returncode=returncode)
+    process.communicate = AsyncMock(return_value=(stdout, stderr))
+    return process
+
+
+@pytest.mark.asyncio
+async def test_restores_checkpoint_before_opencode_server_starts(tmp_path: Path) -> None:
+    supervisor = _make_supervisor()
+    checkpoint = json.dumps({"info": {"id": "ses_expected"}, "messages": []}).encode()
+    missing_export = _process(1)
+    imported = _process(0)
+    response = MagicMock(
+        status_code=200,
+        content=checkpoint,
+        headers={"X-OpenCode-Session-ID": "ses_expected"},
+    )
+    client = AsyncMock()
+    client.get = AsyncMock(return_value=response)
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = None
+
+    with (
+        patch.dict(os.environ, {"OPENCODE_SESSION_ID": "ses_expected"}, clear=False),
+        patch(
+            "sandbox_runtime.entrypoint.asyncio.create_subprocess_exec",
+            AsyncMock(side_effect=[missing_export, imported]),
+        ) as create_process,
+        patch("sandbox_runtime.entrypoint.httpx.AsyncClient", return_value=client),
+    ):
+        await supervisor._restore_opencode_context(tmp_path, {})
+
+        assert os.environ["OPENCODE_CONTEXT_STATUS"] == "restored"
+
+    import_args = create_process.await_args_list[1].args
+    assert import_args[:2] == ("opencode", "import")
+    assert import_args[-1] == "--pure"
+    assert not Path(import_args[2]).exists()
+
+
+@pytest.mark.asyncio
+async def test_keeps_existing_local_context_without_downloading(tmp_path: Path) -> None:
+    supervisor = _make_supervisor()
+    checkpoint = json.dumps({"info": {"id": "ses_expected"}, "messages": []}).encode()
+    local_export = _process(0, stdout=checkpoint)
+
+    with (
+        patch.dict(os.environ, {"OPENCODE_SESSION_ID": "ses_expected"}, clear=False),
+        patch(
+            "sandbox_runtime.entrypoint.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=local_export),
+        ),
+        patch("sandbox_runtime.entrypoint.httpx.AsyncClient") as client,
+    ):
+        await supervisor._restore_opencode_context(tmp_path, {})
+
+        assert os.environ["OPENCODE_CONTEXT_STATUS"] == "existing"
+        client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_marks_context_unavailable_when_no_checkpoint_exists(tmp_path: Path) -> None:
+    supervisor = _make_supervisor()
+    response = MagicMock(status_code=404, content=b"", headers={})
+    client = AsyncMock()
+    client.get = AsyncMock(return_value=response)
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = None
+
+    with (
+        patch.dict(os.environ, {"OPENCODE_SESSION_ID": "ses_expected"}, clear=False),
+        patch(
+            "sandbox_runtime.entrypoint.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=_process(1)),
+        ),
+        patch("sandbox_runtime.entrypoint.httpx.AsyncClient", return_value=client),
+    ):
+        await supervisor._restore_opencode_context(tmp_path, {})
+
+        assert os.environ["OPENCODE_CONTEXT_STATUS"] == "unavailable"

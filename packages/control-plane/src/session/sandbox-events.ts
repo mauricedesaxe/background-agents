@@ -32,6 +32,7 @@ const CRITICAL_EVENT_TYPES: ReadonlySet<string> = new Set([
   "push_error",
   "context_compacted",
   "context_compaction_failed",
+  "context_unavailable",
 ]);
 
 export class SessionSandboxEventProcessor {

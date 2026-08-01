@@ -8,7 +8,16 @@ from src.sandbox.manager import (
     SandboxConfig,
     SandboxManager,
     _has_repository,
+    _opencode_session_id,
 )
+
+
+def test_opencode_session_id_supports_create_and_restore_config_shapes():
+    config = SessionConfig(session_id="sess-1", opencode_session_id="oc-1")
+
+    assert _opencode_session_id(config) == "oc-1"
+    assert _opencode_session_id(config.model_dump()) == "oc-1"
+    assert _opencode_session_id(None) is None
 
 
 @pytest.mark.parametrize(

@@ -6,6 +6,8 @@ import {
   openClientWs,
   openSandboxWs,
   seedSandboxAuth,
+  seedMessage,
+  sendSandboxReady,
   queryDO,
   waitForSandboxStatus,
 } from "./helpers";
@@ -77,23 +79,22 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     expect(ws).toBeNull();
   });
 
-  it("sandbox connect sets status to ready", async () => {
+  it("sandbox remains connecting until the bridge verifies context", async () => {
     const name = `ws-sandbox-ready-${Date.now()}`;
     const { stub } = await initNamedSession(name);
-    // Model the production boot sequence: the sandbox connects while the
-    // lifecycle is still in "connecting", and the WS accept flips it to ready.
     await seedSandboxAuth(stub, {
       authToken: SANDBOX_TOKEN,
       sandboxId: SANDBOX_ID,
       status: "connecting",
     });
-
     const { ws } = await openSandboxWs(name, {
       authToken: SANDBOX_TOKEN,
       sandboxId: SANDBOX_ID,
     });
     expect(ws).not.toBeNull();
     ws!.accept();
+    await waitForSandboxStatus(stub, "connecting");
+    sendSandboxReady(ws!, SANDBOX_ID, "existing");
     await waitForSandboxStatus(stub, "ready");
 
     const stateRes = await stub.fetch("http://internal/internal/state");
@@ -121,8 +122,76 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     });
     expect(ws).not.toBeNull();
     ws!.accept();
+    sendSandboxReady(ws!, SANDBOX_ID, "restored");
     await waitForSandboxStatus(stub, "ready");
     ws!.close();
+  });
+
+  it("fails queued prompts without dispatch when context is unavailable", async () => {
+    const name = `ws-sandbox-context-unavailable-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    await seedSandboxAuth(stub, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+      status: "connecting",
+    });
+    const participant = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    await seedMessage(stub, {
+      id: "interrupted-message",
+      authorId: participant[0].id,
+      content: "work interrupted before replacement",
+      source: "web",
+      status: "processing",
+      createdAt: Date.now() - 1000,
+      startedAt: Date.now() - 500,
+    });
+    const { ws: sandboxWs } = await openSandboxWs(name, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+    });
+    sandboxWs!.accept();
+    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
+    const queued = collectMessages(clientWs, {
+      until: (message) => message.type === "prompt_queued",
+    });
+    clientWs.send(JSON.stringify({ type: "prompt", content: "continue" }));
+    await queued;
+
+    const sandboxMessages = collectMessages(sandboxWs!, {
+      until: (message) => message.type === "ack",
+    });
+    const failed = collectMessages(clientWs, {
+      until: (message) =>
+        message.type === "sandbox_event" && message.event.type === "execution_complete",
+    });
+    sandboxWs!.send(
+      JSON.stringify({
+        type: "context_unavailable",
+        sandboxId: SANDBOX_ID,
+        opencodeSessionId: "ses_missing",
+        error: "The prior OpenCode conversation could not be restored",
+        ackId: "context_unavailable:ses_missing",
+        timestamp: Date.now() / 1000,
+      })
+    );
+
+    expect((await sandboxMessages).some((message) => message.type === "prompt")).toBe(false);
+    expect(await failed).toContainEqual({
+      type: "sandbox_event",
+      event: expect.objectContaining({
+        type: "execution_complete",
+        success: false,
+        error: "The prior OpenCode conversation could not be restored",
+      }),
+    });
+    const messages = await queryDO<{ status: string }>(stub, "SELECT status FROM messages");
+    expect(messages).toEqual([{ status: "failed" }, { status: "failed" }]);
+
+    sandboxWs!.close();
+    clientWs.close();
   });
 
   it("sandbox WS message is stored as event", async () => {
@@ -186,6 +255,8 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     });
     expect(sandboxWs).not.toBeNull();
     sandboxWs!.accept();
+    sendSandboxReady(sandboxWs!, SANDBOX_ID);
+    await waitForSandboxStatus(stub, "ready");
 
     const tokenUsage = {
       total: 223,

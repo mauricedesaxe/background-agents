@@ -86,6 +86,7 @@ def bridge() -> AgentBridge:
     )
     bridge.opencode_session_id = "oc-session-123"
     bridge.http_client = MockHttpClient()
+    bridge._save_checkpoint_or_warn = AsyncMock()
     return bridge
 
 

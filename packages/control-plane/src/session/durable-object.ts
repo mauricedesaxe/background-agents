@@ -935,10 +935,10 @@ export class SessionDO extends DurableObject<Env> {
   private async handleWebSocketUpgrade(request: Request, url: URL, log: Logger): Promise<Response> {
     log.debug("WebSocket upgrade requested");
     const isSandbox = url.searchParams.get("type") === "sandbox";
+    const wsStartTime = Date.now();
 
     // Validate sandbox authentication
     if (isSandbox) {
-      const wsStartTime = Date.now();
       const authHeader = request.headers.get("Authorization");
       const sandboxId = request.headers.get("X-Sandbox-ID");
       const providedToken = authHeader?.startsWith("Bearer ")
@@ -1008,16 +1008,8 @@ export class SessionDO extends DurableObject<Env> {
           sandboxId ?? undefined
         );
 
-        // Notify manager that sandbox connected so it can reset the spawning flag
-        this.lifecycleManager.onSandboxConnected();
-        this.updateSandboxStatus("ready");
-        this.broadcast({ type: "sandbox_status", status: "ready" });
-
-        // Set initial activity timestamp and schedule inactivity check
-        // IMPORTANT: Must await to ensure alarm is scheduled before returning
-        const now = Date.now();
-        this.updateLastActivity(now);
-        await this.scheduleInactivityCheck();
+        this.updateSandboxStatus("connecting");
+        this.broadcast({ type: "sandbox_status", status: "connecting" });
 
         log.info("ws.connect", {
           event: "ws.connect",
@@ -1025,11 +1017,8 @@ export class SessionDO extends DurableObject<Env> {
           outcome: "success",
           sandbox_id: sandboxId,
           replaced_existing: replaced,
-          duration_ms: Date.now() - now,
+          duration_ms: Date.now() - wsStartTime,
         });
-
-        // Process any pending messages now that sandbox is connected
-        this.processMessageQueue();
       } else {
         const wsId = `ws-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
         this.wsManager.acceptClientSocket(server, wsId);
@@ -1167,12 +1156,15 @@ export class SessionDO extends DurableObject<Env> {
     const event = this.parseWebSocketMessage(message, "sandbox", sandboxEventSchema);
     if (!event) return;
 
-    // Persist the bridge-reported OpenCode session id so a later respawn can
-    // reattach to the same conversation. The bridge emits it in its `ready`
-    // event on every (re)connect; without this the resume config always sends
-    // a null id and every restart starts a fresh, empty OpenCode session.
     if (event.type === "ready") {
+      if (!this.wsManager.isCurrentSandboxSocket(ws)) return;
       this.persistOpencodeSessionId(event.opencodeSessionId);
+      await this.markSandboxContextReady(event.contextStatus);
+    } else if (event.type === "opencode_session_created") {
+      this.persistOpencodeSessionId(event.opencodeSessionId);
+    } else if (event.type === "context_unavailable") {
+      if (!this.wsManager.isCurrentSandboxSocket(ws)) return;
+      await this.handleContextUnavailable(event.error);
     }
 
     try {
@@ -1182,6 +1174,29 @@ export class SessionDO extends DurableObject<Env> {
         error: e instanceof Error ? e : String(e),
       });
     }
+  }
+
+  private async markSandboxContextReady(
+    contextStatus: "fresh" | "existing" | "restored" | undefined
+  ): Promise<void> {
+    this.lifecycleManager.onSandboxConnected();
+    this.updateSandboxStatus("ready");
+    this.broadcast({ type: "sandbox_status", status: "ready" });
+    const now = Date.now();
+    this.updateLastActivity(now);
+    await this.scheduleInactivityCheck();
+    this.log.info("opencode.context_ready", {
+      event: "opencode.context_ready",
+      context_status: contextStatus ?? "legacy_verified",
+    });
+    await this.processMessageQueue();
+  }
+
+  private async handleContextUnavailable(failure: string): Promise<void> {
+    this.updateSandboxStatus("failed");
+    this.broadcast({ type: "sandbox_status", status: "failed" });
+    this.broadcast({ type: "sandbox_error", error: failure });
+    await this.messageQueue.failMessagesForContextLoss(failure);
   }
 
   /**

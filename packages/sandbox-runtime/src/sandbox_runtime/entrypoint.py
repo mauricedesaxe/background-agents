@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import signal
+import tempfile
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -120,6 +121,7 @@ class SandboxSupervisor:
     CLONE_DEPTH_COMMITS = 100
     SIDECAR_TIMEOUT_SECONDS = 5
     MCP_PACKAGE_INSTALL_TIMEOUT_SECONDS = 180
+    CONTEXT_RESTORE_TIMEOUT_SECONDS = 30
 
     # OOM-killer bias (Linux oom_score_adj, range -1000..1000; lower = less
     # likely to be killed). Under memory pressure from a build/test workload we
@@ -1310,6 +1312,8 @@ class SandboxSupervisor:
             "OPENCODE_CLIENT": "serve",
         }
 
+        await self._restore_opencode_context(workdir, env)
+
         # Start OpenCode server in the repo directory
         self.opencode_process = await asyncio.create_subprocess_exec(
             "opencode",
@@ -1340,6 +1344,114 @@ class SandboxSupervisor:
         await self._wait_for_health()
         self.opencode_ready.set()
         self.log.info("opencode.ready")
+
+    async def _restore_opencode_context(self, workdir: Path, env: dict[str, str]) -> None:
+        """Restore a missing expected native conversation before OpenCode starts."""
+        expected_session_id = os.environ.get("OPENCODE_SESSION_ID") or None
+        if not expected_session_id:
+            os.environ["OPENCODE_CONTEXT_STATUS"] = "fresh"
+            return
+
+        export_process = await asyncio.create_subprocess_exec(
+            "opencode",
+            "export",
+            expected_session_id,
+            "--pure",
+            cwd=workdir,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            export_stdout, _ = await asyncio.wait_for(
+                export_process.communicate(), timeout=self.CONTEXT_RESTORE_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            export_process.kill()
+            await export_process.wait()
+            export_stdout = b""
+        if export_process.returncode == 0 and self._checkpoint_matches(
+            export_stdout, expected_session_id
+        ):
+            os.environ["OPENCODE_CONTEXT_STATUS"] = "existing"
+            return
+
+        session_id = self.session_config.get("session_id", "")
+        if not self.control_plane_url or not self.sandbox_token or not session_id:
+            os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
+            return
+
+        checkpoint_url = f"{self.control_plane_url}/sessions/{session_id}/checkpoint"
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    checkpoint_url,
+                    headers={"Authorization": f"Bearer {self.sandbox_token}"},
+                )
+            checkpoint = response.content
+            if (
+                response.status_code != 200
+                or response.headers.get("X-OpenCode-Session-ID") != expected_session_id
+                or not self._checkpoint_matches(checkpoint, expected_session_id)
+            ):
+                os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
+                return
+
+            checkpoint_path: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    prefix="opencode-checkpoint-", suffix=".json", delete=False
+                ) as checkpoint_file:
+                    checkpoint_file.write(checkpoint)
+                    checkpoint_path = Path(checkpoint_file.name)
+                checkpoint_path.chmod(0o600)
+
+                import_process = await asyncio.create_subprocess_exec(
+                    "opencode",
+                    "import",
+                    str(checkpoint_path),
+                    "--pure",
+                    cwd=workdir,
+                    env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    _, import_stderr = await asyncio.wait_for(
+                        import_process.communicate(), timeout=self.CONTEXT_RESTORE_TIMEOUT_SECONDS
+                    )
+                except TimeoutError:
+                    import_process.kill()
+                    await import_process.wait()
+                    os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
+                    return
+                if import_process.returncode != 0:
+                    detail = import_stderr.decode(errors="replace").strip()
+                    self.log.error("opencode.context_import_failed", detail=detail)
+                    os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
+                    return
+            finally:
+                if checkpoint_path:
+                    checkpoint_path.unlink(missing_ok=True)
+        except Exception as error:
+            self.log.error("opencode.context_restore_failed", exc=error)
+            os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
+            return
+
+        os.environ["OPENCODE_CONTEXT_STATUS"] = "restored"
+        self.log.info("opencode.context_restored", opencode_session_id=expected_session_id)
+
+    @staticmethod
+    def _checkpoint_matches(checkpoint: bytes, expected_session_id: str) -> bool:
+        try:
+            parsed = json.loads(checkpoint)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return False
+        return (
+            isinstance(parsed, dict)
+            and isinstance(parsed.get("info"), dict)
+            and parsed["info"].get("id") == expected_session_id
+        )
 
     async def _forward_opencode_logs(self) -> None:
         """Forward OpenCode stdout to supervisor stdout."""
@@ -1392,6 +1504,10 @@ class SandboxSupervisor:
             return
 
         # Run bridge as a module (works with relative imports)
+        bridge_env = {
+            **os.environ,
+            "OPENCODE_WORKDIR": str(self._opencode_workdir()),
+        }
         self.bridge_process = await asyncio.create_subprocess_exec(
             "python",
             "-m",
@@ -1406,7 +1522,7 @@ class SandboxSupervisor:
             self.sandbox_token,
             "--opencode-port",
             str(self.OPENCODE_PORT),
-            env=os.environ,
+            env=bridge_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             limit=_LOG_FORWARD_STREAM_LIMIT_BYTES,
