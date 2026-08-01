@@ -412,6 +412,21 @@ describe("SessionWebSocketManagerImpl", () => {
       expect(manager.isCurrentSandboxSocket(stale)).toBe(false);
       expect(manager.isCurrentSandboxSocket(active)).toBe(true);
     });
+
+    it("deactivates a hibernated socket when its replacement connects", () => {
+      const { manager } = createManager();
+      const stale = createFakeWebSocket();
+      const replacement = createFakeWebSocket();
+      manager.acceptAndSetSandboxSocket(stale, "sb-1");
+      manager.clearSandboxSocket();
+
+      manager.acceptAndSetSandboxSocket(replacement, "sb-1");
+      manager.clearSandboxSocket();
+
+      expect(manager.isCurrentSandboxSocket(stale)).toBe(false);
+      expect(manager.isCurrentSandboxSocket(replacement)).toBe(true);
+      expect(stale.close).toHaveBeenCalledWith(1000, "New sandbox connecting");
+    });
   });
 
   describe("clearSandboxSocket", () => {
