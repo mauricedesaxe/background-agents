@@ -31,6 +31,7 @@ def _process(returncode: int, stdout: bytes = b"", stderr: bytes = b"") -> Magic
 @pytest.mark.asyncio
 async def test_restores_checkpoint_before_opencode_server_starts(tmp_path: Path) -> None:
     supervisor = _make_supervisor()
+    supervisor.context_unavailable_file = tmp_path / "context-unavailable"
     checkpoint = json.dumps({"info": {"id": "ses_expected"}, "messages": []}).encode()
     missing_export = _process(1)
     imported = _process(0)
@@ -66,6 +67,7 @@ async def test_restores_checkpoint_before_opencode_server_starts(tmp_path: Path)
 @pytest.mark.asyncio
 async def test_rejects_an_import_that_drops_native_conversation_state(tmp_path: Path) -> None:
     supervisor = _make_supervisor()
+    supervisor.context_unavailable_file = tmp_path / "context-unavailable"
     checkpoint = json.dumps(
         {
             "info": {"id": "ses_expected"},
@@ -95,10 +97,22 @@ async def test_rejects_an_import_that_drops_native_conversation_state(tmp_path: 
 
         assert os.environ["OPENCODE_CONTEXT_STATUS"] == "unavailable"
 
+    with (
+        patch.dict(os.environ, {"OPENCODE_SESSION_ID": "ses_expected"}, clear=False),
+        patch(
+            "sandbox_runtime.entrypoint.asyncio.create_subprocess_exec",
+            AsyncMock(),
+        ) as create_process,
+    ):
+        await supervisor._restore_opencode_context(tmp_path, {})
+
+    create_process.assert_not_awaited()
+
 
 @pytest.mark.asyncio
 async def test_keeps_existing_local_context_without_downloading(tmp_path: Path) -> None:
     supervisor = _make_supervisor()
+    supervisor.context_unavailable_file = tmp_path / "context-unavailable"
     checkpoint = json.dumps({"info": {"id": "ses_expected"}, "messages": []}).encode()
     local_export = _process(0, stdout=checkpoint)
 
@@ -119,6 +133,7 @@ async def test_keeps_existing_local_context_without_downloading(tmp_path: Path) 
 @pytest.mark.asyncio
 async def test_marks_context_unavailable_when_no_checkpoint_exists(tmp_path: Path) -> None:
     supervisor = _make_supervisor()
+    supervisor.context_unavailable_file = tmp_path / "context-unavailable"
     response = MagicMock(status_code=404, content=b"", headers={})
     client = AsyncMock()
     client.get = AsyncMock(return_value=response)

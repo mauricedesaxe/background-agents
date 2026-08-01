@@ -2489,6 +2489,12 @@ class AgentBridge:
                     "refusing to continue without its conversation context"
                 )
 
+        if os.environ.get("OPENCODE_CONTEXT_STATUS") == "unavailable":
+            self.opencode_session_error = (
+                f"OpenCode session {self.opencode_session_id} failed checkpoint verification; "
+                "refusing to continue without its complete conversation context"
+            )
+
     async def _save_session_id(self) -> None:
         """Save OpenCode session ID to file for persistence."""
         if self.opencode_session_id:

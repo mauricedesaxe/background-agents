@@ -170,6 +170,7 @@ class SandboxSupervisor:
             self.workspace_path / self.repo_name if self.has_repository else self.workspace_path
         )
         self.session_id_file = Path("/tmp/opencode-session-id")
+        self.context_unavailable_file = Path("/tmp/opencode-context-unavailable")
 
         # Ordered repository list. SESSION_CONFIG.repositories is the source
         # of truth; absent, a one-entry list is synthesized from the scalar
@@ -1350,6 +1351,9 @@ class SandboxSupervisor:
         if not expected_session_id:
             os.environ["OPENCODE_CONTEXT_STATUS"] = "fresh"
             return
+        if self.context_unavailable_file.exists():
+            self._mark_context_unavailable()
+            return
 
         export_process = await asyncio.create_subprocess_exec(
             "opencode",
@@ -1377,7 +1381,7 @@ class SandboxSupervisor:
 
         session_id = self.session_config.get("session_id", "")
         if not self.control_plane_url or not self.sandbox_token or not session_id:
-            os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
+            self._mark_context_unavailable()
             return
 
         checkpoint_url = f"{self.control_plane_url}/sessions/{session_id}/checkpoint"
@@ -1393,7 +1397,7 @@ class SandboxSupervisor:
                 or response.headers.get("X-OpenCode-Session-ID") != expected_session_id
                 or not self._checkpoint_matches(checkpoint, expected_session_id)
             ):
-                os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
+                self._mark_context_unavailable()
                 return
 
             checkpoint_path: Path | None = None
@@ -1422,12 +1426,12 @@ class SandboxSupervisor:
                 except TimeoutError:
                     import_process.kill()
                     await import_process.wait()
-                    os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
+                    self._mark_context_unavailable()
                     return
                 if import_process.returncode != 0:
                     detail = import_stderr.decode(errors="replace").strip()
                     self.log.error("opencode.context_import_failed", detail=detail)
-                    os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
+                    self._mark_context_unavailable()
                     return
 
                 verify_process = await asyncio.create_subprocess_exec(
@@ -1447,23 +1451,27 @@ class SandboxSupervisor:
                 except TimeoutError:
                     verify_process.kill()
                     await verify_process.wait()
-                    os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
+                    self._mark_context_unavailable()
                     return
                 if verify_process.returncode != 0 or not self._checkpoints_equal(
                     checkpoint, verify_stdout
                 ):
-                    os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
+                    self._mark_context_unavailable()
                     return
             finally:
                 if checkpoint_path:
                     checkpoint_path.unlink(missing_ok=True)
         except Exception as error:
             self.log.error("opencode.context_restore_failed", exc=error)
-            os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
+            self._mark_context_unavailable()
             return
 
         os.environ["OPENCODE_CONTEXT_STATUS"] = "restored"
         self.log.info("opencode.context_restored", opencode_session_id=expected_session_id)
+
+    def _mark_context_unavailable(self) -> None:
+        os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
+        self.context_unavailable_file.write_text("unavailable")
 
     @staticmethod
     def _checkpoint_matches(checkpoint: bytes, expected_session_id: str) -> bool:

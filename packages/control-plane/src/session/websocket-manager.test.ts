@@ -6,10 +6,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import {
-  ACTIVE_SANDBOX_CONNECTION_STORAGE_KEY,
-  SessionWebSocketManagerImpl,
-} from "./websocket-manager";
+import { SessionWebSocketManagerImpl } from "./websocket-manager";
 import type { WebSocketManagerConfig } from "./websocket-manager";
 import type { Logger } from "../logger";
 import type { ClientInfo } from "../types";
@@ -22,6 +19,7 @@ import type { SandboxRow } from "./types";
 
 /** Minimal fake WebSocket for testing. */
 function createFakeWebSocket(readyState = WebSocket.OPEN): WebSocket {
+  let attachment: unknown = null;
   return {
     readyState,
     send: vi.fn(),
@@ -45,15 +43,16 @@ function createFakeWebSocket(readyState = WebSocket.OPEN): WebSocket {
     accept: vi.fn(),
     serialize: vi.fn(),
     deserialize: vi.fn(),
-    serializeAttachment: vi.fn(),
-    deserializeAttachment: vi.fn(),
+    serializeAttachment: vi.fn((value: unknown) => {
+      attachment = value;
+    }),
+    deserializeAttachment: vi.fn(() => attachment),
   } as unknown as WebSocket;
 }
 
 /** Type for the fake DurableObjectState with test helpers. */
 interface FakeCtx {
   sockets: Map<WebSocket, string[]>;
-  stored: Map<string, unknown>;
   state: DurableObjectState;
 }
 
@@ -62,7 +61,6 @@ interface FakeCtx {
  */
 function createFakeCtx(): FakeCtx {
   const sockets = new Map<WebSocket, string[]>();
-  const stored = new Map<string, unknown>();
 
   const state = {
     acceptWebSocket(ws: WebSocket, tags: string[]) {
@@ -77,21 +75,12 @@ function createFakeCtx(): FakeCtx {
     setWebSocketAutoResponse: vi.fn(),
     storage: {
       setAlarm: vi.fn(),
-      get: vi.fn((key: string) => Promise.resolve(stored.get(key))),
-      put: vi.fn((key: string, value: unknown) => {
-        stored.set(key, value);
-        return Promise.resolve();
-      }),
-      delete: vi.fn((key: string) => {
-        stored.delete(key);
-        return Promise.resolve(true);
-      }),
     },
     id: { toString: () => "test-do-id" },
     waitUntil: vi.fn(),
   } as unknown as DurableObjectState;
 
-  return { sockets, stored, state };
+  return { sockets, state };
 }
 
 /** Create a minimal mock Logger. */
@@ -205,7 +194,6 @@ function createManager() {
   return {
     manager,
     sockets: fakeCtx.sockets,
-    stored: fakeCtx.stored,
     state: fakeCtx.state,
     mockRepo,
     log,
@@ -343,6 +331,7 @@ describe("SessionWebSocketManagerImpl", () => {
 
       // Simulate hibernation: socket is in ctx but not in memory
       sockets.set(ws, ["sandbox", "sid:sb-1"]);
+      ws.serializeAttachment({ activeSandboxConnection: true });
       mockRepo.setSandbox(createSandboxRow("sb-1"));
 
       expect(manager.getSandboxSocket()).toBe(ws);
@@ -353,6 +342,7 @@ describe("SessionWebSocketManagerImpl", () => {
       const wrongWs = createFakeWebSocket();
 
       sockets.set(wrongWs, ["sandbox", "sid:wrong-id"]);
+      wrongWs.serializeAttachment({ activeSandboxConnection: true });
       mockRepo.setSandbox(createSandboxRow("correct-id"));
 
       expect(manager.getSandboxSocket()).toBeNull();
@@ -410,17 +400,17 @@ describe("SessionWebSocketManagerImpl", () => {
   });
 
   describe("isCurrentSandboxSocket", () => {
-    it("rejects a stale connection after hibernation", async () => {
-      const { manager, stored } = createManager();
+    it("rejects a stale connection after hibernation", () => {
+      const { manager } = createManager();
       const stale = createFakeWebSocket();
       const active = createFakeWebSocket();
-      manager.acceptAndSetSandboxSocket(stale, "sb-1", "connection-old");
-      manager.acceptAndSetSandboxSocket(active, "sb-1", "connection-new");
+      manager.acceptAndSetSandboxSocket(stale, "sb-1");
+      manager.acceptAndSetSandboxSocket(active, "sb-1");
       manager.clearSandboxSocket();
-      stored.set(ACTIVE_SANDBOX_CONNECTION_STORAGE_KEY, "connection-new");
 
-      expect(await manager.isCurrentSandboxSocket(stale)).toBe(false);
-      expect(await manager.isCurrentSandboxSocket(active)).toBe(true);
+      expect(manager.getSandboxSocket()).toBe(active);
+      expect(manager.isCurrentSandboxSocket(stale)).toBe(false);
+      expect(manager.isCurrentSandboxSocket(active)).toBe(true);
     });
   });
 
