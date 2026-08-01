@@ -140,7 +140,7 @@ class TestSessionReattach:
 
         bridge._send_event.assert_awaited_once_with(
             {
-                "type": "ready",
+                "type": "opencode_session_created",
                 "sandboxId": "test-sandbox",
                 "opencodeSessionId": "oc-new",
             }

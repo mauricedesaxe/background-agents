@@ -8,6 +8,7 @@ import { sessionPromptRoutes } from "./session-prompt";
 import { sessionPullRequestRoutes } from "./session-pull-requests";
 import { sessionRuntimeProxyRoutes } from "./session-runtime-proxy";
 import { sessionWsTokenRoutes } from "./session-ws-token";
+import { sessionCheckpointRoutes } from "./session-checkpoints";
 
 export const sessionRoutes: Route[] = [
   ...sessionCreateRoutes,
@@ -15,6 +16,7 @@ export const sessionRoutes: Route[] = [
   ...sessionRuntimeProxyRoutes,
   ...sessionWsTokenRoutes,
   ...sessionPromptRoutes,
+  ...sessionCheckpointRoutes,
   ...sessionPullRequestRoutes,
   ...sessionMediaRoutes,
   ...sessionChildSpawnRoutes,

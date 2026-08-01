@@ -8,6 +8,7 @@ import {
 import { error, json, parsePattern, type RequestContext, type Route } from "./shared";
 import { epochMs } from "../time";
 import type { Env } from "../types";
+import { createMediaObjectStorage } from "../storage/object-storage";
 
 const SESSION_STATUSES: SessionStatus[] = [
   "created",
@@ -186,6 +187,7 @@ async function handleDeleteSession(
   if (!sessionId) return error("Session ID required");
 
   const sessionStore = new SessionIndexStore(ctx.db);
+  await createMediaObjectStorage(env).deletePrefix(`sessions/${sessionId}/`);
   await sessionStore.delete(sessionId);
 
   return json({ status: "deleted", sessionId });

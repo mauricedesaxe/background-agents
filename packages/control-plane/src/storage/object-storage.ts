@@ -26,6 +26,7 @@ export interface ObjectStorage {
   delete(key: string): Promise<void>;
   head(key: string): Promise<ObjectStorageMetadata | null>;
   get(key: string, options?: { range?: ObjectStorageRange }): Promise<ObjectStorageObject | null>;
+  deletePrefix(prefix: string): Promise<void>;
 }
 
 class R2ObjectStorage implements ObjectStorage {
@@ -56,6 +57,17 @@ class R2ObjectStorage implements ObjectStorage {
     options?: { range?: ObjectStorageRange }
   ): Promise<ObjectStorageObject | null> {
     return this.bucket.get(key, options?.range ? { range: options.range } : undefined);
+  }
+
+  async deletePrefix(prefix: string): Promise<void> {
+    let cursor: string | undefined;
+    do {
+      const page = await this.bucket.list({ prefix, cursor });
+      if (page.objects.length > 0) {
+        await this.bucket.delete(page.objects.map((object) => object.key));
+      }
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
   }
 }
 

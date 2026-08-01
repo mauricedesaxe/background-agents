@@ -29,6 +29,8 @@ export type ArtifactType = "pr" | "screenshot" | "video" | "preview" | "branch" 
 export type EventType =
   | "heartbeat"
   | "ready"
+  | "opencode_session_created"
+  | "context_unavailable"
   | "token"
   | "tool_call"
   | "step_start"

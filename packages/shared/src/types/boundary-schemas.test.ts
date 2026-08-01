@@ -245,6 +245,26 @@ describe("boundary schemas", () => {
 
       expect(result.success).toBe(true);
     });
+
+    it("distinguishes restored context from permanent context loss", () => {
+      const restored = sandboxEventSchema.safeParse({
+        type: "ready",
+        sandboxId: "sandbox-1",
+        opencodeSessionId: "ses-1",
+        contextStatus: "restored",
+        timestamp: 123,
+      });
+      const unavailable = sandboxEventSchema.safeParse({
+        type: "context_unavailable",
+        sandboxId: "sandbox-1",
+        opencodeSessionId: "ses-1",
+        error: "The checkpoint could not be restored",
+        timestamp: 123,
+      });
+
+      expect(restored.success).toBe(true);
+      expect(unavailable.success).toBe(true);
+    });
   });
 
   describe("clientMessageSchema", () => {

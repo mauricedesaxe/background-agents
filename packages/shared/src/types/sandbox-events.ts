@@ -61,7 +61,17 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
     // Present in essentially every session's replay history.
     type: z.literal("ready"),
     opencodeSessionId: z.string().nullable().optional(),
+    contextStatus: z.enum(["fresh", "existing", "restored"]).optional(),
     repositories: z.array(sessionDiffBaselineRepositorySchema).optional(),
+  }),
+  sandboxEventBaseSchema.extend({
+    type: z.literal("opencode_session_created"),
+    opencodeSessionId: z.string().min(1),
+  }),
+  sandboxEventBaseSchema.extend({
+    type: z.literal("context_unavailable"),
+    opencodeSessionId: z.string().min(1),
+    error: z.string().min(1),
   }),
   messageSandboxEventBaseSchema.extend({
     type: z.literal("token"),
@@ -158,7 +168,7 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
   // unknown union entries, so this entry must exist before runtimes emit it.
   z.object({
     type: z.literal("warning"),
-    scope: z.enum(["sync", "setup", "start", "assembly", "secrets", "media"]),
+    scope: z.enum(["sync", "setup", "start", "assembly", "secrets", "media", "checkpoint"]),
     message: z.string(),
     repoOwner: z.string().optional(),
     repoName: z.string().optional(),

@@ -10,6 +10,7 @@ import {
   seedMessage,
   openSandboxWs,
   seedSandboxAuth,
+  sendSandboxReady,
   waitForSandboxStatus,
 } from "./helpers";
 
@@ -424,6 +425,8 @@ describe("Client WebSocket (via SELF.fetch)", () => {
       sandboxId: SANDBOX_ID,
     });
     sandboxWs!.accept();
+    sendSandboxReady(sandboxWs!, SANDBOX_ID);
+    await waitForSandboxStatus(stub, "ready");
     const { ws: clientWs } = await openClientWs(name, { subscribe: true });
 
     const sandboxMessages = collectMessages(sandboxWs!, {
@@ -544,6 +547,8 @@ describe("Client WebSocket (via SELF.fetch)", () => {
       sandboxId: SANDBOX_ID,
     });
     sandboxWs!.accept();
+    sendSandboxReady(sandboxWs!, SANDBOX_ID);
+    await waitForSandboxStatus(stub, "ready");
     const { ws: clientWs } = await openClientWs(name, { subscribe: true });
 
     const promptDispatched = collectMessages(sandboxWs!, {
@@ -582,6 +587,8 @@ describe("Client WebSocket (via SELF.fetch)", () => {
       sandboxId: SANDBOX_ID,
     });
     sandboxWs!.accept();
+    sendSandboxReady(sandboxWs!, SANDBOX_ID);
+    await waitForSandboxStatus(stub, "ready");
     const first = await openClientWs(name, { subscribe: true });
     const second = await openClientWs(name, { subscribe: true });
 
@@ -645,6 +652,8 @@ describe("Client WebSocket (via SELF.fetch)", () => {
       sandboxId: SANDBOX_ID,
     });
     sandboxWs!.accept();
+    sendSandboxReady(sandboxWs!, SANDBOX_ID);
+    await waitForSandboxStatus(stub, "ready");
     const { ws: clientWs } = await openClientWs(name, { subscribe: true });
 
     const dispatched = collectMessages(sandboxWs!, {
@@ -699,6 +708,8 @@ describe("Client WebSocket (via SELF.fetch)", () => {
       sandboxId: SANDBOX_ID,
     });
     sandboxWs!.accept();
+    sendSandboxReady(sandboxWs!, SANDBOX_ID);
+    await waitForSandboxStatus(stub, "ready");
     const { ws: clientWs } = await openClientWs(name, { subscribe: true });
 
     const dispatched = collectMessages(sandboxWs!, {
@@ -752,6 +763,8 @@ describe("Client WebSocket (via SELF.fetch)", () => {
       sandboxId: SANDBOX_ID,
     });
     sandboxWs!.accept();
+    sendSandboxReady(sandboxWs!, SANDBOX_ID);
+    await waitForSandboxStatus(stub, "ready");
     const { ws: clientWs } = await openClientWs(name, { subscribe: true });
 
     const dispatched = collectMessages(sandboxWs!, {
@@ -823,6 +836,8 @@ describe("Client WebSocket (via SELF.fetch)", () => {
     const { ws: sandboxWs } = await openSandboxWs(name, sandboxAuth);
     expect(sandboxWs).not.toBeNull();
     sandboxWs!.accept();
+    sendSandboxReady(sandboxWs!, sandboxAuth.sandboxId);
+    await waitForSandboxStatus(stub, "ready");
     const { ws: clientWs } = await openClientWs(name, { subscribe: true });
 
     const firstDispatch = collectMessages(sandboxWs!, {

@@ -94,6 +94,8 @@ const SANDBOX_ONLY_ROUTES: PrincipalRouteGrant[] = [
   { method: "POST", pattern: /^\/sessions\/[^/]+\/board\/[^/]+\/mutate$/ },
   { method: "GET", pattern: /^\/sessions\/[^/]+\/board\/[^/]+\/snapshot$/ },
   { method: "POST", pattern: /^\/sessions\/[^/]+\/board\/[^/]+\/inspect$/ },
+  { method: "PUT", pattern: /^\/sessions\/[^/]+\/checkpoint$/ },
+  { method: "GET", pattern: /^\/sessions\/[^/]+\/checkpoint$/ },
 ];
 
 const USER_OR_SANDBOX_ROUTES: PrincipalRouteGrant[] = [
@@ -229,6 +231,7 @@ function isScmAgnosticRoute(path: string): boolean {
     /^\/provider-identities\/(github|slack|linear|google)\/[^/]+$/.test(path) ||
     /^\/sessions\/[^/]+\/tunnel-urls$/.test(path) ||
     /^\/sessions\/[^/]+\/children(\/[^/]+(\/cancel)?)?$/.test(path) ||
+    /^\/sessions\/[^/]+\/checkpoint$/.test(path) ||
     // Boards are unrelated to the SCM provider.
     /^\/sessions\/[^/]+\/board(\/[^/]+\/(mutate|snapshot|inspect))?$/.test(path)
   );

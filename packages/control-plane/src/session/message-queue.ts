@@ -543,6 +543,33 @@ export class SessionMessageQueue {
     await this.sessionStatus.reconcileAfterExecution(false);
   }
 
+  async failMessagesForContextLoss(failure: string): Promise<void> {
+    const processing = this.repository.getProcessingMessage();
+    const messages = [...(processing ? [processing] : []), ...this.repository.getPendingMessages()];
+    if (messages.length === 0) return;
+
+    const now = Date.now();
+    for (const message of messages) {
+      this.repository.updateMessageCompletion(message.id, "failed", now);
+      const syntheticEvent: Extract<SandboxEvent, { type: "execution_complete" }> = {
+        type: "execution_complete",
+        messageId: message.id,
+        success: false,
+        error: failure,
+        sandboxId: "",
+        timestamp: now / 1000,
+      };
+      this.repository.upsertExecutionCompleteEvent(message.id, syntheticEvent, now);
+      await this.sessionStatus.recordCompletedOutput(message.id, now);
+      this.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });
+      this.ctx.waitUntil(this.callbackService.notifyComplete(message.id, false, failure));
+    }
+
+    this.messenger.broadcast({ type: "processing_status", isProcessing: false });
+    this.broadcastPromptQueue();
+    await this.sessionStatus.reconcileAfterExecution(false);
+  }
+
   writeUserMessageEvent(
     participant: ParticipantRow,
     content: string,

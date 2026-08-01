@@ -95,18 +95,22 @@ that cost.
 `packages/sandbox-runtime/src/sandbox_runtime/bridge.py` takes a control-plane-supplied
 `opencodeSessionId` and reattaches, with a watchdog for messages that arrive before the sandbox is
 ready. An authoritative session ID that is missing from OpenCode fails the resume rather than
-silently replacing the conversation. The same bridge keeps its SSE stream attached after OpenCode
-emits the first typed `ContextOverflowError`, allowing OpenCode's native compaction and replay to
-finish. Repeated or unrelated errors remain terminal. Automatic overflow recovery persists and
-renders only its message-scoped `context_compacted` completion. Manual compaction persists its start
-and terminal outcome as timeline events: starts and completions render neutrally, while failures
-render destructively. The session UI exposes manual compaction only while idle. Its dedicated
-protocol command subscribes to OpenCode events before calling `POST /session/:id/summarize` with the
-selected model's flat, case-sensitive `providerID` and `modelID`. Only `session.compacted` is
-success. `session.error` is a failure even when the HTTP response is `200`, and a five-minute
-deadline aborts OpenCode before the bridge reports a timeout. The operation stays attached to the
-existing OpenCode session and is stored outside the prompt transcript. The native endpoint behavior
-and later message lineage were
+silently replacing the conversation. After each idle turn and successful manual compaction, the
+bridge exports OpenCode's native conversation into private, checksum-addressed checkpoint
+generations. A replacement sandbox imports the newest valid generation before starting OpenCode,
+then verifies the expected session through OpenCode itself. The control plane does not dispatch
+queued prompts until that verification reports fresh, existing, or restored context. The same bridge
+keeps its SSE stream attached after OpenCode emits the first typed `ContextOverflowError`, allowing
+OpenCode's native compaction and replay to finish. Repeated or unrelated errors remain terminal.
+Automatic overflow recovery persists and renders only its message-scoped `context_compacted`
+completion. Manual compaction persists its start and terminal outcome as timeline events: starts and
+completions render neutrally, while failures render destructively. The session UI exposes manual
+compaction only while idle. Its dedicated protocol command subscribes to OpenCode events before
+calling `POST /session/:id/summarize` with the selected model's flat, case-sensitive `providerID`
+and `modelID`. Only `session.compacted` is success. `session.error` is a failure even when the HTTP
+response is `200`, and a five-minute deadline aborts OpenCode before the bridge reports a timeout.
+The operation stays attached to the existing OpenCode session and is stored outside the prompt
+transcript. The native endpoint behavior and later message lineage were
 [probed against pinned OpenCode 1.14.41](https://github.com/mauricedesaxe/background-agents/issues/129#issuecomment-5044195365).
 
 Automatic overflow recovery is pinned by
@@ -117,7 +121,8 @@ control-plane WebSocket integration tests.
 **Why.** Without reattachment, resuming starts a fresh conversation and the history is gone from the
 agent's point of view while still being visible in the UI. Without overflow deferral, the bridge
 reports failure and disconnects while OpenCode successfully compacts and recovers in the same
-session, so the recovered response never reaches the user.
+session, so the recovered response never reaches the user. Filesystem replacement also removes the
+native conversation database, so reattachment alone cannot preserve context across a new sandbox.
 
 ### 7. The SSE reader is decoupled from the WebSocket send
 

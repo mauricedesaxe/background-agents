@@ -67,6 +67,14 @@ def _has_repository(repo_owner: str | None, repo_name: str | None) -> bool:
     return has_owner
 
 
+def _opencode_session_id(session_config: SessionConfig | dict | None) -> str | None:
+    if isinstance(session_config, dict):
+        value = session_config.get("opencode_session_id")
+    else:
+        value = session_config.opencode_session_id if session_config else None
+    return value if isinstance(value, str) and value else None
+
+
 def _resource_kwargs(settings: dict[str, Any] | None) -> dict:
     """Map sandbox settings to Modal resource kwargs.
 
@@ -433,6 +441,8 @@ class SandboxManager:
 
         if config.session_config:
             env_vars["SESSION_CONFIG"] = config.session_config.model_dump_json()
+            if opencode_session_id := _opencode_session_id(config.session_config):
+                env_vars["OPENCODE_SESSION_ID"] = opencode_session_id
 
         # Determine image to use (priority: session snapshot > repo image > base image)
         if config.snapshot_id:
@@ -740,6 +750,8 @@ class SandboxManager:
                 "SESSION_CONFIG": session_config_json,
             }
         )
+        if opencode_session_id := _opencode_session_id(session_config):
+            env_vars["OPENCODE_SESSION_ID"] = opencode_session_id
 
         # Snapshot restore still passes the clone token through for
         # repo-backed sandboxes. Snapshots taken before the credential-helper

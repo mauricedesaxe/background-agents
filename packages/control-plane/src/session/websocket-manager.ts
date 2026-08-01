@@ -50,6 +50,9 @@ export interface SessionWebSocketManager {
    */
   getSandboxSocket(): WebSocket | null;
 
+  /** Whether an event came from the currently active sandbox connection. */
+  isCurrentSandboxSocket(ws: WebSocket): boolean;
+
   /** Clear the in-memory sandbox socket reference. */
   clearSandboxSocket(): void;
 
@@ -145,14 +148,7 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
   // -------------------------------------------------------------------------
 
   getSandboxSocket(): WebSocket | null {
-    if (this.sandboxWs?.readyState === WebSocket.OPEN) {
-      return this.sandboxWs;
-    }
-
-    // Hibernation recovery: scan all WebSockets, validate sandbox identity
     const sandbox = this.repository.getSandbox();
-    const expectedSandboxId = sandbox?.modal_sandbox_id;
-
     // If the sandbox is in a terminal state, don't re-adopt stale WebSockets.
     // After inactivity timeout or heartbeat stale, the DO closes the WS and sets
     // status to stopped/stale, but the close handshake may not complete before
@@ -168,6 +164,13 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
       }
       return null;
     }
+    if (sandbox && sandbox.status !== "ready") return null;
+
+    if (this.sandboxWs?.readyState === WebSocket.OPEN) {
+      return this.sandboxWs;
+    }
+
+    const expectedSandboxId = sandbox?.modal_sandbox_id;
 
     for (const ws of this.ctx.getWebSockets()) {
       const parsed = this.classify(ws);
@@ -187,6 +190,10 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
     }
 
     return null;
+  }
+
+  isCurrentSandboxSocket(ws: WebSocket): boolean {
+    return this.sandboxWs === null || this.sandboxWs === ws;
   }
 
   clearSandboxSocket(): void {

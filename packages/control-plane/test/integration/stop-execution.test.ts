@@ -8,6 +8,8 @@ import {
   openSandboxWs,
   seedSandboxAuth,
   collectMessages,
+  sendSandboxReady,
+  waitForSandboxStatus,
 } from "./helpers";
 
 describe("POST /internal/stop", () => {
@@ -290,7 +292,11 @@ describe("POST /internal/stop", () => {
 
     // Connect sandbox WS so queue drain can dispatch
     const { ws: sandboxWs } = await openSandboxWs(name, sandboxAuth);
-    if (sandboxWs) sandboxWs.accept();
+    if (sandboxWs) {
+      sandboxWs.accept();
+      sendSandboxReady(sandboxWs, sandboxAuth.sandboxId);
+      await waitForSandboxStatus(stub, "ready");
+    }
 
     // Stop execution - marks A as failed
     await stub.fetch("http://internal/internal/stop", { method: "POST" });
@@ -349,6 +355,8 @@ describe("POST /internal/stop", () => {
     const { ws: firstSandbox } = await openSandboxWs(name, sandboxAuth);
     expect(firstSandbox).not.toBeNull();
     firstSandbox!.accept();
+    sendSandboxReady(firstSandbox!, sandboxAuth.sandboxId);
+    await waitForSandboxStatus(stub, "ready");
     const closed = new Promise<CloseEvent>((resolve) => {
       firstSandbox!.addEventListener("close", resolve, { once: true });
     });
@@ -374,15 +382,18 @@ describe("POST /internal/stop", () => {
     const { ws: replacementSandbox } = await openSandboxWs(name, sandboxAuth);
     expect(replacementSandbox).not.toBeNull();
     replacementSandbox!.accept();
-    const dispatched = await collectMessages(replacementSandbox!, {
+    const dispatchPromise = collectMessages(replacementSandbox!, {
       until: (message) => message.type === "prompt",
       timeoutMs: 3000,
     });
+    sendSandboxReady(replacementSandbox!, sandboxAuth.sandboxId);
+    await waitForSandboxStatus(stub, "ready");
+    const dispatched = await dispatchPromise;
     expect(dispatched.find((message) => message.type === "prompt")?.messageId).toBe(
       "msg-missing-b"
     );
     replacementSandbox!.close();
-  });
+  }, 10_000);
 
   it("stop via WebSocket client message", async () => {
     const name = `ws-stop-client-${Date.now()}`;
@@ -410,7 +421,11 @@ describe("POST /internal/stop", () => {
 
     // Connect sandbox WS (so stop can be forwarded)
     const { ws: sandboxWs } = await openSandboxWs(name, sandboxAuth);
-    if (sandboxWs) sandboxWs.accept();
+    if (sandboxWs) {
+      sandboxWs.accept();
+      sendSandboxReady(sandboxWs, sandboxAuth.sandboxId);
+      await waitForSandboxStatus(stub, "ready");
+    }
 
     // Subscribe client
     const { ws: clientWs } = await openClientWs(name, { subscribe: true });
