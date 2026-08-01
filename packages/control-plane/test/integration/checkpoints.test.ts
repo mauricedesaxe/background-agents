@@ -60,8 +60,10 @@ describe("session checkpoints", () => {
     expect((await putCheckpoint(sessionName, previous)).status).toBe(201);
     const latestUpload = await putCheckpoint(sessionName, latest);
     expect(latestUpload.status).toBe(201);
-    const latestMetadata = await latestUpload.json<{ objectKey: string }>();
-    await env.MEDIA_BUCKET.delete(latestMetadata.objectKey);
+    const latestMetadata = await latestUpload.json<{ checksum: string }>();
+    await env.MEDIA_BUCKET.delete(
+      `sessions/${sessionName}/checkpoints/generations/${latestMetadata.checksum}.json`
+    );
 
     const restore = await SELF.fetch(`https://test.local/sessions/${sessionName}/checkpoint`, {
       headers: { Authorization: `Bearer ${SANDBOX_TOKEN}` },

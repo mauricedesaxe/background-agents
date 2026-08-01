@@ -5,18 +5,17 @@ import { error, json, parsePattern, type Route } from "./shared";
 
 const CHECKPOINT_MAX_BYTES = 50 * 1024 * 1024;
 const CHECKPOINT_GENERATIONS_TO_KEEP = 2;
+const CHECKPOINT_SCHEMA_VERSION = 1;
 
 const checkpointGenerationSchema = z.object({
   checksum: z.string().regex(/^[a-f0-9]{64}$/),
-  objectKey: z.string().min(1),
   byteLength: z.number().int().positive(),
   opencodeSessionId: z.string().min(1),
   opencodeVersion: z.string().min(1),
-  createdAt: z.string().datetime(),
 });
 
 const checkpointManifestSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(CHECKPOINT_SCHEMA_VERSION),
   generations: z.array(checkpointGenerationSchema).max(CHECKPOINT_GENERATIONS_TO_KEEP),
 });
 
@@ -59,13 +58,15 @@ async function readManifest(
   sessionId: string
 ): Promise<CheckpointManifest> {
   const object = await storage.get(manifestKey(sessionId));
-  if (!object) return { schemaVersion: 1, generations: [] };
+  if (!object) return { schemaVersion: CHECKPOINT_SCHEMA_VERSION, generations: [] };
   try {
     const parsed = JSON.parse(await new Response(object.body).text());
     const result = checkpointManifestSchema.safeParse(parsed);
-    return result.success ? result.data : { schemaVersion: 1, generations: [] };
+    return result.success
+      ? result.data
+      : { schemaVersion: CHECKPOINT_SCHEMA_VERSION, generations: [] };
   } catch {
-    return { schemaVersion: 1, generations: [] };
+    return { schemaVersion: CHECKPOINT_SCHEMA_VERSION, generations: [] };
   }
 }
 
@@ -114,27 +115,27 @@ async function handleCheckpointUpload(
   const previous = await readManifest(storage, sessionId);
   const generation: CheckpointGeneration = {
     checksum,
-    objectKey,
     byteLength: bytes.byteLength,
     opencodeSessionId,
     opencodeVersion,
-    createdAt: new Date().toISOString(),
   };
   const generations = [
     generation,
     ...previous.generations.filter((entry) => entry.checksum !== checksum),
   ].slice(0, CHECKPOINT_GENERATIONS_TO_KEEP);
-  await storage.put(manifestKey(sessionId), JSON.stringify({ schemaVersion: 1, generations }), {
-    contentType: "application/json",
-  });
-  const retainedKeys = new Set(generations.map((entry) => entry.objectKey));
+  await storage.put(
+    manifestKey(sessionId),
+    JSON.stringify({ schemaVersion: CHECKPOINT_SCHEMA_VERSION, generations }),
+    { contentType: "application/json" }
+  );
+  const retainedChecksums = new Set(generations.map((entry) => entry.checksum));
   await Promise.all(
     previous.generations
-      .filter((entry) => !retainedKeys.has(entry.objectKey))
-      .map((entry) => storage.delete(entry.objectKey))
+      .filter((entry) => !retainedChecksums.has(entry.checksum))
+      .map((entry) => storage.delete(generationKey(sessionId, entry.checksum)))
   );
 
-  return json({ checksum, objectKey }, 201);
+  return json({ checksum }, 201);
 }
 
 async function handleCheckpointDownload(
@@ -148,7 +149,7 @@ async function handleCheckpointDownload(
   const storage = createMediaObjectStorage(env);
   const manifest = await readManifest(storage, sessionId);
   for (const generation of manifest.generations) {
-    const object = await storage.get(generation.objectKey);
+    const object = await storage.get(generationKey(sessionId, generation.checksum));
     if (!object || object.size !== generation.byteLength) continue;
     const bytes = new Uint8Array(await new Response(object.body).arrayBuffer());
     if ((await sha256(bytes)) !== generation.checksum) continue;

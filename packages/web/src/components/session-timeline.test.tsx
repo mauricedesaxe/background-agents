@@ -78,6 +78,50 @@ describe("EventItem", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders restored conversation context", () => {
+    const event: SandboxEvent = {
+      type: "ready",
+      sandboxId: "sandbox-1",
+      opencodeSessionId: "ses-1",
+      contextStatus: "restored",
+      timestamp: 1_700_000_000,
+    };
+
+    render(
+      <EventItem
+        event={event}
+        sessionId="session-1"
+        currentParticipantId={null}
+        onOpenMedia={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("Conversation context restored")).toBeInTheDocument();
+  });
+
+  it("renders permanent conversation context loss", () => {
+    const event: SandboxEvent = {
+      type: "context_unavailable",
+      sandboxId: "sandbox-1",
+      opencodeSessionId: "ses-1",
+      error: "The checkpoint could not be restored",
+      timestamp: 1_700_000_000,
+    };
+
+    render(
+      <EventItem
+        event={event}
+        sessionId="session-1"
+        currentParticipantId={null}
+        onOpenMedia={vi.fn()}
+      />
+    );
+
+    expect(
+      screen.getByText("Conversation context unavailable: The checkpoint could not be restored")
+    ).toBeInTheDocument();
+  });
+
   it("shows the persisted queue position on a pending user message", () => {
     const event: SandboxEvent = {
       type: "user_message",

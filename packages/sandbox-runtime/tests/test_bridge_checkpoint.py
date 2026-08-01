@@ -32,7 +32,9 @@ async def test_successful_turn_uploads_checkpoint_before_completion() -> None:
 
     bridge._stream_opencode_response_sse = stream
     bridge._configure_git_identity = AsyncMock()
-    bridge._save_checkpoint = AsyncMock(side_effect=lambda: observed.append("checkpoint"))
+    bridge._export_and_upload_checkpoint = AsyncMock(
+        side_effect=lambda: observed.append("checkpoint")
+    )
     bridge._send_event = send
 
     await bridge._handle_prompt({"messageId": "msg-1", "content": "continue"})
@@ -50,7 +52,7 @@ async def test_checkpoint_failure_does_not_turn_completed_work_into_a_retry() ->
 
     bridge._stream_opencode_response_sse = stream
     bridge._configure_git_identity = AsyncMock()
-    bridge._save_checkpoint = AsyncMock(side_effect=RuntimeError("upload failed"))
+    bridge._export_and_upload_checkpoint = AsyncMock(side_effect=RuntimeError("upload failed"))
     bridge._send_event = AsyncMock(side_effect=sent.append)
 
     await bridge._handle_prompt({"messageId": "msg-1", "content": "continue"})
@@ -77,7 +79,7 @@ async def test_checkpoint_upload_uses_native_export_without_replaying_messages()
         "sandbox_runtime.bridge.asyncio.create_subprocess_exec",
         AsyncMock(return_value=process),
     ) as create_process:
-        await bridge._save_checkpoint()
+        await bridge._export_and_upload_checkpoint()
 
     create_process.assert_awaited_once()
     args = create_process.await_args.args

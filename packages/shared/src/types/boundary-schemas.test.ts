@@ -265,6 +265,26 @@ describe("boundary schemas", () => {
       expect(restored.success).toBe(true);
       expect(unavailable.success).toBe(true);
     });
+
+    it("rejects readiness states that cannot prove their claimed context", () => {
+      const freshWithSession = sandboxEventSchema.safeParse({
+        type: "ready",
+        sandboxId: "sandbox-1",
+        opencodeSessionId: "ses-1",
+        contextStatus: "fresh",
+        timestamp: 123,
+      });
+      const restoredWithoutSession = sandboxEventSchema.safeParse({
+        type: "ready",
+        sandboxId: "sandbox-1",
+        opencodeSessionId: null,
+        contextStatus: "restored",
+        timestamp: 123,
+      });
+
+      expect(freshWithSession.success).toBe(false);
+      expect(restoredWithoutSession.success).toBe(false);
+    });
   });
 
   describe("clientMessageSchema", () => {

@@ -51,7 +51,7 @@ const messageSandboxEventBaseSchema = sandboxEventBaseSchema.extend({
 });
 
 // Sandbox events from Modal or synthesized by the control plane.
-export const sandboxEventSchema = z.discriminatedUnion("type", [
+const sandboxEventUnionSchema = z.discriminatedUnion("type", [
   sandboxEventBaseSchema.extend({
     type: z.literal("heartbeat"),
     status: z.string(),
@@ -198,6 +198,19 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
     attachments: resolvedSessionAttachmentsSchema.optional(),
   }),
 ]);
+
+export const sandboxEventSchema = sandboxEventUnionSchema.superRefine((event, ctx) => {
+  if (event.type !== "ready" || event.contextStatus === undefined) return;
+  if (event.contextStatus === "fresh" && event.opencodeSessionId) {
+    ctx.addIssue({ code: "custom", message: "Fresh context cannot have a session ID" });
+  }
+  if (
+    (event.contextStatus === "existing" || event.contextStatus === "restored") &&
+    !event.opencodeSessionId
+  ) {
+    ctx.addIssue({ code: "custom", message: "Resumed context requires a session ID" });
+  }
+});
 
 export type SandboxEvent = z.infer<typeof sandboxEventSchema>;
 

@@ -486,6 +486,26 @@ function ContextCompactionFailedEvent({ event }: EventRendererProps) {
   );
 }
 
+function ContextRestoredEvent({ event }: EventRendererProps) {
+  if (event.type !== "ready" || event.contextStatus !== "restored") return null;
+
+  return (
+    <StatusRow tone="success" time={formatEventTime(event)}>
+      Conversation context restored
+    </StatusRow>
+  );
+}
+
+function ContextUnavailableEvent({ event }: EventRendererProps) {
+  if (event.type !== "context_unavailable") return null;
+
+  return (
+    <StatusRow tone="destructive" time={formatEventTime(event)}>
+      Conversation context unavailable: {event.error}
+    </StatusRow>
+  );
+}
+
 function ArtifactEvent({ event, sessionId, onOpenMedia }: EventRendererProps) {
   if (
     event.type !== "artifact" ||
@@ -556,6 +576,8 @@ const eventRenderers: Partial<
   context_compaction_started: ContextCompactionStartedEvent,
   context_compacted: ContextCompactedEvent,
   context_compaction_failed: ContextCompactionFailedEvent,
+  ready: ContextRestoredEvent,
+  context_unavailable: ContextUnavailableEvent,
   artifact: ArtifactEvent,
   error: ErrorEvent,
   execution_complete: ExecutionCompleteEvent,

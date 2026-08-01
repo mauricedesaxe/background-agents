@@ -9,6 +9,8 @@ import { error, json, parsePattern, type RequestContext, type Route } from "./sh
 import { epochMs } from "../time";
 import type { Env } from "../types";
 import { createMediaObjectStorage } from "../storage/object-storage";
+import { SessionInternalPaths } from "../session/contracts";
+import { createSessionRuntimeClient } from "../session/runtime-client";
 
 const SESSION_STATUSES: SessionStatus[] = [
   "created",
@@ -185,6 +187,19 @@ async function handleDeleteSession(
 ): Promise<Response> {
   const sessionId = match.groups?.id;
   if (!sessionId) return error("Session ID required");
+  const userId = ctx.principal?.kind === "user" ? ctx.principal.user.canonicalUserId : null;
+  if (!userId) return error("User identity required", 403);
+
+  const archiveResponse = await createSessionRuntimeClient(env, ctx).fetch(
+    sessionId,
+    SessionInternalPaths.archive,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId }),
+    }
+  );
+  if (!archiveResponse.ok) return archiveResponse;
 
   const sessionStore = new SessionIndexStore(ctx.db);
   await createMediaObjectStorage(env).deletePrefix(`sessions/${sessionId}/`);
