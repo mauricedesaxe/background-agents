@@ -487,7 +487,20 @@ function ContextCompactionFailedEvent({ event }: EventRendererProps) {
 }
 
 function ContextRestoredEvent({ event }: EventRendererProps) {
-  if (event.type !== "ready" || event.contextStatus !== "restored") return null;
+  if (
+    event.type !== "ready" ||
+    (event.contextStatus !== "restored" && event.contextStatus !== "fallback")
+  ) {
+    return null;
+  }
+
+  if (event.contextStatus === "fallback") {
+    return (
+      <StatusRow tone="destructive" time={formatEventTime(event)}>
+        Conversation restored from an older checkpoint. The latest turn may be missing.
+      </StatusRow>
+    );
+  }
 
   return (
     <StatusRow tone="success" time={formatEventTime(event)}>
@@ -502,6 +515,16 @@ function ContextUnavailableEvent({ event }: EventRendererProps) {
   return (
     <StatusRow tone="destructive" time={formatEventTime(event)}>
       Conversation context unavailable: {event.error}
+    </StatusRow>
+  );
+}
+
+function CheckpointEvent({ event }: EventRendererProps) {
+  if (event.type !== "checkpoint" || event.checkpointStatus !== "failed") return null;
+
+  return (
+    <StatusRow tone="destructive" time={formatEventTime(event)}>
+      Latest conversation changes could not be checkpointed. Recovery may lose this turn.
     </StatusRow>
   );
 }
@@ -577,6 +600,7 @@ const eventRenderers: Partial<
   context_compacted: ContextCompactedEvent,
   context_compaction_failed: ContextCompactionFailedEvent,
   ready: ContextRestoredEvent,
+  checkpoint: CheckpointEvent,
   context_unavailable: ContextUnavailableEvent,
   artifact: ArtifactEvent,
   error: ErrorEvent,

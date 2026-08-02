@@ -123,6 +123,8 @@ class SandboxSupervisor:
     SIDECAR_TIMEOUT_SECONDS = 5
     MCP_PACKAGE_INSTALL_TIMEOUT_SECONDS = 180
     CONTEXT_RESTORE_TIMEOUT_SECONDS = 30
+    CONTEXT_RESTORE_MAX_DOWNLOAD_ATTEMPTS = 3
+    CONTEXT_RESTORE_RETRY_BASE_DELAY_SECONDS = 1.0
 
     # OOM-killer bias (Linux oom_score_adj, range -1000..1000; lower = less
     # likely to be killed). Under memory pressure from a build/test workload we
@@ -1410,14 +1412,18 @@ class SandboxSupervisor:
                 attempted_generation_tokens: set[str] = set()
                 while generation_token not in attempted_generation_tokens:
                     attempted_generation_tokens.add(generation_token)
-                    response = await client.get(
+                    response = await self._download_checkpoint_generation(
+                        client,
                         checkpoint_url,
-                        params={"generation": generation_token},
-                        headers={"Authorization": f"Bearer {self.sandbox_token}"},
+                        generation_token,
                     )
                     if response.status_code == 404:
                         break
                     next_generation = response.headers.get("X-Checkpoint-Next-Generation")
+                    checkpoint_id = response.headers.get("X-Checkpoint-ID")
+                    recovery_status = response.headers.get("X-Checkpoint-Recovery")
+                    if recovery_status not in {"restored", "fallback"}:
+                        recovery_status = "fallback" if generation_token != "0" else "restored"
                     checkpoint = response.content
                     if (
                         response.status_code != 200
@@ -1438,11 +1444,15 @@ class SandboxSupervisor:
                     )
                     if outcome == "restored":
                         self.context_unavailable_file.unlink(missing_ok=True)
-                        os.environ["OPENCODE_CONTEXT_STATUS"] = "restored"
+                        os.environ["OPENCODE_CONTEXT_STATUS"] = recovery_status
+                        if checkpoint_id:
+                            os.environ["OPENCODE_CHECKPOINT_ID"] = checkpoint_id
                         self.log.info(
                             "opencode.context_restored",
                             opencode_session_id=expected_session_id,
+                            checkpoint_id=checkpoint_id,
                             generation=generation_token,
+                            recovery_status=recovery_status,
                         )
                         return
                     if outcome == "unavailable" or next_generation is None:
@@ -1454,6 +1464,33 @@ class SandboxSupervisor:
             return
 
         self._mark_context_unavailable(persist=self.context_unavailable_file.exists())
+
+    async def _download_checkpoint_generation(
+        self,
+        client: httpx.AsyncClient,
+        checkpoint_url: str,
+        generation_token: str,
+    ) -> httpx.Response:
+        last_response: httpx.Response | None = None
+        for attempt in range(self.CONTEXT_RESTORE_MAX_DOWNLOAD_ATTEMPTS):
+            try:
+                response = await client.get(
+                    checkpoint_url,
+                    params={"generation": generation_token},
+                    headers={"Authorization": f"Bearer {self.sandbox_token}"},
+                )
+                if response.status_code < 500 and response.status_code not in {408, 429}:
+                    return response
+                last_response = response
+            except httpx.RequestError:
+                if attempt + 1 == self.CONTEXT_RESTORE_MAX_DOWNLOAD_ATTEMPTS:
+                    raise
+            if attempt + 1 < self.CONTEXT_RESTORE_MAX_DOWNLOAD_ATTEMPTS:
+                await asyncio.sleep(self.CONTEXT_RESTORE_RETRY_BASE_DELAY_SECONDS * 2**attempt)
+
+        if last_response is None:
+            raise RuntimeError("Checkpoint download failed without a response")
+        return last_response
 
     async def _restore_checkpoint_generation(
         self,

@@ -22,19 +22,6 @@ const PUSH_TIMEOUT_MS = 360_000;
 const MAX_EVENT_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const UNIX_SECONDS_UPPER_BOUND = 10_000_000_000;
 
-/** Event types that require delivery acknowledgement. */
-const CRITICAL_EVENT_TYPES: ReadonlySet<string> = new Set([
-  "execution_complete",
-  "step_finish",
-  "error",
-  "snapshot_ready",
-  "push_complete",
-  "push_error",
-  "context_compacted",
-  "context_compaction_failed",
-  "context_unavailable",
-]);
-
 export class SessionSandboxEventProcessor {
   private pendingPushResolvers = new Map<string, PushResolver>();
 
@@ -285,7 +272,7 @@ export class SessionSandboxEventProcessor {
 
     this.messenger.broadcast({ type: "sandbox_event", event });
 
-    if (acknowledge && CRITICAL_EVENT_TYPES.has(event.type)) {
+    if (acknowledge && ackId) {
       this.sendAck(ackId);
     }
   }

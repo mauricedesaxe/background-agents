@@ -338,7 +338,7 @@ export async function openSandboxWs(
 export function sendSandboxReady(
   ws: WebSocket,
   sandboxId: string,
-  contextStatus: "fresh" | "existing" | "restored" = "fresh"
+  contextStatus: "fresh" | "existing" | "restored" | "fallback" = "fresh"
 ): void {
   ws.send(
     JSON.stringify({

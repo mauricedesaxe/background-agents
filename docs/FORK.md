@@ -118,16 +118,29 @@ The operation stays attached to the existing OpenCode session and is stored outs
 transcript. The native endpoint behavior and later message lineage were
 [probed against pinned OpenCode 1.14.41](https://github.com/mauricedesaxe/background-agents/issues/129#issuecomment-5044195365).
 
+Idle-boundary exports use stable checkpoint and attempt identities. The bridge keeps an interrupted
+upload locally and retries that identity instead of replaying completed model work. R2 promotes a
+checkpoint only after reading back its payload and immutable manifest, then verifies the current
+pointer. Recovery ignores incomplete records and reports when it had to use an older confirmed
+checkpoint. Immutable checkpoint objects remain until session deletion because eager reclamation can
+race a concurrent promotion that references the same content-addressed payload.
+
 Automatic overflow recovery is pinned by
 `packages/sandbox-runtime/scripts/reproduce_context_overflow.py` and the compaction cases in
 `test_bridge_sse.py`. Manual compaction is pinned by `test_bridge_compaction.py` and the
-control-plane WebSocket integration tests.
+control-plane WebSocket integration tests. Checkpoint promotion and fallback are pinned by
+`packages/control-plane/test/integration/checkpoints.test.ts`,
+`packages/control-plane/test/integration/sandbox-events.test.ts`,
+`packages/sandbox-runtime/tests/test_bridge_checkpoint.py`, and
+`packages/sandbox-runtime/tests/test_opencode_checkpoint_restore.py`.
 
 **Why.** Without reattachment, resuming starts a fresh conversation and the history is gone from the
 agent's point of view while still being visible in the UI. Without overflow deferral, the bridge
 reports failure and disconnects while OpenCode successfully compacts and recovers in the same
 session, so the recovered response never reaches the user. Filesystem replacement also removes the
 native conversation database, so reattachment alone cannot preserve context across a new sandbox.
+Without verified promotion, a lost upload response or a partial R2 write can silently replace the
+last recoverable conversation with one that was never usable.
 
 ### 7. The SSE reader is decoupled from the WebSocket send
 

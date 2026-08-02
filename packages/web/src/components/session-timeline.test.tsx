@@ -99,6 +99,59 @@ describe("EventItem", () => {
     expect(screen.getByText("Conversation context restored")).toBeInTheDocument();
   });
 
+  it("warns when conversation recovery falls back to an older checkpoint", () => {
+    const event: SandboxEvent = {
+      type: "ready",
+      sandboxId: "sandbox-1",
+      opencodeSessionId: "ses-1",
+      contextStatus: "fallback",
+      timestamp: 1_700_000_000,
+    };
+
+    render(
+      <EventItem
+        event={event}
+        sessionId="session-1"
+        currentParticipantId={null}
+        onOpenMedia={vi.fn()}
+      />
+    );
+
+    expect(
+      screen.getByText(
+        "Conversation restored from an older checkpoint. The latest turn may be missing."
+      )
+    ).toBeInTheDocument();
+  });
+
+  it("renders a terminal warning when the latest checkpoint fails", () => {
+    const event: SandboxEvent = {
+      type: "checkpoint",
+      checkpointStatus: "failed",
+      checkpointId: "cp-1",
+      attemptId: "cpa-1",
+      errorClass: "pointer_put",
+      detail: "Current checkpoint pointer could not be stored",
+      sandboxId: "sandbox-1",
+      timestamp: 1_700_000_000,
+    };
+
+    render(
+      <EventItem
+        event={event}
+        sessionId="session-1"
+        currentParticipantId={null}
+        onOpenMedia={vi.fn()}
+      />
+    );
+
+    expect(
+      screen.getByText(
+        "Latest conversation changes could not be checkpointed. Recovery may lose this turn."
+      )
+    ).toBeInTheDocument();
+  });
+
   it("renders permanent conversation context loss", () => {
     const event: SandboxEvent = {
       type: "context_unavailable",

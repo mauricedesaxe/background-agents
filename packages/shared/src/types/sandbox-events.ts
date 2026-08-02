@@ -50,6 +50,33 @@ const messageSandboxEventBaseSchema = sandboxEventBaseSchema.extend({
   messageId: z.string(),
 });
 
+const checkpointSandboxEventBaseSchema = sandboxEventBaseSchema.extend({
+  type: z.literal("checkpoint"),
+  checkpointId: z.string().min(1).max(128),
+  attemptId: z.string().min(1).max(128),
+  messageId: z.string().optional(),
+});
+
+const checkpointSandboxEventSchema = z.discriminatedUnion("checkpointStatus", [
+  checkpointSandboxEventBaseSchema.extend({
+    checkpointStatus: z.literal("in_progress"),
+    checksum: z.string().regex(/^[a-f0-9]{64}$/),
+    byteLength: z.number().int().positive(),
+  }),
+  checkpointSandboxEventBaseSchema.extend({
+    checkpointStatus: z.literal("confirmed"),
+    checksum: z.string().regex(/^[a-f0-9]{64}$/),
+    byteLength: z.number().int().positive(),
+  }),
+  checkpointSandboxEventBaseSchema.extend({
+    checkpointStatus: z.literal("failed"),
+    errorClass: z.string().min(1).max(100),
+    httpStatus: z.number().int().min(100).max(599).optional(),
+    providerCode: z.number().int().optional(),
+    detail: z.string().min(1).max(500),
+  }),
+]);
+
 // Sandbox events from Modal or synthesized by the control plane.
 const sandboxEventUnionSchema = z.discriminatedUnion("type", [
   sandboxEventBaseSchema.extend({
@@ -61,7 +88,8 @@ const sandboxEventUnionSchema = z.discriminatedUnion("type", [
     // Present in essentially every session's replay history.
     type: z.literal("ready"),
     opencodeSessionId: z.string().nullable().optional(),
-    contextStatus: z.enum(["fresh", "existing", "restored"]).optional(),
+    contextStatus: z.enum(["fresh", "existing", "restored", "fallback"]).optional(),
+    checkpointId: z.string().min(1).max(128).optional(),
     repositories: z.array(sessionDiffBaselineRepositorySchema).optional(),
   }),
   sandboxEventBaseSchema.extend({
@@ -73,6 +101,7 @@ const sandboxEventUnionSchema = z.discriminatedUnion("type", [
     opencodeSessionId: z.string().min(1),
     error: z.string().min(1),
   }),
+  checkpointSandboxEventSchema,
   messageSandboxEventBaseSchema.extend({
     type: z.literal("token"),
     content: z.string(),
@@ -205,7 +234,9 @@ export const sandboxEventSchema = sandboxEventUnionSchema.superRefine((event, ct
     ctx.addIssue({ code: "custom", message: "Fresh context cannot have a session ID" });
   }
   if (
-    (event.contextStatus === "existing" || event.contextStatus === "restored") &&
+    (event.contextStatus === "existing" ||
+      event.contextStatus === "restored" ||
+      event.contextStatus === "fallback") &&
     !event.opencodeSessionId
   ) {
     ctx.addIssue({ code: "custom", message: "Resumed context requires a session ID" });

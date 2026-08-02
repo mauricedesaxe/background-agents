@@ -39,7 +39,11 @@ async def test_restores_checkpoint_before_opencode_server_starts(tmp_path: Path)
     response = MagicMock(
         status_code=200,
         content=checkpoint,
-        headers={"X-OpenCode-Session-ID": "ses_expected"},
+        headers={
+            "X-OpenCode-Session-ID": "ses_expected",
+            "X-Checkpoint-ID": "cp_latest",
+            "X-Checkpoint-Recovery": "restored",
+        },
     )
     client = AsyncMock()
     client.get = AsyncMock(return_value=response)
@@ -57,6 +61,7 @@ async def test_restores_checkpoint_before_opencode_server_starts(tmp_path: Path)
         await supervisor._restore_opencode_context(tmp_path, {})
 
         assert os.environ["OPENCODE_CONTEXT_STATUS"] == "restored"
+        assert os.environ["OPENCODE_CHECKPOINT_ID"] == "cp_latest"
         assert not supervisor.context_unavailable_file.exists()
 
     import_args = create_process.await_args_list[1].args
@@ -130,12 +135,18 @@ async def test_falls_back_when_the_newest_checkpoint_import_is_rejected(tmp_path
                 headers={
                     "X-OpenCode-Session-ID": "ses_expected",
                     "X-Checkpoint-Next-Generation": "1",
+                    "X-Checkpoint-ID": "cp_latest",
+                    "X-Checkpoint-Recovery": "restored",
                 },
             ),
             MagicMock(
                 status_code=200,
                 content=previous,
-                headers={"X-OpenCode-Session-ID": "ses_expected"},
+                headers={
+                    "X-OpenCode-Session-ID": "ses_expected",
+                    "X-Checkpoint-ID": "cp_previous",
+                    "X-Checkpoint-Recovery": "fallback",
+                },
             ),
         ]
     )
@@ -159,7 +170,8 @@ async def test_falls_back_when_the_newest_checkpoint_import_is_rejected(tmp_path
     ):
         await supervisor._restore_opencode_context(tmp_path, {})
 
-        assert os.environ["OPENCODE_CONTEXT_STATUS"] == "restored"
+        assert os.environ["OPENCODE_CONTEXT_STATUS"] == "fallback"
+        assert os.environ["OPENCODE_CHECKPOINT_ID"] == "cp_previous"
 
     assert [call.kwargs["params"] for call in client.get.await_args_list] == [
         {"generation": "0"},
@@ -193,12 +205,18 @@ async def test_falls_back_when_the_newest_checkpoint_fails_verification(tmp_path
                 headers={
                     "X-OpenCode-Session-ID": "ses_expected",
                     "X-Checkpoint-Next-Generation": "1",
+                    "X-Checkpoint-ID": "cp_latest",
+                    "X-Checkpoint-Recovery": "restored",
                 },
             ),
             MagicMock(
                 status_code=200,
                 content=previous,
-                headers={"X-OpenCode-Session-ID": "ses_expected"},
+                headers={
+                    "X-OpenCode-Session-ID": "ses_expected",
+                    "X-Checkpoint-ID": "cp_previous",
+                    "X-Checkpoint-Recovery": "fallback",
+                },
             ),
         ]
     )
@@ -223,7 +241,7 @@ async def test_falls_back_when_the_newest_checkpoint_fails_verification(tmp_path
     ):
         await supervisor._restore_opencode_context(tmp_path, {})
 
-        assert os.environ["OPENCODE_CONTEXT_STATUS"] == "restored"
+        assert os.environ["OPENCODE_CONTEXT_STATUS"] == "fallback"
         assert not supervisor.context_unavailable_file.exists()
 
 
@@ -275,47 +293,31 @@ async def test_recovers_local_context_from_the_persisted_session_id(tmp_path: Pa
 async def test_retries_checkpoint_download_after_a_transient_failure(tmp_path: Path) -> None:
     supervisor = _make_supervisor()
     supervisor.context_unavailable_file = tmp_path / "context-unavailable"
-
-    failing_client = AsyncMock()
-    failing_client.get = AsyncMock(side_effect=RuntimeError("network unavailable"))
-    failing_client.__aenter__.return_value = failing_client
-    failing_client.__aexit__.return_value = None
-    with (
-        patch.dict(os.environ, {"OPENCODE_SESSION_ID": "ses_expected"}, clear=False),
-        patch(
-            "sandbox_runtime.entrypoint.asyncio.create_subprocess_exec",
-            AsyncMock(return_value=_process(1)),
-        ),
-        patch("sandbox_runtime.entrypoint.httpx.AsyncClient", return_value=failing_client),
-    ):
-        await supervisor._restore_opencode_context(tmp_path, {})
-        failed_context_status = os.environ["OPENCODE_CONTEXT_STATUS"]
-
-    assert failed_context_status == "unavailable"
-    assert not supervisor.context_unavailable_file.exists()
-
     checkpoint = json.dumps({"info": {"id": "ses_expected"}, "messages": []}).encode()
-    response = MagicMock(
+    unavailable = MagicMock(status_code=429, content=b"", headers={})
+    available = MagicMock(
         status_code=200,
         content=checkpoint,
         headers={"X-OpenCode-Session-ID": "ses_expected"},
     )
-    working_client = AsyncMock()
-    working_client.get = AsyncMock(return_value=response)
-    working_client.__aenter__.return_value = working_client
-    working_client.__aexit__.return_value = None
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=[unavailable, available])
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = None
     with (
         patch.dict(os.environ, {"OPENCODE_SESSION_ID": "ses_expected"}, clear=False),
         patch(
             "sandbox_runtime.entrypoint.asyncio.create_subprocess_exec",
             AsyncMock(side_effect=[_process(1), _process(0), _process(0, stdout=checkpoint)]),
         ),
-        patch("sandbox_runtime.entrypoint.httpx.AsyncClient", return_value=working_client),
+        patch("sandbox_runtime.entrypoint.httpx.AsyncClient", return_value=client),
+        patch("sandbox_runtime.entrypoint.asyncio.sleep", new_callable=AsyncMock),
     ):
         await supervisor._restore_opencode_context(tmp_path, {})
         restored_context_status = os.environ["OPENCODE_CONTEXT_STATUS"]
 
     assert restored_context_status == "restored"
+    assert client.get.await_count == 2
 
 
 @pytest.mark.asyncio
