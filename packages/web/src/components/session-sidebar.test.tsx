@@ -623,6 +623,73 @@ describe("SessionSidebar", () => {
     });
   });
 
+  it("continues past a page containing only ancestor duplicates", async () => {
+    const firstPage = Array.from({ length: 50 }, (_, index) => createSession(index + 1));
+    const duplicatePageKey = buildSessionsPageKey({
+      excludeStatus: "archived",
+      mode: "tree",
+      cursor: "page-1-cursor",
+    });
+    const finalPageKey = buildSessionsPageKey({
+      excludeStatus: "archived",
+      mode: "tree",
+      cursor: "page-2-cursor",
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === duplicatePageKey) {
+        return jsonResponse({
+          sessions: [...firstPage],
+          hasMore: true,
+          nextCursor: "page-2-cursor",
+        });
+      }
+      if (url === finalPageKey) {
+        return jsonResponse({
+          sessions: [createSession(51, { title: "Older unique session" })],
+          hasMore: false,
+          nextCursor: null,
+        });
+      }
+      throw new Error(`Unexpected fetch for ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { container } = render(
+      <SWRConfig
+        value={{
+          provider: () => new Map(),
+          fallback: {
+            [SIDEBAR_SESSIONS_KEY]: {
+              sessions: firstPage,
+              hasMore: true,
+              nextCursor: "page-1-cursor",
+            },
+          },
+          dedupingInterval: 0,
+          revalidateOnFocus: false,
+          revalidateOnMount: false,
+        }}
+      >
+        <SessionSidebar />
+      </SWRConfig>
+    );
+
+    expect(await screen.findByText("Session 1")).toBeInTheDocument();
+
+    const scrollContainer = container.querySelector(".overflow-y-auto") as HTMLDivElement;
+    Object.defineProperty(scrollContainer, "scrollHeight", { configurable: true, value: 2000 });
+    Object.defineProperty(scrollContainer, "clientHeight", { configurable: true, value: 400 });
+    Object.defineProperty(scrollContainer, "scrollTop", { configurable: true, value: 1705 });
+    fireEvent.scroll(scrollContainer);
+
+    expect(await screen.findByText("Older unique session")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(duplicatePageKey);
+      expect(fetchMock).toHaveBeenCalledWith(finalPageKey);
+    });
+  });
+
   it("keeps closure children classified after pagination and first-page revalidation", async () => {
     const now = Date.now();
     const parent = createSession(1, { title: "Closure parent", updatedAt: now - 10_000 });
