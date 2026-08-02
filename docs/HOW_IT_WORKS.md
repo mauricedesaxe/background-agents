@@ -267,18 +267,19 @@ When restoring from a previous snapshot:
 ```
 ┌─────────────┐    ┌────────────┐    ┌─────────────┐    ┌───────┐
 │  Restore    │───▶│ Quick Sync │───▶│ Start Script│───▶│ Ready │
-│  Snapshot   │    │ (git pull) │    │ (optional)  │    │       │
+│  Snapshot   │    │(fetch only)│    │ (optional)  │    │       │
 └─────────────┘    └────────────┘    └─────────────┘    └───────┘
 ```
 
 1. **Restore snapshot**: The selected snapshot-capable provider restores the filesystem from a saved
    snapshot or checkpoint
-2. **Quick sync**: Pulls latest changes (usually just a few commits)
+2. **Quick sync**: Fetches the remote tracking ref without changing local commits or files
 3. **Start script**: Runs `.openinspect/start.sh` for runtime startup (if present)
 4. **Ready**: Sandbox is ready almost instantly
 
-Snapshots include installed dependencies, built artifacts, and workspace state. This is why
-follow-up prompts in an existing session are much faster than the first prompt.
+Snapshots include installed dependencies, built artifacts, and workspace state. Local commits, dirty
+tracked files, and untracked files remain unchanged during restore. This is why follow-up prompts in
+an existing session are much faster than the first prompt.
 
 ### Prebuilt Image Start
 

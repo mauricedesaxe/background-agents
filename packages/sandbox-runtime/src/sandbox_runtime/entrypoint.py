@@ -170,7 +170,7 @@ class SandboxSupervisor:
         self.repo_path = (
             self.workspace_path / self.repo_name if self.has_repository else self.workspace_path
         )
-        self.session_id_file = Path("/tmp/opencode-session-id")
+        self.session_id_file = Path(tempfile.gettempdir()) / "opencode-session-id"
         self.context_unavailable_file = Path("/tmp/opencode-context-unavailable")
 
         # Ordered repository list. SESSION_CONFIG.repositories is the source
@@ -500,12 +500,12 @@ class SandboxSupervisor:
         return ""
 
     async def _sync_repo(self, repo: RepoEntry) -> bool:
-        """Sync one repository: update in place when present, clone when missing.
+        """Prepare one repository for the current boot mode.
 
-        The same rule serves every boot mode — a fresh boot clones, an
-        image/snapshot boot finds the path and fetches — so member count and
-        boot mode never multiply into special cases here. Failure policy is
-        the caller's (run()) job.
+        A restored session owns changes that may not exist upstream, so it
+        fetches the remote tracking ref without resetting the checkout. Fresh,
+        build, and repo-image boots update in place when present and clone when
+        missing. Failure policy is the caller's (run()) job.
         """
         self.log.debug(
             "git.sync_start",
@@ -513,6 +513,17 @@ class SandboxSupervisor:
             repo_name=repo.name,
             repo_path=str(repo.path),
         )
+        if self.boot_mode in ("persistent_resume", "snapshot_restore"):
+            if not (repo.path / ".git").exists():
+                return False
+            self.log.info(
+                "git.checkout_preserved",
+                repo_owner=repo.owner,
+                repo_name=repo.name,
+            )
+            if not await self._ensure_plain_origin(repo):
+                return False
+            return await self._fetch_branch(repo, repo.branch)
         if not repo.path.exists():
             if not await self._clone_repo(repo):
                 return False
@@ -2079,6 +2090,8 @@ class SandboxSupervisor:
             self.boot_mode = "snapshot_restore"
         elif from_repo_image:
             self.boot_mode = "repo_image"
+        elif self.session_id_file.is_file():
+            self.boot_mode = "persistent_resume"
         else:
             self.boot_mode = "fresh"
 
@@ -2094,6 +2107,8 @@ class SandboxSupervisor:
         elif from_repo_image:
             repo_image_sha = os.environ.get("REPO_IMAGE_SHA", "unknown")
             self.log.info("supervisor.from_repo_image", build_sha=repo_image_sha)
+        elif self.boot_mode == "persistent_resume":
+            self.log.info("supervisor.persistent_resume")
         repo_image_callback = (
             RepoImageBuildCallback.from_env(self.log) if image_build_mode else None
         )
@@ -2134,13 +2149,6 @@ class SandboxSupervisor:
             if self.repositories:
                 await self._ensure_credential_helper_configured()
 
-            # Phase 1: Git sync — one per-repo rule for every boot mode
-            # (existing checkout → fetch/checkout, missing → clone). Only the
-            # failure policy differs: fresh and build boots cannot do useful
-            # work without every repository, so any failure is fatal
-            # (deliberate change — previously a fresh boot limped on
-            # repo-less); image/snapshot boots keep their leniency (a deleted
-            # upstream branch must not brick a resume).
             failed_repos = await self.sync_repositories()
             git_sync_success = not failed_repos
             if failed_repos:
