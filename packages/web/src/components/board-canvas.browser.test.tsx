@@ -83,6 +83,17 @@ test("declares the rendered long-text and layered inspection fixture ready", asy
   await expect
     .poll(() => inspectionContainer.querySelector('[data-shape-id="shape:top"]'))
     .not.toBeNull();
+  await expect
+    .poll(() => {
+      const bottom = inspectionContainer
+        .querySelector<HTMLElement>('[data-shape-id="shape:bottom"]')
+        ?.getBoundingClientRect();
+      const top = inspectionContainer
+        .querySelector<HTMLElement>('[data-shape-id="shape:top"]')
+        ?.getBoundingClientRect();
+      return Math.min(bottom?.width ?? 0, bottom?.height ?? 0, top?.width ?? 0, top?.height ?? 0);
+    })
+    .toBeGreaterThan(0);
 
   const longTextShape = inspectionContainer.querySelector<HTMLElement>(
     '[data-shape-id="shape:long-text"]'
