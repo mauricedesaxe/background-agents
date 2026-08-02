@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 from dataclasses import replace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -480,6 +481,29 @@ class TestNormalMode:
         supervisor.run_start_script.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_partial_checkout_without_session_remains_fresh(self, base_env, tmp_path):
+        supervisor = _make_supervisor(base_env)
+        supervisor.repo_path = tmp_path / "my-repo"
+        (supervisor.repo_path / ".git").mkdir(parents=True)
+        supervisor.session_id_file = tmp_path / "missing-session-id"
+        _repoint_primary(supervisor)
+        supervisor.sync_repositories = AsyncMock(return_value=[])
+        supervisor.run_setup_script = AsyncMock(return_value=True)
+        supervisor.run_start_script = AsyncMock(return_value=True)
+        supervisor.start_code_server = AsyncMock()
+        supervisor.start_ttyd = AsyncMock()
+        supervisor.start_opencode = AsyncMock()
+        supervisor.start_bridge = AsyncMock()
+        supervisor.monitor_processes = AsyncMock()
+        supervisor.shutdown = AsyncMock()
+
+        with patch.dict(os.environ, base_env, clear=False):
+            await supervisor.run()
+
+        assert supervisor.boot_mode == "fresh"
+        supervisor.run_setup_script.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_clone_depth_100_in_normal_mode(self, base_env, tmp_path):
         """Normal mode should clone with --depth 100."""
         supervisor = _make_supervisor(base_env)
@@ -519,8 +543,123 @@ class TestNormalMode:
         assert "100" in clone_args, f"Expected --depth 100 in clone args, got {clone_args}"
 
 
+class TestSessionResumeModes:
+    @pytest.mark.parametrize(
+        ("resume_flags", "expected_boot_mode"),
+        [
+            ({}, "persistent_resume"),
+            ({"RESTORED_FROM_SNAPSHOT": "true"}, "snapshot_restore"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_preserves_local_work_across_upstream_branch_deletion(
+        self, base_env, tmp_path, resume_flags, expected_boot_mode
+    ):
+        origin = tmp_path / "origin.git"
+        seed = tmp_path / "seed"
+        workspace = tmp_path / "workspace"
+        checkout = workspace / "my-repo"
+        setup_marker = tmp_path / "setup-ran"
+
+        def git(cwd, *args):
+            return subprocess.run(
+                ["git", "-C", str(cwd), *args],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+        subprocess.run(
+            ["git", "init", "--bare", str(origin)],
+            check=True,
+            capture_output=True,
+        )
+        seed.mkdir()
+        git(seed, "init", "-b", "main")
+        git(seed, "config", "user.email", "test@example.com")
+        git(seed, "config", "user.name", "Test")
+        (seed / "tracked.txt").write_text("remote\n")
+        setup_script = seed / ".openinspect" / "setup.sh"
+        setup_script.parent.mkdir()
+        setup_script.write_text('#!/bin/sh\ntouch "$SETUP_MARKER"\n')
+        setup_script.chmod(0o755)
+        git(seed, "add", ".")
+        git(seed, "commit", "-m", "initial")
+        git(seed, "remote", "add", "origin", str(origin))
+        git(seed, "push", "origin", "main")
+
+        workspace.mkdir()
+        subprocess.run(
+            ["git", "clone", "--branch", "main", str(origin), str(checkout)],
+            check=True,
+            capture_output=True,
+        )
+        git(checkout, "config", "user.email", "test@example.com")
+        git(checkout, "config", "user.name", "Test")
+        (checkout / "local.txt").write_text("unpublished work\n")
+        git(checkout, "add", "local.txt")
+        git(checkout, "commit", "-m", "local work")
+        local_head = git(checkout, "rev-parse", "HEAD")
+        (checkout / "tracked.txt").write_text("dirty work\n")
+        (checkout / "untracked.txt").write_text("untracked work\n")
+        (seed / "remote.txt").write_text("advanced upstream\n")
+        git(seed, "add", "remote.txt")
+        git(seed, "commit", "-m", "advance upstream")
+        git(seed, "push", "origin", "main")
+        remote_head = git(seed, "rev-parse", "HEAD")
+
+        env = {**os.environ, **base_env, "SETUP_MARKER": str(setup_marker)}
+        for key in ("IMAGE_BUILD_MODE", "RESTORED_FROM_SNAPSHOT", "FROM_REPO_IMAGE"):
+            env.pop(key, None)
+        env.update(resume_flags)
+
+        def make_resume_supervisor():
+            supervisor = _make_supervisor(env)
+            supervisor.workspace_path = workspace
+            supervisor.repo_path = checkout
+            supervisor.session_id_file = tmp_path / "opencode-session-id"
+            _repoint_primary(supervisor)
+            supervisor._ensure_credential_helper_configured = AsyncMock()
+            supervisor._ensure_plain_origin = AsyncMock(return_value=True)
+            supervisor.run_start_script = AsyncMock(return_value=True)
+            supervisor.start_code_server = AsyncMock()
+            supervisor.start_ttyd = AsyncMock()
+            supervisor.start_opencode = AsyncMock()
+            supervisor.start_bridge = AsyncMock()
+            supervisor.monitor_processes = AsyncMock()
+            supervisor.shutdown = AsyncMock()
+            return supervisor
+
+        (tmp_path / "opencode-session-id").write_text("ses_existing")
+        supervisor = make_resume_supervisor()
+        with patch.dict(os.environ, env, clear=True):
+            await supervisor.run()
+
+        assert git(checkout, "rev-parse", "HEAD") == local_head
+        assert git(checkout, "rev-parse", "refs/remotes/origin/main") == remote_head
+        assert (checkout / "tracked.txt").read_text() == "dirty work\n"
+        assert (checkout / "untracked.txt").read_text() == "untracked work\n"
+        assert not setup_marker.exists()
+        assert supervisor.boot_mode == expected_boot_mode
+        supervisor.run_start_script.assert_called_once()
+
+        git(origin, "update-ref", "-d", "refs/heads/main")
+        supervisor = make_resume_supervisor()
+        with patch.dict(os.environ, env, clear=True):
+            await supervisor.run()
+
+        assert git(checkout, "rev-parse", "HEAD") == local_head
+        assert (checkout / "tracked.txt").read_text() == "dirty work\n"
+        assert (checkout / "untracked.txt").read_text() == "untracked work\n"
+        assert not setup_marker.exists()
+        supervisor.run_start_script.assert_called_once()
+        warnings = (tmp_path / "oi-boot-warnings.jsonl").read_text().splitlines()
+        assert len(warnings) == 1
+        assert json.loads(warnings[0])["scope"] == "sync"
+
+
 class TestSnapshotRestoreMode:
-    """RESTORED_FROM_SNAPSHOT=true: update repo (best-effort) + start hook, skip setup."""
+    """RESTORED_FROM_SNAPSHOT=true: preserve repo + start hook, skip setup."""
 
     @pytest.mark.asyncio
     async def test_skips_setup_and_runs_start(self, base_env):

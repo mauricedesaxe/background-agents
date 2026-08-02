@@ -47,7 +47,9 @@ Upstream ships several providers and we retain all of them; the ones we do not r
 through the shared harness install. Daytona is the one under load here, so it carries fork-local
 work: sizing applied to the snapshot rather than the create call, 4 GiB memory and 8 GiB disk per
 sandbox, a readable OOM cause, a 24-hour auto-archive default instead of 7 days, and a stop that
-retries across the provider's state-change settle.
+retries across the provider's state-change settle. A restarted Daytona supervisor recognizes the
+persisted OpenCode session as a resume, preserving local work and skipping setup hooks instead of
+resetting the branch to its remote tip.
 
 **Why.** Each of these was a production incident, not a preference. The 7-day auto-archive plus a
 300 GiB account disk cap produced a recurring "timed out waiting to connect" outage. The 1 GiB
@@ -320,6 +322,22 @@ Using any of them as the cursor loses commits after a failed run or classifies t
 The finalized `to_sha` is the cursor, while classifications from failed scans remain reusable. The
 inbound boundary is deliberately report-only: it never creates local artifacts or merges. The
 outbound boundary never writes upstream.
+
+### 23. Restored sessions preserve workspace state
+
+Snapshot restores and persistent Daytona resumes fetch each repository's remote tracking ref without
+checking it out. Local commits, dirty tracked files, and untracked files remain unchanged. A missing
+upstream branch records a warning and does not prevent the session from starting. Fresh boots,
+builds, and repo-image starts still synchronize their checkout to the requested remote branch.
+
+The real-Git resume cases in `packages/sandbox-runtime/tests/test_entrypoint_build_mode.py` pin the
+workspace behavior for both restore paths. A partial checkout without a persisted OpenCode session
+remains a fresh boot and still runs setup.
+
+**Why.** The filesystem is the session's working state. Publishing a commit is a separate action and
+must not decide whether work survives an inactivity stop, provider restart, or snapshot restore.
+Fetching preserves visibility into remote movement without choosing a merge policy or discarding
+either side.
 
 ## Where we match upstream against our own docs
 
