@@ -129,6 +129,15 @@ export class SessionMessageQueue {
     const messageId = data.requestId ?? generateId();
     const now = Date.now();
 
+    if (this.repository.getSession()?.status === "cancelled") {
+      this.wsManager.send(ws, {
+        type: "prompt_rejected",
+        requestId: messageId,
+        message: "Session has been cancelled",
+      } as ServerMessage);
+      return;
+    }
+
     if (this.sessionStatus.isArchiveInProgress()) {
       this.wsManager.send(ws, {
         type: "prompt_rejected",

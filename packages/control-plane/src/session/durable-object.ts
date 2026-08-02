@@ -830,6 +830,7 @@ export class SessionDO extends DurableObject<Env> {
           });
           await this.failActiveCompaction("Sandbox stopped before context compaction completed");
         },
+        onRecoveredInactivityStop: () => this.messageQueue.processMessageQueue(),
       },
       imageBuildLookup
     );
@@ -948,6 +949,18 @@ export class SessionDO extends DurableObject<Env> {
       // Get expected values from DB
       const sandbox = this.getSandbox();
       const expectedSandboxId = sandbox?.modal_sandbox_id;
+
+      if (sandbox?.status === "stopping") {
+        log.info("ws.connect", {
+          event: "ws.connect",
+          ws_type: "sandbox",
+          outcome: "rejected",
+          reject_reason: "sandbox_stopping",
+          sandbox_status: sandbox.status,
+          duration_ms: Date.now() - wsStartTime,
+        });
+        return new Response("Sandbox stop is settling", { status: 409 });
+      }
 
       // Reject connection if sandbox should be stopped (prevents reconnection after inactivity timeout).
       // Deliberately narrower than isDeadSandboxStatus: a "failed" sandbox may
@@ -1226,7 +1239,7 @@ export class SessionDO extends DurableObject<Env> {
   private async markSandboxContextReady(
     contextStatus: "fresh" | "existing" | "restored" | undefined
   ): Promise<void> {
-    this.lifecycleManager.onSandboxConnected();
+    if (!this.lifecycleManager.onSandboxConnected()) return;
     this.updateSandboxStatus("ready");
     this.broadcast({ type: "sandbox_status", status: "ready" });
     const now = Date.now();

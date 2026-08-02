@@ -265,6 +265,7 @@ function reduceServerMessage(
       const isReplacementStart = message.status === "spawning";
       const shouldClearAccessState =
         isReplacementStart ||
+        message.status === "stopping" ||
         message.status === "stale" ||
         message.status === "stopped" ||
         message.status === "failed";

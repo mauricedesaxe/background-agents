@@ -229,6 +229,7 @@ export function SandboxStatus({
     syncing: "text-accent",
     ready: "text-success",
     running: "text-accent",
+    stopping: "text-warning",
     stopped: "text-muted-foreground",
     stale: "text-muted-foreground",
     failed: "text-destructive",
@@ -280,7 +281,9 @@ export function CombinedStatusDot({
   } else if (sandboxStatus === "failed") {
     color = "bg-destructive";
     label = `Connected \u00b7 Sandbox: ${sandboxStatus}`;
-  } else if (["pending", "warming", "spawning", "syncing"].includes(sandboxStatus || "")) {
+  } else if (
+    ["pending", "warming", "spawning", "syncing", "stopping"].includes(sandboxStatus || "")
+  ) {
     color = "bg-warning";
     label = `Connected \u00b7 Sandbox: ${sandboxStatus}`;
   } else {

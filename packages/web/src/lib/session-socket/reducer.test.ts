@@ -430,8 +430,8 @@ describe("sessionSocketReducer", () => {
       expect(state.sessionState?.sandboxDashboardUrl).toBeUndefined();
     });
 
-    it("clears credentials but keeps the dashboard URL on terminal statuses", () => {
-      for (const status of ["stale", "stopped", "failed"] as const) {
+    it("clears credentials but keeps the dashboard URL when access is unavailable", () => {
+      for (const status of ["stopping", "stale", "stopped", "failed"] as const) {
         const state = reduce(withAccessState(), serverMessage({ type: "sandbox_status", status }));
         expect(state.sessionState?.sandboxStatus).toBe(status);
         expect(state.sessionState?.codeServerUrl).toBeUndefined();

@@ -520,8 +520,8 @@ export function createSessionLifecycleHandler(
         return Response.json({ error: `Session already ${session.status}` }, { status: 409 });
       }
 
-      await deps.stopExecution({ suppressStatusReconcile: true });
       await deps.statusService.transition("cancelled");
+      await deps.stopExecution({ suppressStatusReconcile: true });
 
       const sandbox = deps.getSandbox();
       if (sandbox) {

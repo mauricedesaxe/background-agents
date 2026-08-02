@@ -123,13 +123,13 @@ CREATE TABLE IF NOT EXISTS sandbox (
   snapshot_image_id TEXT,                           -- Modal Image ID for filesystem snapshot restoration
   auth_token TEXT,                                  -- Token for sandbox to authenticate back to control plane
   auth_token_hash TEXT,                             -- SHA-256 hash of sandbox auth token (preferred)
-  status TEXT DEFAULT 'pending',                    -- 'pending', 'spawning', 'connecting', 'warming', 'syncing', 'ready', 'running', 'stale', 'snapshotting', 'stopped', 'failed'
+  status TEXT DEFAULT 'pending',                    -- 'pending', 'spawning', 'connecting', 'warming', 'syncing', 'ready', 'running', 'stale', 'snapshotting', 'stopping', 'stopped', 'failed'
   git_sync_status TEXT DEFAULT 'pending',           -- 'pending', 'in_progress', 'completed', 'failed'
   last_heartbeat INTEGER,
   last_activity INTEGER,                            -- Last activity timestamp for inactivity-based snapshot
   last_spawn_error TEXT,                            -- Last sandbox spawn error (if any)
   last_spawn_error_at INTEGER,                      -- Timestamp of last spawn error
-  stop_unreconciled_at INTEGER,                     -- Set when a provider stop failed after the row was marked dead, so the VM may still be running; NULL once reconciled
+  stop_unreconciled_at INTEGER,                     -- Set while a failed provider stop remains unsettled; NULL once reconciled
   stop_unreconciled_provider_id TEXT,               -- The provider object the failed stop targeted, pinned so a respawn can't redirect the retry
   spawn_failure_count INTEGER DEFAULT 0,            -- Circuit breaker: consecutive spawn failures
   last_spawn_failure INTEGER,                       -- Timestamp of last spawn failure

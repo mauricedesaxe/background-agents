@@ -79,6 +79,58 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     expect(ws).toBeNull();
   });
 
+  it("upgrade while provider stop is settling returns retryable 409", async () => {
+    const name = `ws-sandbox-stopping-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    await seedSandboxAuth(stub, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+      status: "ready",
+    });
+    await queryDO(stub, "UPDATE sandbox SET status = 'stopping'");
+
+    const { ws, response } = await openSandboxWs(name, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+    });
+
+    expect(response.status).toBe(409);
+    expect(ws).toBeNull();
+    const state = await queryDO<{ status: string }>(stub, "SELECT status FROM sandbox");
+    expect(state).toEqual([{ status: "stopping" }]);
+  });
+
+  it("late readiness cannot overwrite a provider stop in progress", async () => {
+    const name = `ws-sandbox-ready-during-stop-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    await seedSandboxAuth(stub, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+      status: "ready",
+    });
+    const { ws } = await openSandboxWs(name, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+    });
+    ws!.accept();
+    await queryDO(stub, "UPDATE sandbox SET status = 'stopping'");
+
+    sendSandboxReady(ws!, SANDBOX_ID, "existing");
+    await expect
+      .poll(async () => {
+        const session = await queryDO<{ opencode_session_id: string | null }>(
+          stub,
+          "SELECT opencode_session_id FROM session"
+        );
+        return session[0]?.opencode_session_id;
+      })
+      .toBe("oc-test-session");
+
+    const state = await queryDO<{ status: string }>(stub, "SELECT status FROM sandbox");
+    expect(state).toEqual([{ status: "stopping" }]);
+    ws!.close();
+  });
+
   it("sandbox remains connecting until the bridge verifies context", async () => {
     const name = `ws-sandbox-ready-${Date.now()}`;
     const { stub } = await initNamedSession(name);

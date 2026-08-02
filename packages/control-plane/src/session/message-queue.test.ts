@@ -252,6 +252,24 @@ describe("SessionMessageQueue", () => {
     expect(h.sessionStatus.transition).toHaveBeenCalledWith("active");
   });
 
+  it("rejects a WebSocket prompt after the session is cancelled", async () => {
+    const h = buildQueue();
+    h.repository.getSession.mockReturnValue(createSession({ status: "cancelled" }));
+
+    await h.queue.handlePromptMessage({} as WebSocket, createClientInfo(), {
+      requestId: "request-after-cancel",
+      content: "resume",
+    });
+
+    expect(h.repository.createMessage).not.toHaveBeenCalled();
+    expect(h.sessionStatus.transition).not.toHaveBeenCalled();
+    expect(h.wsManager.send).toHaveBeenCalledWith(expect.anything(), {
+      type: "prompt_rejected",
+      requestId: "request-after-cancel",
+      message: "Session has been cancelled",
+    });
+  });
+
   it("rejects a prompt while provider archival is in progress", async () => {
     const h = buildQueue();
     h.sessionStatus.isArchiveInProgress.mockReturnValue(true);
