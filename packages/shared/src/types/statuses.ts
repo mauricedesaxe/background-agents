@@ -20,6 +20,7 @@ export type SandboxStatus =
   | "running"
   | "stale"
   | "snapshotting"
+  | "stopping"
   | "stopped"
   | "failed";
 export type GitSyncStatus = "pending" | "in_progress" | "completed" | "failed";
@@ -67,6 +68,7 @@ export const sandboxStatusSchema = z.enum([
   "running",
   "stale",
   "snapshotting",
+  "stopping",
   "stopped",
   "failed",
 ]);

@@ -33,6 +33,10 @@ class TestIsFatalConnectionError:
         error_str = "server rejected WebSocket connection: HTTP 404"
         assert bridge._is_fatal_connection_error(error_str) is True
 
+    def test_http_409_is_not_fatal(self, bridge):
+        error_str = "server rejected WebSocket connection: HTTP 409"
+        assert bridge._is_fatal_connection_error(error_str) is False
+
     def test_http_500_is_not_fatal(self, bridge):
         error_str = "server rejected WebSocket connection: HTTP 500"
         assert bridge._is_fatal_connection_error(error_str) is False

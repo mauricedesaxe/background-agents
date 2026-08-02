@@ -101,9 +101,8 @@ export interface SandboxStorage {
   /** Update sandbox status */
   updateSandboxStatus(status: SandboxStatus): void;
   /**
-   * Record, or clear with a pair of nulls, that a provider stop failed after
-   * the row was marked dead, so the VM may still be running. The provider id is
-   * pinned alongside so a later retry targets that VM and not a replacement.
+   * Record or clear an unsettled provider stop. Pinning the provider id keeps a
+   * later retry from targeting a replacement.
    */
   updateSandboxStopUnreconciled(timestamp: EpochMs | null, providerObjectId: string | null): void;
   /** Update sandbox for spawn (status, auth token, sandbox ID, created_at) */
@@ -220,7 +219,7 @@ export const DEFAULT_LIFECYCLE_CONFIG: Omit<SandboxLifecycleConfig, "controlPlan
 const CHILD_SANDBOX_TIMEOUT_SECONDS = 3600; // 1 hour (vs default 2 hours)
 
 /**
- * How long a stop that failed after its row was marked dead keeps being retried.
+ * How long an unsettled provider stop keeps being retried.
  * The window closes well inside a provider's own auto-stop backstop, so a
  * recoverable stop is recovered before the VM bills its full lifetime.
  */
@@ -295,7 +294,11 @@ export type SandboxTerminationReason =
 export interface LifecycleCallbacks {
   /** Called when the sandbox is being terminated, with the reason it's going away. */
   onSandboxTerminating?: (reason: SandboxTerminationReason) => Promise<void>;
+  /** Recheck queued work after an unobserved failed stop later settles. */
+  onRecoveredInactivityStop?: () => Promise<void>;
 }
+
+type ProviderStopSettlement = { success: true } | { success: false; error: string };
 
 // ==================== Manager ====================
 
@@ -322,6 +325,9 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
    * The persisted sandbox status ("spawning", "connecting") handles cross-request protection.
    */
   private isSpawningSandbox = false;
+
+  private inFlightInactivityStop: Promise<boolean> | null = null;
+  private inactivityStopResumeWaiters = 0;
 
   /** Session-scoped logger. Falls back to module-level logger if no sessionId configured. */
   private readonly log: Logger;
@@ -350,6 +356,26 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
    */
   async spawnSandbox(): Promise<void> {
     const sandboxState = this.storage.getSandboxWithCircuitBreaker();
+    if (sandboxState?.status === "stopping") {
+      const providerObjectId = sandboxState.modal_object_id;
+      if (!providerObjectId) {
+        this.log.error("Cannot settle sandbox stop: missing provider object ID", {
+          event: "sandbox.stop_failed",
+          transition: "stop",
+          phase: "settlement",
+        });
+        return;
+      }
+
+      this.inactivityStopResumeWaiters += 1;
+      try {
+        const settled = await this.joinInactivityStop(providerObjectId);
+        if (settled && this.sessionAllowsSandboxResume()) await this.spawnSandbox();
+        return;
+      } finally {
+        this.inactivityStopResumeWaiters -= 1;
+      }
+    }
     const now = Date.now();
 
     // Extract circuit breaker state
@@ -428,6 +454,27 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       case "spawn":
         await this.doSpawn();
         return;
+    }
+  }
+
+  private sessionAllowsSandboxResume(): boolean {
+    const session = this.storage.getSession();
+    return (
+      session != null &&
+      session.archive_claimed_at == null &&
+      !["completed", "failed", "cancelled", "archived"].includes(session.status)
+    );
+  }
+
+  private async notifyRecoveredInactivityStop(): Promise<void> {
+    if (this.inactivityStopResumeWaiters !== 0 || !this.sessionAllowsSandboxResume()) return;
+    try {
+      await this.callbacks.onRecoveredInactivityStop?.();
+    } catch (error) {
+      this.log.error("Failed to process queued work after recovered inactivity stop", {
+        event: "sandbox.stop_recovery_callback_failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
@@ -1099,15 +1146,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
     this.storage.clearSandboxTtyd();
   }
 
-  /**
-   * Note that the VM behind an already-dead row may still be running.
-   *
-   * terminateSandbox and the timeout paths mark the row dead before asking the
-   * provider to stop, so a throw there breaks the invariant they document: a
-   * dead row means a stopped VM. handleAlarm short-circuits on a dead row, so
-   * without this marker nothing ever comes back for it and the VM bills until
-   * the provider's own backstop.
-   */
+  /** Pin failed settlement to its original provider object for alarm retries. */
   private async recordUnreconciledStop(
     reason: string,
     error: unknown,
@@ -1119,27 +1158,104 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       provider_object_id: providerObjectId,
       error: error instanceof Error ? error.message : String(error),
     });
-    this.storage.updateSandboxStopUnreconciled(nowMs(), providerObjectId);
+    const sandbox = this.storage.getSandbox();
+    const sameProvider = sandbox?.stop_unreconciled_provider_id === providerObjectId;
+    const unreconciledAt =
+      sameProvider && sandbox?.stop_unreconciled_at != null
+        ? epochMs(sandbox.stop_unreconciled_at)
+        : nowMs();
+    this.storage.updateSandboxStopUnreconciled(unreconciledAt, providerObjectId);
     await this.alarmScheduler.scheduleAlarm(nowMs() + STOP_RECONCILE_INTERVAL_MS);
   }
 
-  /**
-   * Stop the provider sandbox, marking it for reconciliation if that fails.
-   *
-   * Every path that marks a row dead goes through here. Pairing the stop with
-   * the marker in one place is what stops a future caller adding a sixth stop
-   * site that forgets the marker, which is the whole bug this exists to close.
-   */
+  /** Stop the provider sandbox and persist failed settlement for reconciliation. */
   private async stopProviderSandboxOrRecord(
     reason: string,
     providerObjectId: string
-  ): Promise<void> {
+  ): Promise<ProviderStopSettlement> {
+    const requestedAt = nowMs();
+    this.log.info("Provider stop requested", {
+      event: "sandbox.provider_transition",
+      transition: "stop",
+      phase: "requested",
+      reason,
+      provider_object_id: providerObjectId,
+    });
     try {
       await this.stopProviderSandbox(reason, providerObjectId);
       this.storage.updateSandboxStopUnreconciled(null, null);
+      this.log.info("Provider stop settled", {
+        event: "sandbox.provider_transition",
+        transition: "stop",
+        phase: "settled",
+        reason,
+        provider_object_id: providerObjectId,
+        duration_ms: nowMs() - requestedAt,
+      });
+      return { success: true };
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.log.error("Provider stop failed", {
+        event: "sandbox.provider_transition",
+        transition: "stop",
+        phase: "failed",
+        reason,
+        provider_object_id: providerObjectId,
+        duration_ms: nowMs() - requestedAt,
+        error: errorMessage,
+      });
       await this.recordUnreconciledStop(reason, error, providerObjectId);
+      return { success: false, error: errorMessage };
     }
+  }
+
+  private joinInactivityStop(providerObjectId: string): Promise<boolean> {
+    if (this.inFlightInactivityStop) return this.inFlightInactivityStop;
+
+    const sandbox = this.storage.getSandbox();
+    if (sandbox?.status !== "stopping") {
+      this.storage.updateSandboxStatus("stopping");
+      this.clearSandboxAccessState();
+      this.broadcaster.broadcast({ type: "sandbox_status", status: "stopping" });
+    }
+
+    const operation = this.finishInactivityStop(providerObjectId);
+    this.inFlightInactivityStop = operation;
+    const clearOperation = () => {
+      if (this.inFlightInactivityStop === operation) this.inFlightInactivityStop = null;
+    };
+    void operation.then(clearOperation, clearOperation);
+    return operation;
+  }
+
+  private async finishInactivityStop(providerObjectId: string): Promise<boolean> {
+    try {
+      await this.callbacks.onSandboxTerminating?.("inactivity_timeout");
+    } catch (error) {
+      this.log.error("Failed to prepare session state for inactivity stop", {
+        event: "sandbox.termination_callback_failed",
+        reason: "inactivity_timeout",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    const settlement = await this.stopProviderSandboxOrRecord(
+      "inactivity_timeout",
+      providerObjectId
+    );
+    if (!settlement.success) {
+      this.storage.setLastSpawnError(`Sandbox stop failed: ${settlement.error}`, nowMs());
+      return false;
+    }
+
+    this.storage.updateSandboxStatus("stopped");
+    this.wsManager.closeSandboxWebSocket(1000, "Inactivity timeout");
+    this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });
+    this.broadcaster.broadcast({
+      type: "sandbox_warning",
+      message: "Sandbox stopped due to inactivity",
+    });
+    return true;
   }
 
   /**
@@ -1287,7 +1403,16 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       return;
     }
 
-    if (!isDeadSandboxStatus(sandbox.status)) {
+    if (sandbox.status === "stopping") {
+      const settled = await this.joinInactivityStop(providerObjectId);
+      if (!settled) {
+        const error = new Error(
+          this.storage.getSandbox()?.last_spawn_error || "Provider stop did not settle"
+        );
+        if (options.throwOnFailure) throw error;
+        return;
+      }
+    } else if (!isDeadSandboxStatus(sandbox.status)) {
       this.storage.updateSandboxStatus("stopped");
       this.clearSandboxAccessState();
       this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });
@@ -1323,6 +1448,13 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
   async terminateSandbox(reason: string): Promise<void> {
     const sandbox = this.storage.getSandbox();
     if (!sandbox) {
+      return;
+    }
+
+    if (sandbox.status === "stopping") {
+      const providerObjectId =
+        sandbox.stop_unreconciled_provider_id ?? sandbox.modal_object_id ?? undefined;
+      if (providerObjectId) await this.joinInactivityStop(providerObjectId);
       return;
     }
 
@@ -1387,6 +1519,29 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       last_activity: sandbox.last_activity,
       last_heartbeat: sandbox.last_heartbeat,
     });
+
+    if (sandbox.status === "stopping") {
+      if (
+        sandbox.stop_unreconciled_at != null &&
+        now - sandbox.stop_unreconciled_at >= STOP_RECONCILE_WINDOW_MS
+      ) {
+        this.log.error("Provider stop reconciliation window expired", {
+          event: "sandbox.provider_transition",
+          transition: "stop",
+          phase: "failed",
+          reason: "inactivity_timeout",
+          provider_object_id: providerObjectId,
+          duration_ms: now - sandbox.stop_unreconciled_at,
+        });
+        this.storage.updateSandboxStopUnreconciled(null, null);
+        return;
+      }
+      if (providerObjectId) {
+        const settled = await this.joinInactivityStop(providerObjectId);
+        if (settled) await this.notifyRecoveredInactivityStop();
+      }
+      return;
+    }
 
     // Skip if sandbox is already in terminal state. A dead row whose stop never
     // landed is the exception: this branch is the only thing that still looks at
@@ -1494,6 +1649,11 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
           last_activity: sandbox.last_activity,
           timeout_ms: this.config.inactivity.timeoutMs,
         });
+        if (this.usesProviderManagedStop() && providerObjectId) {
+          await this.joinInactivityStop(providerObjectId);
+          return;
+        }
+
         // Fail any stuck processing message before terminating
         await this.callbacks.onSandboxTerminating?.("inactivity_timeout");
         // Set status to stopped FIRST to block reconnection attempts
@@ -1501,11 +1661,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         this.clearSandboxAccessState();
         this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });
 
-        if (this.usesProviderManagedStop()) {
-          if (providerObjectId) {
-            await this.stopProviderSandboxOrRecord("inactivity_timeout", providerObjectId);
-          }
-        } else {
+        if (!this.usesProviderManagedStop()) {
           await this.triggerSnapshot("inactivity_timeout", providerObjectId);
           this.wsManager.sendToSandbox({ type: "shutdown" });
           if (this.canStopProviderSandbox() && providerObjectId) {
@@ -1701,13 +1857,18 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
   }
 
   /**
-   * Notify the manager that a sandbox has connected.
-   * Resets the in-memory spawning flag and clears any stale spawn error.
-   *
-   * Called by SessionDO when sandbox WebSocket connects successfully.
+   * Reject readiness from sockets accepted before a stop claimed the lifecycle.
    */
-  onSandboxConnected(): void {
+  onSandboxConnected(): boolean {
+    if (this.storage.getSandbox()?.status === "stopping") {
+      this.log.info("Ignoring sandbox readiness while provider stop is settling", {
+        event: "sandbox.ready_deferred",
+        sandbox_status: "stopping",
+      });
+      return false;
+    }
     this.isSpawningSandbox = false;
     this.storage.setLastSpawnError(null, null);
+    return true;
   }
 }

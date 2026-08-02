@@ -1129,6 +1129,251 @@ describe("SandboxLifecycleManager", () => {
       expect(wsManager.closeSandboxWebSocket).toHaveBeenCalledWith(1000, "Inactivity timeout");
     });
 
+    it("waits for an in-flight inactivity stop before resuming once", async () => {
+      const infoSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const now = Date.now();
+      const config = createTestConfig();
+      const sandbox = createMockSandbox({
+        status: "ready",
+        last_heartbeat: now - 10000,
+        last_activity: now - config.inactivity.timeoutMs - 1000,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      let markStopStarted!: () => void;
+      let releaseStop!: () => void;
+      const stopStarted = new Promise<void>((resolve) => {
+        markStopStarted = resolve;
+      });
+      const stopSandbox = vi.fn(
+        () =>
+          new Promise<StopResult>((resolve) => {
+            markStopStarted();
+            releaseStop = () => resolve({ success: true });
+          })
+      );
+      const resumeSandbox = vi.fn(async () => ({ success: true }));
+      const provider = createMockProvider({
+        capabilities: { supportsExplicitStop: true, supportsPersistentResume: true },
+        stopSandbox,
+        resumeSandbox,
+      });
+      const onRecoveredInactivityStop = vi.fn(async () => undefined);
+      const { manager } = buildManager({
+        provider,
+        storage,
+        wsManager: createMockWebSocketManager(true, 0),
+        config,
+        callbacks: { onRecoveredInactivityStop },
+      });
+
+      const inactivityStop = manager.handleAlarm();
+      await stopStarted;
+      expect(sandbox.status).toBe("stopping");
+
+      const incomingPrompt = manager.spawnSandbox();
+      await Promise.resolve();
+      expect(stopSandbox).toHaveBeenCalledTimes(1);
+      expect(resumeSandbox).not.toHaveBeenCalled();
+
+      releaseStop();
+      await Promise.all([inactivityStop, incomingPrompt]);
+
+      expect(stopSandbox).toHaveBeenCalledTimes(1);
+      expect(resumeSandbox).toHaveBeenCalledTimes(1);
+      expect(onRecoveredInactivityStop).not.toHaveBeenCalled();
+      expect(sandbox.status).toBe("connecting");
+      const transitions = infoSpy.mock.calls
+        .map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+        .filter((record) => record.event === "sandbox.provider_transition");
+      expect(transitions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            phase: "requested",
+            provider_object_id: sandbox.modal_object_id,
+          }),
+          expect.objectContaining({
+            phase: "settled",
+            provider_object_id: sandbox.modal_object_id,
+            duration_ms: expect.any(Number),
+          }),
+        ])
+      );
+      infoSpy.mockRestore();
+    });
+
+    it.each([
+      {
+        caseName: "cancellation",
+        reason: "session_cancelled",
+        sessionStatus: "cancelled",
+        expectedResumeCalls: 0,
+        expectedSandboxStatus: "stopped",
+      },
+      {
+        caseName: "bridge disconnect",
+        reason: "sandbox_disconnected",
+        sessionStatus: "active",
+        expectedResumeCalls: 1,
+        expectedSandboxStatus: "connecting",
+      },
+    ] as const)(
+      "serializes a concurrent $caseName without issuing another stop",
+      async ({ reason, sessionStatus, expectedResumeCalls, expectedSandboxStatus }) => {
+        const now = Date.now();
+        const config = createTestConfig();
+        const session = createMockSession({ status: sessionStatus });
+        const sandbox = createMockSandbox({
+          status: "ready",
+          last_heartbeat: now - 10000,
+          last_activity: now - config.inactivity.timeoutMs - 1000,
+        });
+        const storage = createMockStorage(session, sandbox);
+        let markStopStarted!: () => void;
+        let releaseStop!: () => void;
+        const stopStarted = new Promise<void>((resolve) => {
+          markStopStarted = resolve;
+        });
+        const stopSandbox = vi.fn(
+          () =>
+            new Promise<StopResult>((resolve) => {
+              markStopStarted();
+              releaseStop = () => resolve({ success: true });
+            })
+        );
+        const resumeSandbox = vi.fn(async () => ({ success: true }));
+        const { manager } = buildManager({
+          provider: createMockProvider({
+            capabilities: { supportsExplicitStop: true, supportsPersistentResume: true },
+            stopSandbox,
+            resumeSandbox,
+          }),
+          storage,
+          wsManager: createMockWebSocketManager(true, 0),
+          config,
+        });
+
+        const inactivityStop = manager.handleAlarm();
+        await stopStarted;
+        const incomingPrompt = manager.spawnSandbox();
+        const terminalAction = manager.terminateSandbox(reason);
+
+        releaseStop();
+        await Promise.all([inactivityStop, incomingPrompt, terminalAction]);
+
+        expect(stopSandbox).toHaveBeenCalledTimes(1);
+        expect(resumeSandbox).toHaveBeenCalledTimes(expectedResumeCalls);
+        expect(sandbox.status).toBe(expectedSandboxStatus);
+      }
+    );
+
+    it("keeps failed stop settlement transitional for the pending-message watchdog", async () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const now = Date.now();
+      const config = createTestConfig();
+      const sandbox = createMockSandbox({
+        status: "ready",
+        last_heartbeat: now - 10000,
+        last_activity: now - config.inactivity.timeoutMs - 1000,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const stopSandbox = vi.fn(async (): Promise<StopResult> => {
+        throw new SandboxProviderError("provider still transitioning", "transient");
+      });
+      const { manager, alarmScheduler } = buildManager({
+        provider: createMockProvider({
+          capabilities: { supportsExplicitStop: true, supportsPersistentResume: true },
+          stopSandbox,
+        }),
+        storage,
+        wsManager: createMockWebSocketManager(true, 0),
+        config,
+      });
+
+      await manager.handleAlarm();
+
+      expect(sandbox.status).toBe("stopping");
+      expect(sandbox.last_spawn_error).toBe("Sandbox stop failed: provider still transitioning");
+      expect(sandbox.stop_unreconciled_provider_id).toBe(sandbox.modal_object_id);
+      expect(alarmScheduler.alarms).toHaveLength(1);
+      const transitions = errorSpy.mock.calls
+        .map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+        .filter((record) => record.event === "sandbox.provider_transition");
+      expect(transitions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            phase: "failed",
+            provider_object_id: sandbox.modal_object_id,
+            duration_ms: expect.any(Number),
+          }),
+        ])
+      );
+      errorSpy.mockRestore();
+    });
+
+    it.each([
+      { sessionStatus: "active", expectedQueueChecks: 1 },
+      { sessionStatus: "cancelled", expectedQueueChecks: 0 },
+    ] as const)(
+      "rechecks pending work after recovery when the session is $sessionStatus",
+      async ({ sessionStatus, expectedQueueChecks }) => {
+        const now = Date.now();
+        const config = createTestConfig();
+        const session = createMockSession();
+        const sandbox = createMockSandbox({
+          status: "ready",
+          last_heartbeat: now - 10000,
+          last_activity: now - config.inactivity.timeoutMs - 1000,
+        });
+        const storage = createMockStorage(session, sandbox);
+        const stopSandbox = vi
+          .fn<() => Promise<StopResult>>()
+          .mockRejectedValueOnce(
+            new SandboxProviderError("provider still transitioning", "transient")
+          )
+          .mockResolvedValueOnce({ success: true });
+        const onRecoveredInactivityStop = vi.fn(async () => undefined);
+        const { manager } = buildManager({
+          provider: createMockProvider({
+            capabilities: { supportsExplicitStop: true, supportsPersistentResume: true },
+            stopSandbox,
+          }),
+          storage,
+          wsManager: createMockWebSocketManager(true, 0),
+          config,
+          callbacks: { onRecoveredInactivityStop },
+        });
+
+        await manager.handleAlarm();
+        expect(sandbox.status).toBe("stopping");
+        expect(onRecoveredInactivityStop).not.toHaveBeenCalled();
+
+        session.status = sessionStatus;
+        await manager.handleAlarm();
+
+        expect(stopSandbox).toHaveBeenCalledTimes(2);
+        expect(sandbox.status).toBe("stopped");
+        expect(onRecoveredInactivityStop).toHaveBeenCalledTimes(expectedQueueChecks);
+      }
+    );
+
+    it("bounds retries for an inactivity stop that never settles", async () => {
+      const now = Date.now();
+      const sandbox = createMockSandbox({
+        status: "stopping",
+        stop_unreconciled_at: now - 31 * 60 * 1000,
+        stop_unreconciled_provider_id: "modal-obj-123",
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const { provider, stopSandbox } = createProviderManagedStopProvider();
+      const { manager } = buildManager({ provider, storage });
+
+      await manager.handleAlarm();
+
+      expect(stopSandbox).not.toHaveBeenCalled();
+      expect(sandbox.stop_unreconciled_at).toBeNull();
+      expect(sandbox.status).toBe("stopping");
+    });
+
     it("schedules next alarm correctly", async () => {
       const now = Date.now();
       const sandbox = createMockSandbox({

@@ -357,6 +357,19 @@ describe("SessionWebSocketManagerImpl", () => {
       expect(manager.getSandboxSocket()).toBeNull();
     });
 
+    it("withholds the existing socket while its provider stop is settling", () => {
+      const { manager, sockets, mockRepo } = createManager();
+      const ws = createFakeWebSocket();
+
+      sockets.set(ws, ["sandbox", "sid:sb-1"]);
+      const row = createSandboxRow("sb-1");
+      row.status = "stopping";
+      mockRepo.setSandbox(row);
+
+      expect(manager.getSandboxSocket()).toBeNull();
+      expect(ws.close).not.toHaveBeenCalled();
+    });
+
     it("returns null and closes zombie WS when sandbox status is stopped", () => {
       const { manager, sockets, mockRepo } = createManager();
       const ws = createFakeWebSocket();

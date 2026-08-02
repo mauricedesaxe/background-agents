@@ -551,13 +551,92 @@ describe("DaytonaSandboxProvider", () => {
 
   describe("stopSandbox", () => {
     it("happy path: stops sandbox", async () => {
-      const client = createMockClient();
+      const client = createMockClient({
+        getSandbox: vi
+          .fn()
+          .mockResolvedValueOnce({ id: "daytona-sandbox-id", state: "started" })
+          .mockResolvedValueOnce({ id: "daytona-sandbox-id", state: "stopped" }),
+      });
       const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
 
       const result = await provider.stopSandbox(baseStopConfig);
 
       expect(result.success).toBe(true);
       expect(client.stopSandbox).toHaveBeenCalledWith("daytona-sandbox-id");
+    });
+
+    it("waits for Daytona to report stopped after accepting the command", async () => {
+      vi.useFakeTimers();
+      const infoSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      try {
+        const getSandbox = vi
+          .fn()
+          .mockResolvedValueOnce({ id: "daytona-sandbox-id", state: "started" })
+          .mockResolvedValueOnce({ id: "daytona-sandbox-id", state: "stopping" })
+          .mockResolvedValueOnce({ id: "daytona-sandbox-id", state: "stopped" });
+        const client = createMockClient({ getSandbox });
+        const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+        const pending = provider.stopSandbox(baseStopConfig);
+        await vi.runAllTimersAsync();
+        const result = await pending;
+
+        expect(result.success).toBe(true);
+        expect(client.stopSandbox).toHaveBeenCalledTimes(1);
+        expect(getSandbox).toHaveBeenCalledTimes(3);
+        const transitions = infoSpy.mock.calls
+          .map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+          .filter((record) => record.event === "sandbox.provider_transition");
+        expect(transitions).toEqual([
+          expect.objectContaining({
+            phase: "accepted",
+            provider_object_id: baseStopConfig.providerObjectId,
+            duration_ms: expect.any(Number),
+          }),
+        ]);
+      } finally {
+        infoSpy.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("observes an existing stop transition without issuing another command", async () => {
+      const getSandbox = vi
+        .fn()
+        .mockResolvedValueOnce({ id: "daytona-sandbox-id", state: "stopping" })
+        .mockResolvedValueOnce({ id: "daytona-sandbox-id", state: "stopped" });
+      const client = createMockClient({ getSandbox });
+      const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+      const result = await provider.stopSandbox(baseStopConfig);
+
+      expect(result.success).toBe(true);
+      expect(client.stopSandbox).not.toHaveBeenCalled();
+      expect(getSandbox).toHaveBeenCalledTimes(2);
+    });
+
+    it("fails when an accepted stop never reaches the stopped state", async () => {
+      vi.useFakeTimers();
+      try {
+        const getSandbox = vi.fn(async () => ({
+          id: "daytona-sandbox-id",
+          state: "started",
+        }));
+        const client = createMockClient({ getSandbox });
+        const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+        const pending = provider.stopSandbox(baseStopConfig);
+        const settled = expect(pending).rejects.toThrow(
+          "Daytona accepted the stop but did not report the sandbox as stopped"
+        );
+        await vi.runAllTimersAsync();
+        await settled;
+
+        expect(client.stopSandbox).toHaveBeenCalledTimes(1);
+        expect(getSandbox).toHaveBeenCalledTimes(41);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("returns success when sandbox not found (already gone)", async () => {
@@ -594,6 +673,10 @@ describe("DaytonaSandboxProvider", () => {
       vi.useFakeTimers();
       try {
         const client = createMockClient({
+          getSandbox: vi
+            .fn()
+            .mockResolvedValueOnce({ id: "daytona-sandbox-id", state: "started" })
+            .mockResolvedValueOnce({ id: "daytona-sandbox-id", state: "stopped" }),
           stopSandbox: vi
             .fn()
             .mockRejectedValueOnce(new DaytonaApiError("Sandbox state change in progress", 409))

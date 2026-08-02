@@ -40,6 +40,9 @@ const STATE_SETTLE_RETRY_MAX_ATTEMPTS = 8;
 /** Gap between those attempts. A transition settles in a few seconds in practice. */
 const STATE_SETTLE_RETRY_DELAY_MS = 1500;
 
+const STATE_OBSERVATION_MAX_ATTEMPTS = 40;
+const STATE_OBSERVATION_POLL_MS = 500;
+
 const delayMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ---------------------------------------------------------------------------
@@ -189,9 +192,28 @@ export class DaytonaSandboxProvider implements SandboxProvider {
   }
 
   async stopSandbox(config: StopConfig): Promise<StopResult> {
+    const requestedAt = Date.now();
     try {
       try {
+        const current = await this.client.getSandbox(config.providerObjectId);
+        if (current.state === "stopped" || current.state === "archived") {
+          return { success: true };
+        }
+        if (current.state === "stopping") {
+          await this.waitForStopped(config.providerObjectId);
+          return { success: true };
+        }
+
         await this.retryAcrossStateSettle(() => this.client.stopSandbox(config.providerObjectId));
+        log.info("daytona.provider_transition", {
+          event: "sandbox.provider_transition",
+          transition: "stop",
+          phase: "accepted",
+          provider_object_id: config.providerObjectId,
+          reason: config.reason,
+          duration_ms: Date.now() - requestedAt,
+        });
+        await this.waitForStopped(config.providerObjectId);
       } catch (error) {
         if (error instanceof DaytonaNotFoundError) {
           return { success: true };
@@ -201,8 +223,22 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       return { success: true };
     } catch (error) {
       if (error instanceof SandboxProviderError) throw error;
-      throw this.classifyError("Failed to stop Daytona sandbox", error);
+      if (error instanceof DaytonaApiError) {
+        throw this.classifyError("Failed to stop Daytona sandbox", error);
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      throw this.classifyError(`Failed to stop Daytona sandbox: ${detail}`, error);
     }
+  }
+
+  private async waitForStopped(providerObjectId: string): Promise<void> {
+    for (let attempt = 1; attempt <= STATE_OBSERVATION_MAX_ATTEMPTS; attempt++) {
+      const sandbox = await this.client.getSandbox(providerObjectId);
+      if (sandbox.state === "stopped" || sandbox.state === "archived") return;
+      if (attempt < STATE_OBSERVATION_MAX_ATTEMPTS) await delayMs(STATE_OBSERVATION_POLL_MS);
+    }
+
+    throw new Error("Daytona accepted the stop but did not report the sandbox as stopped");
   }
 
   async archiveSandbox(config: ArchiveConfig): Promise<ArchiveResult> {

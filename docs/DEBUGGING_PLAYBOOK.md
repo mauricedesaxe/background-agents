@@ -126,25 +126,27 @@ One `image_build.*` vocabulary covers both scope kinds; events carry `scope_kind
 
 #### Lifecycle Manager (`component: "lifecycle-manager"`)
 
-| Event                     | Level | Key Fields                                       | Description                |
-| ------------------------- | ----- | ------------------------------------------------ | -------------------------- |
-| `sandbox.spawn`           | info  | `expected_sandbox_id`, `repo_owner`, `repo_name` | Spawn attempt started      |
-| `sandbox.spawned`         | info  | `sandbox_id`, `provider_object_id`               | Spawn succeeded            |
-| `sandbox.spawn_failed`    | error | `error`                                          | Spawn failed               |
-| `sandbox.restore`         | info  | `snapshot_image_id`                              | Restore attempt started    |
-| `sandbox.restored`        | info  | `sandbox_id`, `provider_object_id`               | Restore succeeded          |
-| `sandbox.snapshot`        | info  | `reason`, `provider_object_id`                   | Snapshot attempt started   |
-| `sandbox.snapshot_saved`  | info  | `image_id`, `reason`                             | Snapshot saved             |
-| `sandbox.heartbeat_stale` | warn  | `last_heartbeat_ms`, `threshold_ms`              | Heartbeat missed           |
-| `sandbox.timeout`         | info  | `last_activity`, `timeout_ms`                    | Inactivity timeout reached |
+| Event                         | Level       | Key Fields                                                           | Description                                       |
+| ----------------------------- | ----------- | -------------------------------------------------------------------- | ------------------------------------------------- |
+| `sandbox.spawn`               | info        | `expected_sandbox_id`, `repo_owner`, `repo_name`                     | Spawn attempt started                             |
+| `sandbox.spawned`             | info        | `sandbox_id`, `provider_object_id`                                   | Spawn succeeded                                   |
+| `sandbox.spawn_failed`        | error       | `error`                                                              | Spawn failed                                      |
+| `sandbox.restore`             | info        | `snapshot_image_id`                                                  | Restore attempt started                           |
+| `sandbox.restored`            | info        | `sandbox_id`, `provider_object_id`                                   | Restore succeeded                                 |
+| `sandbox.snapshot`            | info        | `reason`, `provider_object_id`                                       | Snapshot attempt started                          |
+| `sandbox.snapshot_saved`      | info        | `image_id`, `reason`                                                 | Snapshot saved                                    |
+| `sandbox.heartbeat_stale`     | warn        | `last_heartbeat_ms`, `threshold_ms`                                  | Heartbeat missed                                  |
+| `sandbox.timeout`             | info        | `last_activity`, `timeout_ms`                                        | Inactivity timeout reached                        |
+| `sandbox.provider_transition` | info, error | `transition`, `phase`, `reason`, `provider_object_id`, `duration_ms` | Provider transition requested, settled, or failed |
 
 #### Provider Clients
 
-| Event                    | Level | Key Fields                                                                      | Description                               |
-| ------------------------ | ----- | ------------------------------------------------------------------------------- | ----------------------------------------- |
-| `modal.request`          | info  | `endpoint`, `session_id`, `sandbox_id`, `http_status`, `duration_ms`, `outcome` | One per control-plane -> Modal call       |
-| `vercel_sandbox.request` | info  | `endpoint`, `session_id`, `http_status`, `duration_ms`, `outcome`               | One per control-plane -> Vercel API call  |
-| `daytona.create_sandbox` | info  | `sandbox_id`, `target`, `duration_ms`, `outcome`                                | Daytona sandbox create/restore API result |
+| Event                         | Level | Key Fields                                                                      | Description                               |
+| ----------------------------- | ----- | ------------------------------------------------------------------------------- | ----------------------------------------- |
+| `modal.request`               | info  | `endpoint`, `session_id`, `sandbox_id`, `http_status`, `duration_ms`, `outcome` | One per control-plane -> Modal call       |
+| `vercel_sandbox.request`      | info  | `endpoint`, `session_id`, `http_status`, `duration_ms`, `outcome`               | One per control-plane -> Vercel API call  |
+| `daytona.create_sandbox`      | info  | `sandbox_id`, `target`, `duration_ms`, `outcome`                                | Daytona sandbox create/restore API result |
+| `sandbox.provider_transition` | info  | `transition`, `phase`, `reason`, `provider_object_id`, `duration_ms`            | Daytona accepted a provider transition    |
 
 ---
 
