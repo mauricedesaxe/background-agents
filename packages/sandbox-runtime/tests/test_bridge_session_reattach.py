@@ -5,10 +5,12 @@ resume), its precedence over the on-disk cache, and the GET verification that
 refuses to discard control-plane-owned conversation context.
 """
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from websockets.asyncio.server import ServerConnection, serve
 
 from sandbox_runtime.bridge import AgentBridge
 
@@ -164,6 +166,36 @@ class TestSessionReattach:
                 "opencodeSessionId": "oc-new",
             }
         )
+
+    @pytest.mark.asyncio
+    async def test_reports_existing_context_when_resumed_from_disk(self, tmp_path: Path) -> None:
+        received: list[dict[str, object]] = []
+
+        async def receive_ready(websocket: ServerConnection) -> None:
+            raw = await websocket.recv()
+            received.append(json.loads(raw))
+            await websocket.close()
+
+        with patch.dict("os.environ", {"OPENCODE_CONTEXT_STATUS": "fresh"}, clear=True):
+            bridge = _make_bridge()
+            bridge.session_id_file = tmp_path / "opencode-session-id"
+            bridge.session_id_file.write_text("oc-existing")
+            bridge.http_client = _ok_client()
+            await bridge._load_session_id()
+
+            async with serve(receive_ready, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+                bridge.control_plane_url = f"http://127.0.0.1:{port}"
+                await bridge._connect_and_run()
+
+        ready = received[0]
+        assert ready == {
+            "type": "ready",
+            "sandboxId": "test-sandbox",
+            "opencodeSessionId": "oc-existing",
+            "contextStatus": "existing",
+            "timestamp": ready["timestamp"],
+        }
 
     @pytest.mark.asyncio
     async def test_no_id_leaves_fresh_session(self, tmp_path: Path) -> None:

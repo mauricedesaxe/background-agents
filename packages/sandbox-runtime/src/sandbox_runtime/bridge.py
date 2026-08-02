@@ -542,7 +542,9 @@ class AgentBridge:
                     )
                 else:
                     context_status = os.environ.get("OPENCODE_CONTEXT_STATUS")
-                    if context_status not in {"fresh", "existing", "restored"}:
+                    if self.opencode_session_id and context_status == "fresh":
+                        context_status = "existing"
+                    elif context_status not in {"fresh", "existing", "restored"}:
                         context_status = "existing" if self.opencode_session_id else "fresh"
                     await self._send_event(
                         {
