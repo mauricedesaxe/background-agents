@@ -3,6 +3,7 @@ import { TOKEN_VALIDITY_MS } from "@open-inspect/shared";
 
 import { ServiceAuthNonceStore } from "./service-auth-nonces";
 import type { SqlDatabase } from "./sql-database";
+import { addDuration, durationMs, epochMs } from "../time";
 
 describe("ServiceAuthNonceStore", () => {
   it("retains future-dated nonces through the signature validity window", async () => {
@@ -17,11 +18,15 @@ describe("ServiceAuthNonceStore", () => {
       prepare: vi.fn(() => statement),
       batch: vi.fn(async () => [{ meta: { changes: 0 } }, { meta: { changes: 1 } }]),
     } as unknown as SqlDatabase;
-    const now = 1_000_000;
-    const signatureTimestampMs = now + TOKEN_VALIDITY_MS;
+    const now = epochMs(1_000_000);
+    const signatureTimestamp = addDuration(now, durationMs(TOKEN_VALIDITY_MS));
 
-    await new ServiceAuthNonceStore(db).claim("modal", "nonce", signatureTimestampMs, now);
+    await new ServiceAuthNonceStore(db).claim("modal", "nonce", signatureTimestamp, now);
 
-    expect(binds).toContainEqual(["modal", "nonce", signatureTimestampMs + TOKEN_VALIDITY_MS]);
+    expect(binds).toContainEqual([
+      "modal",
+      "nonce",
+      addDuration(signatureTimestamp, durationMs(TOKEN_VALIDITY_MS)),
+    ]);
   });
 });

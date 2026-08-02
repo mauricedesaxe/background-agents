@@ -1,6 +1,9 @@
 import { TOKEN_VALIDITY_MS, type ServiceName } from "@open-inspect/shared";
 
 import type { SqlDatabase } from "./sql-database";
+import { addDuration, durationMs, nowMs, type EpochMs } from "../time";
+
+const TOKEN_VALIDITY_DURATION_MS = durationMs(TOKEN_VALIDITY_MS);
 
 export class ServiceAuthNonceStore {
   constructor(private readonly db: SqlDatabase) {}
@@ -8,8 +11,8 @@ export class ServiceAuthNonceStore {
   async claim(
     service: ServiceName,
     nonce: string,
-    signatureTimestampMs: number,
-    now = Date.now()
+    signatureTimestamp: EpochMs,
+    now = nowMs()
   ): Promise<boolean> {
     const [, claim] = await this.db.batch([
       this.db.prepare("DELETE FROM service_auth_nonces WHERE expires_at <= ?").bind(now),
@@ -17,7 +20,7 @@ export class ServiceAuthNonceStore {
         .prepare(
           "INSERT OR IGNORE INTO service_auth_nonces (service, nonce, expires_at) VALUES (?, ?, ?)"
         )
-        .bind(service, nonce, signatureTimestampMs + TOKEN_VALIDITY_MS),
+        .bind(service, nonce, addDuration(signatureTimestamp, TOKEN_VALIDITY_DURATION_MS)),
     ]);
     return claim.meta.changes > 0;
   }
