@@ -122,7 +122,7 @@ export function extractAuthorizedCommand(body: string, botUsername: string): str
 
     const slashMatch = slashCommand.exec(trimmed);
     const slashInstruction = slashMatch
-      ? [slashMatch[1] ?? "", ...lines.slice(index + 1)].join("\n").trim()
+      ? [slashMatch[1] ?? "", ...authorizedContinuation(lines, index + 1)].join("\n").trim()
       : "";
     if (slashInstruction) return slashInstruction;
 
@@ -132,7 +132,7 @@ export function extractAuthorizedCommand(body: string, botUsername: string): str
       const afterMention = trimmed.slice(mentionMatch.index + mentionMatch[0].length).trimStart();
       const mentionInstruction = [
         [beforeMention, afterMention].filter(Boolean).join(" "),
-        ...lines.slice(index + 1),
+        ...authorizedContinuation(lines, index + 1),
       ]
         .join("\n")
         .trim();
@@ -141,6 +141,25 @@ export function extractAuthorizedCommand(body: string, botUsername: string): str
   }
 
   return null;
+}
+
+function authorizedContinuation(lines: string[], startIndex: number): string[] {
+  let fence: "```" | "~~~" | null = null;
+  const authorized: string[] = [];
+
+  for (const line of lines.slice(startIndex)) {
+    if (/^(?: {4}|\t)/.test(line)) continue;
+    const trimmed = line.trimStart();
+    if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+      const marker = trimmed.startsWith("```") ? "```" : "~~~";
+      fence = fence === marker ? null : fence === null ? marker : fence;
+      continue;
+    }
+    if (fence || trimmed.startsWith(">")) continue;
+    authorized.push(line);
+  }
+
+  return authorized;
 }
 
 function fireAndForgetReaction(
