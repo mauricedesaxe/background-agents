@@ -12,6 +12,9 @@
  */
 export const TOKEN_VALIDITY_MS = 5 * 60 * 1000;
 
+/** Keeps a lost rotation response recoverable before token-family reuse becomes suspicious. */
+export const REFRESH_REUSE_GRACE_MS = 60 * 1000;
+
 /**
  * Constant-time string comparison to prevent timing attacks.
  */
