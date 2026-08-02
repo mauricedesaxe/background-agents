@@ -13,6 +13,7 @@ export type ObjectStorageRange = {
 
 export type ObjectStorageMetadata = {
   size: number;
+  etag: string;
   httpEtag: string;
   writeHttpMetadata(headers: Headers): void;
 };
@@ -23,6 +24,12 @@ export type ObjectStorageObject = ObjectStorageMetadata & {
 
 export interface ObjectStorage {
   put(key: string, value: ObjectStoragePutValue, options?: ObjectStoragePutOptions): Promise<void>;
+  compareAndSet(
+    key: string,
+    value: ObjectStoragePutValue,
+    expectedEtag: string | null,
+    options?: ObjectStoragePutOptions
+  ): Promise<boolean>;
   delete(key: string): Promise<void>;
   head(key: string): Promise<ObjectStorageMetadata | null>;
   get(key: string, options?: { range?: ObjectStorageRange }): Promise<ObjectStorageObject | null>;
@@ -40,8 +47,25 @@ class R2ObjectStorage implements ObjectStorage {
     await this.bucket.put(
       key,
       value,
-      options?.contentType ? { httpMetadata: { contentType: options.contentType } } : undefined
+      options
+        ? {
+            ...(options.contentType ? { httpMetadata: { contentType: options.contentType } } : {}),
+          }
+        : undefined
     );
+  }
+
+  async compareAndSet(
+    key: string,
+    value: ObjectStoragePutValue,
+    expectedEtag: string | null,
+    options?: ObjectStoragePutOptions
+  ): Promise<boolean> {
+    const stored = await this.bucket.put(key, value, {
+      ...(options?.contentType ? { httpMetadata: { contentType: options.contentType } } : {}),
+      onlyIf: expectedEtag ? { etagMatches: expectedEtag } : { etagDoesNotMatch: "*" },
+    });
+    return stored !== null;
   }
 
   async delete(key: string): Promise<void> {

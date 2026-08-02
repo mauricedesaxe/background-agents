@@ -266,6 +266,54 @@ describe("boundary schemas", () => {
       expect(unavailable.success).toBe(true);
     });
 
+    it("retains checkpoint progress and fallback recovery outcomes", () => {
+      const checkpoint = sandboxEventSchema.safeParse({
+        type: "checkpoint",
+        checkpointStatus: "failed",
+        checkpointId: "cp_1",
+        attemptId: "cpa_1",
+        errorClass: "pointer_put",
+        httpStatus: 503,
+        providerCode: 10001,
+        detail: "Current checkpoint pointer could not be stored",
+        sandboxId: "sandbox-1",
+        timestamp: 123,
+        ackId: "checkpoint:cp_1:failed",
+      });
+      const fallback = sandboxEventSchema.safeParse({
+        type: "ready",
+        sandboxId: "sandbox-1",
+        opencodeSessionId: "ses-1",
+        contextStatus: "fallback",
+        checkpointId: "cp_previous",
+        timestamp: 123,
+      });
+
+      expect(checkpoint.success).toBe(true);
+      expect(fallback.success).toBe(true);
+    });
+
+    it("requires status-specific checkpoint evidence", () => {
+      const base = {
+        type: "checkpoint",
+        checkpointId: "cp_1",
+        attemptId: "cpa_1",
+        sandboxId: "sandbox-1",
+        timestamp: 123,
+      };
+
+      expect(
+        sandboxEventSchema.safeParse({ ...base, checkpointStatus: "in_progress" }).success
+      ).toBe(false);
+      expect(
+        sandboxEventSchema.safeParse({
+          ...base,
+          checkpointStatus: "failed",
+          errorClass: "payload_put",
+        }).success
+      ).toBe(false);
+    });
+
     it("rejects readiness states that cannot prove their claimed context", () => {
       const freshWithSession = sandboxEventSchema.safeParse({
         type: "ready",

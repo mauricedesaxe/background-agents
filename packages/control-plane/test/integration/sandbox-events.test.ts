@@ -33,6 +33,47 @@ describe("POST /internal/sandbox-event", () => {
     expect(tokenEvents.length).toBeGreaterThanOrEqual(1);
   });
 
+  it("retains deduplicated checkpoint progress and confirmation", async () => {
+    const { stub } = await initSession();
+    const inProgress = {
+      type: "checkpoint",
+      checkpointStatus: "in_progress",
+      checkpointId: "cp-1",
+      attemptId: "cpa-1",
+      checksum: "a".repeat(64),
+      byteLength: 100,
+      ackId: "checkpoint:cp-1:in_progress",
+      sandboxId: "sb-1",
+      timestamp: Date.now() / 1000,
+    };
+
+    for (const event of [
+      inProgress,
+      inProgress,
+      {
+        ...inProgress,
+        checkpointStatus: "confirmed",
+        ackId: "checkpoint:cp-1:confirmed",
+      },
+    ]) {
+      const response = await stub.fetch("http://internal/internal/sandbox-event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(event),
+      });
+      expect(response.status).toBe(200);
+    }
+
+    const events = await queryDO<{ type: string; data: string }>(
+      stub,
+      "SELECT type, data FROM events WHERE type = 'checkpoint' ORDER BY created_at"
+    );
+    expect(events.map((event) => JSON.parse(event.data).checkpointStatus)).toEqual([
+      "in_progress",
+      "confirmed",
+    ]);
+  });
+
   it("stores tool_call with messageId", async () => {
     const { stub } = await initSession();
 

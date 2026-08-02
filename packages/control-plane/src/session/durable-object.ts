@@ -1181,7 +1181,10 @@ export class SessionDO extends DurableObject<Env> {
 
     if (event.type === "ready") {
       const expectedSessionId = this.getSession()?.opencode_session_id;
-      const resumed = event.contextStatus === "existing" || event.contextStatus === "restored";
+      const resumed =
+        event.contextStatus === "existing" ||
+        event.contextStatus === "restored" ||
+        event.contextStatus === "fallback";
       if (expectedSessionId && (event.opencodeSessionId !== expectedSessionId || !resumed)) {
         await this.recordContextUnavailable(ws, {
           type: "context_unavailable",
@@ -1243,7 +1246,7 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   private async markSandboxContextReady(
-    contextStatus: "fresh" | "existing" | "restored" | undefined
+    contextStatus: "fresh" | "existing" | "restored" | "fallback" | undefined
   ): Promise<void> {
     if (!this.lifecycleManager.onSandboxConnected()) return;
     this.updateSandboxStatus("ready");
@@ -1254,6 +1257,10 @@ export class SessionDO extends DurableObject<Env> {
     this.log.info("opencode.context_ready", {
       event: "opencode.context_ready",
       context_status: contextStatus ?? "fresh",
+      checkpoint_recovery:
+        contextStatus === "restored" || contextStatus === "fallback"
+          ? contextStatus
+          : "not_attempted",
     });
     await this.processMessageQueue();
   }
@@ -1264,6 +1271,10 @@ export class SessionDO extends DurableObject<Env> {
     broadcastFailure = true,
     beforeSocketClose?: () => void
   ): Promise<boolean> {
+    this.log.warn("opencode.context_unavailable", {
+      event: "opencode.context_unavailable",
+      checkpoint_recovery: "permanently_unavailable",
+    });
     if (broadcastFailure) this.broadcast({ type: "sandbox_error", error: failure });
     const messageFailure = this.messageQueue.failMessagesForContextLoss(failure, eventCreatedAt);
     const sandboxStop = this.lifecycleManager.stopSandboxAfterFailure(

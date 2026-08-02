@@ -57,7 +57,7 @@ def bridge() -> AgentBridge:
         auth_token="test-token",
     )
     instance.opencode_session_id = "oc-session-123"
-    instance._save_checkpoint_or_warn = AsyncMock()
+    instance._save_checkpoint_or_report_failure = AsyncMock()
     return instance
 
 
