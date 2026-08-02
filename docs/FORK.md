@@ -47,9 +47,10 @@ Upstream ships several providers and we retain all of them; the ones we do not r
 through the shared harness install. Daytona is the one under load here, so it carries fork-local
 work: sizing applied to the snapshot rather than the create call, 4 GiB memory and 8 GiB disk per
 sandbox, a readable OOM cause, a 24-hour auto-archive default instead of 7 days, and a stop that
-retries across the provider's state-change settle. A restarted Daytona supervisor recognizes the
-persisted OpenCode session as a resume, preserving local work and skipping setup hooks instead of
-resetting the branch to its remote tip.
+retries across the provider's state-change settle. Failed-stop reconciliation pins the original
+provider ID so a retry cannot stop a replacement sandbox. A restarted Daytona supervisor recognizes
+the persisted OpenCode session as a resume, preserving local work and skipping setup hooks instead
+of resetting the branch to its remote tip.
 
 **Why.** Each of these was a production incident, not a preference. The 7-day auto-archive plus a
 300 GiB account disk cap produced a recurring "timed out waiting to connect" outage. The 1 GiB
