@@ -12,7 +12,7 @@
 import type { AutomationEventSource, ServiceName, SpawnSource } from "@open-inspect/shared";
 
 import { createLogger } from "./../logger";
-import { CALLBACK_DESTINATIONS } from "./callback-signing";
+import { callbackSourceForPrincipal } from "./callback-signing";
 import type { Principal, ResolvedIdentity } from "./principal";
 import type { UserStore } from "../db/user-store";
 import { error, type RequestContext } from "../routes/shared";
@@ -241,11 +241,7 @@ export async function resolveCanonicalUserId(
  * notification-forgery vector.
  */
 export function mayAttachCallbackContext(ctx: RequestContext): boolean {
-  const principal = ctx.principal;
-  return (
-    principal?.kind === "service" &&
-    (CALLBACK_DESTINATIONS as readonly ServiceName[]).includes(principal.service)
-  );
+  return callbackSourceForPrincipal(ctx.principal) !== null;
 }
 
 function logMismatchRejected(
