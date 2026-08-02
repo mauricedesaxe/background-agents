@@ -34,6 +34,7 @@ import { ServiceAuthNonceStore } from "../db/service-auth-nonces";
 import { UserStore } from "../db/user-store";
 import { createLogger } from "../logger";
 import type { RequestContext } from "../routes/shared";
+import { epochMs } from "../time";
 import type { Env } from "../types";
 
 const logger = createLogger("auth");
@@ -216,7 +217,7 @@ async function authenticateServiceCredential(
     nonceClaimed = await new ServiceAuthNonceStore(ctx.db).claim(
       service,
       verification.nonce,
-      verification.timestampMs
+      epochMs(verification.timestampMs)
     );
   } catch (error) {
     logger.error("Service auth nonce claim failed", {
