@@ -104,20 +104,22 @@ async function sendPrompt(
   return result.data.messageId;
 }
 
+type MarkdownFence = { marker: "`" | "~"; length: number };
+
 export function extractAuthorizedCommand(body: string, botUsername: string): string | null {
   const slashCommand = /^\/open-inspect(?:\s+(.+))?$/i;
   const mention = new RegExp(`@${escapeRegExp(botUsername)}(?![\\w-])`, "i");
-  let fence: "```" | "~~~" | null = null;
+  let fence: MarkdownFence | null = null;
   const lines = body.split(/\r?\n/);
 
   for (const [index, line] of lines.entries()) {
     if (/^(?: {4}|\t)/.test(line)) continue;
     const trimmed = line.trimStart();
-    if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
-      const marker = trimmed.startsWith("```") ? "```" : "~~~";
-      fence = fence === marker ? null : fence === null ? marker : fence;
+    if (fence) {
+      if (closesMarkdownFence(trimmed, fence)) fence = null;
       continue;
     }
+    fence = openingMarkdownFence(trimmed);
     if (fence || trimmed.startsWith(">")) continue;
 
     const slashMatch = slashCommand.exec(trimmed);
@@ -144,22 +146,37 @@ export function extractAuthorizedCommand(body: string, botUsername: string): str
 }
 
 function authorizedContinuation(lines: string[], startIndex: number): string[] {
-  let fence: "```" | "~~~" | null = null;
+  let fence: MarkdownFence | null = null;
   const authorized: string[] = [];
 
   for (const line of lines.slice(startIndex)) {
     if (/^(?: {4}|\t)/.test(line)) continue;
     const trimmed = line.trimStart();
-    if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
-      const marker = trimmed.startsWith("```") ? "```" : "~~~";
-      fence = fence === marker ? null : fence === null ? marker : fence;
+    if (fence) {
+      if (closesMarkdownFence(trimmed, fence)) fence = null;
       continue;
     }
+    fence = openingMarkdownFence(trimmed);
     if (fence || trimmed.startsWith(">")) continue;
     authorized.push(line);
   }
 
   return authorized;
+}
+
+function openingMarkdownFence(line: string): MarkdownFence | null {
+  const match = /^(`{3,}|~{3,})(.*)$/.exec(line);
+  if (!match) return null;
+
+  const run = match[1];
+  const suffix = match[2];
+  if (run[0] === "`" && suffix.includes("`")) return null;
+  return { marker: run[0] as MarkdownFence["marker"], length: run.length };
+}
+
+function closesMarkdownFence(line: string, fence: MarkdownFence): boolean {
+  const match = /^(`+|~+)[ \t]*$/.exec(line);
+  return Boolean(match && match[1][0] === fence.marker && match[1].length >= fence.length);
 }
 
 function fireAndForgetReaction(
