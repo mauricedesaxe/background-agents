@@ -1349,6 +1349,13 @@ class SandboxSupervisor:
 
     async def _restore_opencode_context(self, workdir: Path, env: dict[str, str]) -> None:
         expected_session_id = os.environ.get("OPENCODE_SESSION_ID") or None
+        if not expected_session_id and self.session_id_file.exists():
+            try:
+                expected_session_id = self.session_id_file.read_text().strip() or None
+            except OSError as error:
+                self.log.error("opencode.session.load_error", exc=error)
+                self._mark_context_unavailable(persist=False)
+                return
         if not expected_session_id:
             os.environ["OPENCODE_CONTEXT_STATUS"] = "fresh"
             return
@@ -1432,10 +1439,10 @@ class SandboxSupervisor:
                     generation_token = next_generation
         except Exception as error:
             self.log.error("opencode.context_restore_failed", exc=error)
-            self._mark_context_unavailable()
+            self._mark_context_unavailable(persist=self.context_unavailable_file.exists())
             return
 
-        self._mark_context_unavailable()
+        self._mark_context_unavailable(persist=self.context_unavailable_file.exists())
 
     async def _restore_checkpoint_generation(
         self,
@@ -1511,9 +1518,10 @@ class SandboxSupervisor:
             if checkpoint_path:
                 checkpoint_path.unlink(missing_ok=True)
 
-    def _mark_context_unavailable(self) -> None:
+    def _mark_context_unavailable(self, *, persist: bool = True) -> None:
         os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
-        self.context_unavailable_file.write_text("unavailable")
+        if persist:
+            self.context_unavailable_file.write_text("unavailable")
 
     @staticmethod
     def _checkpoint_matches(checkpoint: bytes, expected_session_id: str) -> bool:
