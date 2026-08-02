@@ -4,6 +4,7 @@ import {
   type CallbackContext,
   type SessionAttachmentReference,
 } from "@open-inspect/shared";
+import { callbackSourceForPrincipal } from "../auth/callback-signing";
 import { applyIdentityEnforcement, mayAttachCallbackContext } from "../auth/identity-enforcement";
 import { SessionIndexStore } from "../db/session-index";
 import { UserStore } from "../db/user-store";
@@ -15,13 +16,6 @@ import { error, parsePattern, type Route } from "./shared";
 import { sessionRoute, type SessionRouteContext } from "./session-route";
 
 const logger = createLogger("router:session-prompt");
-
-function servicePromptSource(ctx: SessionRouteContext): "slack" | "linear" | null {
-  if (ctx.principal?.kind !== "service") return null;
-  if (ctx.principal.service === "slack-bot") return "slack";
-  if (ctx.principal.service === "linear-bot") return "linear";
-  return null;
-}
 
 function validateAttachments(raw: unknown): SessionAttachmentReference[] | Response | undefined {
   if (raw == null) return undefined;
@@ -71,7 +65,7 @@ async function handleSessionPrompt(
   // anonymous. callbackContext is a completion notification channel — only
   // the bots that own callbacks may attach one.
   const authorId = enforcement.enforced.participantUserId ?? "anonymous";
-  const authenticatedSource = servicePromptSource(ctx);
+  const authenticatedSource = callbackSourceForPrincipal(ctx.principal);
   const callbackContext = mayAttachCallbackContext(ctx) ? body.callbackContext : undefined;
   if (callbackContext === undefined && body.callbackContext !== undefined) {
     logger.warn("Dropped callbackContext from unauthorized principal", {
