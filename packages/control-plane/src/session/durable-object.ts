@@ -1226,9 +1226,15 @@ export class SessionDO extends DurableObject<Env> {
     event: Extract<SandboxEvent, { type: "context_unavailable" }>
   ): Promise<void> {
     try {
-      await this.processSandboxEvent(event);
-      await this.handleContextUnavailable(event.error);
-      if (event.ackId) this.wsManager.send(ws, { type: "ack", ackId: event.ackId });
+      const observedAt = Date.now();
+      const isReplay = !!event.ackId && this.repository.hasEvent(event.ackId);
+      if (!isReplay) await this.sandboxEventProcessor.processSandboxEvent(event, false);
+      const eventCreatedAt = event.ackId
+        ? (this.repository.getEventCreatedAt(event.ackId) ?? observedAt)
+        : observedAt;
+      await this.handleContextUnavailable(event.error, eventCreatedAt, !isReplay, () => {
+        if (event.ackId) this.wsManager.send(ws, { type: "ack", ackId: event.ackId });
+      });
     } catch (error) {
       this.log.error("Failed to record unavailable OpenCode context", {
         error: error instanceof Error ? error : String(error),
@@ -1252,11 +1258,23 @@ export class SessionDO extends DurableObject<Env> {
     await this.processMessageQueue();
   }
 
-  private async handleContextUnavailable(failure: string): Promise<void> {
-    this.updateSandboxStatus("failed");
-    this.broadcast({ type: "sandbox_status", status: "failed" });
-    this.broadcast({ type: "sandbox_error", error: failure });
-    await this.messageQueue.failMessagesForContextLoss(failure);
+  private async handleContextUnavailable(
+    failure: string,
+    eventCreatedAt: number,
+    broadcastFailure = true,
+    beforeSocketClose?: () => void
+  ): Promise<boolean> {
+    if (broadcastFailure) this.broadcast({ type: "sandbox_error", error: failure });
+    const messageFailure = this.messageQueue.failMessagesForContextLoss(failure, eventCreatedAt);
+    const sandboxStop = this.lifecycleManager.stopSandboxAfterFailure(
+      "context_unavailable",
+      async () => {
+        await messageFailure;
+        beforeSocketClose?.();
+      }
+    );
+    const [, settled] = await Promise.all([messageFailure, sandboxStop]);
+    return settled;
   }
 
   /**

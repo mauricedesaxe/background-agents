@@ -6,6 +6,7 @@ import {
   openClientWs,
   openSandboxWs,
   seedSandboxAuth,
+  seedEvents,
   seedMessage,
   sendSandboxReady,
   queryDO,
@@ -219,22 +220,23 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
       until: (message) =>
         message.type === "sandbox_event" && message.event.type === "execution_complete",
     });
-    sandboxWs!.send(
-      JSON.stringify({
-        type: "context_unavailable",
-        sandboxId: SANDBOX_ID,
-        opencodeSessionId: "ses_missing",
-        error: "The prior OpenCode conversation could not be restored",
-        ackId: "context_unavailable:ses_missing",
-        timestamp: Date.now() / 1000,
-      })
-    );
+    const clientMessages = collectMessages(clientWs, { timeoutMs: 500 });
+    const unavailableEvent = JSON.stringify({
+      type: "context_unavailable",
+      sandboxId: SANDBOX_ID,
+      opencodeSessionId: "ses_missing",
+      error: "The prior OpenCode conversation could not be restored",
+      ackId: "context_unavailable:attempt-1",
+      timestamp: Date.now() / 1000,
+    });
+    sandboxWs!.send(unavailableEvent);
+    sandboxWs!.send(unavailableEvent);
 
     const controlMessages = await sandboxMessages;
     expect(controlMessages.some((message) => message.type === "prompt")).toBe(false);
     expect(controlMessages).toContainEqual({
       type: "ack",
-      ackId: "context_unavailable:ses_missing",
+      ackId: "context_unavailable:attempt-1",
     });
     expect(await failed).toContainEqual({
       type: "sandbox_event",
@@ -246,6 +248,86 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     });
     const messages = await queryDO<{ status: string }>(stub, "SELECT status FROM messages");
     expect(messages).toEqual([{ status: "failed" }, { status: "failed" }]);
+    expect((await clientMessages).filter((message) => message.type === "sandbox_error")).toEqual([
+      {
+        type: "sandbox_error",
+        error: "The prior OpenCode conversation could not be restored",
+      },
+    ]);
+    await waitForSandboxStatus(stub, "stopped");
+
+    sandboxWs!.close();
+    clientWs.close();
+  });
+
+  it("finishes context-loss cleanup after the critical event was already stored", async () => {
+    const name = `ws-sandbox-context-replay-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    await seedSandboxAuth(stub, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+      status: "connecting",
+    });
+    const participant = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    await seedMessage(stub, {
+      id: "interrupted-message",
+      authorId: participant[0].id,
+      content: "Continue",
+      source: "web",
+      status: "processing",
+      createdAt: Date.now() - 1_000,
+      startedAt: Date.now() - 500,
+    });
+    await seedEvents(stub, [
+      {
+        id: "context_unavailable:attempt-1",
+        type: "context_unavailable",
+        data: JSON.stringify({
+          type: "context_unavailable",
+          sandboxId: SANDBOX_ID,
+          opencodeSessionId: "ses_missing",
+          error: "The prior OpenCode conversation could not be restored",
+          ackId: "context_unavailable:attempt-1",
+          timestamp: Date.now() / 1000,
+        }),
+        createdAt: Date.now() - 100,
+      },
+    ]);
+
+    const { ws: sandboxWs } = await openSandboxWs(name, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+    });
+    sandboxWs!.accept();
+    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
+    const queued = collectMessages(clientWs, {
+      until: (message) => message.type === "prompt_queued",
+    });
+    clientWs.send(JSON.stringify({ type: "prompt", content: "Retry after context loss" }));
+    await queued;
+    sandboxWs!.send(
+      JSON.stringify({
+        type: "context_unavailable",
+        sandboxId: SANDBOX_ID,
+        opencodeSessionId: "ses_missing",
+        error: "The prior OpenCode conversation could not be restored",
+        ackId: "context_unavailable:attempt-1",
+        timestamp: Date.now() / 1000,
+      })
+    );
+
+    await waitForSandboxStatus(stub, "stopped");
+    const messages = await queryDO<{ content: string; status: string }>(
+      stub,
+      "SELECT content, status FROM messages ORDER BY created_at"
+    );
+    expect(messages).toEqual([
+      { content: "Continue", status: "failed" },
+      { content: "Retry after context loss", status: "pending" },
+    ]);
 
     sandboxWs!.close();
     clientWs.close();
@@ -266,7 +348,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     });
     sandboxWs!.accept();
     sendSandboxReady(sandboxWs!, SANDBOX_ID, "fresh");
-    await waitForSandboxStatus(stub, "failed");
+    await waitForSandboxStatus(stub, "stopped");
 
     const state = await queryDO<{ opencode_session_id: string }>(
       stub,
@@ -305,7 +387,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
       })
     );
 
-    await waitForSandboxStatus(stub, "failed");
+    await waitForSandboxStatus(stub, "stopped");
     const events = await queryDO<{ type: string }>(
       stub,
       "SELECT type FROM events WHERE type = 'context_unavailable'"

@@ -392,6 +392,7 @@ class AgentBridge:
         # Pending ACKs: events sent but not yet acknowledged by the control plane.
         # Keyed by ackId, re-sent on reconnect until the DO confirms receipt.
         self._pending_acks: dict[str, dict[str, Any]] = {}
+        self._context_unavailable_ack_id = f"context_unavailable:{secrets.token_hex(8)}"
 
         self._last_forwarded_session_title: str | None = None
 
@@ -532,13 +533,16 @@ class AgentBridge:
             ) as ws:
                 self.ws = ws
                 self.log.info("bridge.connect", outcome="success")
+                sent_on_connect: set[str] = set()
 
                 if self.opencode_session_error and self.opencode_session_id:
+                    sent_on_connect.add(self._context_unavailable_ack_id)
                     await self._send_event(
                         {
                             "type": "context_unavailable",
                             "opencodeSessionId": self.opencode_session_id,
                             "error": self.opencode_session_error,
+                            "ackId": self._context_unavailable_ack_id,
                         }
                     )
                 else:
@@ -559,7 +563,7 @@ class AgentBridge:
                 await self._drain_boot_warnings()
 
                 just_flushed = await self._flush_event_buffer()
-                await self._flush_pending_acks(skip_ack_ids=just_flushed)
+                await self._flush_pending_acks(skip_ack_ids=sent_on_connect | just_flushed)
 
                 heartbeat_task = asyncio.create_task(self._heartbeat_loop())
                 ack_retry_task = asyncio.create_task(self._ack_retry_loop())

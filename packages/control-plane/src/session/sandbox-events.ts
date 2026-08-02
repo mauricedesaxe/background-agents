@@ -64,7 +64,7 @@ export class SessionSandboxEventProcessor {
     return this.getLog();
   }
 
-  async processSandboxEvent(event: SandboxEventWithAck): Promise<void> {
+  async processSandboxEvent(event: SandboxEventWithAck, acknowledge = true): Promise<void> {
     if (event.type === "heartbeat" || event.type === "token") {
       this.log.debug("Sandbox event", { event_type: event.type });
     } else if (event.type !== "execution_complete") {
@@ -76,7 +76,7 @@ export class SessionSandboxEventProcessor {
     const ackId = event.ackId;
 
     if (ackId && this.repository.hasEvent(ackId)) {
-      this.sendAck(ackId);
+      if (acknowledge) this.sendAck(ackId);
       return;
     }
 
@@ -285,7 +285,7 @@ export class SessionSandboxEventProcessor {
 
     this.messenger.broadcast({ type: "sandbox_event", event });
 
-    if (CRITICAL_EVENT_TYPES.has(event.type)) {
+    if (acknowledge && CRITICAL_EVENT_TYPES.has(event.type)) {
       this.sendAck(ackId);
     }
   }
