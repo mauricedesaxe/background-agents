@@ -2739,6 +2739,92 @@ describe("SandboxLifecycleManager", () => {
       expect(storage.calls).toContain("updateSandboxStatus:stopped");
     });
 
+    it("keeps a failed recovery non-resumable until its provider stop settles", async () => {
+      const sandbox = createMockSandbox({
+        status: "connecting",
+        modal_object_id: "provider-obj-123",
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      let releaseStop!: () => void;
+      let markStopStarted!: () => void;
+      const stopStarted = new Promise<void>((resolve) => {
+        markStopStarted = resolve;
+      });
+      const stopSandbox = vi.fn(
+        () =>
+          new Promise<StopResult>((resolve) => {
+            markStopStarted();
+            releaseStop = () => resolve({ success: true });
+          })
+      );
+      const resumeSandbox = vi.fn(async () => ({ success: true }));
+      const wsManager = createMockWebSocketManager(true);
+      const { manager } = buildManager({
+        provider: createMockProvider({
+          capabilities: { supportsExplicitStop: true, supportsPersistentResume: true },
+          stopSandbox,
+          resumeSandbox,
+        }),
+        storage,
+        wsManager,
+      });
+
+      const termination = manager.stopSandboxAfterFailure("context_unavailable");
+      await stopStarted;
+      const recovery = manager.spawnSandbox();
+
+      expect(sandbox.status).toBe("stopping");
+
+      releaseStop();
+      await Promise.all([termination, recovery]);
+
+      expect(sandbox.status).toBe("connecting");
+      expect(stopSandbox).toHaveBeenCalledTimes(1);
+      expect(resumeSandbox).toHaveBeenCalledTimes(1);
+      expect(wsManager.closeSandboxWebSocket).toHaveBeenCalledWith(1000, "Context recovery failed");
+    });
+
+    it("keeps a failed recovery stop transitional for reconciliation", async () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const sandbox = createMockSandbox({
+        status: "connecting",
+        modal_object_id: "provider-obj-123",
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const stopSandbox = vi
+        .fn<() => Promise<StopResult>>()
+        .mockRejectedValueOnce(
+          new SandboxProviderError("provider still transitioning", "transient")
+        )
+        .mockResolvedValueOnce({ success: true });
+      const wsManager = createMockWebSocketManager(true);
+      const provider = createMockProvider({
+        capabilities: { supportsExplicitStop: true, supportsPersistentResume: true },
+        stopSandbox,
+      });
+      const { manager } = buildManager({
+        provider,
+        storage,
+        wsManager,
+      });
+
+      await expect(manager.stopSandboxAfterFailure("context_unavailable")).resolves.toBe(false);
+
+      expect(sandbox.status).toBe("stopping");
+      expect(sandbox.stop_unreconciled_provider_id).toBe("provider-obj-123");
+      expect(wsManager.closeSandboxWebSocket).not.toHaveBeenCalled();
+
+      const { manager: recoveredManager } = buildManager({ provider, storage, wsManager });
+      await recoveredManager.handleAlarm();
+
+      expect(sandbox.status).toBe("stopped");
+      expect(stopSandbox).toHaveBeenLastCalledWith(
+        expect.objectContaining({ reason: "context_unavailable" })
+      );
+      expect(wsManager.closeSandboxWebSocket).toHaveBeenCalledWith(1000, "Context recovery failed");
+      errorSpy.mockRestore();
+    });
+
     it("is idempotent, so terminating twice does not stop the VM twice", async () => {
       // The timeout paths terminate and then close the socket, and a normal
       // close terminates again. Without this guard that's a redundant stop call

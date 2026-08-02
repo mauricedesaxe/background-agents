@@ -949,6 +949,12 @@ export class SessionRepository {
     return this.rows(result).length > 0;
   }
 
+  getEventCreatedAt(id: string): number | null {
+    const result = this.sql.exec("SELECT created_at FROM events WHERE id = ? LIMIT 1", id);
+    const rows = this.rows<{ created_at: number }>(result);
+    return rows[0]?.created_at ?? null;
+  }
+
   private upsertEventByMessageId<TType extends UpsertableEventType>(
     type: TType,
     messageId: string,

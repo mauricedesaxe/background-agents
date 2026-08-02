@@ -227,6 +227,7 @@ const STOP_RECONCILE_WINDOW_MS = 30 * 60 * 1000;
 
 /** Gap between those retries. */
 const STOP_RECONCILE_INTERVAL_MS = 2 * 60 * 1000;
+const CONTEXT_STOP_ERROR_PREFIX = "Context recovery stop failed:";
 
 function buildSandboxIdForSession(session: SessionRow, now: number): string {
   const sandboxName = sessionHasRepository(session)
@@ -327,6 +328,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
   private isSpawningSandbox = false;
 
   private inFlightInactivityStop: Promise<boolean> | null = null;
+  private providerStopReason: string | null = null;
   private inactivityStopResumeWaiters = 0;
 
   /** Session-scoped logger. Falls back to module-level logger if no sessionId configured. */
@@ -1210,6 +1212,21 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
   }
 
   private joinInactivityStop(providerObjectId: string): Promise<boolean> {
+    return this.joinProviderStop(providerObjectId, this.getPendingProviderStopReason());
+  }
+
+  private getPendingProviderStopReason(): string {
+    if (this.storage.getSandbox()?.last_spawn_error?.startsWith(CONTEXT_STOP_ERROR_PREFIX)) {
+      return "context_unavailable";
+    }
+    return this.providerStopReason ?? "inactivity_timeout";
+  }
+
+  private joinProviderStop(
+    providerObjectId: string,
+    reason: string,
+    beforeSocketClose?: () => void | Promise<void>
+  ): Promise<boolean> {
     if (this.inFlightInactivityStop) return this.inFlightInactivityStop;
 
     const sandbox = this.storage.getSandbox();
@@ -1219,7 +1236,8 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       this.broadcaster.broadcast({ type: "sandbox_status", status: "stopping" });
     }
 
-    const operation = this.finishInactivityStop(providerObjectId);
+    this.providerStopReason = reason;
+    const operation = this.finishProviderStop(providerObjectId, reason, beforeSocketClose);
     this.inFlightInactivityStop = operation;
     const clearOperation = () => {
       if (this.inFlightInactivityStop === operation) this.inFlightInactivityStop = null;
@@ -1228,33 +1246,47 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
     return operation;
   }
 
-  private async finishInactivityStop(providerObjectId: string): Promise<boolean> {
-    try {
-      await this.callbacks.onSandboxTerminating?.("inactivity_timeout");
-    } catch (error) {
-      this.log.error("Failed to prepare session state for inactivity stop", {
-        event: "sandbox.termination_callback_failed",
-        reason: "inactivity_timeout",
-        error: error instanceof Error ? error.message : String(error),
-      });
+  private async finishProviderStop(
+    providerObjectId: string,
+    reason: string,
+    beforeSocketClose?: () => void | Promise<void>
+  ): Promise<boolean> {
+    if (reason === "inactivity_timeout") {
+      try {
+        await this.callbacks.onSandboxTerminating?.("inactivity_timeout");
+      } catch (error) {
+        this.log.error("Failed to prepare session state for inactivity stop", {
+          event: "sandbox.termination_callback_failed",
+          reason: "inactivity_timeout",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
 
-    const settlement = await this.stopProviderSandboxOrRecord(
-      "inactivity_timeout",
-      providerObjectId
-    );
+    const settlement = await this.stopProviderSandboxOrRecord(reason, providerObjectId);
     if (!settlement.success) {
-      this.storage.setLastSpawnError(`Sandbox stop failed: ${settlement.error}`, nowMs());
+      const prefix =
+        reason === "context_unavailable" ? CONTEXT_STOP_ERROR_PREFIX : "Sandbox stop failed:";
+      this.storage.setLastSpawnError(`${prefix} ${settlement.error}`, nowMs());
       return false;
     }
 
+    const contextUnavailable = reason === "context_unavailable";
+    await beforeSocketClose?.();
+    this.storage.setLastSpawnError(null, null);
     this.storage.updateSandboxStatus("stopped");
-    this.wsManager.closeSandboxWebSocket(1000, "Inactivity timeout");
+    this.wsManager.closeSandboxWebSocket(
+      1000,
+      contextUnavailable ? "Context recovery failed" : "Inactivity timeout"
+    );
     this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });
-    this.broadcaster.broadcast({
-      type: "sandbox_warning",
-      message: "Sandbox stopped due to inactivity",
-    });
+    if (!contextUnavailable) {
+      this.broadcaster.broadcast({
+        type: "sandbox_warning",
+        message: "Sandbox stopped due to inactivity",
+      });
+    }
+    this.providerStopReason = null;
     return true;
   }
 
@@ -1501,6 +1533,34 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
     }
   }
 
+  async stopSandboxAfterFailure(
+    reason: string,
+    beforeSocketClose?: () => void | Promise<void>
+  ): Promise<boolean> {
+    const sandbox = this.storage.getSandbox();
+    if (!sandbox || sandbox.status === "stopped" || sandbox.status === "stale") {
+      return true;
+    }
+
+    if (reason === "context_unavailable") {
+      this.storage.setLastSpawnError(`${CONTEXT_STOP_ERROR_PREFIX} in progress`, nowMs());
+    }
+    const providerObjectId = sandbox.modal_object_id ?? undefined;
+    if (providerObjectId && this.canStopProviderSandbox()) {
+      return this.joinProviderStop(providerObjectId, reason, beforeSocketClose);
+    }
+
+    this.storage.updateSandboxStatus("stopping");
+    this.clearSandboxAccessState();
+    this.broadcaster.broadcast({ type: "sandbox_status", status: "stopping" });
+    await beforeSocketClose?.();
+    this.storage.setLastSpawnError(null, null);
+    this.storage.updateSandboxStatus("stopped");
+    this.wsManager.closeSandboxWebSocket(1000, "Context recovery failed");
+    this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });
+    return true;
+  }
+
   /**
    * Handle alarm for inactivity and heartbeat monitoring.
    */
@@ -1521,6 +1581,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
     });
 
     if (sandbox.status === "stopping") {
+      const stopReason = this.getPendingProviderStopReason();
       if (
         sandbox.stop_unreconciled_at != null &&
         now - sandbox.stop_unreconciled_at >= STOP_RECONCILE_WINDOW_MS
@@ -1529,7 +1590,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
           event: "sandbox.provider_transition",
           transition: "stop",
           phase: "failed",
-          reason: "inactivity_timeout",
+          reason: stopReason,
           provider_object_id: providerObjectId,
           duration_ms: now - sandbox.stop_unreconciled_at,
         });

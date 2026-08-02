@@ -552,13 +552,17 @@ export class SessionMessageQueue {
     await this.sessionStatus.reconcileAfterExecution(false);
   }
 
-  async failMessagesForContextLoss(failure: string): Promise<void> {
-    const processing = this.repository.getProcessingMessage();
-    const messages = [...(processing ? [processing] : []), ...this.repository.getPendingMessages()];
-    if (messages.length === 0) return;
+  failMessagesForContextLoss(failure: string, createdBeforeOrAt: number): Promise<void> {
+    const processingRef = this.repository.getProcessingMessage();
+    const processing = processingRef ? this.repository.getMessageById(processingRef.id) : null;
+    const messages = [
+      ...(processing ? [processing] : []),
+      ...this.repository.getPendingMessages(),
+    ].filter((message) => message.created_at <= createdBeforeOrAt);
+    if (messages.length === 0) return Promise.resolve();
 
     const now = Date.now();
-    for (const message of messages) {
+    const events = messages.map((message) => {
       this.repository.updateMessageCompletion(message.id, "failed", now);
       const syntheticEvent: Extract<SandboxEvent, { type: "execution_complete" }> = {
         type: "execution_complete",
@@ -569,7 +573,22 @@ export class SessionMessageQueue {
         timestamp: now / 1000,
       };
       this.repository.upsertExecutionCompleteEvent(message.id, syntheticEvent, now);
-      await this.sessionStatus.recordCompletedOutput(message.id, now);
+      return { message, syntheticEvent };
+    });
+
+    return this.finishContextLossFailures(events, now, failure);
+  }
+
+  private async finishContextLossFailures(
+    events: Array<{
+      message: MessageRow;
+      syntheticEvent: Extract<SandboxEvent, { type: "execution_complete" }>;
+    }>,
+    completedAt: number,
+    failure: string
+  ): Promise<void> {
+    for (const { message, syntheticEvent } of events) {
+      await this.sessionStatus.recordCompletedOutput(message.id, completedAt);
       this.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });
       this.ctx.waitUntil(this.callbackService.notifyComplete(message.id, false, failure));
     }

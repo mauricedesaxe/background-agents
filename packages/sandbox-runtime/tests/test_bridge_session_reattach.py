@@ -5,6 +5,7 @@ resume), its precedence over the on-disk cache, and the GET verification that
 refuses to discard control-plane-owned conversation context.
 """
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -116,6 +117,35 @@ class TestSessionReattach:
             "OpenCode session oc-env failed checkpoint verification; "
             "refusing to continue without its complete conversation context"
         )
+
+    @pytest.mark.asyncio
+    async def test_context_failure_keeps_one_identity_across_reconnects(self) -> None:
+        received: list[dict[str, object]] = []
+
+        async def receive_failure(websocket: ServerConnection) -> None:
+            while True:
+                try:
+                    raw = await asyncio.wait_for(websocket.recv(), timeout=0.05)
+                except TimeoutError:
+                    break
+                received.append(json.loads(raw))
+            await websocket.close()
+
+        bridge = _make_bridge()
+        bridge.opencode_session_id = "oc-env"
+        bridge.opencode_session_error = "Context could not be restored"
+
+        async with serve(receive_failure, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            bridge.control_plane_url = f"http://127.0.0.1:{port}"
+            await bridge._connect_and_run()
+            await bridge._connect_and_run()
+
+        assert [event["type"] for event in received] == [
+            "context_unavailable",
+            "context_unavailable",
+        ]
+        assert received[0]["ackId"] == received[1]["ackId"]
 
     @pytest.mark.asyncio
     async def test_failed_reattach_rejects_prompt_without_running_agent(self) -> None:
