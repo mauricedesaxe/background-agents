@@ -384,6 +384,7 @@ class AgentBridge:
         # Track the current prompt task so _handle_stop can cancel it
         self._current_prompt_task: asyncio.Task[None] | None = None
         self._current_compaction_task: asyncio.Task[None] | None = None
+        self._prompt_stop_requested = False
 
         # Event buffer: survives WS reconnection, flushed on reconnect
         self._event_buffer: list[dict[str, Any]] = []
@@ -958,6 +959,21 @@ class AgentBridge:
                 }
             )
 
+        except asyncio.CancelledError:
+            if not self._prompt_stop_requested:
+                raise
+            outcome = "error"
+            if pump is not None:
+                self._log_dropped_events(message_id, await pump.aclose())
+                await self._save_checkpoint_or_warn(message_id=message_id)
+            await self._send_event(
+                {
+                    "type": "execution_complete",
+                    "messageId": message_id,
+                    "success": False,
+                    "error": "Task was cancelled",
+                }
+            )
         except Exception as e:
             outcome = "error"
             self.log.error("prompt.error", exc=e, message_id=message_id)
@@ -974,6 +990,8 @@ class AgentBridge:
                 }
             )
         finally:
+            if asyncio.current_task() is self._current_prompt_task:
+                self._prompt_stop_requested = False
             if pump is not None:
                 pump.cancel()
             duration_ms = int((time.time() - start_time) * 1000)
@@ -2027,11 +2045,12 @@ class AgentBridge:
     async def _handle_stop(self) -> None:
         """Cancel active OpenCode work and request a server-side abort."""
         self.log.info("bridge.stop")
-        for task in (self._current_prompt_task, self._current_compaction_task):
-            if task and not task.done():
-                task.cancel()
-        # Best-effort: also tell OpenCode to stop (saves LLM compute cost)
         await self._request_opencode_stop(reason="command")
+        if self._current_prompt_task and not self._current_prompt_task.done():
+            self._prompt_stop_requested = True
+            self._current_prompt_task.cancel()
+        if self._current_compaction_task and not self._current_compaction_task.done():
+            self._current_compaction_task.cancel()
 
     async def _handle_snapshot(self) -> None:
         """Handle snapshot command - prepare for snapshot."""

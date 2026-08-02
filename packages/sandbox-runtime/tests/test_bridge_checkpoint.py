@@ -1,3 +1,4 @@
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -113,6 +114,38 @@ async def test_stream_failure_checkpoints_tool_history_before_completion() -> No
     await bridge._handle_prompt({"messageId": "msg-1", "content": "continue"})
 
     assert observed == ["checkpoint", "complete"]
+
+
+@pytest.mark.asyncio
+async def test_stopped_turn_checkpoints_before_cancellation_completion() -> None:
+    bridge = _make_bridge()
+    observed: list[str] = []
+
+    async def stream(*_args, **_kwargs):
+        yield {"type": "tool_call", "tool": "write", "input": {}}
+        await asyncio.sleep(3600)
+
+    async def send(event):
+        if event["type"] == "execution_complete":
+            observed.append("complete")
+
+    bridge._stream_opencode_response_sse = stream
+    bridge._configure_git_identity = AsyncMock()
+    bridge._export_and_upload_checkpoint = AsyncMock(
+        side_effect=lambda: observed.append("checkpoint")
+    )
+    bridge._send_event = send
+
+    await bridge._handle_command({"type": "prompt", "messageId": "msg-1", "content": "continue"})
+    task = bridge._current_prompt_task
+    assert task is not None
+    await asyncio.sleep(0)
+
+    await bridge._handle_stop()
+    await task
+
+    assert observed == ["checkpoint", "complete"]
+    bridge.http_client.post.assert_awaited_once()
 
 
 @pytest.mark.asyncio
