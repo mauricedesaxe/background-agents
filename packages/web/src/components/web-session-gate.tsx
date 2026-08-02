@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useSession } from "next-auth/react";
+import { REFRESH_REUSE_GRACE_MS } from "@open-inspect/shared";
 import { revokeAndSignOut } from "@/lib/sign-out";
 
 /**
@@ -9,7 +10,7 @@ import { revokeAndSignOut } from "@/lib/sign-out";
  * token renewal window so rotation completes before expiry.
  */
 const WEB_SESSION_CHECK_INTERVAL_MS = 5 * 60 * 1000;
-const WEB_SESSION_FAILURE_RETRY_MS = 15 * 1000;
+const WEB_SESSION_FAILURE_RETRY_MS = REFRESH_REUSE_GRACE_MS / 4;
 
 /**
  * Confirms that NextAuth and the control-plane token pair form a usable web

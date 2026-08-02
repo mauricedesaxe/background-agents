@@ -12,6 +12,8 @@
  * Reuse after the grace window is the attack signal and revokes the family.
  */
 
+import { REFRESH_REUSE_GRACE_MS } from "@open-inspect/shared";
+
 import { generateId, hashToken } from "./crypto";
 import { decryptToken, encryptToken } from "./crypto";
 import { base64UrlEncode } from "./encoding";
@@ -19,11 +21,11 @@ import type { WebAuthProvider } from "./subject-verification";
 import type { ApiTokenRow, WebSessionTokenStore } from "../db/api-tokens";
 import { z } from "zod";
 
+export { REFRESH_REUSE_GRACE_MS };
+
 export const WEB_SESSION_TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
 export const WEB_SESSION_REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const WEB_SESSION_FAMILY_TTL_MS = 90 * 24 * 60 * 60 * 1000;
-export const REFRESH_REUSE_GRACE_MS = 60 * 1000;
-
 export const ACCESS_TOKEN_PREFIX = "oi_at_";
 export const REFRESH_TOKEN_PREFIX = "oi_rt_";
 

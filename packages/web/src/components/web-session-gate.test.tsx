@@ -132,7 +132,7 @@ describe("WebSessionGate", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(15 * 1000);
+      await vi.advanceTimersToNextTimerAsync();
     });
 
     expect(fetchSpy).toHaveBeenCalledTimes(2);
