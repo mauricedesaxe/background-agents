@@ -10,6 +10,7 @@ Every test runs the script with `env -i` and a HOME under tmp_path. Nothing here
 ~/.claude, ~/.config/opencode, or $CLAUDE_CONFIG_DIR.
 """
 
+import json
 import os
 import re
 import shutil
@@ -293,6 +294,9 @@ class TestPinnedHarness:
         # The skills the sandbox used to fork under different names.
         assert (opencode / "skills" / "lazar-review" / "SKILL.md").is_file()
         assert (opencode / "skills" / "matt-implement" / "SKILL.md").is_file()
+        bro_command = (opencode / "commands" / "bro.md").read_text()
+        config = json.loads((opencode / "opencode.json").read_text())
+        assert config["permission"]["skill"]["bro"] == "deny"
 
         # The reviewer agents, in OpenCode's dialect. The sandbox's hand-copied clarity-reviewer
         # never had `mode:`, so OpenCode defaulted it to `all` and offered a reviewer as a
@@ -303,6 +307,10 @@ class TestPinnedHarness:
         # Claude Code's copy, which is what makes a sandbox and a laptop the same harness.
         assert (claude / "rules" / "PHILOSOPHY.md").is_file()
         assert (claude / "skills" / "lazar-review" / "SKILL.md").is_file()
+        bro = (claude / "skills" / "bro" / "SKILL.md").read_text()
+        assert "disable-model-invocation: true" in bro
+        assert bro.split("---", 2)[-1].strip() == bro_command.split("---", 2)[-1].strip()
+        assert "Restate your last message" in bro
 
         # The sandbox workspace default, generated from the surface rather than hand-kept.
         instructions = (opencode / "AGENTS.md").read_text()
