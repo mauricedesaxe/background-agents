@@ -223,14 +223,12 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
     const container = scrollContainerRef.current;
     if (!container || loading || loadingMore || !hasMorePages) return;
 
-    if (container.clientHeight > 0 && container.scrollHeight <= container.clientHeight) {
-      void loadMoreSessions();
-    }
+    maybeLoadMoreSessions();
   }, [
     hasMorePages,
     loading,
     loadingMore,
-    loadMoreSessions,
+    maybeLoadMoreSessions,
     firstPageSessions.length,
     extraSessions.length,
     searchQuery,
