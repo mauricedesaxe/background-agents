@@ -249,6 +249,76 @@ async def test_keeps_existing_local_context_without_downloading(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_recovers_local_context_from_the_persisted_session_id(tmp_path: Path) -> None:
+    supervisor = _make_supervisor()
+    supervisor.session_id_file = tmp_path / "opencode-session-id"
+    supervisor.session_id_file.write_text("ses_expected")
+    supervisor.context_unavailable_file = tmp_path / "context-unavailable"
+    checkpoint = json.dumps({"info": {"id": "ses_expected"}, "messages": []}).encode()
+
+    with (
+        patch.dict(os.environ, {"OPENCODE_SESSION_ID": ""}, clear=False),
+        patch(
+            "sandbox_runtime.entrypoint.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=_process(0, stdout=checkpoint)),
+        ),
+        patch("sandbox_runtime.entrypoint.httpx.AsyncClient") as client,
+    ):
+        await supervisor._restore_opencode_context(tmp_path, {})
+        context_status = os.environ["OPENCODE_CONTEXT_STATUS"]
+
+    assert context_status == "existing"
+    client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_retries_checkpoint_download_after_a_transient_failure(tmp_path: Path) -> None:
+    supervisor = _make_supervisor()
+    supervisor.context_unavailable_file = tmp_path / "context-unavailable"
+
+    failing_client = AsyncMock()
+    failing_client.get = AsyncMock(side_effect=RuntimeError("network unavailable"))
+    failing_client.__aenter__.return_value = failing_client
+    failing_client.__aexit__.return_value = None
+    with (
+        patch.dict(os.environ, {"OPENCODE_SESSION_ID": "ses_expected"}, clear=False),
+        patch(
+            "sandbox_runtime.entrypoint.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=_process(1)),
+        ),
+        patch("sandbox_runtime.entrypoint.httpx.AsyncClient", return_value=failing_client),
+    ):
+        await supervisor._restore_opencode_context(tmp_path, {})
+        failed_context_status = os.environ["OPENCODE_CONTEXT_STATUS"]
+
+    assert failed_context_status == "unavailable"
+    assert not supervisor.context_unavailable_file.exists()
+
+    checkpoint = json.dumps({"info": {"id": "ses_expected"}, "messages": []}).encode()
+    response = MagicMock(
+        status_code=200,
+        content=checkpoint,
+        headers={"X-OpenCode-Session-ID": "ses_expected"},
+    )
+    working_client = AsyncMock()
+    working_client.get = AsyncMock(return_value=response)
+    working_client.__aenter__.return_value = working_client
+    working_client.__aexit__.return_value = None
+    with (
+        patch.dict(os.environ, {"OPENCODE_SESSION_ID": "ses_expected"}, clear=False),
+        patch(
+            "sandbox_runtime.entrypoint.asyncio.create_subprocess_exec",
+            AsyncMock(side_effect=[_process(1), _process(0), _process(0, stdout=checkpoint)]),
+        ),
+        patch("sandbox_runtime.entrypoint.httpx.AsyncClient", return_value=working_client),
+    ):
+        await supervisor._restore_opencode_context(tmp_path, {})
+        restored_context_status = os.environ["OPENCODE_CONTEXT_STATUS"]
+
+    assert restored_context_status == "restored"
+
+
+@pytest.mark.asyncio
 async def test_marks_context_unavailable_when_no_checkpoint_exists(tmp_path: Path) -> None:
     supervisor = _make_supervisor()
     supervisor.context_unavailable_file = tmp_path / "context-unavailable"
