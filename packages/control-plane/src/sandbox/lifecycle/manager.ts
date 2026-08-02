@@ -1111,7 +1111,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
   private async recordUnreconciledStop(
     reason: string,
     error: unknown,
-    providerObjectId: string | undefined
+    providerObjectId: string
   ): Promise<void> {
     this.log.error("Provider stop failed, leaving the VM unreconciled", {
       event: "sandbox.stop_unreconciled",
@@ -1119,7 +1119,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       provider_object_id: providerObjectId,
       error: error instanceof Error ? error.message : String(error),
     });
-    this.storage.updateSandboxStopUnreconciled(nowMs(), providerObjectId ?? null);
+    this.storage.updateSandboxStopUnreconciled(nowMs(), providerObjectId);
     await this.alarmScheduler.scheduleAlarm(nowMs() + STOP_RECONCILE_INTERVAL_MS);
   }
 
@@ -1132,7 +1132,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
    */
   private async stopProviderSandboxOrRecord(
     reason: string,
-    providerObjectId?: string
+    providerObjectId: string
   ): Promise<void> {
     try {
       await this.stopProviderSandbox(reason, providerObjectId);
@@ -1182,14 +1182,14 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       return;
     }
 
+    const providerObjectId = sandbox.stop_unreconciled_provider_id;
+    if (!providerObjectId) {
+      this.abandonUnpinnedStop();
+      return;
+    }
+
     try {
-      // The pinned id, never the row's current one: a respawn between the failed
-      // stop and this alarm swaps modal_object_id, and retrying against that
-      // would stop the replacement and leave the VM we set out to kill running.
-      await this.stopProviderSandbox(
-        "stop_reconcile",
-        sandbox.stop_unreconciled_provider_id ?? undefined
-      );
+      await this.stopProviderSandbox("stop_reconcile", providerObjectId);
       this.storage.updateSandboxStopUnreconciled(null, null);
       this.log.info("Reconciled a sandbox whose stop had failed", {
         event: "sandbox.stop_reconciled",
@@ -1204,26 +1204,31 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
     }
   }
 
+  private abandonUnpinnedStop(): void {
+    this.log.warn("Cannot reconcile a failed stop without its original provider ID", {
+      event: "sandbox.stop_reconcile_abandoned",
+    });
+    this.storage.updateSandboxStopUnreconciled(null, null);
+  }
+
   /**
    * Stop a provider-managed sandbox via its API.
    *
-   * Pass `providerObjectId` to stop a specific sandbox. Without it the caller
-   * gets whatever the row currently points at, which is only safe when nothing
-   * has been awaited since the caller read it.
+   * The caller pins `providerObjectId` before its first await so a concurrent
+   * respawn cannot redirect the stop to the replacement sandbox.
    */
-  private async stopProviderSandbox(reason: string, providerObjectId?: string): Promise<void> {
+  private async stopProviderSandbox(reason: string, providerObjectId: string): Promise<void> {
     if (!this.provider.stopSandbox) {
       return;
     }
 
     const session = this.storage.getSession();
-    const targetId = providerObjectId ?? this.storage.getSandbox()?.modal_object_id;
-    if (!targetId || !session) {
+    if (!session) {
       return;
     }
 
     const result = await this.provider.stopSandbox({
-      providerObjectId: targetId,
+      providerObjectId,
       sessionId: session.session_name || session.id,
       reason,
     });
@@ -1325,15 +1330,12 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       if (sandbox.stop_unreconciled_at == null) {
         return;
       }
-      // Prefer the pinned id over the row's current one, for the reason
-      // reconcileUnstoppedSandbox spells out: a respawn since the failed stop
-      // would make us kill the replacement instead. The heartbeat and
-      // inactivity paths don't pin one, so those rows still fall back to
-      // modal_object_id and keep that hazard.
-      await this.stopProviderSandboxOrRecord(
-        reason,
-        sandbox.stop_unreconciled_provider_id ?? undefined
-      );
+      const providerObjectId = sandbox.stop_unreconciled_provider_id;
+      if (!providerObjectId) {
+        this.abandonUnpinnedStop();
+        return;
+      }
+      await this.stopProviderSandboxOrRecord(reason, providerObjectId);
       return;
     }
 
@@ -1362,7 +1364,9 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       await this.triggerSnapshot(reason, providerObjectId);
     }
 
-    await this.stopProviderSandboxOrRecord(reason, providerObjectId);
+    if (providerObjectId) {
+      await this.stopProviderSandboxOrRecord(reason, providerObjectId);
+    }
   }
 
   /**
@@ -1374,6 +1378,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       this.log.debug("Alarm fired: no sandbox found");
       return;
     }
+    const providerObjectId = sandbox.modal_object_id ?? undefined;
 
     const now = nowMs();
 
@@ -1411,8 +1416,8 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       await this.callbacks.onSandboxTerminating?.("connecting_timeout");
       this.storage.updateSandboxStatus("failed");
       this.clearSandboxAccessState();
-      if (this.canStopProviderSandbox()) {
-        await this.stopProviderSandboxOrRecord("connecting_timeout");
+      if (this.canStopProviderSandbox() && providerObjectId) {
+        await this.stopProviderSandboxOrRecord("connecting_timeout", providerObjectId);
       }
       this.broadcaster.broadcast({ type: "sandbox_status", status: "failed" });
       this.broadcaster.broadcast({
@@ -1443,11 +1448,15 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       this.broadcaster.broadcast({ type: "sandbox_status", status: "stale" });
 
       if (this.usesProviderManagedStop()) {
-        await this.stopProviderSandboxOrRecord("heartbeat_timeout");
+        if (providerObjectId) {
+          await this.stopProviderSandboxOrRecord("heartbeat_timeout", providerObjectId);
+        }
       } else {
         if (this.canStopProviderSandbox()) {
-          await this.triggerSnapshot("heartbeat_timeout");
-          await this.stopProviderSandboxOrRecord("heartbeat_timeout");
+          await this.triggerSnapshot("heartbeat_timeout", providerObjectId);
+          if (providerObjectId) {
+            await this.stopProviderSandboxOrRecord("heartbeat_timeout", providerObjectId);
+          }
         } else {
           // Fire-and-forget snapshot so status broadcast isn't delayed.
           this.triggerSnapshot("heartbeat_timeout").catch((e) =>
@@ -1493,12 +1502,14 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });
 
         if (this.usesProviderManagedStop()) {
-          await this.stopProviderSandboxOrRecord("inactivity_timeout");
+          if (providerObjectId) {
+            await this.stopProviderSandboxOrRecord("inactivity_timeout", providerObjectId);
+          }
         } else {
-          await this.triggerSnapshot("inactivity_timeout");
+          await this.triggerSnapshot("inactivity_timeout", providerObjectId);
           this.wsManager.sendToSandbox({ type: "shutdown" });
-          if (this.canStopProviderSandbox()) {
-            await this.stopProviderSandboxOrRecord("inactivity_timeout");
+          if (this.canStopProviderSandbox() && providerObjectId) {
+            await this.stopProviderSandboxOrRecord("inactivity_timeout", providerObjectId);
           }
         }
 

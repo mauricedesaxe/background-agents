@@ -2756,6 +2756,41 @@ describe("SandboxLifecycleManager", () => {
       );
     });
 
+    it.each([
+      {
+        name: "alarm reconciliation",
+        drive: (manager: SandboxLifecycleManager) => manager.handleAlarm(),
+      },
+      {
+        name: "cancel reconciliation",
+        drive: (manager: SandboxLifecycleManager) => manager.terminateSandbox("session_cancelled"),
+      },
+    ])("$name does not stop a replacement for an unpinned legacy marker", async ({ drive }) => {
+      const stopSandbox = vi.fn(async () => ({ success: true }));
+      const storage = createMockStorage(
+        createMockSession(),
+        createMockSandbox({
+          status: "stopped",
+          modal_object_id: "provider-obj-REPLACEMENT",
+          stop_unreconciled_at: Date.now() - 60 * 1000,
+          stop_unreconciled_provider_id: null,
+        })
+      );
+      const { manager } = buildManager({
+        provider: createMockProvider({
+          stopSandbox,
+          capabilities: { supportsExplicitStop: true, supportsPersistentResume: true },
+        }),
+        storage,
+        wsManager: createMockWebSocketManager(false, 0),
+      });
+
+      await drive(manager);
+
+      expect(stopSandbox).not.toHaveBeenCalled();
+      expect(storage.calls).toContain("updateSandboxStopUnreconciled:cleared");
+    });
+
     it("rearms the alarm when the retried stop fails again", async () => {
       const stopSandbox = vi.fn(async (): Promise<StopResult> => {
         throw new SandboxProviderError("still broken", "transient");
@@ -3315,6 +3350,27 @@ describe("SandboxLifecycleManager", () => {
 
       expect(isDeadSandboxStatus(row.status as SandboxStatus)).toBe(true);
       expect(stopSandbox).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(paths)("$name pins the provider ID when stop fails", async ({ sandbox, drive }) => {
+      const row = sandbox();
+      row.modal_object_id = "provider-obj-ORIGINAL";
+      const stopSandbox = vi.fn(async (): Promise<StopResult> => {
+        throw new SandboxProviderError("provider exploded", "transient");
+      });
+      const storage = createMockStorage(createMockSession(), row);
+      const { manager } = buildManager({
+        provider: createMockProvider({
+          stopSandbox,
+          capabilities: { supportsExplicitStop: true, supportsPersistentResume: true },
+        }),
+        storage,
+        wsManager: createMockWebSocketManager(true, 0),
+      });
+
+      await drive(manager);
+
+      expect(row.stop_unreconciled_provider_id).toBe("provider-obj-ORIGINAL");
     });
   });
 });
