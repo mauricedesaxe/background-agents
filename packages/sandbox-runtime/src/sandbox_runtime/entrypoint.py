@@ -21,7 +21,6 @@ import tempfile
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Literal
 
 import httpx
 
@@ -122,9 +121,6 @@ class SandboxSupervisor:
     CLONE_DEPTH_COMMITS = 100
     SIDECAR_TIMEOUT_SECONDS = 5
     MCP_PACKAGE_INSTALL_TIMEOUT_SECONDS = 180
-    CONTEXT_RESTORE_TIMEOUT_SECONDS = 30
-    CONTEXT_RESTORE_MAX_DOWNLOAD_ATTEMPTS = 3
-    CONTEXT_RESTORE_RETRY_BASE_DELAY_SECONDS = 1.0
 
     # OOM-killer bias (Linux oom_score_adj, range -1000..1000; lower = less
     # likely to be killed). Under memory pressure from a build/test workload we
@@ -173,7 +169,6 @@ class SandboxSupervisor:
             self.workspace_path / self.repo_name if self.has_repository else self.workspace_path
         )
         self.session_id_file = Path(tempfile.gettempdir()) / "opencode-session-id"
-        self.context_unavailable_file = Path("/tmp/opencode-context-unavailable")
 
         # Ordered repository list. SESSION_CONFIG.repositories is the source
         # of truth; absent, a one-entry list is synthesized from the scalar
@@ -1327,8 +1322,6 @@ class SandboxSupervisor:
             "OPENCODE_CLIENT": "serve",
         }
 
-        await self._restore_opencode_context(workdir, env)
-
         # Start OpenCode server in the repo directory
         self.opencode_process = await asyncio.create_subprocess_exec(
             "opencode",
@@ -1359,255 +1352,6 @@ class SandboxSupervisor:
         await self._wait_for_health()
         self.opencode_ready.set()
         self.log.info("opencode.ready")
-
-    async def _restore_opencode_context(self, workdir: Path, env: dict[str, str]) -> None:
-        expected_session_id = os.environ.get("OPENCODE_SESSION_ID") or None
-        if not expected_session_id and self.session_id_file.exists():
-            try:
-                expected_session_id = self.session_id_file.read_text().strip() or None
-            except OSError as error:
-                self.log.error("opencode.session.load_error", exc=error)
-                self._mark_context_unavailable(persist=False)
-                return
-        if not expected_session_id:
-            os.environ["OPENCODE_CONTEXT_STATUS"] = "fresh"
-            return
-        if self.context_unavailable_file.exists():
-            self._mark_context_unavailable()
-            return
-
-        export_process = await asyncio.create_subprocess_exec(
-            "opencode",
-            "export",
-            expected_session_id,
-            "--pure",
-            cwd=workdir,
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            export_stdout, _ = await asyncio.wait_for(
-                export_process.communicate(), timeout=self.CONTEXT_RESTORE_TIMEOUT_SECONDS
-            )
-        except TimeoutError:
-            export_process.kill()
-            await export_process.wait()
-            export_stdout = b""
-        if export_process.returncode == 0 and self._checkpoint_matches(
-            export_stdout, expected_session_id
-        ):
-            os.environ["OPENCODE_CONTEXT_STATUS"] = "existing"
-            return
-
-        session_id = self.session_config.get("session_id", "")
-        if not self.control_plane_url or not self.sandbox_token or not session_id:
-            self._mark_context_unavailable()
-            return
-
-        checkpoint_url = f"{self.control_plane_url}/sessions/{session_id}/checkpoint"
-        try:
-            async with httpx.AsyncClient(timeout=self.CONTEXT_RESTORE_TIMEOUT_SECONDS) as client:
-                generation_token = "0"
-                attempted_generation_tokens: set[str] = set()
-                while generation_token not in attempted_generation_tokens:
-                    attempted_generation_tokens.add(generation_token)
-                    response = await self._download_checkpoint_generation(
-                        client,
-                        checkpoint_url,
-                        generation_token,
-                    )
-                    if response.status_code == 404:
-                        break
-                    next_generation = response.headers.get("X-Checkpoint-Next-Generation")
-                    checkpoint_id = response.headers.get("X-Checkpoint-ID")
-                    recovery_status = response.headers.get("X-Checkpoint-Recovery")
-                    if recovery_status not in {"restored", "fallback"}:
-                        recovery_status = "fallback" if generation_token != "0" else "restored"
-                    checkpoint = response.content
-                    if (
-                        response.status_code != 200
-                        or response.headers.get("X-OpenCode-Session-ID") != expected_session_id
-                        or not self._checkpoint_matches(checkpoint, expected_session_id)
-                    ):
-                        if next_generation is None:
-                            break
-                        generation_token = next_generation
-                        continue
-
-                    outcome = await self._restore_checkpoint_generation(
-                        checkpoint,
-                        generation_token,
-                        expected_session_id,
-                        workdir,
-                        env,
-                    )
-                    if outcome == "restored":
-                        self.context_unavailable_file.unlink(missing_ok=True)
-                        os.environ["OPENCODE_CONTEXT_STATUS"] = recovery_status
-                        if checkpoint_id:
-                            os.environ["OPENCODE_CHECKPOINT_ID"] = checkpoint_id
-                        self.log.info(
-                            "opencode.context_restored",
-                            opencode_session_id=expected_session_id,
-                            checkpoint_id=checkpoint_id,
-                            generation=generation_token,
-                            recovery_status=recovery_status,
-                        )
-                        return
-                    if outcome == "unavailable" or next_generation is None:
-                        break
-                    generation_token = next_generation
-        except Exception as error:
-            self.log.error("opencode.context_restore_failed", exc=error)
-            self._mark_context_unavailable(persist=self.context_unavailable_file.exists())
-            return
-
-        self._mark_context_unavailable(persist=self.context_unavailable_file.exists())
-
-    async def _download_checkpoint_generation(
-        self,
-        client: httpx.AsyncClient,
-        checkpoint_url: str,
-        generation_token: str,
-    ) -> httpx.Response:
-        last_response: httpx.Response | None = None
-        for attempt in range(self.CONTEXT_RESTORE_MAX_DOWNLOAD_ATTEMPTS):
-            try:
-                response = await client.get(
-                    checkpoint_url,
-                    params={"generation": generation_token},
-                    headers={"Authorization": f"Bearer {self.sandbox_token}"},
-                )
-                if response.status_code < 500 and response.status_code not in {408, 429}:
-                    return response
-                last_response = response
-            except httpx.RequestError:
-                if attempt + 1 == self.CONTEXT_RESTORE_MAX_DOWNLOAD_ATTEMPTS:
-                    raise
-            if attempt + 1 < self.CONTEXT_RESTORE_MAX_DOWNLOAD_ATTEMPTS:
-                await asyncio.sleep(self.CONTEXT_RESTORE_RETRY_BASE_DELAY_SECONDS * 2**attempt)
-
-        if last_response is None:
-            raise RuntimeError("Checkpoint download failed without a response")
-        return last_response
-
-    async def _restore_checkpoint_generation(
-        self,
-        checkpoint: bytes,
-        generation_token: str,
-        expected_session_id: str,
-        workdir: Path,
-        env: dict[str, str],
-    ) -> Literal["restored", "rejected", "unavailable"]:
-        checkpoint_path: Path | None = None
-        try:
-            self.context_unavailable_file.write_text("importing")
-            with tempfile.NamedTemporaryFile(
-                prefix="opencode-checkpoint-", suffix=".json", delete=False
-            ) as checkpoint_file:
-                checkpoint_file.write(checkpoint)
-                checkpoint_path = Path(checkpoint_file.name)
-            checkpoint_path.chmod(0o600)
-
-            import_process = await asyncio.create_subprocess_exec(
-                "opencode",
-                "import",
-                str(checkpoint_path),
-                "--pure",
-                cwd=workdir,
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                _, import_stderr = await asyncio.wait_for(
-                    import_process.communicate(),
-                    timeout=self.CONTEXT_RESTORE_TIMEOUT_SECONDS,
-                )
-            except TimeoutError:
-                import_process.kill()
-                await import_process.wait()
-                return "unavailable"
-            if import_process.returncode != 0:
-                detail = import_stderr.decode(errors="replace").strip()
-                self.log.error(
-                    "opencode.context_import_failed",
-                    generation=generation_token,
-                    detail=detail,
-                )
-                return "rejected"
-
-            verify_process = await asyncio.create_subprocess_exec(
-                "opencode",
-                "export",
-                expected_session_id,
-                "--pure",
-                cwd=workdir,
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                verify_stdout, _ = await asyncio.wait_for(
-                    verify_process.communicate(),
-                    timeout=self.CONTEXT_RESTORE_TIMEOUT_SECONDS,
-                )
-            except TimeoutError:
-                verify_process.kill()
-                await verify_process.wait()
-                return "unavailable"
-            if verify_process.returncode != 0 or not self._checkpoint_roundtrip_matches(
-                checkpoint, verify_stdout
-            ):
-                return "rejected"
-            return "restored"
-        finally:
-            if checkpoint_path:
-                checkpoint_path.unlink(missing_ok=True)
-
-    def _mark_context_unavailable(self, *, persist: bool = True) -> None:
-        os.environ["OPENCODE_CONTEXT_STATUS"] = "unavailable"
-        if persist:
-            self.context_unavailable_file.write_text("unavailable")
-
-    @staticmethod
-    def _checkpoint_matches(checkpoint: bytes, expected_session_id: str) -> bool:
-        try:
-            parsed = json.loads(checkpoint)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return False
-        return (
-            isinstance(parsed, dict)
-            and isinstance(parsed.get("info"), dict)
-            and parsed["info"].get("id") == expected_session_id
-        )
-
-    @staticmethod
-    def _checkpoint_roundtrip_matches(expected: bytes, actual: bytes) -> bool:
-        """Allow OpenCode to rebind an imported session to the replacement workspace."""
-        try:
-            expected_checkpoint = json.loads(expected)
-            actual_checkpoint = json.loads(actual)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return False
-        if not isinstance(expected_checkpoint, dict) or not isinstance(actual_checkpoint, dict):
-            return False
-        expected_info = expected_checkpoint.get("info")
-        actual_info = actual_checkpoint.get("info")
-        if not isinstance(expected_info, dict) or not isinstance(actual_info, dict):
-            return False
-        if not all(
-            isinstance(info.get("projectID"), str) and info["projectID"].strip()
-            for info in (expected_info, actual_info)
-        ):
-            return False
-
-        expected_checkpoint = {**expected_checkpoint, "info": dict(expected_info)}
-        actual_checkpoint = {**actual_checkpoint, "info": dict(actual_info)}
-        expected_checkpoint["info"].pop("projectID", None)
-        actual_checkpoint["info"].pop("projectID", None)
-        return expected_checkpoint == actual_checkpoint
 
     async def _forward_opencode_logs(self) -> None:
         """Forward OpenCode stdout to supervisor stdout."""

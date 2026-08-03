@@ -338,14 +338,13 @@ export async function openSandboxWs(
 export function sendSandboxReady(
   ws: WebSocket,
   sandboxId: string,
-  contextStatus: "fresh" | "existing" | "restored" | "fallback" = "fresh"
+  opencodeSessionId: string | null = null
 ): void {
   ws.send(
     JSON.stringify({
       type: "ready",
       sandboxId,
-      opencodeSessionId: contextStatus === "fresh" ? null : "oc-test-session",
-      contextStatus,
+      opencodeSessionId,
       timestamp: Date.now() / 1000,
     })
   );

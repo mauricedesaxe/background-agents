@@ -116,7 +116,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     ws!.accept();
     await queryDO(stub, "UPDATE sandbox SET status = 'stopping'");
 
-    sendSandboxReady(ws!, SANDBOX_ID, "existing");
+    sendSandboxReady(ws!, SANDBOX_ID, "oc-test-session");
     await expect
       .poll(async () => {
         const session = await queryDO<{ opencode_session_id: string | null }>(
@@ -147,7 +147,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     expect(ws).not.toBeNull();
     ws!.accept();
     await waitForSandboxStatus(stub, "connecting");
-    sendSandboxReady(ws!, SANDBOX_ID, "existing");
+    sendSandboxReady(ws!, SANDBOX_ID, "oc-test-session");
     await waitForSandboxStatus(stub, "ready");
 
     const stateRes = await stub.fetch("http://internal/internal/state");
@@ -157,7 +157,61 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     ws!.close();
   });
 
-  it("failed sandbox can reconnect and self-heal to ready", async () => {
+  it("acknowledges and drops legacy checkpoint lifecycle events", async () => {
+    const name = `ws-sandbox-legacy-checkpoint-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    await seedSandboxAuth(stub, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+      status: "connecting",
+    });
+    const { ws: sandboxWs } = await openSandboxWs(name, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+    });
+    sandboxWs!.accept();
+    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
+    const sandboxMessages = collectMessages(sandboxWs!, {
+      until: (message) => message.type === "ack",
+    });
+    const clientMessages = collectMessages(clientWs, { timeoutMs: 200 });
+
+    sandboxWs!.send(
+      JSON.stringify({
+        type: "checkpoint",
+        checkpointStatus: "confirmed",
+        checkpointId: "cp-legacy",
+        attemptId: "cpa-legacy",
+        checksum: "a".repeat(64),
+        byteLength: 100,
+        ackId: "checkpoint:cp-legacy:confirmed",
+        sandboxId: SANDBOX_ID,
+        timestamp: Date.now() / 1000,
+      })
+    );
+
+    expect(await sandboxMessages).toContainEqual({
+      type: "ack",
+      ackId: "checkpoint:cp-legacy:confirmed",
+    });
+    const persisted = await queryDO<{ type: string }>(
+      stub,
+      "SELECT type FROM events WHERE type = 'checkpoint'"
+    );
+    expect(persisted).toEqual([]);
+    expect(
+      (await clientMessages).filter(
+        (message) =>
+          message.type === "sandbox_event" &&
+          (message.event as { type?: string } | undefined)?.type === "checkpoint"
+      )
+    ).toEqual([]);
+
+    sandboxWs!.close();
+    clientWs.close();
+  });
+
+  it("failed sandbox can reconnect to its existing OpenCode session", async () => {
     const name = `ws-sandbox-selfheal-${Date.now()}`;
     const { stub } = await initNamedSession(name);
     // The WS upgrade gate deliberately admits "failed" sandboxes: a slow boot
@@ -175,7 +229,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     });
     expect(ws).not.toBeNull();
     ws!.accept();
-    sendSandboxReady(ws!, SANDBOX_ID, "restored");
+    sendSandboxReady(ws!, SANDBOX_ID, "oc-test-session");
     await waitForSandboxStatus(stub, "ready");
     ws!.close();
   });
@@ -225,7 +279,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
       type: "context_unavailable",
       sandboxId: SANDBOX_ID,
       opencodeSessionId: "ses_missing",
-      error: "The prior OpenCode conversation could not be restored",
+      error: "The expected OpenCode conversation is permanently unavailable",
       ackId: "context_unavailable:attempt-1",
       timestamp: Date.now() / 1000,
     });
@@ -243,7 +297,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
       event: expect.objectContaining({
         type: "execution_complete",
         success: false,
-        error: "The prior OpenCode conversation could not be restored",
+        error: "The expected OpenCode conversation is permanently unavailable",
       }),
     });
     const messages = await queryDO<{ status: string }>(stub, "SELECT status FROM messages");
@@ -251,7 +305,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     expect((await clientMessages).filter((message) => message.type === "sandbox_error")).toEqual([
       {
         type: "sandbox_error",
-        error: "The prior OpenCode conversation could not be restored",
+        error: "The expected OpenCode conversation is permanently unavailable",
       },
     ]);
     await waitForSandboxStatus(stub, "stopped");
@@ -289,7 +343,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
           type: "context_unavailable",
           sandboxId: SANDBOX_ID,
           opencodeSessionId: "ses_missing",
-          error: "The prior OpenCode conversation could not be restored",
+          error: "The expected OpenCode conversation is permanently unavailable",
           ackId: "context_unavailable:attempt-1",
           timestamp: Date.now() / 1000,
         }),
@@ -313,7 +367,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
         type: "context_unavailable",
         sandboxId: SANDBOX_ID,
         opencodeSessionId: "ses_missing",
-        error: "The prior OpenCode conversation could not be restored",
+        error: "The expected OpenCode conversation is permanently unavailable",
         ackId: "context_unavailable:attempt-1",
         timestamp: Date.now() / 1000,
       })
@@ -333,7 +387,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     clientWs.close();
   });
 
-  it("refuses fresh readiness when an existing conversation is expected", async () => {
+  it("fails closed when a fresh replacement cannot provide the expected conversation", async () => {
     const name = `ws-sandbox-ready-mismatch-${Date.now()}`;
     const { stub } = await initNamedSession(name);
     await seedSandboxAuth(stub, {
@@ -347,7 +401,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
       sandboxId: SANDBOX_ID,
     });
     sandboxWs!.accept();
-    sendSandboxReady(sandboxWs!, SANDBOX_ID, "fresh");
+    sendSandboxReady(sandboxWs!, SANDBOX_ID);
     await waitForSandboxStatus(stub, "stopped");
 
     const state = await queryDO<{ opencode_session_id: string }>(
@@ -364,7 +418,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     sandboxWs!.close();
   });
 
-  it("refuses legacy readiness when an existing conversation is expected", async () => {
+  it("resumes when the same sandbox verifies the expected conversation", async () => {
     const name = `ws-sandbox-ready-legacy-${Date.now()}`;
     const { stub } = await initNamedSession(name);
     await seedSandboxAuth(stub, {
@@ -387,12 +441,12 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
       })
     );
 
-    await waitForSandboxStatus(stub, "stopped");
+    await waitForSandboxStatus(stub, "ready");
     const events = await queryDO<{ type: string }>(
       stub,
       "SELECT type FROM events WHERE type = 'context_unavailable'"
     );
-    expect(events).toEqual([{ type: "context_unavailable" }]);
+    expect(events).toEqual([]);
     sandboxWs!.close();
   });
 

@@ -104,6 +104,14 @@ describe("createMessagesHandler", () => {
     expect(await response.json()).toEqual({ error: "Invalid event type: invalid" });
   });
 
+  it("does not expose legacy checkpoint events as a current filter", async () => {
+    const { handler } = createHandler();
+
+    const response = handler.listEvents(new URL("http://internal/internal/events?type=checkpoint"));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Invalid event type: checkpoint" });
+  });
+
   it("returns 400 for malformed event cursors", async () => {
     const { handler, messageService } = createHandler();
 

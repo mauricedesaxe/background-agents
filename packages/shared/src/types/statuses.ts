@@ -32,7 +32,6 @@ export type EventType =
   | "ready"
   | "opencode_session_created"
   | "context_unavailable"
-  | "checkpoint"
   | "token"
   | "tool_call"
   | "step_start"

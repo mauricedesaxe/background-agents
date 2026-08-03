@@ -8,6 +8,7 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
+import { z } from "zod";
 import { initSchema } from "./schema";
 import {
   DEFAULT_MODEL,
@@ -138,6 +139,15 @@ const WS_AUTH_TIMEOUT_MS = 30000; // 30 seconds
 const WS_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const ACTIVE_COMPACTION_STORAGE_KEY = "activeCompactionRequestId";
 const COMPACTION_TIMEOUT_MS = 5 * 60 * 1000;
+const legacyCheckpointLifecycleEventSchema = z.object({
+  type: z.literal("checkpoint"),
+  checkpointStatus: z.enum(["in_progress", "confirmed", "failed"]),
+  checkpointId: z.string().min(1).max(128),
+  attemptId: z.string().min(1).max(128),
+  ackId: z.string().min(1).max(512),
+  sandboxId: z.string().min(1),
+  timestamp: z.number(),
+});
 
 interface ActiveCompaction {
   requestId: string;
@@ -1167,6 +1177,12 @@ export class SessionDO extends DurableObject<Env> {
    * Handle messages from sandbox.
    */
   private async handleSandboxMessage(ws: WebSocket, message: string): Promise<void> {
+    const legacyCheckpoint = parseLegacyCheckpointLifecycleEvent(message);
+    if (legacyCheckpoint) {
+      this.wsManager.send(ws, { type: "ack", ackId: legacyCheckpoint.ackId });
+      return;
+    }
+
     const event = this.parseWebSocketMessage(message, "sandbox", sandboxEventSchema);
     if (!event) return;
 
@@ -1181,22 +1197,18 @@ export class SessionDO extends DurableObject<Env> {
 
     if (event.type === "ready") {
       const expectedSessionId = this.getSession()?.opencode_session_id;
-      const resumed =
-        event.contextStatus === "existing" ||
-        event.contextStatus === "restored" ||
-        event.contextStatus === "fallback";
-      if (expectedSessionId && (event.opencodeSessionId !== expectedSessionId || !resumed)) {
+      if (expectedSessionId && event.opencodeSessionId !== expectedSessionId) {
         await this.recordContextUnavailable(ws, {
           type: "context_unavailable",
           sandboxId: event.sandboxId,
           opencodeSessionId: expectedSessionId,
-          error: `OpenCode session ${expectedSessionId} was not restored; refusing to continue without its conversation context`,
+          error: `OpenCode session ${expectedSessionId} is unavailable; refusing to continue without its conversation context`,
           timestamp: Date.now() / 1000,
         });
         return;
       }
       this.persistOpencodeSessionId(event.opencodeSessionId);
-      await this.markSandboxContextReady(event.contextStatus);
+      await this.markSandboxContextReady();
     } else if (event.type === "opencode_session_created") {
       const expectedSessionId = this.getSession()?.opencode_session_id;
       if (expectedSessionId && event.opencodeSessionId !== expectedSessionId) {
@@ -1245,9 +1257,7 @@ export class SessionDO extends DurableObject<Env> {
     }
   }
 
-  private async markSandboxContextReady(
-    contextStatus: "fresh" | "existing" | "restored" | "fallback" | undefined
-  ): Promise<void> {
+  private async markSandboxContextReady(): Promise<void> {
     if (!this.lifecycleManager.onSandboxConnected()) return;
     this.updateSandboxStatus("ready");
     this.broadcast({ type: "sandbox_status", status: "ready" });
@@ -1256,11 +1266,7 @@ export class SessionDO extends DurableObject<Env> {
     await this.scheduleInactivityCheck();
     this.log.info("opencode.context_ready", {
       event: "opencode.context_ready",
-      context_status: contextStatus ?? "fresh",
-      checkpoint_recovery:
-        contextStatus === "restored" || contextStatus === "fallback"
-          ? contextStatus
-          : "not_attempted",
+      context_status: this.getSession()?.opencode_session_id ? "existing" : "fresh",
     });
     await this.processMessageQueue();
   }
@@ -1273,7 +1279,7 @@ export class SessionDO extends DurableObject<Env> {
   ): Promise<boolean> {
     this.log.warn("opencode.context_unavailable", {
       event: "opencode.context_unavailable",
-      checkpoint_recovery: "permanently_unavailable",
+      continuity: "permanently_unavailable",
     });
     if (broadcastFailure) this.broadcast({ type: "sandbox_error", error: failure });
     const messageFailure = this.messageQueue.failMessagesForContextLoss(failure, eventCreatedAt);
@@ -2242,5 +2248,16 @@ export class SessionDO extends DurableObject<Env> {
       });
       return null;
     }
+  }
+}
+
+function parseLegacyCheckpointLifecycleEvent(
+  message: string
+): z.infer<typeof legacyCheckpointLifecycleEventSchema> | null {
+  try {
+    const result = legacyCheckpointLifecycleEventSchema.safeParse(JSON.parse(message));
+    return result.success ? result.data : null;
+  } catch {
+    return null;
   }
 }

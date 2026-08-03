@@ -95,52 +95,48 @@ falling back to a default. Pinned by
 invisible. Every fanned-out agent also gets its own sandbox, so a zero cap is the only way to cap
 that cost.
 
-### 6. A session reattaches to its OpenCode conversation and survives compaction
+### 6. A session reattaches on the same sandbox and fails closed after permanent loss
 
 `packages/sandbox-runtime/src/sandbox_runtime/bridge.py` takes a control-plane-supplied
 `opencodeSessionId` and reattaches, with a watchdog for messages that arrive before the sandbox is
-ready. An authoritative session ID that is missing from OpenCode fails the resume rather than
-silently replacing the conversation. After each idle turn and successful manual compaction, the
-bridge exports OpenCode's native conversation into private, checksum-addressed checkpoint
-generations. A replacement sandbox imports the newest valid generation before starting OpenCode,
-then verifies the expected session through OpenCode itself. The control plane does not dispatch
-queued prompts until that verification reports fresh, existing, or restored context. The same bridge
-keeps its SSE stream attached after OpenCode emits the first typed `ContextOverflowError`, allowing
-OpenCode's native compaction and replay to finish. Repeated or unrelated errors remain terminal.
-Automatic overflow recovery persists and renders only its message-scoped `context_compacted`
-completion. Manual compaction persists its start and terminal outcome as timeline events: starts and
-completions render neutrally, while failures render destructively. The session UI exposes manual
-compaction only while idle. Its dedicated protocol command subscribes to OpenCode events before
-calling `POST /session/:id/summarize` with the selected model's flat, case-sensitive `providerID`
-and `modelID`. Only `session.compacted` is success. `session.error` is a failure even when the HTTP
+ready. The bridge verifies the expected session through OpenCode before reporting readiness. An
+authoritative session ID that is missing from OpenCode fails the resume rather than silently
+replacing the conversation. The control plane fails queued work and settles the pinned provider
+object before acknowledging that terminal result. Daytona stop, archive, supervisor restart, and
+bridge restart retain the same provider object and disk, so its workspace and native OpenCode
+conversation remain available while that object exists. The bridge keeps its SSE stream attached
+after OpenCode emits the first typed `ContextOverflowError`, allowing OpenCode's native compaction
+and replay to finish. Repeated or unrelated errors remain terminal. Automatic overflow recovery
+persists and renders only its message-scoped `context_compacted` completion. Manual compaction
+persists its start and terminal outcome as timeline events: starts and completions render neutrally,
+while failures render destructively. The session UI exposes manual compaction only while idle. Its
+dedicated protocol command subscribes to OpenCode events before calling
+`POST /session/:id/summarize` with the selected model's flat, case-sensitive `providerID` and
+`modelID`. Only `session.compacted` is success. `session.error` is a failure even when the HTTP
 response is `200`, and a five-minute deadline aborts OpenCode before the bridge reports a timeout.
 The operation stays attached to the existing OpenCode session and is stored outside the prompt
 transcript. The native endpoint behavior and later message lineage were
 [probed against pinned OpenCode 1.14.41](https://github.com/mauricedesaxe/background-agents/issues/129#issuecomment-5044195365).
 
-Idle-boundary exports use stable checkpoint and attempt identities. The bridge keeps an interrupted
-upload locally and retries that identity instead of replaying completed model work. R2 promotes a
-checkpoint only after reading back its payload and immutable manifest, then verifies the current
-pointer. Recovery ignores incomplete records and reports when it had to use an older confirmed
-checkpoint. Immutable checkpoint objects remain until session deletion because eager reclamation can
-race a concurrent promotion that references the same content-addressed payload.
+Mixed-version deploys retain a narrow compatibility sink for old bridges. Legacy checkpoint uploads
+are checksummed and discarded, checkpoint lifecycle events are acknowledged without persistence or
+broadcast, and downloads return `404`. This prevents retries during rollout without making
+checkpoints part of the current protocol or recovery path.
 
 Automatic overflow recovery is pinned by
 `packages/sandbox-runtime/scripts/reproduce_context_overflow.py` and the compaction cases in
 `test_bridge_sse.py`. Manual compaction is pinned by `test_bridge_compaction.py` and the
-control-plane WebSocket integration tests. Checkpoint promotion and fallback are pinned by
-`packages/control-plane/test/integration/checkpoints.test.ts`,
-`packages/control-plane/test/integration/sandbox-events.test.ts`,
-`packages/sandbox-runtime/tests/test_bridge_checkpoint.py`, and
-`packages/sandbox-runtime/tests/test_opencode_checkpoint_restore.py`.
+control-plane WebSocket integration tests. Same-sandbox continuity and permanent-loss handling are
+pinned by `packages/sandbox-runtime/tests/test_bridge_session_reattach.py` and
+`packages/control-plane/test/integration/websocket-sandbox.test.ts`.
 
 **Why.** Without reattachment, resuming starts a fresh conversation and the history is gone from the
 agent's point of view while still being visible in the UI. Without overflow deferral, the bridge
 reports failure and disconnects while OpenCode successfully compacts and recovers in the same
-session, so the recovered response never reaches the user. Filesystem replacement also removes the
-native conversation database, so reattachment alone cannot preserve context across a new sandbox.
-Without verified promotion, a lost upload response or a partial R2 write can silently replace the
-last recoverable conversation with one that was never usable.
+session, so the recovered response never reaches the user. Permanent provider-object loss removes
+both unpublished workspace state and the native conversation database. Automatic reconstruction
+proved less reliable than failing clearly before model or tool execution, so a replacement sandbox
+does not download or import native conversation checkpoints.
 
 ### 7. The SSE reader is decoupled from the WebSocket send
 

@@ -12,7 +12,6 @@ This module handles:
 import argparse
 import asyncio
 import contextlib
-import hashlib
 import json
 import os
 import re
@@ -108,67 +107,6 @@ class PushRejected(Exception):
     """
 
 
-@dataclass
-class PendingCheckpoint:
-    checkpoint_id: str
-    attempt_id: str
-    created_at_ms: int
-    checksum: str
-    byte_length: int
-    opencode_session_id: str
-    opencode_version: str
-    attempt_count: int = 0
-
-    def to_json(self) -> dict[str, str | int]:
-        return {
-            "checkpointId": self.checkpoint_id,
-            "attemptId": self.attempt_id,
-            "createdAtMs": self.created_at_ms,
-            "checksum": self.checksum,
-            "byteLength": self.byte_length,
-            "opencodeSessionId": self.opencode_session_id,
-            "opencodeVersion": self.opencode_version,
-            "attemptCount": self.attempt_count,
-        }
-
-    @classmethod
-    def from_json(cls, value: object) -> "PendingCheckpoint":
-        if not isinstance(value, dict):
-            raise ValueError("Pending checkpoint metadata is not an object")
-        return cls(
-            checkpoint_id=str(value["checkpointId"]),
-            attempt_id=str(value["attemptId"]),
-            created_at_ms=int(value["createdAtMs"]),
-            checksum=str(value["checksum"]),
-            byte_length=int(value["byteLength"]),
-            opencode_session_id=str(value["opencodeSessionId"]),
-            opencode_version=str(value["opencodeVersion"]),
-            attempt_count=int(value["attemptCount"]),
-        )
-
-
-class CheckpointFailure(Exception):
-    def __init__(
-        self,
-        error_class: str,
-        detail: str,
-        *,
-        checkpoint_id: str,
-        attempt_id: str,
-        http_status: int | None = None,
-        provider_code: int | None = None,
-        retryable: bool = False,
-    ) -> None:
-        super().__init__(detail)
-        self.error_class = error_class
-        self.detail = detail
-        self.checkpoint_id = checkpoint_id
-        self.attempt_id = attempt_id
-        self.http_status = http_status
-        self.provider_code = provider_code
-        self.retryable = retryable
-
-
 class OpenCodeIdentifier:
     """
     Generate OpenCode-compatible ascending IDs.
@@ -238,8 +176,8 @@ class SessionTerminatedError(Exception):
     """Raised when the control plane has terminated the session (HTTP 410).
 
     This is a non-recoverable error - the bridge should exit gracefully
-    rather than retry. The session can be restored via user action (sending
-    a new prompt), which will trigger snapshot restoration on the control plane.
+    rather than retry. A later prompt lets the control plane resume the same
+    provider object when its disk still exists.
     """
 
     pass
@@ -373,9 +311,6 @@ class AgentBridge:
     MAX_PENDING_PART_EVENTS = 2000
     MAX_EVENT_BUFFER_SIZE = 1000
     ACK_RETRY_INTERVAL_SECONDS = 5.0
-    CHECKPOINT_MAX_UPLOAD_ATTEMPTS = 3
-    CHECKPOINT_RETRY_BASE_DELAY_SECONDS = 1.0
-    CHECKPOINT_DETAIL_MAX_LENGTH = 500
     # Cap on events buffered between the SSE reader and the WebSocket sender
     # while a prompt streams. Sized generously since it only fills when the
     # send genuinely can't keep up; overflow evicts superseded events first.
@@ -394,7 +329,6 @@ class AgentBridge:
         "context_compacted",
         "context_compaction_failed",
         "context_unavailable",
-        "checkpoint",
     }
     # Events whose payload is cumulative, so a later one supersedes an earlier
     # one. These are safe to drop first under stream backpressure.
@@ -441,13 +375,6 @@ class AgentBridge:
             os.environ.get("OPENCODE_SESSION_ID") or None
         )
         self.session_id_file = Path(tempfile.gettempdir()) / "opencode-session-id"
-        self.checkpoint_pending_file = (
-            Path(tempfile.gettempdir()) / "opencode-checkpoint-pending.json"
-        )
-        self.checkpoint_terminal_events_file = (
-            Path(tempfile.gettempdir()) / "opencode-checkpoint-terminal-events.json"
-        )
-        self._checkpoint_lock = asyncio.Lock()
         self.repo_path = Path("/workspace")
         # Supervisor-written canonical repo manifest; push targeting resolves
         # member checkout paths through it rather than joining spec-supplied
@@ -611,9 +538,6 @@ class AgentBridge:
                 self.log.info("bridge.connect", outcome="success")
                 sent_on_connect: set[str] = set()
 
-                await self._resume_checkpoint_terminal_events()
-                await self._resume_pending_checkpoint_or_report_failure()
-
                 if self.opencode_session_error and self.opencode_session_id:
                     sent_on_connect.add(self._context_unavailable_ack_id)
                     await self._send_event(
@@ -625,21 +549,13 @@ class AgentBridge:
                         }
                     )
                 else:
-                    context_status = os.environ.get("OPENCODE_CONTEXT_STATUS")
-                    if self.opencode_session_id and context_status == "fresh":
-                        context_status = "existing"
-                    elif context_status not in {"fresh", "existing", "restored", "fallback"}:
-                        context_status = "existing" if self.opencode_session_id else "fresh"
-                    ready_event = {
-                        "type": "ready",
-                        "sandboxId": self.sandbox_id,
-                        "opencodeSessionId": self.opencode_session_id,
-                        "contextStatus": context_status,
-                    }
-                    checkpoint_id = os.environ.get("OPENCODE_CHECKPOINT_ID")
-                    if checkpoint_id:
-                        ready_event["checkpointId"] = checkpoint_id
-                    await self._send_event(ready_event)
+                    await self._send_event(
+                        {
+                            "type": "ready",
+                            "sandboxId": self.sandbox_id,
+                            "opencodeSessionId": self.opencode_session_id,
+                        }
+                    )
 
                 await self._drain_boot_warnings()
 
@@ -955,7 +871,6 @@ class AgentBridge:
             ack_id = cmd.get("ackId")
             if ack_id and ack_id in self._pending_acks:
                 del self._pending_acks[ack_id]
-                self._remove_checkpoint_terminal_event(ack_id)
                 self.log.debug("bridge.ack_received", ack_id=ack_id)
         else:
             self.log.debug("bridge.unknown_command", cmd_type=cmd_type)
@@ -1031,8 +946,6 @@ class AgentBridge:
             if had_error:
                 outcome = "error"
 
-            await self._save_checkpoint_or_report_failure(message_id=message_id)
-
             # Drain everything the agent produced before the terminal event, so
             # execution_complete always lands last.
             self._log_dropped_events(message_id, await pump.aclose())
@@ -1051,7 +964,6 @@ class AgentBridge:
             outcome = "error"
             if pump is not None:
                 self._log_dropped_events(message_id, await pump.aclose())
-                await self._save_checkpoint_or_report_failure(message_id=message_id)
             await self._send_event(
                 {
                     "type": "execution_complete",
@@ -1066,7 +978,6 @@ class AgentBridge:
             if pump is not None:
                 # Deliver any output salvaged before the failure, then complete.
                 self._log_dropped_events(message_id, await pump.aclose())
-                await self._save_checkpoint_or_report_failure(message_id=message_id)
             await self._send_event(
                 {
                     "type": "execution_complete",
@@ -1089,497 +1000,6 @@ class AgentBridge:
                 outcome=outcome,
                 duration_ms=duration_ms,
             )
-
-    async def _export_and_upload_checkpoint(self) -> None:
-        if not self.opencode_session_id or not self.http_client:
-            raise RuntimeError("OpenCode session is not ready for checkpointing")
-
-        existing = self._load_pending_checkpoint()
-        if existing:
-            pending, checkpoint = existing
-            await self._complete_pending_checkpoint(pending, checkpoint, resumed=True)
-            if self.checkpoint_pending_file.exists():
-                raise CheckpointFailure(
-                    "confirmation_unknown",
-                    "Previous checkpoint upload outcome could not be confirmed",
-                    checkpoint_id=pending.checkpoint_id,
-                    attempt_id=pending.attempt_id,
-                    retryable=True,
-                )
-
-        checkpoint_id = f"cp_{int(time.time() * 1000)}_{secrets.token_hex(8)}"
-        attempt_id = f"cpa_{secrets.token_hex(12)}"
-        created_at_ms = int(time.time() * 1000)
-
-        try:
-            process = await asyncio.create_subprocess_exec(
-                "opencode",
-                "export",
-                self.opencode_session_id,
-                "--pure",
-                cwd=os.environ.get("OPENCODE_WORKDIR") or None,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except OSError as error:
-            raise CheckpointFailure(
-                "export_spawn",
-                self._bounded_checkpoint_detail(str(error)),
-                checkpoint_id=checkpoint_id,
-                attempt_id=attempt_id,
-            ) from None
-        try:
-            stdout, _stderr = await asyncio.wait_for(
-                process.communicate(), timeout=self.OPENCODE_REQUEST_TIMEOUT
-            )
-        except TimeoutError:
-            process.kill()
-            await process.wait()
-            raise CheckpointFailure(
-                "export_timeout",
-                "OpenCode checkpoint export timed out",
-                checkpoint_id=checkpoint_id,
-                attempt_id=attempt_id,
-            ) from None
-
-        if process.returncode != 0:
-            detail = f"OpenCode checkpoint export exited with status {process.returncode}"
-            raise CheckpointFailure(
-                "export_exit",
-                self._bounded_checkpoint_detail(detail),
-                checkpoint_id=checkpoint_id,
-                attempt_id=attempt_id,
-            )
-
-        try:
-            exported = json.loads(stdout)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            raise CheckpointFailure(
-                "export_invalid_json",
-                "OpenCode checkpoint export returned invalid JSON",
-                checkpoint_id=checkpoint_id,
-                attempt_id=attempt_id,
-            ) from None
-        info = exported.get("info") if isinstance(exported, dict) else None
-        if not isinstance(info, dict) or info.get("id") != self.opencode_session_id:
-            raise CheckpointFailure(
-                "export_session_mismatch",
-                "OpenCode checkpoint export returned the wrong session",
-                checkpoint_id=checkpoint_id,
-                attempt_id=attempt_id,
-            )
-
-        pending = PendingCheckpoint(
-            checkpoint_id=checkpoint_id,
-            attempt_id=attempt_id,
-            created_at_ms=created_at_ms,
-            checksum=hashlib.sha256(stdout).hexdigest(),
-            byte_length=len(stdout),
-            opencode_session_id=self.opencode_session_id,
-            opencode_version=os.environ.get("OPENCODE_VERSION", "unknown"),
-        )
-        self._write_pending_checkpoint(pending, stdout)
-        await self._complete_pending_checkpoint(pending, stdout)
-
-    async def _complete_pending_checkpoint(
-        self, pending: PendingCheckpoint, checkpoint: bytes, *, resumed: bool = False
-    ) -> None:
-        async with self._checkpoint_lock:
-            stored = self._load_pending_checkpoint()
-            if stored:
-                stored_pending, stored_checkpoint = stored
-                if (
-                    stored_pending.checkpoint_id != pending.checkpoint_id
-                    or stored_pending.attempt_id != pending.attempt_id
-                ):
-                    if resumed:
-                        return
-                    raise CheckpointFailure(
-                        "pending_checkpoint_conflict",
-                        "Another checkpoint is already pending",
-                        checkpoint_id=pending.checkpoint_id,
-                        attempt_id=pending.attempt_id,
-                        retryable=True,
-                    )
-                pending = stored_pending
-                checkpoint = stored_checkpoint
-            elif resumed:
-                return
-
-            await self._send_checkpoint_event(pending, "in_progress")
-            await self._upload_pending_checkpoint(pending, checkpoint)
-            terminal_persisted = await self._send_checkpoint_event(pending, "confirmed")
-            if terminal_persisted:
-                self._clear_pending_checkpoint()
-            self.log.info(
-                "opencode.checkpoint_saved",
-                checkpoint_id=pending.checkpoint_id,
-                attempt_id=pending.attempt_id,
-                checksum=pending.checksum,
-                opencode_session_id=pending.opencode_session_id,
-                byte_length=pending.byte_length,
-                attempt_count=pending.attempt_count,
-                resumed=resumed,
-                terminal_persisted=terminal_persisted,
-            )
-
-    async def _upload_pending_checkpoint(
-        self, pending: PendingCheckpoint, checkpoint: bytes
-    ) -> None:
-        if not self.http_client:
-            raise CheckpointFailure(
-                "upload_client_unavailable",
-                "Checkpoint upload client is unavailable",
-                checkpoint_id=pending.checkpoint_id,
-                attempt_id=pending.attempt_id,
-            )
-
-        last_failure: CheckpointFailure | None = None
-        if pending.attempt_count >= self.CHECKPOINT_MAX_UPLOAD_ATTEMPTS:
-            reconciliation = await self._reconcile_checkpoint_confirmation(pending)
-            if reconciliation == "confirmed":
-                return
-            if reconciliation == "unknown":
-                raise CheckpointFailure(
-                    "confirmation_unknown",
-                    "Checkpoint upload outcome could not be confirmed",
-                    checkpoint_id=pending.checkpoint_id,
-                    attempt_id=pending.attempt_id,
-                    retryable=True,
-                )
-        while pending.attempt_count < self.CHECKPOINT_MAX_UPLOAD_ATTEMPTS:
-            pending.attempt_count += 1
-            self._write_pending_checkpoint(pending, checkpoint)
-            try:
-                response = await self.http_client.put(
-                    f"{self.control_plane_url}/sessions/{self.session_id}/checkpoint",
-                    content=checkpoint,
-                    headers={
-                        "Authorization": f"Bearer {self.auth_token}",
-                        "Content-Type": "application/json",
-                        "X-OpenCode-Session-ID": pending.opencode_session_id,
-                        "X-OpenCode-Version": pending.opencode_version,
-                        "X-Checkpoint-ID": pending.checkpoint_id,
-                        "X-Checkpoint-Attempt-ID": pending.attempt_id,
-                        "X-Checkpoint-Created-At-Ms": str(pending.created_at_ms),
-                    },
-                    timeout=self.HTTP_DEFAULT_TIMEOUT,
-                )
-                if response.status_code in {200, 201}:
-                    self._verify_checkpoint_confirmation(response, pending)
-                    return
-                last_failure = self._checkpoint_http_failure(response, pending)
-            except CheckpointFailure as failure:
-                last_failure = failure
-            except httpx.TimeoutException:
-                last_failure = CheckpointFailure(
-                    "upload_timeout",
-                    "Checkpoint upload timed out before confirmation",
-                    checkpoint_id=pending.checkpoint_id,
-                    attempt_id=pending.attempt_id,
-                    retryable=True,
-                )
-            except httpx.RequestError as error:
-                last_failure = CheckpointFailure(
-                    "upload_transport",
-                    self._bounded_checkpoint_detail(str(error)),
-                    checkpoint_id=pending.checkpoint_id,
-                    attempt_id=pending.attempt_id,
-                    retryable=True,
-                )
-
-            if not last_failure.retryable:
-                raise last_failure
-            if pending.attempt_count < self.CHECKPOINT_MAX_UPLOAD_ATTEMPTS:
-                await asyncio.sleep(
-                    self.CHECKPOINT_RETRY_BASE_DELAY_SECONDS * 2 ** (pending.attempt_count - 1)
-                )
-
-        if last_failure:
-            if last_failure.error_class in {"upload_timeout", "upload_transport"}:
-                reconciliation = await self._reconcile_checkpoint_confirmation(pending)
-                if reconciliation == "confirmed":
-                    return
-                if reconciliation == "unknown":
-                    raise CheckpointFailure(
-                        "confirmation_unknown",
-                        "Checkpoint upload outcome could not be confirmed",
-                        checkpoint_id=pending.checkpoint_id,
-                        attempt_id=pending.attempt_id,
-                        retryable=True,
-                    )
-            raise last_failure
-        raise CheckpointFailure(
-            "upload_attempts_exhausted",
-            "Checkpoint upload attempts were exhausted",
-            checkpoint_id=pending.checkpoint_id,
-            attempt_id=pending.attempt_id,
-        )
-
-    async def _reconcile_checkpoint_confirmation(self, pending: PendingCheckpoint) -> str:
-        if not self.http_client:
-            return "unknown"
-        try:
-            response = await self.http_client.get(
-                f"{self.control_plane_url}/sessions/{self.session_id}/checkpoint",
-                params={
-                    "checkpointId": pending.checkpoint_id,
-                    "attemptId": pending.attempt_id,
-                    "checksum": pending.checksum,
-                },
-                headers={"Authorization": f"Bearer {self.auth_token}"},
-                timeout=self.HTTP_DEFAULT_TIMEOUT,
-            )
-            if response.status_code == 404:
-                return "absent"
-            if response.status_code != 200:
-                return "unknown"
-            try:
-                self._verify_checkpoint_confirmation(response, pending)
-            except CheckpointFailure:
-                return "unknown"
-            return "confirmed"
-        except httpx.RequestError:
-            return "unknown"
-
-    def _verify_checkpoint_confirmation(
-        self, response: httpx.Response, pending: PendingCheckpoint
-    ) -> None:
-        try:
-            confirmation = response.json()
-        except (json.JSONDecodeError, ValueError):
-            confirmation = None
-        if isinstance(confirmation, dict) and confirmation == {"checksum": pending.checksum}:
-            return
-        if not isinstance(confirmation, dict) or (
-            confirmation.get("status") != "confirmed"
-            or confirmation.get("checkpointId") != pending.checkpoint_id
-            or confirmation.get("attemptId") != pending.attempt_id
-            or confirmation.get("checksum") != pending.checksum
-        ):
-            raise CheckpointFailure(
-                "confirmation_invalid",
-                "Checkpoint confirmation did not match the upload",
-                checkpoint_id=pending.checkpoint_id,
-                attempt_id=pending.attempt_id,
-                http_status=response.status_code,
-                retryable=True,
-            )
-
-    def _checkpoint_http_failure(
-        self, response: httpx.Response, pending: PendingCheckpoint
-    ) -> CheckpointFailure:
-        error_class = "upload_http"
-        detail = f"Checkpoint upload returned HTTP {response.status_code}"
-        provider_code: int | None = None
-        try:
-            body = response.json()
-            if isinstance(body, dict):
-                if isinstance(body.get("errorClass"), str):
-                    error_class = body["errorClass"]
-                if isinstance(body.get("error"), str):
-                    detail = body["error"]
-                if isinstance(body.get("providerCode"), int):
-                    provider_code = body["providerCode"]
-        except (json.JSONDecodeError, ValueError):
-            pass
-        return CheckpointFailure(
-            error_class,
-            self._bounded_checkpoint_detail(detail),
-            checkpoint_id=pending.checkpoint_id,
-            attempt_id=pending.attempt_id,
-            http_status=response.status_code,
-            provider_code=provider_code,
-            retryable=response.status_code in {408, 429} or response.status_code >= 500,
-        )
-
-    def _write_pending_checkpoint(self, pending: PendingCheckpoint, checkpoint: bytes) -> None:
-        try:
-            metadata = json.dumps(pending.to_json(), separators=(",", ":")).encode()
-            pending_temp = self.checkpoint_pending_file.with_suffix(".tmp")
-            pending_temp.write_bytes(metadata + b"\n" + checkpoint)
-            pending_temp.chmod(0o600)
-            pending_temp.replace(self.checkpoint_pending_file)
-        except OSError as error:
-            raise CheckpointFailure(
-                "pending_write",
-                self._bounded_checkpoint_detail(str(error)),
-                checkpoint_id=pending.checkpoint_id,
-                attempt_id=pending.attempt_id,
-            ) from None
-
-    def _load_pending_checkpoint(self) -> tuple[PendingCheckpoint, bytes] | None:
-        if not self.checkpoint_pending_file.exists():
-            return None
-        metadata, separator, checkpoint = self.checkpoint_pending_file.read_bytes().partition(b"\n")
-        if not separator:
-            raise ValueError("Pending checkpoint envelope is incomplete")
-        pending = PendingCheckpoint.from_json(json.loads(metadata))
-        if (
-            pending.opencode_session_id != self.opencode_session_id
-            or pending.byte_length != len(checkpoint)
-            or pending.checksum != hashlib.sha256(checkpoint).hexdigest()
-        ):
-            raise ValueError("Pending checkpoint does not match its payload")
-        return pending, checkpoint
-
-    def _clear_pending_checkpoint(self) -> None:
-        try:
-            self.checkpoint_pending_file.unlink(missing_ok=True)
-        except OSError as error:
-            self.log.warn("opencode.checkpoint_pending_clear_failed", exc=error)
-
-    async def _resume_pending_checkpoint_or_report_failure(self) -> None:
-        try:
-            loaded = self._load_pending_checkpoint()
-            if not loaded:
-                return
-            pending, checkpoint = loaded
-            await self._complete_pending_checkpoint(pending, checkpoint, resumed=True)
-        except Exception as error:
-            if isinstance(error, CheckpointFailure) and error.error_class == "confirmation_unknown":
-                self.log.warn(
-                    "opencode.checkpoint_confirmation_pending",
-                    checkpoint_id=error.checkpoint_id,
-                    attempt_id=error.attempt_id,
-                )
-                return
-            await self._report_checkpoint_failure(error)
-
-    async def _send_checkpoint_event(
-        self,
-        pending: PendingCheckpoint,
-        checkpoint_status: str,
-    ) -> bool:
-        event = {
-            "type": "checkpoint",
-            "checkpointStatus": checkpoint_status,
-            "checkpointId": pending.checkpoint_id,
-            "attemptId": pending.attempt_id,
-            "checksum": pending.checksum,
-            "byteLength": pending.byte_length,
-            "ackId": (f"checkpoint:{pending.checkpoint_id}:{checkpoint_status}"),
-        }
-        if checkpoint_status == "confirmed":
-            return await self._send_checkpoint_terminal_event(event)
-        await self._send_event(event)
-        return True
-
-    async def _send_checkpoint_terminal_event(self, event: dict[str, Any]) -> bool:
-        try:
-            self._persist_checkpoint_terminal_event(event)
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            self.log.warn("opencode.checkpoint_terminal_persist_failed", exc=error)
-            await self._send_event(event)
-            return False
-        await self._send_event(event)
-        return True
-
-    def _persist_checkpoint_terminal_event(self, event: dict[str, Any]) -> None:
-        try:
-            events = self._load_checkpoint_terminal_events()
-        except (ValueError, json.JSONDecodeError) as error:
-            self.log.warn("opencode.checkpoint_terminal_reset", exc=error)
-            events = []
-        events = [entry for entry in events if entry.get("ackId") != event.get("ackId")]
-        events.append(event)
-        events_temp = self.checkpoint_terminal_events_file.with_suffix(".tmp")
-        events_temp.write_text(json.dumps(events, separators=(",", ":")))
-        events_temp.chmod(0o600)
-        events_temp.replace(self.checkpoint_terminal_events_file)
-
-    def _load_checkpoint_terminal_events(self) -> list[dict[str, Any]]:
-        if not self.checkpoint_terminal_events_file.exists():
-            return []
-        value = json.loads(self.checkpoint_terminal_events_file.read_text())
-        if not isinstance(value, list) or not all(isinstance(event, dict) for event in value):
-            raise ValueError("Checkpoint terminal events are not an array of objects")
-        return value
-
-    async def _resume_checkpoint_terminal_events(self) -> None:
-        try:
-            events = self._load_checkpoint_terminal_events()
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            self.log.warn("opencode.checkpoint_terminal_load_failed", exc=error)
-            return
-        for event in events:
-            await self._send_event(event)
-
-    def _remove_checkpoint_terminal_event(self, ack_id: str) -> None:
-        try:
-            retained = [
-                event
-                for event in self._load_checkpoint_terminal_events()
-                if event.get("ackId") != ack_id
-            ]
-            if not retained:
-                self.checkpoint_terminal_events_file.unlink(missing_ok=True)
-                return
-            events_temp = self.checkpoint_terminal_events_file.with_suffix(".tmp")
-            events_temp.write_text(json.dumps(retained, separators=(",", ":")))
-            events_temp.chmod(0o600)
-            events_temp.replace(self.checkpoint_terminal_events_file)
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            self.log.warn("opencode.checkpoint_terminal_ack_failed", ack_id=ack_id, exc=error)
-
-    async def _report_checkpoint_failure(
-        self, error: Exception, *, message_id: str | None = None
-    ) -> None:
-        if isinstance(error, CheckpointFailure):
-            failure = error
-        else:
-            failure = CheckpointFailure(
-                "unknown",
-                self._bounded_checkpoint_detail(str(error)),
-                checkpoint_id=f"cp_unknown_{secrets.token_hex(8)}",
-                attempt_id=f"cpa_unknown_{secrets.token_hex(8)}",
-            )
-        self.log.warn(
-            "opencode.checkpoint_failed",
-            message_id=message_id,
-            checkpoint_id=failure.checkpoint_id,
-            attempt_id=failure.attempt_id,
-            error_class=failure.error_class,
-            http_status=failure.http_status,
-            provider_code=failure.provider_code,
-            detail=failure.detail,
-        )
-        event: dict[str, Any] = {
-            "type": "checkpoint",
-            "checkpointStatus": "failed",
-            "checkpointId": failure.checkpoint_id,
-            "attemptId": failure.attempt_id,
-            "errorClass": failure.error_class,
-            "detail": failure.detail,
-            "ackId": f"checkpoint:{failure.checkpoint_id}:failed",
-        }
-        if message_id:
-            event["messageId"] = message_id
-        if failure.http_status is not None:
-            event["httpStatus"] = failure.http_status
-        if failure.provider_code is not None:
-            event["providerCode"] = failure.provider_code
-        if await self._send_checkpoint_terminal_event(event):
-            self._clear_pending_checkpoint()
-
-    def _bounded_checkpoint_detail(self, detail: str) -> str:
-        redacted = detail.replace(self.auth_token, "***") if self.auth_token else detail
-        redacted = re.sub(r"(https?://)([^/\s@]+)@", r"\1***@", redacted)
-        return redacted[: self.CHECKPOINT_DETAIL_MAX_LENGTH]
-
-    async def _save_checkpoint_or_report_failure(self, *, message_id: str | None = None) -> None:
-        try:
-            await self._export_and_upload_checkpoint()
-        except Exception as e:
-            if isinstance(e, CheckpointFailure) and e.error_class == "confirmation_unknown":
-                self.log.warn(
-                    "opencode.checkpoint_confirmation_pending",
-                    message_id=message_id,
-                    checkpoint_id=e.checkpoint_id,
-                    attempt_id=e.attempt_id,
-                )
-                return
-            await self._report_checkpoint_failure(e, message_id=message_id)
 
     async def _handle_context_compaction(self, cmd: dict[str, Any]) -> None:
         request_id = str(cmd.get("requestId") or "unknown")
@@ -1637,7 +1057,6 @@ class AgentBridge:
                         if props.get("sessionID") != self.opencode_session_id:
                             continue
                         if event_type == "session.compacted":
-                            await self._save_checkpoint_or_report_failure()
                             await self._send_event(
                                 {
                                     "type": "context_compacted",
@@ -1709,7 +1128,6 @@ class AgentBridge:
         )
 
         await self._save_session_id()
-        os.environ["OPENCODE_CONTEXT_STATUS"] = "existing"
         await self._send_event(
             {
                 "type": "opencode_session_created",
@@ -2989,7 +2407,6 @@ class AgentBridge:
             source=source,
         )
 
-        # Verify the session still exists; clear it (fresh session) if not.
         if self.http_client:
             error_message = (
                 f"OpenCode session {self.opencode_session_id} is unavailable; "
@@ -3042,12 +2459,6 @@ class AgentBridge:
                 )
                 self.opencode_session_error = error_message
                 break
-
-        if os.environ.get("OPENCODE_CONTEXT_STATUS") == "unavailable":
-            self.opencode_session_error = (
-                f"OpenCode session {self.opencode_session_id} failed checkpoint verification; "
-                "refusing to continue without its complete conversation context"
-            )
 
     async def _save_session_id(self) -> None:
         """Save OpenCode session ID to file for persistence."""
