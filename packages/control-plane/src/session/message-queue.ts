@@ -26,7 +26,7 @@ import {
 import { getAvatarUrl } from "./participant-service";
 import { resolveParticipantName } from "./participant-name";
 import { validateReasoningEffort } from "./reasoning-effort";
-import { addDuration, durationMs, epochMs } from "../time";
+import { addDuration, durationMs, elapsed, epochMs, nowMs } from "../time";
 
 interface PromptMessageData {
   requestId?: string;
@@ -46,6 +46,7 @@ interface PromptMessageData {
  */
 export const PENDING_SANDBOX_CONNECT_TIMEOUT_MS = 5 * 60 * 1000;
 export const STOP_CONFIRMATION_TIMEOUT_MS = 3_000;
+const PENDING_SANDBOX_CONNECT_TIMEOUT = durationMs(PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
 
 const MS_PER_MINUTE = 60 * 1000;
 
@@ -513,10 +514,10 @@ export class SessionMessageQueue {
     const pending = this.repository.getNextPendingMessage();
     if (!pending) return;
 
-    const now = Date.now();
-    if (now - pending.created_at < PENDING_SANDBOX_CONNECT_TIMEOUT_MS) {
+    const now = nowMs();
+    if (elapsed(epochMs(pending.created_at), now) < PENDING_SANDBOX_CONNECT_TIMEOUT) {
       await this.scheduleAlarm(
-        addDuration(epochMs(pending.created_at), durationMs(PENDING_SANDBOX_CONNECT_TIMEOUT_MS))
+        addDuration(epochMs(pending.created_at), PENDING_SANDBOX_CONNECT_TIMEOUT)
       );
       return;
     }
@@ -548,7 +549,7 @@ export class SessionMessageQueue {
     this.log.warn("prompt.pending_timeout", {
       event: "prompt.pending_timeout",
       message_id: pending.id,
-      waited_ms: now - pending.created_at,
+      waited_ms: elapsed(epochMs(pending.created_at), now),
     });
 
     this.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });

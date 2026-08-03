@@ -61,7 +61,7 @@ import type {
 } from "../types";
 import type { SqlDatabase } from "../db/sql-database";
 import type { SessionRow, ArtifactRow, SandboxRow } from "./types";
-import { durationMs, nowMs } from "../time";
+import { durationMs, elapsed, nowMs } from "../time";
 import { SessionRepository } from "./repository";
 import { resolveParticipantName } from "./participant-name";
 import { validateReasoningEffort } from "./reasoning-effort";
@@ -957,7 +957,7 @@ export class SessionDO extends DurableObject<Env> {
           outcome: "rejected",
           reject_reason: "sandbox_stopping",
           sandbox_status: sandbox.status,
-          duration_ms: Date.now() - wsStartTime,
+          duration_ms: elapsed(wsStartTime, nowMs()),
         });
         return new Response("Sandbox stop is settling", { status: 409 });
       }
@@ -973,7 +973,7 @@ export class SessionDO extends DurableObject<Env> {
           outcome: "rejected",
           reject_reason: "sandbox_stopped",
           sandbox_status: sandbox.status,
-          duration_ms: Date.now() - wsStartTime,
+          duration_ms: elapsed(wsStartTime, nowMs()),
         });
         return new Response("Sandbox is stopped", { status: 410 });
       }
@@ -987,7 +987,7 @@ export class SessionDO extends DurableObject<Env> {
           reject_reason: "sandbox_id_mismatch",
           expected_sandbox_id: expectedSandboxId,
           sandbox_id: sandboxId,
-          duration_ms: Date.now() - wsStartTime,
+          duration_ms: elapsed(wsStartTime, nowMs()),
         });
         return new Response("Forbidden: Wrong sandbox ID", { status: 403 });
       }
@@ -1000,7 +1000,7 @@ export class SessionDO extends DurableObject<Env> {
           ws_type: "sandbox",
           outcome: "auth_failed",
           reject_reason: "token_mismatch",
-          duration_ms: Date.now() - wsStartTime,
+          duration_ms: elapsed(wsStartTime, nowMs()),
         });
         return new Response("Unauthorized: Invalid auth token", { status: 401 });
       }
@@ -1030,7 +1030,7 @@ export class SessionDO extends DurableObject<Env> {
           outcome: "success",
           sandbox_id: sandboxId,
           replaced_existing: replaced,
-          duration_ms: Date.now() - wsStartTime,
+          duration_ms: elapsed(wsStartTime, nowMs()),
         });
       } else {
         const wsId = `ws-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
