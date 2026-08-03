@@ -2989,8 +2989,9 @@ class AgentBridge:
             source=source,
         )
 
-        # Verify the session still exists; clear it (fresh session) if not.
-        if self.http_client:
+        context_status = os.environ.get("OPENCODE_CONTEXT_STATUS")
+        supervisor_verified_context = context_status in {"restored", "fallback"}
+        if self.http_client and not supervisor_verified_context:
             error_message = (
                 f"OpenCode session {self.opencode_session_id} is unavailable; "
                 "refusing to continue without its conversation context"
@@ -3043,7 +3044,7 @@ class AgentBridge:
                 self.opencode_session_error = error_message
                 break
 
-        if os.environ.get("OPENCODE_CONTEXT_STATUS") == "unavailable":
+        if context_status == "unavailable":
             self.opencode_session_error = (
                 f"OpenCode session {self.opencode_session_id} failed checkpoint verification; "
                 "refusing to continue without its complete conversation context"

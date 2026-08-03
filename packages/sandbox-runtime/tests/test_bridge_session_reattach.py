@@ -68,6 +68,26 @@ class TestSessionReattach:
         assert bridge.opencode_session_id == "oc-file"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("context_status", ["restored", "fallback"])
+    async def test_uses_supervisor_verified_restored_session(self, context_status: str) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "OPENCODE_SESSION_ID": "oc-env",
+                "OPENCODE_CONTEXT_STATUS": context_status,
+            },
+            clear=False,
+        ):
+            bridge = _make_bridge()
+            bridge.http_client = _ok_client()
+
+            await bridge._load_session_id()
+
+        bridge.http_client.get.assert_not_awaited()
+        assert bridge.opencode_session_id == "oc-env"
+        assert bridge.opencode_session_error is None
+
+    @pytest.mark.asyncio
     async def test_blocks_resume_when_control_plane_session_no_longer_exists(
         self, tmp_path: Path
     ) -> None:
