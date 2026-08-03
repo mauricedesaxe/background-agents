@@ -66,6 +66,7 @@ import {
 } from "../automation/session-target";
 import type { RequestContext } from "../routes/shared";
 import { resolveGitHubEnrichment } from "../session/identity";
+import { DEFAULT_EXECUTION_TIMEOUT_MS } from "../sandbox/lifecycle/decisions";
 
 /** Max automations to process per tick (backpressure). */
 const MAX_PER_TICK = 25;
@@ -86,9 +87,6 @@ const AUTOMATION_LAUNCH_CONCURRENCY = 4;
 
 /** Threshold for detecting orphaned "starting" runs (5 minutes). */
 const ORPHAN_THRESHOLD_MS = 5 * 60 * 1000;
-
-/** Default execution timeout for detecting timed-out runs (90 minutes). */
-const DEFAULT_EXECUTION_TIMEOUT_MS = 90 * 60 * 1000;
 
 const repositorySetSchema = z.array(
   z.object({
