@@ -321,6 +321,33 @@ describe("SchedulerDO (integration)", () => {
       expect(automation!.consecutive_failures).toBe(1);
     });
 
+    it("does not recover a run during the control-plane timeout headroom", async () => {
+      const store = new AutomationStore(env.DB);
+      const now = Date.now();
+      await store.create(
+        makeAutomation({ id: "auto-headroom", next_run_at: now + 86400000, enabled: 1 })
+      );
+
+      const ninetyFiveMinutesAgo = now - 95 * 60 * 1000;
+      await seedRun(
+        makeRunRow("auto-headroom", {
+          id: "run-headroom",
+          status: "running",
+          session_id: "sess-headroom",
+          scheduled_at: ninetyFiveMinutesAgo,
+          started_at: ninetyFiveMinutesAgo,
+          created_at: ninetyFiveMinutesAgo,
+        })
+      );
+
+      const stub = getSchedulerStub();
+      const res = await stub.fetch("http://internal/internal/tick", { method: "POST" });
+      expect(res.status).toBe(200);
+
+      const run = await store.getRunById("auto-headroom", "run-headroom");
+      expect(run!.status).toBe("running");
+    });
+
     it("recovers timed-out running runs during sweep", async () => {
       const store = new AutomationStore(env.DB);
       const now = Date.now();
@@ -328,7 +355,6 @@ describe("SchedulerDO (integration)", () => {
         makeAutomation({ id: "auto-t2", next_run_at: now + 86400000, enabled: 1 })
       );
 
-      // Default EXECUTION_TIMEOUT_MS is 90 minutes
       const twoHoursAgo = now - 2 * 60 * 60 * 1000;
       await seedRun(
         makeRunRow("auto-t2", {

@@ -120,7 +120,8 @@ export interface Env {
   // Sandbox lifecycle configuration
   /** Overrides the control-plane inactivity default when set. */
   SANDBOX_INACTIVITY_TIMEOUT_MS?: string;
-  EXECUTION_TIMEOUT_MS?: string; // Max processing time before auto-fail (default: 5400000 = 90 min)
+  /** Overrides DEFAULT_EXECUTION_TIMEOUT_MS when set. */
+  EXECUTION_TIMEOUT_MS?: string;
   SECRETS_CAP_ENFORCEMENT?: string; // "enforce" (default) fails spawn/build on oversized secret payloads; set "warn" to only log
 
   // Logging
