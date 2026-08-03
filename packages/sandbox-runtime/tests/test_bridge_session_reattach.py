@@ -161,25 +161,6 @@ class TestSessionReattach:
         )
 
     @pytest.mark.asyncio
-    async def test_blocks_session_that_failed_checkpoint_graph_verification(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {
-                "OPENCODE_SESSION_ID": "oc-env",
-                "OPENCODE_CONTEXT_STATUS": "unavailable",
-            },
-            clear=False,
-        ):
-            bridge = _make_bridge()
-            bridge.http_client = _ok_client()
-            await bridge._load_session_id()
-
-        assert bridge.opencode_session_error == (
-            "OpenCode session oc-env failed checkpoint verification; "
-            "refusing to continue without its complete conversation context"
-        )
-
-    @pytest.mark.asyncio
     async def test_context_failure_keeps_one_identity_across_reconnects(self) -> None:
         received: list[dict[str, object]] = []
 
@@ -194,7 +175,7 @@ class TestSessionReattach:
 
         bridge = _make_bridge()
         bridge.opencode_session_id = "oc-env"
-        bridge.opencode_session_error = "Context could not be restored"
+        bridge.opencode_session_error = "The expected OpenCode session is unavailable"
 
         async with serve(receive_failure, "127.0.0.1", 0) as server:
             port = server.sockets[0].getsockname()[1]
@@ -209,7 +190,7 @@ class TestSessionReattach:
         assert received[0]["ackId"] == received[1]["ackId"]
 
     @pytest.mark.asyncio
-    async def test_failed_reattach_rejects_prompt_without_running_agent(self) -> None:
+    async def test_fresh_replacement_rejects_prompt_without_running_agent(self) -> None:
         bridge = _make_bridge()
         bridge.opencode_session_id = "oc-env"
         bridge.opencode_session_error = (
@@ -259,7 +240,7 @@ class TestSessionReattach:
         )
 
     @pytest.mark.asyncio
-    async def test_reports_existing_context_when_resumed_from_disk(self, tmp_path: Path) -> None:
+    async def test_same_sandbox_reports_the_session_resumed_from_disk(self, tmp_path: Path) -> None:
         received: list[dict[str, object]] = []
 
         async def receive_ready(websocket: ServerConnection) -> None:
@@ -267,7 +248,7 @@ class TestSessionReattach:
             received.append(json.loads(raw))
             await websocket.close()
 
-        with patch.dict("os.environ", {"OPENCODE_CONTEXT_STATUS": "fresh"}, clear=True):
+        with patch.dict("os.environ", {}, clear=True):
             bridge = _make_bridge()
             bridge.session_id_file = tmp_path / "opencode-session-id"
             bridge.session_id_file.write_text("oc-existing")
@@ -284,7 +265,6 @@ class TestSessionReattach:
             "type": "ready",
             "sandboxId": "test-sandbox",
             "opencodeSessionId": "oc-existing",
-            "contextStatus": "existing",
             "timestamp": ready["timestamp"],
         }
 

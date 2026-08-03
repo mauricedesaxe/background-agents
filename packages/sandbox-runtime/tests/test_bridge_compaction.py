@@ -3,7 +3,6 @@ import contextlib
 import json
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -57,7 +56,6 @@ def bridge() -> AgentBridge:
         auth_token="test-token",
     )
     instance.opencode_session_id = "oc-session-123"
-    instance._save_checkpoint_or_report_failure = AsyncMock()
     return instance
 
 
