@@ -62,32 +62,13 @@ app.post("/webhooks/github", async (c) => {
     return c.json({ error: "invalid signature" }, 401);
   }
 
-  let dedupeKey: string | null = null;
-  if (deliveryId) {
-    dedupeKey = getDeliveryDedupeKey(deliveryId);
-    const existing = await cacheStore.get(dedupeKey);
-    if (existing) {
-      log.info("webhook.duplicate_delivery", {
-        delivery_id: deliveryId,
-        event_type: event,
-        dedupe_status: existing,
-      });
-      return c.json({ ok: true, duplicate: true });
-    }
-
-    await cacheStore.put(dedupeKey, DELIVERY_STATUS_PROCESSING, {
-      expirationTtl: ttlSecondsFromMs(DELIVERY_PROCESSING_TTL_MS),
-    });
-  } else {
-    log.warn("webhook.delivery_id_missing", { event_type: event });
-  }
-
   const payload: unknown = JSON.parse(rawBody);
   const summaryResult = webhookSummaryPayloadSchema.safeParse(payload);
   const summary = summaryResult.success ? summaryResult.data : null;
   const actionResult = webhookActionPayloadSchema.safeParse(payload);
   const action = summary?.action ?? (actionResult.success ? actionResult.data.action : undefined);
   const traceId = crypto.randomUUID();
+  const normalizationPayload = actionResult.success ? actionResult.data : {};
 
   log.info("webhook.received", {
     event_type: event,
@@ -98,6 +79,35 @@ app.post("/webhooks/github", async (c) => {
       : undefined,
     action,
   });
+
+  let dedupeKey: string | null = null;
+  if (deliveryId && shouldDedupeDelivery(event, normalizationPayload)) {
+    const candidateKey = getDeliveryDedupeKey(deliveryId);
+    try {
+      const existing = await cacheStore.get(candidateKey);
+      if (existing) {
+        log.info("webhook.duplicate_delivery", {
+          delivery_id: deliveryId,
+          event_type: event,
+          dedupe_status: existing,
+        });
+        return c.json({ ok: true, duplicate: true });
+      }
+
+      await cacheStore.put(candidateKey, DELIVERY_STATUS_PROCESSING, {
+        expirationTtl: ttlSecondsFromMs(DELIVERY_PROCESSING_TTL_MS),
+      });
+      dedupeKey = candidateKey;
+    } catch (err) {
+      log.warn("webhook.dedupe_claim_failed", {
+        trace_id: traceId,
+        delivery_id: deliveryId,
+        error: err instanceof Error ? err : new Error(String(err)),
+      });
+    }
+  } else if (!deliveryId) {
+    log.warn("webhook.delivery_id_missing", { event_type: event });
+  }
 
   c.executionCtx.waitUntil(
     handleWebhook(c.env, log, event, payload, traceId, deliveryId)
@@ -139,6 +149,20 @@ app.post("/webhooks/github", async (c) => {
 
   return c.json({ ok: true });
 });
+
+function shouldDedupeDelivery(
+  event: string | undefined,
+  normalizationPayload: Record<string, unknown>
+): boolean {
+  if (event && normalizeGitHubEvent(event, normalizationPayload) !== null) return true;
+
+  const action = normalizationPayload.action;
+  return (
+    (event === "pull_request" && (action === "opened" || action === "review_requested")) ||
+    (event === "issue_comment" && action === "created") ||
+    (event === "pull_request_review_comment" && action === "created")
+  );
+}
 
 async function handleWebhook(
   env: Env,
