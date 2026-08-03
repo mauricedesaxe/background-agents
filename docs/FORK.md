@@ -334,8 +334,10 @@ upstream branch records a warning and does not prevent the session from starting
 builds, and repo-image starts still synchronize their checkout to the requested remote branch.
 
 The real-Git resume cases in `packages/sandbox-runtime/tests/test_entrypoint_build_mode.py` pin the
-workspace behavior for both restore paths. A partial checkout without a persisted OpenCode session
-remains a fresh boot and still runs setup.
+workspace behavior for both restore paths. Runtime initialization writes a session-scoped marker
+after sync and setup complete, so a persistent resume preserves terminal and code-server changes
+even when OpenCode has not created a conversation yet. A partial checkout with neither that marker
+nor a persisted OpenCode session remains a fresh boot and still runs setup.
 
 **Why.** The filesystem is the session's working state. Publishing a commit is a separate action and
 must not decide whether work survives an inactivity stop, provider restart, or snapshot restore.
