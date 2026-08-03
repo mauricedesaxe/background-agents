@@ -1,7 +1,8 @@
-import { env, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
+import { hashToken } from "../../src/auth/crypto";
+import type { SessionDO } from "../../src/session/durable-object";
 import { cleanD1Tables } from "./cleanup";
-import { initNamedSession, seedSandboxAuthHash } from "./helpers";
 
 const SANDBOX_TOKEN = "legacy-checkpoint-token";
 
@@ -10,11 +11,7 @@ describe("legacy checkpoint upload compatibility", () => {
 
   it("confirms an old bridge upload without storing recovery state", async () => {
     const sessionName = `legacy-checkpoint-${Date.now()}`;
-    const { stub } = await initNamedSession(sessionName);
-    await seedSandboxAuthHash(stub, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: `sandbox-${sessionName}`,
-    });
+    await seedSandboxAuth(sessionName);
     const checkpoint = JSON.stringify({ info: { id: "ses-legacy" }, messages: [] });
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(checkpoint));
     const checksum = Array.from(new Uint8Array(digest), (byte) =>
@@ -45,11 +42,7 @@ describe("legacy checkpoint upload compatibility", () => {
 
   it("does not serve old checkpoints for automatic restoration", async () => {
     const sessionName = `legacy-checkpoint-download-${Date.now()}`;
-    const { stub } = await initNamedSession(sessionName);
-    await seedSandboxAuthHash(stub, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: `sandbox-${sessionName}`,
-    });
+    await seedSandboxAuth(sessionName);
 
     const response = await SELF.fetch(
       `https://test.local/sessions/${sessionName}/checkpoint?generation=0`,
@@ -62,3 +55,19 @@ describe("legacy checkpoint upload compatibility", () => {
     });
   });
 });
+
+async function seedSandboxAuth(sessionName: string): Promise<void> {
+  const stub = env.SESSION.get(env.SESSION.idFromName(sessionName));
+  await stub.fetch("http://internal/internal/state");
+  const tokenHash = await hashToken(SANDBOX_TOKEN);
+
+  await runInDurableObject(stub, (instance: SessionDO) => {
+    instance.ctx.storage.sql.exec(
+      "INSERT INTO sandbox (id, auth_token_hash, modal_sandbox_id, status, created_at) VALUES (?, ?, ?, 'ready', ?)",
+      `sandbox-row-${sessionName}`,
+      tokenHash,
+      `sandbox-${sessionName}`,
+      Date.now()
+    );
+  });
+}
