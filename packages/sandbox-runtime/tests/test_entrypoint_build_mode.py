@@ -504,6 +504,33 @@ class TestNormalMode:
         supervisor.run_setup_script.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_runtime_marker_detects_resume_before_first_prompt(self, base_env, tmp_path):
+        env = {
+            **base_env,
+            "SESSION_CONFIG": json.dumps({"session_id": "session-before-prompt"}),
+        }
+        supervisor = _make_supervisor(env)
+        supervisor.runtime_started_file = tmp_path / "runtime-started"
+        supervisor.runtime_started_file.write_text("started")
+        supervisor.session_id_file = tmp_path / "missing-session-id"
+        supervisor.sync_repositories = AsyncMock(return_value=[])
+        supervisor.run_setup_script = AsyncMock(return_value=True)
+        supervisor.run_start_script = AsyncMock(return_value=True)
+        supervisor.start_code_server = AsyncMock()
+        supervisor.start_ttyd = AsyncMock()
+        supervisor.start_opencode = AsyncMock()
+        supervisor.start_bridge = AsyncMock()
+        supervisor.monitor_processes = AsyncMock()
+        supervisor.shutdown = AsyncMock()
+
+        with patch.dict(os.environ, env, clear=False):
+            await supervisor.run()
+
+        assert supervisor.boot_mode == "persistent_resume"
+        supervisor.run_setup_script.assert_not_called()
+        supervisor.run_start_script.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_clone_depth_100_in_normal_mode(self, base_env, tmp_path):
         """Normal mode should clone with --depth 100."""
         supervisor = _make_supervisor(base_env)

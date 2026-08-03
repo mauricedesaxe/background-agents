@@ -172,6 +172,12 @@ class SandboxSupervisor:
         )
         self.session_id_file = Path(tempfile.gettempdir()) / "opencode-session-id"
         self.context_unavailable_file = Path("/tmp/opencode-context-unavailable")
+        session_id = self.session_config.get("session_id")
+        self.runtime_started_file = (
+            Path(tempfile.gettempdir()) / f"openinspect-runtime-started-{session_id}"
+            if isinstance(session_id, str) and session_id
+            else None
+        )
 
         # Ordered repository list. SESSION_CONFIG.repositories is the source
         # of truth; absent, a one-entry list is synthesized from the scalar
@@ -2098,7 +2104,9 @@ class SandboxSupervisor:
             self.boot_mode = "snapshot_restore"
         elif from_repo_image:
             self.boot_mode = "repo_image"
-        elif self.session_id_file.is_file():
+        elif self.session_id_file.is_file() or (
+            self.runtime_started_file is not None and self.runtime_started_file.is_file()
+        ):
             self.boot_mode = "persistent_resume"
         else:
             self.boot_mode = "fresh"
@@ -2217,6 +2225,12 @@ class SandboxSupervisor:
                             "the session continues without it."
                         ),
                     )
+
+            if not image_build_mode and self.runtime_started_file is not None:
+                try:
+                    self.runtime_started_file.write_text("started")
+                except OSError as error:
+                    self.log.warn("supervisor.runtime_marker_write_failed", error=str(error))
 
             # Phase 3: Start hooks for all non-build boots, members in
             # position order. The primary stays fatal (a broken primary dev
