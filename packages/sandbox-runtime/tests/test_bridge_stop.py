@@ -128,6 +128,24 @@ class TestHandleStop:
         mock_task.cancel.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_handle_stop_cancels_prompt_when_abort_stalls(self, bridge: AgentBridge):
+        prompt_task = MagicMock(spec=asyncio.Task)
+        prompt_task.done.return_value = False
+        bridge._current_prompt_task = prompt_task
+        bridge.STOP_REQUEST_TIMEOUT_SECONDS = 0.01
+
+        async def stalled_abort(reason: str) -> bool:
+            await asyncio.Event().wait()
+            return True
+
+        bridge._request_opencode_stop = stalled_abort
+
+        await bridge._handle_stop()
+
+        prompt_task.cancel.assert_called_once()
+        assert bridge._prompt_stop_requested is True
+
+    @pytest.mark.asyncio
     async def test_prompt_task_cleared_on_completion(self, bridge: AgentBridge):
         """After a prompt completes normally, _current_prompt_task should be None."""
         http_client = bridge.http_client

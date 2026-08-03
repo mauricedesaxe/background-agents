@@ -308,6 +308,7 @@ class AgentBridge:
     MAX_PENDING_PART_EVENTS = 2000
     MAX_EVENT_BUFFER_SIZE = 1000
     ACK_RETRY_INTERVAL_SECONDS = 5.0
+    STOP_REQUEST_TIMEOUT_SECONDS = 1.0
     # Cap on events buffered between the SSE reader and the WebSocket sender
     # while a prompt streams. Sized generously since it only fills when the
     # send genuinely can't keep up; overflow evicts superseded events first.
@@ -2049,12 +2050,21 @@ class AgentBridge:
     async def _handle_stop(self) -> None:
         """Cancel active OpenCode work and request a server-side abort."""
         self.log.info("bridge.stop")
-        await self._request_opencode_stop(reason="command")
-        if self._current_prompt_task and not self._current_prompt_task.done():
-            self._prompt_stop_requested = True
-            self._current_prompt_task.cancel()
-        if self._current_compaction_task and not self._current_compaction_task.done():
-            self._current_compaction_task.cancel()
+        prompt_task = self._current_prompt_task
+        compaction_task = self._current_compaction_task
+        try:
+            await asyncio.wait_for(
+                self._request_opencode_stop(reason="command"),
+                timeout=self.STOP_REQUEST_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            self.log.warn("bridge.stop_request_timeout", reason="command")
+        finally:
+            if prompt_task and not prompt_task.done():
+                self._prompt_stop_requested = True
+                prompt_task.cancel()
+            if compaction_task and not compaction_task.done():
+                compaction_task.cancel()
 
     async def _handle_snapshot(self) -> None:
         """Handle snapshot command - prepare for snapshot."""
