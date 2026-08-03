@@ -1021,7 +1021,7 @@ export class SessionDO extends DurableObject<Env> {
           sandboxId ?? undefined
         );
 
-        this.updateSandboxStatus("connecting");
+        this.repository.updateSandboxConnecting(wsStartTime);
         this.broadcast({ type: "sandbox_status", status: "connecting" });
 
         log.info("ws.connect", {

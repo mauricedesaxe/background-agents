@@ -542,6 +542,14 @@ export class SessionRepository {
     );
   }
 
+  updateSandboxConnecting(createdAt: number): void {
+    this.sql.exec(
+      `UPDATE sandbox SET status = 'connecting', created_at = ?
+       WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
+      createdAt
+    );
+  }
+
   updateSandboxForSpawn(data: SpawnSandboxData): void {
     this.sql.exec(
       `UPDATE sandbox SET

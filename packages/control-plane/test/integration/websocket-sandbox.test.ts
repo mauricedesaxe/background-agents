@@ -157,6 +157,32 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     ws!.close();
   });
 
+  it("refreshes the connection attempt time before context verification", async () => {
+    const name = `ws-sandbox-reconnect-time-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    await seedSandboxAuth(stub, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+      status: "connecting",
+    });
+    await queryDO(stub, "UPDATE sandbox SET created_at = 1");
+
+    const connectedAt = Date.now();
+    const { ws } = await openSandboxWs(name, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+    });
+    ws!.accept();
+
+    await expect
+      .poll(async () => {
+        const rows = await queryDO<{ created_at: number }>(stub, "SELECT created_at FROM sandbox");
+        return rows[0]?.created_at;
+      })
+      .toBeGreaterThanOrEqual(connectedAt);
+    ws!.close();
+  });
+
   it("failed sandbox can reconnect and self-heal to ready", async () => {
     const name = `ws-sandbox-selfheal-${Date.now()}`;
     const { stub } = await initNamedSession(name);
