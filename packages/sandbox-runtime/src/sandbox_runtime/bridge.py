@@ -361,6 +361,7 @@ class AgentBridge:
     HTTP_CONNECT_TIMEOUT = 30.0
     HTTP_DEFAULT_TIMEOUT = 30.0
     OPENCODE_REQUEST_TIMEOUT = 30.0
+    SESSION_VERIFY_TIMEOUT_SECONDS = 10.0
     SESSION_VERIFY_MAX_ATTEMPTS = 2
     SESSION_VERIFY_RETRY_DELAY_SECONDS = 2.0
     GIT_PUSH_TIMEOUT_SECONDS = 300.0
@@ -2998,7 +2999,7 @@ class AgentBridge:
                 try:
                     resp = await self.http_client.get(
                         f"{self.opencode_base_url}/session/{self.opencode_session_id}",
-                        timeout=self.OPENCODE_REQUEST_TIMEOUT,
+                        timeout=self.SESSION_VERIFY_TIMEOUT_SECONDS,
                     )
                 except httpx.TimeoutException as error:
                     if attempt + 1 < self.SESSION_VERIFY_MAX_ATTEMPTS:

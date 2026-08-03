@@ -118,6 +118,7 @@ class TestSessionReattach:
         await bridge._load_session_id()
 
         assert client.get.await_count == 2
+        assert all(call.kwargs["timeout"] == 10 for call in client.get.await_args_list)
         assert bridge.opencode_session_id == "oc-env"
         assert bridge.opencode_session_error is None
 
