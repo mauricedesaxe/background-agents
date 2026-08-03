@@ -513,7 +513,10 @@ export class SessionMessageQueue {
     if (!pending) return;
 
     const now = Date.now();
-    if (now - pending.created_at < PENDING_SANDBOX_CONNECT_TIMEOUT_MS) return;
+    if (now - pending.created_at < PENDING_SANDBOX_CONNECT_TIMEOUT_MS) {
+      await this.scheduleAlarm(pending.created_at + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
+      return;
+    }
 
     this.repository.updateMessageCompletion(pending.id, "failed", now);
 

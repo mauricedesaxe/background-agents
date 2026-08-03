@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SessionMessageQueue, STOP_CONFIRMATION_TIMEOUT_MS } from "./message-queue";
+import {
+  PENDING_SANDBOX_CONNECT_TIMEOUT_MS,
+  SessionMessageQueue,
+  STOP_CONFIRMATION_TIMEOUT_MS,
+} from "./message-queue";
 import type { ClientInfo, ServerMessage } from "../types";
 import type { MessageRow, ParticipantRow, SessionRow } from "./types";
 import { PromptEnqueueRejectedError, PromptIdConflictError } from "./services/message.service";
@@ -790,17 +794,19 @@ describe("SessionMessageQueue", () => {
       expect(h.repository.updateMessageCompletion).not.toHaveBeenCalled();
     });
 
-    it("does nothing when the pending message has not aged out yet", async () => {
+    it("rearms the watchdog when another alarm fires before the pending deadline", async () => {
       const h = buildQueue();
       h.wsManager.getSandboxSocket.mockReturnValue(null);
       h.repository.getProcessingMessage.mockReturnValue(null);
+      const createdAt = Date.now();
       h.repository.getNextPendingMessage.mockReturnValue(
-        createMessage({ id: "msg-fresh", created_at: Date.now() })
+        createMessage({ id: "msg-fresh", created_at: createdAt })
       );
 
       await h.queue.failStuckPendingMessage();
 
       expect(h.repository.updateMessageCompletion).not.toHaveBeenCalled();
+      expect(h.setAlarm).toHaveBeenCalledWith(createdAt + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
     });
   });
 
