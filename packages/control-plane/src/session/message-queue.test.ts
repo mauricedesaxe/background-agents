@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SessionMessageQueue, STOP_CONFIRMATION_TIMEOUT_MS } from "./message-queue";
+import {
+  PENDING_SANDBOX_CONNECT_TIMEOUT_MS,
+  SessionMessageQueue,
+  STOP_CONFIRMATION_TIMEOUT_MS,
+} from "./message-queue";
 import type { ClientInfo, ServerMessage } from "../types";
 import type { MessageRow, ParticipantRow, SessionRow } from "./types";
 import { PromptEnqueueRejectedError, PromptIdConflictError } from "./services/message.service";
@@ -232,14 +236,15 @@ describe("SessionMessageQueue", () => {
   // watchdog here instead, so the deferred-spawn case diverges deliberately.
   it("spawns sandbox and arms the connect watchdog when there is work but no sandbox socket", async () => {
     const h = buildQueue();
-    h.repository.getNextPendingMessage.mockReturnValue(createMessage());
+    const createdAt = 42_000;
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage({ created_at: createdAt }));
 
     await h.queue.processMessageQueue();
 
     expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_spawning" });
     expect(h.spawnSandbox).toHaveBeenCalledTimes(1);
     expect(h.setAlarm).toHaveBeenCalledTimes(1);
-    expect(h.setAlarm.mock.calls[0][0]).toBeGreaterThan(Date.now());
+    expect(h.setAlarm).toHaveBeenCalledWith(createdAt + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
     expect(h.repository.updateMessageToProcessing).not.toHaveBeenCalled();
     expect(h.callbackService.notifyStarted).not.toHaveBeenCalled();
   });
@@ -676,9 +681,9 @@ describe("SessionMessageQueue", () => {
       const h = buildQueue();
       h.wsManager.getSandboxSocket.mockReturnValue(null);
       h.repository.getProcessingMessage.mockReturnValue(null);
-      h.repository.getNextPendingMessage.mockReturnValue(
-        createMessage({ id: "msg-stuck", created_at: 0 })
-      );
+      h.repository.getNextPendingMessage
+        .mockReturnValueOnce(createMessage({ id: "msg-stuck", created_at: 0 }))
+        .mockReturnValue(null);
 
       await h.queue.failStuckPendingMessage();
 
@@ -704,9 +709,9 @@ describe("SessionMessageQueue", () => {
       const h = buildQueue();
       h.wsManager.getSandboxSocket.mockReturnValue(null);
       h.repository.getProcessingMessage.mockReturnValue(null);
-      h.repository.getNextPendingMessage.mockReturnValue(
-        createMessage({ id: "msg-quota", created_at: 100 })
-      );
+      h.repository.getNextPendingMessage
+        .mockReturnValueOnce(createMessage({ id: "msg-quota", created_at: 100 }))
+        .mockReturnValue(null);
       h.repository.getSandbox.mockReturnValue({
         last_spawn_error: "Total disk limit exceeded",
         last_spawn_error_at: 100,
@@ -725,9 +730,9 @@ describe("SessionMessageQueue", () => {
       const h = buildQueue();
       h.wsManager.getSandboxSocket.mockReturnValue(null);
       h.repository.getProcessingMessage.mockReturnValue(null);
-      h.repository.getNextPendingMessage.mockReturnValue(
-        createMessage({ id: "msg-later", created_at: 100 })
-      );
+      h.repository.getNextPendingMessage
+        .mockReturnValueOnce(createMessage({ id: "msg-later", created_at: 100 }))
+        .mockReturnValue(null);
       // Error recorded before this prompt was queued: a stale cause, not this one.
       h.repository.getSandbox.mockReturnValue({
         last_spawn_error: "Total disk limit exceeded",
@@ -749,9 +754,9 @@ describe("SessionMessageQueue", () => {
       const h = buildQueue();
       h.wsManager.getSandboxSocket.mockReturnValue(null);
       h.repository.getProcessingMessage.mockReturnValue(null);
-      h.repository.getNextPendingMessage.mockReturnValue(
-        createMessage({ id: "msg-timeout", created_at: 0 })
-      );
+      h.repository.getNextPendingMessage
+        .mockReturnValueOnce(createMessage({ id: "msg-timeout", created_at: 0 }))
+        .mockReturnValue(null);
       h.repository.getSandbox.mockReturnValue({
         last_spawn_error: null,
         last_spawn_error_at: null,
@@ -790,17 +795,66 @@ describe("SessionMessageQueue", () => {
       expect(h.repository.updateMessageCompletion).not.toHaveBeenCalled();
     });
 
-    it("does nothing when the pending message has not aged out yet", async () => {
+    it("rearms the persisted deadline when another alarm fires first", async () => {
       const h = buildQueue();
       h.wsManager.getSandboxSocket.mockReturnValue(null);
       h.repository.getProcessingMessage.mockReturnValue(null);
+      const createdAt = Date.now();
       h.repository.getNextPendingMessage.mockReturnValue(
-        createMessage({ id: "msg-fresh", created_at: Date.now() })
+        createMessage({ id: "msg-fresh", created_at: createdAt })
       );
 
       await h.queue.failStuckPendingMessage();
 
       expect(h.repository.updateMessageCompletion).not.toHaveBeenCalled();
+      expect(h.setAlarm).toHaveBeenCalledWith(createdAt + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
+    });
+
+    it("arms the next pending deadline after failing an expired prompt", async () => {
+      const h = buildQueue();
+      const nextCreatedAt = Date.now();
+      h.wsManager.getSandboxSocket.mockReturnValue(null);
+      h.repository.getProcessingMessage.mockReturnValue(null);
+      h.repository.getNextPendingMessage
+        .mockReturnValueOnce(createMessage({ id: "msg-expired", created_at: 0 }))
+        .mockReturnValueOnce(createMessage({ id: "msg-next", created_at: nextCreatedAt }));
+
+      await h.queue.failStuckPendingMessage();
+
+      expect(h.repository.updateMessageCompletion).toHaveBeenCalledTimes(1);
+      expect(h.repository.updateMessageCompletion).toHaveBeenCalledWith(
+        "msg-expired",
+        "failed",
+        expect.any(Number)
+      );
+      expect(h.setAlarm).toHaveBeenCalledWith(nextCreatedAt + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
+    });
+
+    it("fails an already-expired follower in the same alarm pass", async () => {
+      const h = buildQueue();
+      h.wsManager.getSandboxSocket.mockReturnValue(null);
+      h.repository.getProcessingMessage.mockReturnValue(null);
+      h.repository.getNextPendingMessage
+        .mockReturnValueOnce(createMessage({ id: "msg-expired-first", created_at: 0 }))
+        .mockReturnValueOnce(createMessage({ id: "msg-expired-second", created_at: 1 }))
+        .mockReturnValue(null);
+
+      await h.queue.failStuckPendingMessage();
+
+      expect(h.repository.updateMessageCompletion).toHaveBeenCalledTimes(2);
+      expect(h.repository.updateMessageCompletion).toHaveBeenNthCalledWith(
+        1,
+        "msg-expired-first",
+        "failed",
+        expect.any(Number)
+      );
+      expect(h.repository.updateMessageCompletion).toHaveBeenNthCalledWith(
+        2,
+        "msg-expired-second",
+        "failed",
+        expect.any(Number)
+      );
+      expect(h.setAlarm).not.toHaveBeenCalled();
     });
   });
 

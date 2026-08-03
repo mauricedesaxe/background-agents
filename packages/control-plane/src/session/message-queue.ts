@@ -315,7 +315,7 @@ export class SessionMessageQueue {
       // connected sandbox eventually fails the message instead of stalling
       // silently. A successful connect moves the message to `processing`, which
       // neutralizes the watchdog (it only acts on a still-pending message).
-      await this.scheduleAlarm(now + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
+      await this.scheduleAlarm(message.created_at + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
       await this.sandboxLifecycle.spawnSandbox();
       return;
     }
@@ -492,16 +492,10 @@ export class SessionMessageQueue {
   }
 
   /**
-   * Watchdog for a pending message whose sandbox never connected.
-   *
-   * Mirrors {@link failStuckProcessingMessage} but targets `pending`: if a
-   * message has been waiting past PENDING_SANDBOX_CONNECT_TIMEOUT_MS with no
-   * sandbox connected and nothing processing, mark it failed and persist a
-   * durable `execution_complete` error event (the same store `getReplay`
-   * reads) so a reconnecting client sees the failure rather than a silent
-   * stall. No-op when a sandbox connected, something is processing, or the
-   * pending message hasn't actually aged out — all of which mean the normal
-   * dispatch path is (or already was) handling it.
+   * The DO's single alarm slot is shared with lifecycle work, so each prompt's
+   * persisted creation time remains the source of truth. Reconstructing the
+   * next deadline on every wake prevents an unrelated alarm or an older queued
+   * prompt from consuming the only watchdog.
    */
   async failStuckPendingMessage(): Promise<void> {
     // A connected sandbox or an in-flight message means dispatch is handling
@@ -513,7 +507,10 @@ export class SessionMessageQueue {
     if (!pending) return;
 
     const now = Date.now();
-    if (now - pending.created_at < PENDING_SANDBOX_CONNECT_TIMEOUT_MS) return;
+    if (now - pending.created_at < PENDING_SANDBOX_CONNECT_TIMEOUT_MS) {
+      await this.scheduleAlarm(pending.created_at + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
+      return;
+    }
 
     this.repository.updateMessageCompletion(pending.id, "failed", now);
 
@@ -550,6 +547,7 @@ export class SessionMessageQueue {
     this.broadcastPromptQueue();
     this.ctx.waitUntil(this.callbackService.notifyComplete(pending.id, false, timeoutError));
     await this.sessionStatus.reconcileAfterExecution(false);
+    await this.failStuckPendingMessage();
   }
 
   failMessagesForContextLoss(failure: string, createdBeforeOrAt: number): Promise<void> {
