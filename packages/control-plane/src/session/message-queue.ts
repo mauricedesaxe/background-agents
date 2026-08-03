@@ -26,6 +26,7 @@ import {
 import { getAvatarUrl } from "./participant-service";
 import { resolveParticipantName } from "./participant-name";
 import { validateReasoningEffort } from "./reasoning-effort";
+import { addDuration, durationMs, epochMs } from "../time";
 
 interface PromptMessageData {
   requestId?: string;
@@ -514,7 +515,9 @@ export class SessionMessageQueue {
 
     const now = Date.now();
     if (now - pending.created_at < PENDING_SANDBOX_CONNECT_TIMEOUT_MS) {
-      await this.scheduleAlarm(pending.created_at + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
+      await this.scheduleAlarm(
+        addDuration(epochMs(pending.created_at), durationMs(PENDING_SANDBOX_CONNECT_TIMEOUT_MS))
+      );
       return;
     }
 

@@ -61,7 +61,7 @@ import type {
 } from "../types";
 import type { SqlDatabase } from "../db/sql-database";
 import type { SessionRow, ArtifactRow, SandboxRow } from "./types";
-import { durationMs } from "../time";
+import { durationMs, nowMs } from "../time";
 import { SessionRepository } from "./repository";
 import { resolveParticipantName } from "./participant-name";
 import { validateReasoningEffort } from "./reasoning-effort";
@@ -936,7 +936,7 @@ export class SessionDO extends DurableObject<Env> {
   private async handleWebSocketUpgrade(request: Request, url: URL, log: Logger): Promise<Response> {
     log.debug("WebSocket upgrade requested");
     const isSandbox = url.searchParams.get("type") === "sandbox";
-    const wsStartTime = Date.now();
+    const wsStartTime = nowMs();
 
     // Validate sandbox authentication
     if (isSandbox) {
@@ -1021,7 +1021,7 @@ export class SessionDO extends DurableObject<Env> {
           sandboxId ?? undefined
         );
 
-        this.repository.updateSandboxConnecting(wsStartTime);
+        this.repository.startSandboxConnectionAttempt(wsStartTime);
         this.broadcast({ type: "sandbox_status", status: "connecting" });
 
         log.info("ws.connect", {

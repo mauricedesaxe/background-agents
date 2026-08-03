@@ -7,6 +7,7 @@ import {
 import type { ClientInfo, ServerMessage } from "../types";
 import type { MessageRow, ParticipantRow, SessionRow } from "./types";
 import { PromptEnqueueRejectedError, PromptIdConflictError } from "./services/message.service";
+import { addDuration, durationMs, epochMs } from "../time";
 
 const EXECUTION_TIMEOUT_MS = 60_000;
 
@@ -806,7 +807,9 @@ describe("SessionMessageQueue", () => {
       await h.queue.failStuckPendingMessage();
 
       expect(h.repository.updateMessageCompletion).not.toHaveBeenCalled();
-      expect(h.setAlarm).toHaveBeenCalledWith(createdAt + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
+      expect(h.setAlarm).toHaveBeenCalledWith(
+        addDuration(epochMs(createdAt), durationMs(PENDING_SANDBOX_CONNECT_TIMEOUT_MS))
+      );
     });
   });
 

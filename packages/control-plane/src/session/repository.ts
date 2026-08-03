@@ -30,6 +30,7 @@ import {
   type EventTimelineCursor,
 } from "./event-cursor";
 import { buildSessionRepositories, type SessionRepositoryEntry } from "./repository-target";
+import type { EpochMs } from "../time";
 
 type TokenEvent = Extract<SandboxEvent, { type: "token" }>;
 type ExecutionCompleteEvent = Extract<SandboxEvent, { type: "execution_complete" }>;
@@ -542,11 +543,11 @@ export class SessionRepository {
     );
   }
 
-  updateSandboxConnecting(createdAt: number): void {
+  startSandboxConnectionAttempt(startedAt: EpochMs): void {
     this.sql.exec(
       `UPDATE sandbox SET status = 'connecting', created_at = ?
        WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
-      createdAt
+      startedAt
     );
   }
 
