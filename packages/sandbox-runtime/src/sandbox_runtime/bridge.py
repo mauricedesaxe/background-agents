@@ -361,6 +361,8 @@ class AgentBridge:
     HTTP_CONNECT_TIMEOUT = 30.0
     HTTP_DEFAULT_TIMEOUT = 30.0
     OPENCODE_REQUEST_TIMEOUT = 30.0
+    SESSION_VERIFY_MAX_ATTEMPTS = 2
+    SESSION_VERIFY_RETRY_DELAY_SECONDS = 2.0
     GIT_PUSH_TIMEOUT_SECONDS = 300.0
     GIT_PUSH_TERMINATE_GRACE_SECONDS = 5.0
     JJ_COMMAND_TIMEOUT_SECONDS = 30.0
@@ -2988,34 +2990,57 @@ class AgentBridge:
 
         # Verify the session still exists; clear it (fresh session) if not.
         if self.http_client:
-            try:
-                resp = await self.http_client.get(
-                    f"{self.opencode_base_url}/session/{self.opencode_session_id}",
-                    timeout=self.OPENCODE_REQUEST_TIMEOUT,
-                )
-                if resp.status_code != 200:
-                    error_message = (
-                        f"OpenCode session {self.opencode_session_id} is unavailable; "
-                        "refusing to continue without its conversation context"
+            error_message = (
+                f"OpenCode session {self.opencode_session_id} is unavailable; "
+                "refusing to continue without its conversation context"
+            )
+            for attempt in range(self.SESSION_VERIFY_MAX_ATTEMPTS):
+                try:
+                    resp = await self.http_client.get(
+                        f"{self.opencode_base_url}/session/{self.opencode_session_id}",
+                        timeout=self.OPENCODE_REQUEST_TIMEOUT,
                     )
+                except httpx.TimeoutException as error:
+                    if attempt + 1 < self.SESSION_VERIFY_MAX_ATTEMPTS:
+                        self.log.warn(
+                            "opencode.session.verify_retry",
+                            exc=error,
+                            opencode_session_id=self.opencode_session_id,
+                            source=source,
+                            attempt=attempt + 1,
+                            max_attempts=self.SESSION_VERIFY_MAX_ATTEMPTS,
+                            delay_s=self.SESSION_VERIFY_RETRY_DELAY_SECONDS,
+                        )
+                        await asyncio.sleep(self.SESSION_VERIFY_RETRY_DELAY_SECONDS)
+                        continue
                     self.log.error(
-                        "opencode.session.invalid",
+                        "opencode.session.verify_error",
+                        exc=error,
                         opencode_session_id=self.opencode_session_id,
                         source=source,
-                        status_code=resp.status_code,
                     )
                     self.opencode_session_error = error_message
-            except Exception as e:
+                    break
+                except Exception as error:
+                    self.log.error(
+                        "opencode.session.verify_error",
+                        exc=error,
+                        opencode_session_id=self.opencode_session_id,
+                        source=source,
+                    )
+                    self.opencode_session_error = error_message
+                    break
+
+                if resp.status_code == 200:
+                    break
                 self.log.error(
-                    "opencode.session.verify_error",
-                    exc=e,
+                    "opencode.session.invalid",
                     opencode_session_id=self.opencode_session_id,
                     source=source,
+                    status_code=resp.status_code,
                 )
-                self.opencode_session_error = (
-                    f"OpenCode session {self.opencode_session_id} is unavailable; "
-                    "refusing to continue without its conversation context"
-                )
+                self.opencode_session_error = error_message
+                break
 
         if os.environ.get("OPENCODE_CONTEXT_STATUS") == "unavailable":
             self.opencode_session_error = (
