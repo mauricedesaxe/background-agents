@@ -181,6 +181,62 @@ describe("POST /webhooks/github", () => {
     expect(githubKv.put).toHaveBeenCalledTimes(2);
   });
 
+  it("handles actionable deliveries when the dedupe claim fails", async () => {
+    const body = JSON.stringify({
+      action: "created",
+      issue: {
+        number: 42,
+        title: "Review this change",
+        body: null,
+        pull_request: { url: "https://api.github.com/repos/test/repo/pulls/42" },
+      },
+      comment: {
+        id: 99,
+        body: "@test-bot[bot] review this PR",
+        user: { login: "alice" },
+      },
+      repository: {
+        owner: { login: "test" },
+        name: "repo",
+        private: false,
+        default_branch: "main",
+      },
+      sender: {
+        login: "alice",
+        id: 123,
+        avatar_url: "https://avatars.githubusercontent.com/u/123",
+      },
+    });
+    const signature = await sign(SECRET, body);
+    const ctx = makeCtx();
+    const env = makeEnv();
+    const githubKv = env.GITHUB_KV as unknown as {
+      put: ReturnType<typeof vi.fn>;
+    };
+    githubKv.put.mockRejectedValueOnce(new Error("KV put() limit exceeded for the day"));
+
+    const response = await app.fetch(
+      new Request("http://localhost/webhooks/github", {
+        method: "POST",
+        body,
+        headers: {
+          "X-Hub-Signature-256": signature,
+          "X-GitHub-Event": "issue_comment",
+          "X-GitHub-Delivery": "delivery-quota-exceeded",
+        },
+      }),
+      env,
+      ctx
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+    expect(ctx.waitUntil).toHaveBeenCalledOnce();
+    await flushWaitUntil(ctx);
+    expect(handleIssueCommentMock).toHaveBeenCalledOnce();
+    expect(githubKv.put).toHaveBeenCalledOnce();
+  });
+
   it("allows redelivery after async processing failure clears the marker", async () => {
     const body = JSON.stringify({
       action: "opened",
@@ -234,6 +290,7 @@ describe("POST /webhooks/github", () => {
     const body = '{"action":"opened"}';
     const signature = await sign(SECRET, body);
     const ctx = makeCtx();
+    const env = makeEnv();
 
     const res = await app.fetch(
       new Request("http://localhost/webhooks/github", {
@@ -242,15 +299,22 @@ describe("POST /webhooks/github", () => {
         headers: {
           "X-Hub-Signature-256": signature,
           "X-GitHub-Event": "push",
+          "X-GitHub-Delivery": "ignored-delivery",
         },
       }),
-      makeEnv(),
+      env,
       ctx
     );
 
     expect(res.status).toBe(200);
     expect(ctx.waitUntil).toHaveBeenCalledOnce();
     await flushWaitUntil(ctx);
+    const githubKv = env.GITHUB_KV as unknown as {
+      get: ReturnType<typeof vi.fn>;
+      put: ReturnType<typeof vi.fn>;
+    };
+    expect(githubKv.get).not.toHaveBeenCalled();
+    expect(githubKv.put).not.toHaveBeenCalled();
   });
 
   it("returns 200 for handled event with non-matching action", async () => {
