@@ -1557,7 +1557,7 @@ class SandboxSupervisor:
                 verify_process.kill()
                 await verify_process.wait()
                 return "unavailable"
-            if verify_process.returncode != 0 or not self._checkpoints_equal(
+            if verify_process.returncode != 0 or not self._checkpoint_roundtrip_matches(
                 checkpoint, verify_stdout
             ):
                 return "rejected"
@@ -1584,11 +1584,30 @@ class SandboxSupervisor:
         )
 
     @staticmethod
-    def _checkpoints_equal(expected: bytes, actual: bytes) -> bool:
+    def _checkpoint_roundtrip_matches(expected: bytes, actual: bytes) -> bool:
+        """Allow OpenCode to rebind an imported session to the replacement workspace."""
         try:
-            return json.loads(expected) == json.loads(actual)
+            expected_checkpoint = json.loads(expected)
+            actual_checkpoint = json.loads(actual)
         except (json.JSONDecodeError, UnicodeDecodeError):
             return False
+        if not isinstance(expected_checkpoint, dict) or not isinstance(actual_checkpoint, dict):
+            return False
+        expected_info = expected_checkpoint.get("info")
+        actual_info = actual_checkpoint.get("info")
+        if not isinstance(expected_info, dict) or not isinstance(actual_info, dict):
+            return False
+        if not all(
+            isinstance(info.get("projectID"), str) and info["projectID"].strip()
+            for info in (expected_info, actual_info)
+        ):
+            return False
+
+        expected_checkpoint = {**expected_checkpoint, "info": dict(expected_info)}
+        actual_checkpoint = {**actual_checkpoint, "info": dict(actual_info)}
+        expected_checkpoint["info"].pop("projectID", None)
+        actual_checkpoint["info"].pop("projectID", None)
+        return expected_checkpoint == actual_checkpoint
 
     async def _forward_opencode_logs(self) -> None:
         """Forward OpenCode stdout to supervisor stdout."""
