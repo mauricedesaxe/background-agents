@@ -1017,22 +1017,22 @@ describe("evaluateWarmDecision", () => {
 
 describe("evaluateExecutionTimeout", () => {
   const config: ExecutionTimeoutConfig = {
-    timeoutMs: DEFAULT_EXECUTION_TIMEOUT_MS, // 90 minutes
+    timeoutMs: DEFAULT_EXECUTION_TIMEOUT_MS,
   };
 
-  it("returns not timed out within threshold", () => {
+  it("does not preempt the bridge at its 90-minute deadline", () => {
     const now = Date.now();
-    const startedAt = now - 60000; // 1 minute ago
+    const startedAt = now - 90 * 60 * 1000;
 
     const result = evaluateExecutionTimeout(startedAt, config, now);
 
     expect(result.isTimedOut).toBe(false);
-    expect(result.elapsedMs).toBe(60000);
+    expect(result.elapsedMs).toBe(90 * 60 * 1000);
   });
 
-  it("returns timed out past threshold", () => {
+  it("returns timed out past the configured threshold", () => {
     const now = Date.now();
-    const startedAt = now - DEFAULT_EXECUTION_TIMEOUT_MS - 1000; // Just past 90 minutes
+    const startedAt = now - DEFAULT_EXECUTION_TIMEOUT_MS - 1000;
 
     const result = evaluateExecutionTimeout(startedAt, config, now);
 
@@ -1040,7 +1040,7 @@ describe("evaluateExecutionTimeout", () => {
     expect(result.elapsedMs).toBe(DEFAULT_EXECUTION_TIMEOUT_MS + 1000);
   });
 
-  it("returns timed out at exact threshold", () => {
+  it("returns timed out at the configured threshold", () => {
     const now = Date.now();
     const startedAt = now - DEFAULT_EXECUTION_TIMEOUT_MS;
 
