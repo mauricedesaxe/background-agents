@@ -44,7 +44,7 @@ describe("pending prompt connection deadline", () => {
       }),
     });
     const { messageId } = await promptResponse.json<{ messageId: string }>();
-    const deadlineAt = Date.now() + TEST_DEADLINE_MARGIN_MS;
+    const deadlineAtMs = Date.now() + TEST_DEADLINE_MARGIN_MS;
     await queryDO(
       stub,
       `UPDATE sandbox
@@ -54,7 +54,7 @@ describe("pending prompt connection deadline", () => {
     );
 
     await runInDurableObject(stub, async (_instance: SessionDO, state) => {
-      await state.storage.put("pendingSandboxConnectDeadline", { messageId, deadlineAt });
+      await state.storage.put("pendingSandboxConnectDeadline", { messageId, deadlineAtMs });
       await state.storage.setAlarm(Date.now() + UNRELATED_ALARM_DELAY_MS);
     });
     expect(await runDurableObjectAlarm(stub)).toBe(true);
@@ -65,7 +65,7 @@ describe("pending prompt connection deadline", () => {
     await waitForSandboxStatus(stub, "failed");
     expect(
       await runInDurableObject(stub, (_instance: SessionDO, state) => state.storage.getAlarm())
-    ).toBe(deadlineAt);
+    ).toBe(deadlineAtMs);
 
     const { ws: clientWs } = await openClientWs(name, { subscribe: true });
     const terminalEvent = collectMessages(clientWs, {
@@ -74,7 +74,7 @@ describe("pending prompt connection deadline", () => {
         (message.event as { type?: string } | undefined)?.type === "execution_complete",
     });
     await new Promise((resolve) =>
-      setTimeout(resolve, Math.max(0, deadlineAt - Date.now()) + DEADLINE_SETTLE_DELAY_MS)
+      setTimeout(resolve, Math.max(0, deadlineAtMs - Date.now()) + DEADLINE_SETTLE_DELAY_MS)
     );
     expect(await runDurableObjectAlarm(stub)).toBe(true);
 
@@ -159,7 +159,7 @@ describe("pending prompt connection deadline", () => {
     });
     const { messageId: secondMessageId } = await secondResponse.json<{ messageId: string }>();
 
-    const firstDeadlineAt = Date.now() - 1;
+    const firstDeadlineAtMs = Date.now() - 1;
     await queryDO(
       stub,
       `UPDATE sandbox
@@ -169,7 +169,7 @@ describe("pending prompt connection deadline", () => {
     await runInDurableObject(stub, async (_instance: SessionDO, state) => {
       await state.storage.put("pendingSandboxConnectDeadline", {
         messageId: firstMessageId,
-        deadlineAt: firstDeadlineAt,
+        deadlineAtMs: firstDeadlineAtMs,
       });
       await state.storage.setAlarm(Date.now() + UNRELATED_ALARM_DELAY_MS);
     });

@@ -697,7 +697,7 @@ describe("SessionMessageQueue", () => {
       const h = buildQueue();
       h.storageValues.set("pendingSandboxConnectDeadline", {
         messageId: "msg-stuck",
-        deadlineAt: 0,
+        deadlineAtMs: 0,
       });
       h.wsManager.getSandboxSocket.mockReturnValue(null);
       h.repository.getProcessingMessage.mockReturnValue(null);
@@ -729,7 +729,7 @@ describe("SessionMessageQueue", () => {
       const h = buildQueue();
       h.storageValues.set("pendingSandboxConnectDeadline", {
         messageId: "msg-quota",
-        deadlineAt: 0,
+        deadlineAtMs: 0,
       });
       h.wsManager.getSandboxSocket.mockReturnValue(null);
       h.repository.getProcessingMessage.mockReturnValue(null);
@@ -754,7 +754,7 @@ describe("SessionMessageQueue", () => {
       const h = buildQueue();
       h.storageValues.set("pendingSandboxConnectDeadline", {
         messageId: "msg-later",
-        deadlineAt: 0,
+        deadlineAtMs: 0,
       });
       h.wsManager.getSandboxSocket.mockReturnValue(null);
       h.repository.getProcessingMessage.mockReturnValue(null);
@@ -782,7 +782,7 @@ describe("SessionMessageQueue", () => {
       const h = buildQueue();
       h.storageValues.set("pendingSandboxConnectDeadline", {
         messageId: "msg-timeout",
-        deadlineAt: 0,
+        deadlineAtMs: 0,
       });
       h.wsManager.getSandboxSocket.mockReturnValue(null);
       h.repository.getProcessingMessage.mockReturnValue(null);
@@ -831,10 +831,10 @@ describe("SessionMessageQueue", () => {
       const h = buildQueue();
       h.wsManager.getSandboxSocket.mockReturnValue(null);
       h.repository.getProcessingMessage.mockReturnValue(null);
-      const deadlineAt = Date.now() + PENDING_SANDBOX_CONNECT_TIMEOUT_MS;
+      const deadlineAtMs = Date.now() + PENDING_SANDBOX_CONNECT_TIMEOUT_MS;
       h.storageValues.set("pendingSandboxConnectDeadline", {
         messageId: "msg-fresh",
-        deadlineAt,
+        deadlineAtMs,
       });
       h.repository.getNextPendingMessage.mockReturnValue(
         createMessage({ id: "msg-fresh", created_at: 0 })
@@ -843,14 +843,14 @@ describe("SessionMessageQueue", () => {
       await h.queue.failStuckPendingMessage();
 
       expect(h.repository.updateMessageCompletion).not.toHaveBeenCalled();
-      expect(h.setAlarm).toHaveBeenCalledWith(deadlineAt);
+      expect(h.setAlarm).toHaveBeenCalledWith(deadlineAtMs);
     });
 
     it("gives the next pending prompt a full connection window", async () => {
       const h = buildQueue();
       h.storageValues.set("pendingSandboxConnectDeadline", {
         messageId: "msg-expired",
-        deadlineAt: 0,
+        deadlineAtMs: 0,
       });
       const before = Date.now();
       h.wsManager.getSandboxSocket.mockReturnValue(null);
@@ -876,7 +876,7 @@ describe("SessionMessageQueue", () => {
       const h = buildQueue();
       h.storageValues.set("pendingSandboxConnectDeadline", {
         messageId: "msg-expired-first",
-        deadlineAt: 0,
+        deadlineAtMs: 0,
       });
       h.wsManager.getSandboxSocket.mockReturnValue(null);
       h.repository.getProcessingMessage.mockReturnValue(null);

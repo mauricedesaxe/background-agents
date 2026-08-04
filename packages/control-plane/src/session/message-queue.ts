@@ -11,6 +11,7 @@ import type { PromptSnapshotItem, SessionAttachmentReference } from "@open-inspe
 import type { ClientInfo, MessageSource, SandboxEvent, ServerMessage } from "../types";
 import type { SourceControlProviderName } from "../source-control";
 import type { SandboxLifecycle, SandboxTerminationReason } from "../sandbox/lifecycle/manager";
+import { addDuration, durationMs, elapsed, nowMs, type EpochMs } from "../time";
 import type { MessageRow, ParticipantRow, SandboxCommand } from "./types";
 import type { SessionRepository } from "./repository";
 import type { SessionMessenger } from "./messenger";
@@ -43,7 +44,7 @@ interface PromptMessageData {
  * mid-reconnect. This is intentionally generous — cold boots plus git sync can
  * take a while — and only fires when nothing has started processing.
  */
-export const PENDING_SANDBOX_CONNECT_TIMEOUT_MS = 5 * 60 * 1000;
+export const PENDING_SANDBOX_CONNECT_TIMEOUT_MS = durationMs(5 * 60 * 1000);
 export const STOP_CONFIRMATION_TIMEOUT_MS = 3_000;
 
 const MS_PER_MINUTE = 60 * 1000;
@@ -51,7 +52,7 @@ const PENDING_SANDBOX_CONNECT_DEADLINE_KEY = "pendingSandboxConnectDeadline";
 
 interface PendingSandboxConnectDeadline {
   messageId: string;
-  deadlineAt: number;
+  deadlineAtMs: EpochMs;
 }
 
 /**
@@ -127,18 +128,18 @@ export class SessionMessageQueue {
     }
   }
 
-  private async getPendingConnectDeadline(messageId: string, now: number): Promise<number> {
+  private async getPendingConnectDeadlineMs(messageId: string, now: EpochMs): Promise<EpochMs> {
     const stored = await this.ctx.storage.get<PendingSandboxConnectDeadline>(
       PENDING_SANDBOX_CONNECT_DEADLINE_KEY
     );
-    if (stored?.messageId === messageId) return stored.deadlineAt;
+    if (stored?.messageId === messageId) return stored.deadlineAtMs;
 
-    const deadlineAt = now + PENDING_SANDBOX_CONNECT_TIMEOUT_MS;
+    const deadlineAtMs = addDuration(now, PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
     await this.ctx.storage.put(PENDING_SANDBOX_CONNECT_DEADLINE_KEY, {
       messageId,
-      deadlineAt,
+      deadlineAtMs,
     } satisfies PendingSandboxConnectDeadline);
-    return deadlineAt;
+    return deadlineAtMs;
   }
 
   private async clearPendingConnectDeadline(messageId: string): Promise<void> {
@@ -156,7 +157,7 @@ export class SessionMessageQueue {
     data: PromptMessageData
   ): Promise<void> {
     const messageId = data.requestId ?? generateId();
-    const now = Date.now();
+    const now = nowMs();
 
     if (this.repository.getSession()?.status === "cancelled") {
       this.wsManager.send(ws, {
@@ -329,7 +330,7 @@ export class SessionMessageQueue {
     if (!message) {
       return;
     }
-    const now = Date.now();
+    const now = nowMs();
 
     const sandboxWs = this.wsManager.getSandboxSocket();
     if (!sandboxWs) {
@@ -340,8 +341,8 @@ export class SessionMessageQueue {
         reason: "no_sandbox",
       });
       this.messenger.broadcast({ type: "sandbox_spawning" });
-      const deadlineAt = await this.getPendingConnectDeadline(message.id, now);
-      await this.scheduleAlarm(deadlineAt);
+      const deadlineAtMs = await this.getPendingConnectDeadlineMs(message.id, now);
+      await this.scheduleAlarm(deadlineAtMs);
       await this.sandboxLifecycle.spawnSandbox();
       return;
     }
@@ -352,7 +353,7 @@ export class SessionMessageQueue {
     this.broadcastPromptQueue();
     this.sandboxLifecycle.updateLastActivity(now);
 
-    await this.scheduleAlarm(now + this.executionTimeoutMs);
+    await this.scheduleAlarm(addDuration(now, durationMs(this.executionTimeoutMs)));
 
     const author = this.repository.getParticipantById(message.author_id);
     const session = this.repository.getSession();
@@ -527,10 +528,10 @@ export class SessionMessageQueue {
     const pending = this.repository.getNextPendingMessage();
     if (!pending) return;
 
-    const now = Date.now();
-    const deadlineAt = await this.getPendingConnectDeadline(pending.id, now);
-    if (now < deadlineAt) {
-      await this.scheduleAlarm(deadlineAt);
+    const now = nowMs();
+    const deadlineAtMs = await this.getPendingConnectDeadlineMs(pending.id, now);
+    if (now < deadlineAtMs) {
+      await this.scheduleAlarm(deadlineAtMs);
       return;
     }
 
@@ -562,7 +563,10 @@ export class SessionMessageQueue {
     this.log.warn("prompt.pending_timeout", {
       event: "prompt.pending_timeout",
       message_id: pending.id,
-      waited_ms: now - (deadlineAt - PENDING_SANDBOX_CONNECT_TIMEOUT_MS),
+      waited_ms: elapsed(
+        addDuration(deadlineAtMs, durationMs(-PENDING_SANDBOX_CONNECT_TIMEOUT_MS)),
+        now
+      ),
     });
 
     this.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });
