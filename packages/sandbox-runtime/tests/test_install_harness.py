@@ -324,6 +324,10 @@ class TestPinnedHarness:
         complexity = (opencode / "agents" / "complexity-reviewer.md").read_text()
         assert "mode: subagent" in complexity
 
+        assert "### Writing to me" in instructions  # the register this pin was moved to deliver
+        standup = (opencode / "skills" / "lazar-standup" / "SKILL.md").read_text()
+        assert "mergedBy" in standup  # the widened gather, the other half of the same bump
+
 
 class TestScriptIsExecutable:
     def test_script_has_execute_bit(self):
