@@ -33,6 +33,20 @@ def _ok_client() -> AsyncMock:
 
 
 class TestSessionReattach:
+    @pytest.mark.asyncio
+    async def test_verification_restart_closes_http_client(self) -> None:
+        bridge = _make_bridge()
+        bridge._load_session_id = AsyncMock(side_effect=RuntimeError("verification failed"))
+        client = AsyncMock()
+
+        with (
+            patch("sandbox_runtime.bridge.httpx.AsyncClient", return_value=client),
+            pytest.raises(RuntimeError, match="verification failed"),
+        ):
+            await bridge.run()
+
+        client.aclose.assert_awaited_once()
+
     def test_env_var_captured_in_init(self) -> None:
         with patch.dict("os.environ", {"OPENCODE_SESSION_ID": "oc-env"}, clear=False):
             bridge = _make_bridge()
@@ -123,7 +137,7 @@ class TestSessionReattach:
         assert bridge.opencode_session_error is None
 
     @pytest.mark.asyncio
-    async def test_blocks_resume_after_session_verification_timeouts_are_exhausted(self) -> None:
+    async def test_restarts_after_session_verification_timeouts_are_exhausted(self) -> None:
         with patch.dict("os.environ", {"OPENCODE_SESSION_ID": "oc-env"}, clear=False):
             bridge = _make_bridge()
         client = AsyncMock()
@@ -136,29 +150,41 @@ class TestSessionReattach:
         bridge.http_client = client
         bridge.SESSION_VERIFY_RETRY_DELAY_SECONDS = 0
 
-        await bridge._load_session_id()
+        with pytest.raises(RuntimeError, match="Could not verify OpenCode session oc-env"):
+            await bridge._load_session_id()
 
         assert client.get.await_count == 2
-        assert bridge.opencode_session_error == (
-            "OpenCode session oc-env is unavailable; "
-            "refusing to continue without its conversation context"
-        )
+        assert bridge.opencode_session_error is None
 
     @pytest.mark.asyncio
-    async def test_does_not_retry_non_timeout_session_verification_error(self) -> None:
+    async def test_retries_connection_errors_without_reporting_context_loss(self) -> None:
         with patch.dict("os.environ", {"OPENCODE_SESSION_ID": "oc-env"}, clear=False):
             bridge = _make_bridge()
         client = AsyncMock()
         client.get = AsyncMock(side_effect=httpx.ConnectError("OpenCode connection failed"))
         bridge.http_client = client
+        bridge.SESSION_VERIFY_RETRY_DELAY_SECONDS = 0
 
-        await bridge._load_session_id()
+        with pytest.raises(RuntimeError, match="Could not verify OpenCode session oc-env"):
+            await bridge._load_session_id()
 
-        assert client.get.await_count == 1
-        assert bridge.opencode_session_error == (
-            "OpenCode session oc-env is unavailable; "
-            "refusing to continue without its conversation context"
-        )
+        assert client.get.await_count == 2
+        assert bridge.opencode_session_error is None
+
+    @pytest.mark.asyncio
+    async def test_retries_server_errors_without_reporting_context_loss(self) -> None:
+        with patch.dict("os.environ", {"OPENCODE_SESSION_ID": "oc-env"}, clear=False):
+            bridge = _make_bridge()
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=type("Resp", (), {"status_code": 503})())
+        bridge.http_client = client
+        bridge.SESSION_VERIFY_RETRY_DELAY_SECONDS = 0
+
+        with pytest.raises(RuntimeError, match="Could not verify OpenCode session oc-env"):
+            await bridge._load_session_id()
+
+        assert client.get.await_count == 2
+        assert bridge.opencode_session_error is None
 
     @pytest.mark.asyncio
     async def test_context_failure_keeps_one_identity_across_reconnects(self) -> None:
@@ -265,6 +291,7 @@ class TestSessionReattach:
             "type": "ready",
             "sandboxId": "test-sandbox",
             "opencodeSessionId": "oc-existing",
+            "contextStatus": "existing",
             "timestamp": ready["timestamp"],
         }
 
