@@ -47,6 +47,12 @@ export const PENDING_SANDBOX_CONNECT_TIMEOUT_MS = 5 * 60 * 1000;
 export const STOP_CONFIRMATION_TIMEOUT_MS = 3_000;
 
 const MS_PER_MINUTE = 60 * 1000;
+const PENDING_SANDBOX_CONNECT_DEADLINE_KEY = "pendingSandboxConnectDeadline";
+
+interface PendingSandboxConnectDeadline {
+  messageId: string;
+  deadlineAt: number;
+}
 
 /**
  * Generic connect-timeout message for a pending message whose sandbox never
@@ -118,6 +124,29 @@ export class SessionMessageQueue {
     const currentAlarm = await this.ctx.storage.getAlarm();
     if (!currentAlarm || deadlineMs < currentAlarm) {
       await this.ctx.storage.setAlarm(deadlineMs);
+    }
+  }
+
+  private async getPendingConnectDeadline(messageId: string, now: number): Promise<number> {
+    const stored = await this.ctx.storage.get<PendingSandboxConnectDeadline>(
+      PENDING_SANDBOX_CONNECT_DEADLINE_KEY
+    );
+    if (stored?.messageId === messageId) return stored.deadlineAt;
+
+    const deadlineAt = now + PENDING_SANDBOX_CONNECT_TIMEOUT_MS;
+    await this.ctx.storage.put(PENDING_SANDBOX_CONNECT_DEADLINE_KEY, {
+      messageId,
+      deadlineAt,
+    } satisfies PendingSandboxConnectDeadline);
+    return deadlineAt;
+  }
+
+  private async clearPendingConnectDeadline(messageId: string): Promise<void> {
+    const stored = await this.ctx.storage.get<PendingSandboxConnectDeadline>(
+      PENDING_SANDBOX_CONNECT_DEADLINE_KEY
+    );
+    if (stored?.messageId === messageId) {
+      await this.ctx.storage.delete(PENDING_SANDBOX_CONNECT_DEADLINE_KEY);
     }
   }
 
@@ -311,15 +340,13 @@ export class SessionMessageQueue {
         reason: "no_sandbox",
       });
       this.messenger.broadcast({ type: "sandbox_spawning" });
-      // Arm the watchdog before spawning so a spawn/resume that never yields a
-      // connected sandbox eventually fails the message instead of stalling
-      // silently. A successful connect moves the message to `processing`, which
-      // neutralizes the watchdog (it only acts on a still-pending message).
-      await this.scheduleAlarm(message.created_at + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
+      const deadlineAt = await this.getPendingConnectDeadline(message.id, now);
+      await this.scheduleAlarm(deadlineAt);
       await this.sandboxLifecycle.spawnSandbox();
       return;
     }
 
+    await this.clearPendingConnectDeadline(message.id);
     this.repository.updateMessageToProcessing(message.id, now);
     this.messenger.broadcast({ type: "processing_status", isProcessing: true });
     this.broadcastPromptQueue();
@@ -491,12 +518,6 @@ export class SessionMessageQueue {
     await this.sessionStatus.reconcileAfterExecution(false);
   }
 
-  /**
-   * The DO's single alarm slot is shared with lifecycle work, so each prompt's
-   * persisted creation time remains the source of truth. Reconstructing the
-   * next deadline on every wake prevents an unrelated alarm or an older queued
-   * prompt from consuming the only watchdog.
-   */
   async failStuckPendingMessage(): Promise<void> {
     // A connected sandbox or an in-flight message means dispatch is handling
     // this normally; the watchdog must not interfere.
@@ -507,11 +528,13 @@ export class SessionMessageQueue {
     if (!pending) return;
 
     const now = Date.now();
-    if (now - pending.created_at < PENDING_SANDBOX_CONNECT_TIMEOUT_MS) {
-      await this.scheduleAlarm(pending.created_at + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
+    const deadlineAt = await this.getPendingConnectDeadline(pending.id, now);
+    if (now < deadlineAt) {
+      await this.scheduleAlarm(deadlineAt);
       return;
     }
 
+    await this.clearPendingConnectDeadline(pending.id);
     this.repository.updateMessageCompletion(pending.id, "failed", now);
 
     // A failed spawn (e.g. the Daytona disk-quota 400) records the real cause on
@@ -539,7 +562,7 @@ export class SessionMessageQueue {
     this.log.warn("prompt.pending_timeout", {
       event: "prompt.pending_timeout",
       message_id: pending.id,
-      waited_ms: now - pending.created_at,
+      waited_ms: now - (deadlineAt - PENDING_SANDBOX_CONNECT_TIMEOUT_MS),
     });
 
     this.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });

@@ -12,6 +12,7 @@ function createHandler() {
       .fn<SessionMessageQueue["failStuckProcessingMessage"]>()
       .mockResolvedValue(),
     failStuckPendingMessage: vi.fn<() => Promise<void>>().mockResolvedValue(),
+    processMessageQueue: vi.fn<() => Promise<void>>().mockResolvedValue(),
   };
   const lifecycleManager = {
     handleAlarm: vi.fn<() => Promise<void>>().mockResolvedValue(),
@@ -61,6 +62,7 @@ describe("createAlarmHandler", () => {
     expect(messageQueue.failStuckProcessingMessage).not.toHaveBeenCalled();
     expect(statusService.handleAutoArchiveAlarm).toHaveBeenCalledWith(2000);
     expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
+    expect(messageQueue.processMessageQueue).toHaveBeenCalledTimes(1);
   });
 
   it("does not fail processing message when execution timeout is not reached", async () => {
@@ -97,6 +99,7 @@ describe("createAlarmHandler", () => {
       elapsedMs: 1500,
     });
     expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
+    expect(messageQueue.processMessageQueue).not.toHaveBeenCalled();
   });
 
   it("always runs the pending-message watchdog before lifecycle handling", async () => {
@@ -107,5 +110,21 @@ describe("createAlarmHandler", () => {
 
     // Self-guarded, so it runs unconditionally; it decides internally whether to act.
     expect(messageQueue.failStuckPendingMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes queued work after lifecycle handling settles", async () => {
+    const { handler, repository, messageQueue, lifecycleManager } = createHandler();
+    repository.getProcessingMessageWithStartedAt.mockReturnValue(null);
+    const calls: string[] = [];
+    lifecycleManager.handleAlarm.mockImplementation(async () => {
+      calls.push("lifecycle");
+    });
+    messageQueue.processMessageQueue.mockImplementation(async () => {
+      calls.push("queue");
+    });
+
+    await handler.handle();
+
+    expect(calls).toEqual(["lifecycle", "queue"]);
   });
 });
