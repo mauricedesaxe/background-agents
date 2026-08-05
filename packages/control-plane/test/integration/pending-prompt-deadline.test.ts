@@ -46,7 +46,13 @@ describe("pending prompt connection deadline", () => {
     const { messageId } = await promptResponse.json<{ messageId: string }>();
     const createdAt = Date.now() - PENDING_SANDBOX_CONNECT_TIMEOUT_MS + TEST_DEADLINE_MARGIN_MS;
     const deadlineAt = createdAt + PENDING_SANDBOX_CONNECT_TIMEOUT_MS;
-    await queryDO(stub, "UPDATE messages SET created_at = ? WHERE id = ?", createdAt, messageId);
+    await queryDO(
+      stub,
+      "UPDATE messages SET created_at = ?, connect_started_at = ? WHERE id = ?",
+      createdAt,
+      createdAt,
+      messageId
+    );
     await queryDO(
       stub,
       `UPDATE sandbox
@@ -162,8 +168,13 @@ describe("pending prompt connection deadline", () => {
     await queryDO(
       stub,
       `UPDATE messages
-          SET created_at = CASE id WHEN ? THEN ? WHEN ? THEN ? END
+          SET created_at = CASE id WHEN ? THEN ? WHEN ? THEN ? END,
+              connect_started_at = CASE id WHEN ? THEN ? WHEN ? THEN ? END
         WHERE id IN (?, ?)`,
+      firstMessageId,
+      firstCreatedAt,
+      secondMessageId,
+      secondCreatedAt,
       firstMessageId,
       firstCreatedAt,
       secondMessageId,

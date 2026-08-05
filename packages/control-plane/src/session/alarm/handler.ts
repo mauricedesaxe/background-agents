@@ -55,14 +55,10 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
         }
       }
 
-      // Pending-message watchdog: fail a message whose spawned/resumed sandbox
-      // never connected. Self-guards (still pending, no sandbox, not processing,
-      // aged out), so it's safe to run on every alarm regardless of what armed it.
-      await deps.messageQueue.failStuckPendingMessage();
-
       await deps.statusService.handleAutoArchiveAlarm(deps.now());
 
       await deps.lifecycleManager.handleAlarm();
+      await deps.messageQueue.failStuckPendingMessage();
     },
   };
 }

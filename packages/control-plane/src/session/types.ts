@@ -85,6 +85,7 @@ export interface MessageRow {
   status: MessageStatus;
   error_message: string | null;
   created_at: number;
+  connect_started_at: number | null;
   started_at: number | null;
   completed_at: number | null;
 }

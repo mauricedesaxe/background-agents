@@ -262,6 +262,7 @@ describe("createMessagesHandler", () => {
           status: "completed",
           error_message: null,
           created_at: 1000,
+          connect_started_at: null,
           started_at: 1100,
           completed_at: 1200,
         },

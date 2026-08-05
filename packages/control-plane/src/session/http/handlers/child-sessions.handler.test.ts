@@ -129,6 +129,7 @@ function createMessage(overrides: Partial<MessageRow> = {}): MessageRow {
     status: "completed",
     error_message: null,
     created_at: 1,
+    connect_started_at: null,
     started_at: 2,
     completed_at: 3,
     ...overrides,
