@@ -321,6 +321,7 @@ class TestPinnedHarness:
 
         philosophy = (opencode / "rules" / "PHILOSOPHY.md").read_text()
         assert "## §32. Complexity and deep modules" in philosophy
+        assert "**Prefer fewer, longer workflow tests.**" in philosophy
         complexity = (opencode / "agents" / "complexity-reviewer.md").read_text()
         assert "mode: subagent" in complexity
 
