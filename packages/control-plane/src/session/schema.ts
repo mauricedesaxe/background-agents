@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS messages (
   status TEXT DEFAULT 'pending',                    -- 'pending', 'processing', 'completed', 'failed'
   error_message TEXT,                               -- If status='failed'
   created_at INTEGER NOT NULL,
+  connect_started_at INTEGER,                       -- When this pending message first needed a sandbox
   started_at INTEGER,                               -- When processing began
   completed_at INTEGER,                             -- When processing finished
   FOREIGN KEY (author_id) REFERENCES participants(id)
@@ -485,6 +486,16 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
       }
       if (!names.has("archive_claimed_at")) {
         runMigration(sql, `ALTER TABLE session ADD COLUMN archive_claimed_at INTEGER`);
+      }
+    },
+  },
+  {
+    id: 9003,
+    description: "Add pending sandbox connection start to messages",
+    run: (sql) => {
+      const columns = sql.exec("PRAGMA table_info(messages)").toArray() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === "connect_started_at")) {
+        runMigration(sql, `ALTER TABLE messages ADD COLUMN connect_started_at INTEGER`);
       }
     },
   },

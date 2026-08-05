@@ -304,6 +304,10 @@ export class SessionMessageQueue {
 
     const sandboxWs = this.wsManager.getSandboxSocket();
     if (!sandboxWs) {
+      const connectStartedAt = message.connect_started_at ?? now;
+      if (message.connect_started_at === null) {
+        this.repository.markMessageWaitingForSandbox(message.id, connectStartedAt);
+      }
       this.log.info("prompt.dispatch", {
         event: "prompt.dispatch",
         message_id: message.id,
@@ -315,7 +319,7 @@ export class SessionMessageQueue {
       // connected sandbox eventually fails the message instead of stalling
       // silently. A successful connect moves the message to `processing`, which
       // neutralizes the watchdog (it only acts on a still-pending message).
-      await this.scheduleAlarm(message.created_at + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
+      await this.scheduleAlarm(connectStartedAt + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
       await this.sandboxLifecycle.spawnSandbox();
       return;
     }
@@ -506,9 +510,14 @@ export class SessionMessageQueue {
     const pending = this.repository.getNextPendingMessage();
     if (!pending) return;
 
+    if (pending.connect_started_at === null) {
+      await this.processMessageQueue();
+      return;
+    }
+
     const now = Date.now();
-    if (now - pending.created_at < PENDING_SANDBOX_CONNECT_TIMEOUT_MS) {
-      await this.scheduleAlarm(pending.created_at + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
+    if (now - pending.connect_started_at < PENDING_SANDBOX_CONNECT_TIMEOUT_MS) {
+      await this.scheduleAlarm(pending.connect_started_at + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
       return;
     }
 
@@ -521,7 +530,7 @@ export class SessionMessageQueue {
     // error from an earlier spawn isn't pinned to a later prompt's timeout.
     const sandbox = this.repository.getSandbox();
     const spawnError =
-      sandbox?.last_spawn_error && (sandbox.last_spawn_error_at ?? 0) >= pending.created_at
+      sandbox?.last_spawn_error && (sandbox.last_spawn_error_at ?? 0) >= pending.connect_started_at
         ? sandbox.last_spawn_error
         : undefined;
     const timeoutError = spawnError ?? PENDING_CONNECT_TIMEOUT_ERROR;
@@ -539,7 +548,7 @@ export class SessionMessageQueue {
     this.log.warn("prompt.pending_timeout", {
       event: "prompt.pending_timeout",
       message_id: pending.id,
-      waited_ms: now - pending.created_at,
+      waited_ms: now - pending.connect_started_at,
     });
 
     this.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });

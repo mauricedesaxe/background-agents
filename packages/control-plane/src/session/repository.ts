@@ -877,6 +877,14 @@ export class SessionRepository {
     );
   }
 
+  markMessageWaitingForSandbox(messageId: string, startedAt: number): void {
+    this.sql.exec(
+      `UPDATE messages SET connect_started_at = COALESCE(connect_started_at, ?) WHERE id = ?`,
+      startedAt,
+      messageId
+    );
+  }
+
   updateMessageCompletion(messageId: string, status: MessageStatus, completedAt: number): void {
     this.sql.exec(
       `UPDATE messages SET status = ?, completed_at = ? WHERE id = ?`,

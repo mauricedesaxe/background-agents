@@ -99,13 +99,20 @@ describe("createAlarmHandler", () => {
     expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
   });
 
-  it("always runs the pending-message watchdog before lifecycle handling", async () => {
-    const { handler, repository, messageQueue } = createHandler();
+  it("runs the pending-message watchdog after lifecycle handling", async () => {
+    const { handler, repository, messageQueue, lifecycleManager } = createHandler();
     repository.getProcessingMessageWithStartedAt.mockReturnValue(null);
+    const calls: string[] = [];
+    lifecycleManager.handleAlarm.mockImplementation(async () => {
+      calls.push("lifecycle");
+    });
+    messageQueue.failStuckPendingMessage.mockImplementation(async () => {
+      calls.push("pending");
+    });
 
     await handler.handle();
 
-    // Self-guarded, so it runs unconditionally; it decides internally whether to act.
     expect(messageQueue.failStuckPendingMessage).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual(["lifecycle", "pending"]);
   });
 });

@@ -554,6 +554,7 @@ class AgentBridge:
                             "type": "ready",
                             "sandboxId": self.sandbox_id,
                             "opencodeSessionId": self.opencode_session_id,
+                            "contextStatus": ("existing" if self.opencode_session_id else "fresh"),
                         }
                     )
 
@@ -2418,7 +2419,7 @@ class AgentBridge:
                         f"{self.opencode_base_url}/session/{self.opencode_session_id}",
                         timeout=self.SESSION_VERIFY_TIMEOUT_SECONDS,
                     )
-                except httpx.TimeoutException as error:
+                except httpx.RequestError as error:
                     if attempt + 1 < self.SESSION_VERIFY_MAX_ATTEMPTS:
                         self.log.warn(
                             "opencode.session.verify_retry",
@@ -2431,14 +2432,9 @@ class AgentBridge:
                         )
                         await asyncio.sleep(self.SESSION_VERIFY_RETRY_DELAY_SECONDS)
                         continue
-                    self.log.error(
-                        "opencode.session.verify_error",
-                        exc=error,
-                        opencode_session_id=self.opencode_session_id,
-                        source=source,
-                    )
-                    self.opencode_session_error = error_message
-                    break
+                    raise RuntimeError(
+                        "OpenCode session verification remained unavailable"
+                    ) from error
                 except Exception as error:
                     self.log.error(
                         "opencode.session.verify_error",
@@ -2451,6 +2447,22 @@ class AgentBridge:
 
                 if resp.status_code == 200:
                     break
+                if resp.status_code != 404:
+                    if attempt + 1 < self.SESSION_VERIFY_MAX_ATTEMPTS:
+                        self.log.warn(
+                            "opencode.session.verify_retry",
+                            opencode_session_id=self.opencode_session_id,
+                            source=source,
+                            status_code=resp.status_code,
+                            attempt=attempt + 1,
+                            max_attempts=self.SESSION_VERIFY_MAX_ATTEMPTS,
+                            delay_s=self.SESSION_VERIFY_RETRY_DELAY_SECONDS,
+                        )
+                        await asyncio.sleep(self.SESSION_VERIFY_RETRY_DELAY_SECONDS)
+                        continue
+                    raise RuntimeError(
+                        f"OpenCode session verification returned HTTP {resp.status_code}"
+                    )
                 self.log.error(
                     "opencode.session.invalid",
                     opencode_session_id=self.opencode_session_id,
