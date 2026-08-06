@@ -14,6 +14,9 @@ const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
 const OAUTH_DUMMY_KEY = "opencode-oauth-dummy-key";
 const REFRESH_BUFFER_MS = 5 * 60 * 1000; // 5 minutes before expiry
 
+/** Status the SDK reports rather than retries. See rewriteProviderFailure. */
+const NON_RETRYABLE_STATUS = 400;
+
 const ALLOWED_MODELS = new Set([
   "gpt-5.1-codex-max",
   "gpt-5.1-codex-mini",
@@ -104,6 +107,63 @@ async function ensureAccessToken(getAuth, setAuth) {
   }
 
   return { accessToken: cachedAccessToken, accountId: cachedAccountId };
+}
+
+/**
+ * Rewrite a usage-limit rejection into a failure the SDK reports instead of retrying.
+ *
+ * A 429 sits in the SDK's retry set, so a usage limit was retried behind OpenCode's back until the
+ * prompt hit its 90-minute ceiling, with an empty assistant message and no error (issue #278).
+ * Every other rejection passes through untouched, since that retry is how a transient upstream
+ * failure gets absorbed. The envelope matches OpenAI's so the SDK's parser keeps the message.
+ */
+export async function rewriteProviderFailure(response, now = Date.now()) {
+  const body = await response
+    .clone()
+    .text()
+    .catch(() => "");
+  const error = parseJson(body)?.error;
+
+  if (error?.type !== "usage_limit_reached") return response;
+
+  return new Response(
+    JSON.stringify({
+      error: {
+        message: usageLimitMessage(error, now),
+        type: "open_inspect_provider_error",
+      },
+    }),
+    { status: NON_RETRYABLE_STATUS, headers: { "content-type": "application/json" } }
+  );
+}
+
+function usageLimitMessage(error, now) {
+  const plan = error.plan_type ? `${error.plan_type} plan` : "current plan";
+  const resetsAtSeconds = Number(error.resets_at) || 0;
+  if (!resetsAtSeconds) {
+    return `Out of model usage on your ${plan}. Switch models or wait for the reset.`;
+  }
+
+  const resetsAt = new Date(resetsAtSeconds * 1000).toISOString().replace(".000Z", "Z");
+  const waitFor = formatDuration(Math.max(0, resetsAtSeconds - Math.floor(now / 1000)));
+  return (
+    `Out of model usage on your ${plan}. It resets at ${resetsAt}, in ${waitFor}. ` +
+    `Switch models or wait for the reset.`
+  );
+}
+
+function formatDuration(seconds) {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.round((seconds % 3600) / 60);
+  return hours ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+function parseJson(body) {
+  try {
+    return JSON.parse(body);
+  } catch {
+    return null;
+  }
 }
 
 export const CodexAuthProxy = async (input) => {
@@ -221,7 +281,8 @@ export const CodexAuthProxy = async (input) => {
                 ? new URL(CODEX_API_ENDPOINT)
                 : parsed;
 
-            return fetch(url, { ...init, headers });
+            const response = await fetch(url, { ...init, headers });
+            return response.status === 429 ? rewriteProviderFailure(response) : response;
           },
         };
       },
