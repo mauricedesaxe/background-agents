@@ -347,6 +347,27 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v
 
+  # The sandbox-runtime ships JS (OpenCode plugins, in-sandbox agent tools) alongside Python.
+  test-js-sandbox-runtime:
+    name: Test (JS - sandbox-runtime)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: packages/sandbox-runtime
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      # A bare directory is resolved as a module rather than expanded, so the glob is load-bearing.
+      - name: Run tests
+        run: node --test "tests/*.test.mjs"
+
   test-python:
     name: Test (Python - modal-infra)
     runs-on: ubuntu-latest
