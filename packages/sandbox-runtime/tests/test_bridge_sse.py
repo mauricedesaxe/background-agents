@@ -697,6 +697,86 @@ class TestSSEStreaming:
         assert [event for event in events if event["type"] == "session_title"] == []
 
     @pytest.mark.asyncio
+    async def test_forwards_a_provider_retry_with_its_reason(
+        self, bridge: AgentBridge, opencode_message_id: str
+    ):
+        """Should surface OpenCode's retry status so a rate-limited session says why it is idle."""
+        http_client = bridge.http_client
+        http_client.sse_events = [
+            create_sse_event("server.connected", {}),
+            create_sse_event(
+                "session.status",
+                {
+                    "sessionID": "oc-session-123",
+                    "status": {
+                        "type": "retry",
+                        "attempt": 3,
+                        "message": "Usage limit reached. It will reset in 45 hours",
+                        "next": 1786006100468,
+                        "action": {
+                            "reason": "account_rate_limit",
+                            "provider": "zai-coding-plan",
+                            "title": "Limit reached",
+                            "message": "Usage limit reached",
+                            "label": "open settings",
+                        },
+                    },
+                },
+            ),
+            create_sse_event(
+                "message.updated",
+                {
+                    "info": {
+                        "id": "oc-msg-1",
+                        "role": "assistant",
+                        "sessionID": "oc-session-123",
+                        "parentID": opencode_message_id,
+                    }
+                },
+            ),
+            create_sse_event("session.idle", {"sessionID": "oc-session-123"}),
+        ]
+
+        events = []
+        async for event in bridge._stream_opencode_response_sse("cp-msg-1", "Test prompt"):
+            events.append(event)
+
+        assert {
+            "type": "provider_retry",
+            "attempt": 3,
+            "message": "Usage limit reached. It will reset in 45 hours",
+            "nextAttemptAtMs": 1786006100468,
+            "providerName": "zai-coding-plan",
+        } in events
+
+    @pytest.mark.asyncio
+    async def test_ignores_a_provider_retry_for_another_session(self, bridge: AgentBridge):
+        """A sibling session's retry is not this session's news."""
+        http_client = bridge.http_client
+        http_client.sse_events = [
+            create_sse_event("server.connected", {}),
+            create_sse_event(
+                "session.status",
+                {
+                    "sessionID": "oc-session-other",
+                    "status": {
+                        "type": "retry",
+                        "attempt": 1,
+                        "message": "Rate limited",
+                        "next": 1786006100468,
+                    },
+                },
+            ),
+            create_sse_event("session.idle", {"sessionID": "oc-session-123"}),
+        ]
+
+        events = []
+        async for event in bridge._stream_opencode_response_sse("cp-msg-1", "Test prompt"):
+            events.append(event)
+
+        assert [event for event in events if event["type"] == "provider_retry"] == []
+
+    @pytest.mark.asyncio
     async def test_handles_session_error(self, bridge: AgentBridge):
         """Should emit error event on session.error."""
         http_client = bridge.http_client

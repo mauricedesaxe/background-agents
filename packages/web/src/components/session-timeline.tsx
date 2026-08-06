@@ -486,6 +486,19 @@ function ContextCompactionFailedEvent({ event }: EventRendererProps) {
   );
 }
 
+function ProviderRetryEvent({ event }: EventRendererProps) {
+  if (event.type !== "provider_retry") return null;
+
+  const who = event.providerName ? `${event.providerName} ` : "";
+  const nextAt = new Date(event.nextAttemptAtMs).toLocaleTimeString();
+
+  return (
+    <StatusRow tone="destructive" time={formatEventTime(event)}>
+      {who}retry {event.attempt} at {nextAt}: {event.message}
+    </StatusRow>
+  );
+}
+
 function ContextUnavailableEvent({ event }: EventRendererProps) {
   if (event.type !== "context_unavailable") return null;
 
@@ -567,6 +580,7 @@ const eventRenderers: Partial<
   context_compacted: ContextCompactedEvent,
   context_compaction_failed: ContextCompactionFailedEvent,
   context_unavailable: ContextUnavailableEvent,
+  provider_retry: ProviderRetryEvent,
   artifact: ArtifactEvent,
   error: ErrorEvent,
   execution_complete: ExecutionCompleteEvent,
