@@ -41,6 +41,18 @@ configure_logging()
 # Matches the co-author trailer used in generateCommitMessage (shared/git.ts).
 FALLBACK_GIT_USER = GitUser(name="OpenInspect", email="open-inspect@noreply.github.com")
 
+KEEPALIVE_EVENT_TYPES = frozenset({"server.heartbeat", "server.connected"})
+"""SSE events that prove the connection is alive but say nothing about the agent's progress."""
+
+
+def is_session_work(event_type: str | None) -> bool:
+    """Whether an event is the session working, rather than the server talking about itself.
+
+    OpenCode multiplexes file, lsp, storage and installation chatter onto the same stream. None of
+    it means a prompt is progressing, so none of it may hold the session-progress deadline open.
+    """
+    return bool(event_type) and event_type.startswith(("message.", "session."))
+
 
 @dataclass(frozen=True)
 class PushRequest:
@@ -296,6 +308,9 @@ class AgentBridge:
     SSE_INACTIVITY_TIMEOUT = 120.0
     SSE_INACTIVITY_TIMEOUT_MIN = 5.0
     SSE_INACTIVITY_TIMEOUT_MAX = 3600.0
+    SESSION_PROGRESS_TIMEOUT_SECONDS = 600.0
+    SESSION_PROGRESS_TIMEOUT_SECONDS_MIN = 30.0
+    SESSION_PROGRESS_TIMEOUT_SECONDS_MAX = 5400.0
     HTTP_CONNECT_TIMEOUT = 30.0
     HTTP_DEFAULT_TIMEOUT = 30.0
     OPENCODE_REQUEST_TIMEOUT = 30.0
@@ -362,6 +377,12 @@ class AgentBridge:
             default=self.SSE_INACTIVITY_TIMEOUT,
             min_value=self.SSE_INACTIVITY_TIMEOUT_MIN,
             max_value=self.SSE_INACTIVITY_TIMEOUT_MAX,
+        )
+        self.session_progress_timeout_seconds = self._resolve_timeout_seconds(
+            name="BRIDGE_SESSION_PROGRESS_TIMEOUT",
+            default=self.SESSION_PROGRESS_TIMEOUT_SECONDS,
+            min_value=self.SESSION_PROGRESS_TIMEOUT_SECONDS_MIN,
+            max_value=self.SESSION_PROGRESS_TIMEOUT_SECONDS_MAX,
         )
 
         self.ws: ClientConnection | None = None
@@ -1515,6 +1536,7 @@ class AgentBridge:
                         )
 
                     prompt_start = loop.time()
+                    last_progress_at = prompt_start
                     prompt_response = await self.http_client.post(
                         async_url,
                         json=request_body,
@@ -1537,9 +1559,37 @@ class AgentBridge:
                         if not isinstance(props, dict):
                             props = {}
 
-                        if event_type == "server.connected":
-                            pass
-                        elif event_type != "server.heartbeat":
+                        if event_type in KEEPALIVE_EVENT_TYPES:
+                            stalled_for = loop.time() - last_progress_at
+                            if stalled_for > self.session_progress_timeout_seconds:
+                                elapsed = time.time() - start_time
+                                self.log.error(
+                                    "bridge.session_progress_timeout",
+                                    timeout_name="session_progress",
+                                    timeout_ms=int(self.session_progress_timeout_seconds * 1000),
+                                    elapsed_ms=int(elapsed * 1000),
+                                    operation="bridge.sse",
+                                    message_id=message_id,
+                                )
+                                await self._request_opencode_stop(reason="session_progress_timeout")
+                                async for final_event in self._fetch_final_message_state(
+                                    message_id,
+                                    opencode_message_id,
+                                    cumulative_text,
+                                    allowed_assistant_msg_ids,
+                                    user_message_ids=user_message_ids,
+                                    compaction_occurred=compaction_occurred,
+                                ):
+                                    yield final_event
+                                raise RuntimeError(
+                                    f"The agent produced nothing for "
+                                    f"{self.session_progress_timeout_seconds:.0f}s while its connection "
+                                    f"stayed alive. Total elapsed: {elapsed:.0f}s"
+                                )
+                        else:
+                            if is_session_work(event_type):
+                                last_progress_at = loop.time()
+
                             # Track direct child sessions before filtering
                             if event_type == "session.created":
                                 info = props.get("info", {})
