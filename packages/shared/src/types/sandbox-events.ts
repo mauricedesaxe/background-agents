@@ -121,6 +121,13 @@ const sandboxEventUnionSchema = z.discriminatedUnion("type", [
     status: gitSyncStatusSchema,
     sha: z.string().optional(),
   }),
+  sandboxEventBaseSchema.extend({
+    type: z.literal("provider_retry"),
+    attempt: z.number(),
+    message: z.string(), // OpenCode's normalized provider error, verbatim.
+    nextAttemptAtMs: z.number(), // Epoch ms, unlike this union's `timestamp` seconds.
+    providerName: z.string().optional(),
+  }),
   messageSandboxEventBaseSchema.extend({
     type: z.literal("error"),
     error: z.string(),

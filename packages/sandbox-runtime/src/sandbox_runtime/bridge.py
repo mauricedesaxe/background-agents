@@ -1192,6 +1192,40 @@ class AgentBridge:
 
         return self._session_title_event_once(info.get("title"))
 
+    def _provider_retry_event_from_sse(
+        self, event_type: object, props: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Build a `provider_retry` event from OpenCode's retry status, if this event is one.
+
+        OpenCode retries a rejected provider request on a schedule with no attempt cap, honouring
+        the provider's `retry-after` for up to 24 days, and emits nothing but heartbeats while it
+        waits. A usage limit therefore reads as a session that is simply thinking (issue #278).
+        The retry status is the only place the reason surfaces, and it carries OpenCode's own
+        normalized provider message, so forwarding it covers every provider rather than only the
+        ones whose error bodies we know how to parse.
+        """
+        if event_type != "session.status":
+            return None
+        if props.get("sessionID") != self.opencode_session_id:
+            return None
+
+        status = props.get("status")
+        if not isinstance(status, dict) or status.get("type") != "retry":
+            return None
+
+        event: dict[str, Any] = {
+            "type": "provider_retry",
+            "attempt": status.get("attempt", 0),
+            "message": str(status.get("message") or "").strip()
+            or "The provider rejected the request.",
+            "nextAttemptAtMs": status.get("next", 0),
+        }
+
+        action = status.get("action")
+        if isinstance(action, dict) and action.get("provider"):
+            event["providerName"] = str(action["provider"])
+        return event
+
     @staticmethod
     def _extract_error_message(error: object) -> str | None:
         """Extract message from OpenCode NamedError: { "name": "...", "data": { "message": "..." } }."""
@@ -1610,6 +1644,18 @@ class AgentBridge:
                             if title_event:
                                 yield title_event
                             if event_type == "session.updated":
+                                continue
+
+                            retry_event = self._provider_retry_event_from_sse(event_type, props)
+                            if retry_event:
+                                self.log.warn(
+                                    "bridge.provider_retry",
+                                    attempt=retry_event["attempt"],
+                                    provider=retry_event.get("providerName"),
+                                    next_attempt_at_ms=retry_event["nextAttemptAtMs"],
+                                    reason=retry_event["message"],
+                                )
+                                yield retry_event
                                 continue
 
                             event_session_id = props.get("sessionID") or props.get("part", {}).get(

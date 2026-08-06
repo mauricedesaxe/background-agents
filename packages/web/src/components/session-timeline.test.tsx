@@ -101,6 +101,34 @@ describe("EventItem", () => {
     ).toBeInTheDocument();
   });
 
+  it("names the provider and the reason when a turn is stuck retrying", () => {
+    const event: SandboxEvent = {
+      type: "provider_retry",
+      attempt: 3,
+      message: "Usage limit reached. It will reset in 45 hours",
+      nextAttemptAtMs: Date.parse("2026-08-06T09:30:00Z"),
+      providerName: "zai-coding-plan",
+      sandboxId: "sandbox-1",
+      timestamp: 1_700_000_000,
+    };
+
+    render(
+      <EventItem
+        event={event}
+        sessionId="session-1"
+        currentParticipantId={null}
+        onOpenMedia={vi.fn()}
+      />
+    );
+
+    const nextAt = new Date(event.nextAttemptAtMs).toLocaleTimeString();
+    expect(
+      screen.getByText(
+        `zai-coding-plan retry 3 at ${nextAt}: Usage limit reached. It will reset in 45 hours`
+      )
+    ).toBeInTheDocument();
+  });
+
   it("shows the persisted queue position on a pending user message", () => {
     const event: SandboxEvent = {
       type: "user_message",
