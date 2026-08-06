@@ -1551,7 +1551,7 @@ class TestInactivityTimeout:
 
     @pytest.mark.asyncio
     async def test_heartbeat_resets_timeout(self, opencode_message_id: str):
-        """server.heartbeat events should keep the session alive."""
+        """server.heartbeat events should keep the connection deadline alive."""
         bridge = AgentBridge(
             sandbox_id="test-sandbox",
             session_id="test-session",
@@ -1614,6 +1614,130 @@ class TestInactivityTimeout:
 
 class TestPromptMaxDuration:
     """Tests for prompt max duration timeout behavior."""
+
+    @pytest.mark.asyncio
+    async def test_heartbeats_alone_do_not_keep_the_session_alive(self):
+        """A live connection carrying no work should fail on the session-progress deadline.
+
+        This is the shape of the usage-limit stall in issue #278: OpenCode kept heartbeating
+        while the provider rejected every request, so the connection deadline never expired.
+        """
+        bridge = AgentBridge(
+            sandbox_id="test-sandbox",
+            session_id="test-session",
+            control_plane_url="http://localhost:8787",
+            auth_token="test-token",
+        )
+        bridge.opencode_session_id = "oc-session-123"
+        bridge.sse_inactivity_timeout = 2.0
+        bridge.session_progress_timeout_seconds = 0.25
+
+        sse_response = DelayedMockSSEResponse(
+            [
+                (create_sse_event("server.connected", {}), 0),
+                (create_sse_event("server.heartbeat", {}), 0.15),
+                (create_sse_event("server.heartbeat", {}), 0.15),
+                (create_sse_event("server.heartbeat", {}), 0.15),
+            ]
+        )
+        http_client = DelayedMockHttpClient(sse_response)
+        http_client.get_responses = [MockResponse(200, [])]
+        bridge.http_client = http_client
+
+        with pytest.raises(RuntimeError, match="produced nothing"):
+            async for _event in bridge._stream_opencode_response_sse("msg-1", "test"):
+                pass
+
+        assert any(url.endswith("/abort") for url in http_client.post_urls)
+
+    @pytest.mark.asyncio
+    async def test_server_chatter_does_not_hold_the_progress_deadline_open(self):
+        """File and lsp traffic share the stream but say nothing about the prompt progressing."""
+        bridge = AgentBridge(
+            sandbox_id="test-sandbox",
+            session_id="test-session",
+            control_plane_url="http://localhost:8787",
+            auth_token="test-token",
+        )
+        bridge.opencode_session_id = "oc-session-123"
+        bridge.sse_inactivity_timeout = 2.0
+        bridge.session_progress_timeout_seconds = 0.25
+
+        sse_response = DelayedMockSSEResponse(
+            [
+                (create_sse_event("server.connected", {}), 0),
+                (create_sse_event("file.edited", {"file": "/workspace/a.py"}), 0.15),
+                (create_sse_event("lsp.diagnostics", {"path": "/workspace/a.py"}), 0.15),
+                (create_sse_event("server.heartbeat", {}), 0.15),
+            ]
+        )
+        http_client = DelayedMockHttpClient(sse_response)
+        http_client.get_responses = [MockResponse(200, [])]
+        bridge.http_client = http_client
+
+        with pytest.raises(RuntimeError, match="produced nothing"):
+            async for _event in bridge._stream_opencode_response_sse("msg-1", "test"):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_session_work_resets_the_progress_deadline(self, opencode_message_id: str):
+        """Parts arriving between heartbeats should hold the session-progress deadline open."""
+        bridge = AgentBridge(
+            sandbox_id="test-sandbox",
+            session_id="test-session",
+            control_plane_url="http://localhost:8787",
+            auth_token="test-token",
+        )
+        bridge.opencode_session_id = "oc-session-123"
+        bridge.sse_inactivity_timeout = 2.0
+        bridge.session_progress_timeout_seconds = 0.3
+
+        def text_part(part_id: str, text: str) -> str:
+            return create_sse_event(
+                "message.part.updated",
+                {
+                    "part": {
+                        "type": "text",
+                        "id": part_id,
+                        "sessionID": "oc-session-123",
+                        "messageID": "oc-msg-1",
+                        "text": text,
+                    }
+                },
+            )
+
+        sse_response = DelayedMockSSEResponse(
+            [
+                (create_sse_event("server.connected", {}), 0),
+                (
+                    create_sse_event(
+                        "message.updated",
+                        {
+                            "info": {
+                                "id": "oc-msg-1",
+                                "role": "assistant",
+                                "sessionID": "oc-session-123",
+                                "parentID": opencode_message_id,
+                            }
+                        },
+                    ),
+                    0,
+                ),
+                (create_sse_event("server.heartbeat", {}), 0.2),
+                (text_part("part-1", "still"), 0.2),
+                (create_sse_event("server.heartbeat", {}), 0.2),
+                (text_part("part-2", "still working"), 0.2),
+                (create_sse_event("session.idle", {"sessionID": "oc-session-123"}), 0),
+            ]
+        )
+        bridge.http_client = DelayedMockHttpClient(sse_response)
+
+        events = [event async for event in bridge._stream_opencode_response_sse("msg-1", "test")]
+
+        assert [e["content"] for e in events if e["type"] == "token"] == [
+            "still",
+            "still working",
+        ]
 
     @pytest.mark.asyncio
     async def test_prompt_max_duration_timeout(self):
