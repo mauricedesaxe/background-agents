@@ -398,7 +398,6 @@ export class SessionRepository {
     );
   }
 
-  /** Extends terminal_at forward to `now`; no-op unless terminal and later. */
   extendTerminalActivity(sessionId: string, now: number): boolean {
     const result = this.sql.exec(
       `UPDATE session SET terminal_at = ? WHERE id = ? AND terminal_at IS NOT NULL AND ? > terminal_at`,

@@ -759,7 +759,7 @@ describe("createChildSessionsHandler", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true });
     expect(recordTerminalActivity).toHaveBeenCalledWith(expect.any(Number));
-    expect(onTerminalChild).toHaveBeenCalledWith("child-1");
+    expect(onTerminalChild).not.toHaveBeenCalled();
     expect(broadcast).toHaveBeenCalledWith({
       type: "child_session_update",
       childSessionId: "child-1",
@@ -768,7 +768,7 @@ describe("createChildSessionsHandler", () => {
     });
   });
 
-  it("delivers child results only for terminal statuses", async () => {
+  it("delivers child results only on status-transition notifies for terminal statuses", async () => {
     const { handler, onTerminalChild } = createHandler();
 
     await handler.childSessionUpdate(
@@ -777,12 +777,27 @@ describe("createChildSessionsHandler", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           childSessionId: "child-1",
-          status: "active",
-          title: "Still running",
+          status: "completed",
+          title: "Done",
+          deliverResult: true,
         }),
       })
     );
+    expect(onTerminalChild).toHaveBeenCalledWith("child-1");
 
+    onTerminalChild.mockClear();
+
+    await handler.childSessionUpdate(
+      new Request("http://internal/internal/child-session/update", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          childSessionId: "child-1",
+          status: "completed",
+          title: "Retitled after complete",
+        }),
+      })
+    );
     expect(onTerminalChild).not.toHaveBeenCalled();
 
     await handler.childSessionUpdate(
@@ -791,12 +806,26 @@ describe("createChildSessionsHandler", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           childSessionId: "child-2",
-          status: "failed",
-          title: "Failed child",
+          status: "active",
+          title: "Still running",
+          deliverResult: true,
         }),
       })
     );
+    expect(onTerminalChild).not.toHaveBeenCalled();
 
-    expect(onTerminalChild).toHaveBeenCalledWith("child-2");
+    await handler.childSessionUpdate(
+      new Request("http://internal/internal/child-session/update", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          childSessionId: "child-3",
+          status: "failed",
+          title: "Failed child",
+          deliverResult: true,
+        }),
+      })
+    );
+    expect(onTerminalChild).toHaveBeenCalledWith("child-3");
   });
 });
