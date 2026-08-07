@@ -183,13 +183,14 @@ has run to success several times since. Merging to `main` deploys changed servic
 - **Sandbox providers** → data plane (triggers: `packages/sandbox-runtime/`, `packages/*-infra/`,
   deployed via Terraform apply; Daytona is the one this deployment runs)
 
-The `apply` job runs under `environment: production`, which has a required reviewer. So the flow is
-merge, approve, then ship, and nothing reaches production unattended.
+The `apply` job runs under `environment: production`, and that environment carries no protection
+rules. The required reviewer was removed deliberately, because it made every deploy wait on a click.
+So a merge to `main` ships to production unattended, and the PR is the only gate there is.
 
 Things that are not obvious from the workflow files:
 
 - **Confirm the merge created a run.** A rebase-merge has been observed producing zero workflow runs
-  at all, which leaves the change sitting on `main` looking deployed with nothing to approve (issue
+  at all, which leaves the change sitting on `main` looking deployed with nothing having run (issue
   #75). `gh run list --branch main` after merging, and force it with
   `gh workflow run terraform.yml --ref main` if nothing appeared.
 - **A healthy post-deploy plan is not empty.** `always_run = timestamp()` means every worker always
