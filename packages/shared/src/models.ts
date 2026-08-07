@@ -229,6 +229,15 @@ export const MODEL_CATALOG = [
       },
       { id: "openrouter/x-ai/grok-4.3", name: "Grok 4.3", description: "xAI, balanced" },
       { id: "openrouter/x-ai/grok-4.5", name: "Grok 4.5", description: "xAI, most capable" },
+      {
+        id: "openrouter/deepseek/deepseek-v4-flash-0731",
+        name: "DeepSeek V4 Flash 0731",
+        description: "DeepSeek, fast and cheap agentic coding",
+        reasoning: {
+          efforts: ["low", "high", "max"],
+          default: "high",
+        },
+      },
     ],
   },
 ] as const satisfies readonly ModelCatalogGroup[];
