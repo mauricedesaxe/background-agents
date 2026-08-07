@@ -21,7 +21,7 @@ HARNESS_REPO="${HARNESS_REPO:-https://github.com/mauricedesaxe/lazar-harness.git
 # time, so terraform's source_hash over sandbox-runtime/src is what rebuilds the snapshot. A branch
 # ref would leave this file unchanged when the harness moves, and the snapshot would keep whatever
 # it was built with.
-HARNESS_REF="${HARNESS_REF:-583fe4f92eab02c18673dba152cf2de6f984324c}"
+HARNESS_REF="${HARNESS_REF:-4332adfcbb316ae6ecbf48e025e4d591c8b50b43}"
 
 die() {
   printf 'install-harness.sh: %s\n' "$1" >&2
