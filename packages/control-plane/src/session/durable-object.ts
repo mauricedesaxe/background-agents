@@ -20,6 +20,7 @@ import {
   timingSafeEqual,
 } from "@open-inspect/shared";
 import type { SessionAttachmentReference } from "@open-inspect/shared";
+import type { ChildSessionDetail } from "@open-inspect/shared";
 import { generateId, hashToken, encryptToken, decryptToken } from "../auth/crypto";
 import { buildModalSandboxDashboardUrl } from "../sandbox/client";
 import { resolveSandboxBackendName } from "../sandbox/provider-name";
@@ -94,6 +95,7 @@ import { SessionMessageQueue } from "./message-queue";
 import { SessionSandboxEventProcessor } from "./sandbox-events";
 import { SessionEventStream } from "./event-stream";
 import { createSessionInternalRoutes } from "./http/routes";
+import { buildSessionInternalUrl, SessionInternalPaths } from "./contracts";
 import { createMessagesHandler, type MessagesHandler } from "./http/handlers/messages.handler";
 import {
   createChildSessionsHandler,
@@ -122,6 +124,7 @@ import { MessageService } from "./services/message.service";
 import { createAlarmHandler, type AlarmHandler } from "./alarm/handler";
 import { SessionMessengerImpl, type SessionMessenger } from "./messenger";
 import { SessionStatusService } from "./session-status-service";
+import { buildChildResultPrompt } from "./child-result-prompt";
 
 /**
  * Timeout for WebSocket authentication (in milliseconds).
@@ -429,10 +432,61 @@ export class SessionDO extends DurableObject<Env> {
         parseArtifactMetadata: (artifact) => this.parseArtifactMetadata(artifact),
         messenger: this.messenger,
         recordTerminalActivity: (now) => this.statusService.recordTerminalActivity(now),
+        onTerminalChild: (childSessionId) => {
+          this.ctx.waitUntil(this.deliverChildResult(childSessionId));
+        },
       });
     }
 
     return this._childSessionsHandler;
+  }
+
+  /**
+   * Fetch a finished child session's result and deliver it to this (parent)
+   * agent as a prompt, which resumes the sandbox if it has stopped and lets the
+   * parent agent act on the subtask outcome. Fire-and-forget from the child
+   * update handler's perspective (run via `ctx.waitUntil`).
+   */
+  private async deliverChildResult(childSessionId: string): Promise<void> {
+    const session = this.getSession();
+    if (!session) return;
+    if (session.status === "archived" || session.status === "cancelled") return;
+
+    const sessions = this.env.SESSION;
+    if (!sessions) return;
+
+    const owner = this.repository
+      .listParticipants()
+      .find((participant) => participant.role === "owner");
+    if (!owner) return;
+
+    const childSummaryUrl = buildSessionInternalUrl(
+      SessionInternalPaths.childSummary,
+      "?includeFinalResponse=true"
+    );
+    let detail: ChildSessionDetail;
+    try {
+      const response = await sessions
+        .get(sessions.idFromName(childSessionId))
+        .fetch(childSummaryUrl);
+      if (!response.ok) return;
+      detail = (await response.json()) as ChildSessionDetail;
+    } catch (error) {
+      this.log.error("child_result.fetch_failed", { child_id: childSessionId, error });
+      return;
+    }
+
+    const content = buildChildResultPrompt(childSessionId, detail);
+    try {
+      await this.messageQueue.enqueuePromptFromApi({
+        messageId: generateId(),
+        content,
+        authorId: owner.user_id,
+        source: "agent",
+      });
+    } catch (error) {
+      this.log.error("child_result.deliver_failed", { child_id: childSessionId, error });
+    }
   }
 
   private get sandboxHandler(): SandboxHandler {
