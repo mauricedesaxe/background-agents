@@ -57,6 +57,7 @@ const OPENROUTER_MODELS = [
   "openrouter/google/gemini-3.1-pro-preview",
   "openrouter/x-ai/grok-4.3",
   "openrouter/x-ai/grok-4.5",
+  "openrouter/deepseek/deepseek-v4-flash-0731",
 ] as const;
 
 describe("model utilities", () => {
@@ -299,6 +300,10 @@ describe("model utilities", () => {
       efforts: ["none", "low", "medium", "high", "xhigh"],
       default: "high",
     });
+    expect(getReasoningConfig("openrouter/deepseek/deepseek-v4-flash-0731")).toEqual({
+      efforts: ["low", "high", "max"],
+      default: "high",
+    });
     expect(getReasoningConfig("openrouter/x-ai/grok-4.5")).toBeUndefined();
   });
 
@@ -317,6 +322,10 @@ describe("model utilities", () => {
     // OpenCode has no "max" variant for OpenRouter Gemini, and no variants at all for Grok.
     expect(isValidReasoningEffort("openrouter/google/gemini-3.1-flash-lite", "max")).toBe(false);
     expect(isValidReasoningEffort("openrouter/x-ai/grok-4.3", "high")).toBe(false);
+    expect(isValidReasoningEffort("openrouter/deepseek/deepseek-v4-flash-0731", "max")).toBe(true);
+    expect(isValidReasoningEffort("openrouter/deepseek/deepseek-v4-flash-0731", "medium")).toBe(
+      false
+    );
     expect(isValidReasoningEffort("openai/gpt-5.3-codex", "max")).toBe(false);
     expect(isValidReasoningEffort("deepseek/deepseek-v4-pro", "high")).toBe(false);
     expect(isValidReasoningEffort("invalid", "high")).toBe(false);
