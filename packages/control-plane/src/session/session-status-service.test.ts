@@ -70,6 +70,12 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
       session.archive_claimed_at = null;
       if (!keepRetryRequest) session.archive_requested_at = null;
     }),
+    extendTerminalActivity: vi.fn((sessionId: string, now: number) => {
+      if (!session || session.id !== sessionId) return false;
+      if (session.terminal_at == null || now <= session.terminal_at) return false;
+      session.terminal_at = now;
+      return true;
+    }),
     getPendingOrProcessingCount: vi.fn(() => 0),
     getMessageCount: vi.fn(() => 3),
     getActiveDurationMs: vi.fn(() => 4500),
@@ -513,12 +519,70 @@ describe("SessionStatusService.handleAutoArchiveAlarm", () => {
     await expect(archive).resolves.toBe("archived");
   });
 
+  it("re-arms the archive alarm at the extended deadline after post-terminal activity", async () => {
+    const terminalAt = 10_000;
+    const session = createSession({ status: "completed", terminal_at: terminalAt });
+    const h = harness({ session });
+
+    const activityAt = terminalAt + 6 * 60 * 60 * 1000;
+    h.service.recordTerminalActivity(activityAt);
+    expect(session.terminal_at).toBe(activityAt);
+
+    await h.service.handleAutoArchiveAlarm(terminalAt + 12 * 60 * 60 * 1000);
+
+    expect(h.archiveSandbox).not.toHaveBeenCalled();
+    expect(h.setAlarm).toHaveBeenCalledWith(activityAt + 12 * 60 * 60 * 1000);
+  });
+
   it("never auto-archives an active session", async () => {
     const h = harness({ session: createSession({ status: "active" }) });
     await h.service.handleAutoArchiveAlarm(Number.MAX_SAFE_INTEGER);
 
     expect(h.repository.updateSessionStatus).not.toHaveBeenCalled();
     expect(h.archiveSandbox).not.toHaveBeenCalled();
+  });
+});
+
+describe("SessionStatusService.recordTerminalActivity", () => {
+  it("extends terminal_at forward when a terminal session stays active", () => {
+    const terminalAt = 10_000;
+    const session = createSession({ status: "completed", terminal_at: terminalAt });
+    const h = harness({ session });
+
+    h.service.recordTerminalActivity(terminalAt + 3 * 60 * 1000);
+
+    expect(h.repository.extendTerminalActivity).toHaveBeenCalledWith(
+      "session-1",
+      terminalAt + 3 * 60 * 1000
+    );
+    expect(session.terminal_at).toBe(terminalAt + 3 * 60 * 1000);
+  });
+
+  it("is a no-op when the session is not terminal", () => {
+    const h = harness({ session: createSession({ status: "active", terminal_at: null }) });
+
+    h.service.recordTerminalActivity(99_999);
+
+    expect(h.repository.extendTerminalActivity).toHaveBeenCalledWith("session-1", 99_999);
+    expect(h.sessionIndex).toBeDefined();
+  });
+
+  it("does not contract terminal_at when an earlier event arrives", () => {
+    const terminalAt = 50_000;
+    const session = createSession({ status: "completed", terminal_at: terminalAt });
+    const h = harness({ session });
+
+    h.service.recordTerminalActivity(40_000);
+
+    expect(session.terminal_at).toBe(terminalAt);
+  });
+
+  it("is a no-op when there is no session", () => {
+    const h = harness({ session: null });
+
+    h.service.recordTerminalActivity(1);
+
+    expect(h.repository.extendTerminalActivity).not.toHaveBeenCalled();
   });
 });
 

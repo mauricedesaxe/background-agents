@@ -151,6 +151,7 @@ function createHandler() {
   );
   const broadcast = vi.fn();
   const messenger = { broadcast, sendToSandbox: vi.fn(() => true) };
+  const recordTerminalActivity = vi.fn();
 
   const handler = createChildSessionsHandler({
     repository,
@@ -159,6 +160,7 @@ function createHandler() {
     getPublicSessionId,
     parseArtifactMetadata,
     messenger,
+    recordTerminalActivity,
   });
 
   return {
@@ -169,6 +171,7 @@ function createHandler() {
     getPublicSessionId,
     parseArtifactMetadata,
     broadcast,
+    recordTerminalActivity,
   };
 }
 
@@ -718,7 +721,7 @@ describe("createChildSessionsHandler", () => {
   });
 
   it("returns 400 when child session update body is missing required fields", async () => {
-    const { handler, broadcast } = createHandler();
+    const { handler, broadcast, recordTerminalActivity } = createHandler();
 
     const response = await handler.childSessionUpdate(
       new Request("http://internal/internal/child-session/update", {
@@ -731,10 +734,11 @@ describe("createChildSessionsHandler", () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "childSessionId and status are required" });
     expect(broadcast).not.toHaveBeenCalled();
+    expect(recordTerminalActivity).not.toHaveBeenCalled();
   });
 
-  it("broadcasts child session update when payload is valid", async () => {
-    const { handler, broadcast } = createHandler();
+  it("broadcasts child session update and refreshes the archive deadline when payload is valid", async () => {
+    const { handler, broadcast, recordTerminalActivity } = createHandler();
 
     const response = await handler.childSessionUpdate(
       new Request("http://internal/internal/child-session/update", {
@@ -750,6 +754,7 @@ describe("createChildSessionsHandler", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true });
+    expect(recordTerminalActivity).toHaveBeenCalledWith(expect.any(Number));
     expect(broadcast).toHaveBeenCalledWith({
       type: "child_session_update",
       childSessionId: "child-1",

@@ -12,6 +12,7 @@ import type { SessionMessenger } from "./messenger";
 import type { SessionStatusService } from "./session-status-service";
 import type { SessionWebSocketManager } from "./websocket-manager";
 import type { SessionTitleUpdateOptions, SessionTitleUpdateResult } from "./title";
+import { isSessionActivitySandboxEvent } from "./session-activity";
 
 type PushResolver = { resolve: () => void; reject: (err: Error) => void };
 type SandboxEventWithAck = SandboxEvent & { ackId?: string };
@@ -51,6 +52,11 @@ export class SessionSandboxEventProcessor {
     return this.getLog();
   }
 
+  private recordActivity(now: number): void {
+    this.updateLastActivity(now);
+    this.statusService.recordTerminalActivity(now);
+  }
+
   async processSandboxEvent(event: SandboxEventWithAck, acknowledge = true): Promise<void> {
     if (event.type === "heartbeat" || event.type === "token") {
       this.log.debug("Sandbox event", { event_type: event.type });
@@ -82,7 +88,7 @@ export class SessionSandboxEventProcessor {
     const messageId = eventMessageId ?? processingMessage?.id ?? null;
 
     if (event.type === "artifact") {
-      this.updateLastActivity(now);
+      this.recordActivity(now);
 
       const artifactType = assertArtifactType(event.artifactType);
       const artifactId =
@@ -133,7 +139,7 @@ export class SessionSandboxEventProcessor {
     }
 
     if (event.type === "step_start" || event.type === "step_finish") {
-      this.updateLastActivity(now);
+      this.recordActivity(now);
       if (event.type === "step_finish") {
         const session = this.repository.getSession();
         if (!session) throw new Error("Cannot record usage without a session");
@@ -154,7 +160,7 @@ export class SessionSandboxEventProcessor {
     }
 
     if (event.type === "tool_call") {
-      this.updateLastActivity(now);
+      this.recordActivity(now);
       if (shouldPersistToolCallEvent(event.status)) {
         this.repository.createEvent({
           id: generateId(),
@@ -243,7 +249,7 @@ export class SessionSandboxEventProcessor {
       }
 
       this.ctx.waitUntil(this.triggerSnapshot("execution_complete"));
-      this.updateLastActivity(now);
+      this.recordActivity(now);
       await this.scheduleInactivityCheck();
       await this.processMessageQueue();
       this.sendAck(ackId);
@@ -257,6 +263,10 @@ export class SessionSandboxEventProcessor {
       messageId,
       createdAt: now,
     });
+
+    if (isSessionActivitySandboxEvent(event.type)) {
+      this.recordActivity(now);
+    }
 
     if (event.type === "git_sync") {
       this.repository.updateSandboxGitSyncStatus(event.status);

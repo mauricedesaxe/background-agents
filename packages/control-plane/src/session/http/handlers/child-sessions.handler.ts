@@ -29,6 +29,7 @@ export interface ChildSessionsHandlerDeps {
     artifact: Pick<ArtifactRow, "id" | "metadata">
   ) => Record<string, unknown> | null;
   messenger: SessionMessenger;
+  recordTerminalActivity: (now: number) => void;
 }
 
 export interface ChildSessionsHandler {
@@ -140,6 +141,8 @@ export function createChildSessionsHandler(deps: ChildSessionsHandlerDeps): Chil
       if (!body.childSessionId || !body.status) {
         return Response.json({ error: "childSessionId and status are required" }, { status: 400 });
       }
+
+      deps.recordTerminalActivity(Date.now());
 
       deps.messenger.broadcast({
         type: "child_session_update",
