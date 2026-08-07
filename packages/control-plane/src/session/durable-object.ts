@@ -441,12 +441,7 @@ export class SessionDO extends DurableObject<Env> {
     return this._childSessionsHandler;
   }
 
-  /**
-   * Fetch a finished child session's result and deliver it to this (parent)
-   * agent as a prompt, which resumes the sandbox if it has stopped and lets the
-   * parent agent act on the subtask outcome. Fire-and-forget from the child
-   * update handler's perspective (run via `ctx.waitUntil`).
-   */
+  /** Enqueues the child outcome as an agent prompt so a stopped parent sandbox is resumed. */
   private async deliverChildResult(childSessionId: string): Promise<void> {
     const session = this.getSession();
     if (!session) return;

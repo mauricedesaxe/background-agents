@@ -83,13 +83,15 @@ export class SessionSandboxEventProcessor {
       return;
     }
 
+    if (isSessionActivitySandboxEvent(event.type)) {
+      this.recordActivity(now);
+    }
+
     const eventMessageId = "messageId" in event ? event.messageId : null;
     const processingMessage = this.repository.getProcessingMessage();
     const messageId = eventMessageId ?? processingMessage?.id ?? null;
 
     if (event.type === "artifact") {
-      this.recordActivity(now);
-
       const artifactType = assertArtifactType(event.artifactType);
       const artifactId =
         typeof event.artifactId === "string" && event.artifactId.length > 0
@@ -139,7 +141,6 @@ export class SessionSandboxEventProcessor {
     }
 
     if (event.type === "step_start" || event.type === "step_finish") {
-      this.recordActivity(now);
       if (event.type === "step_finish") {
         const session = this.repository.getSession();
         if (!session) throw new Error("Cannot record usage without a session");
@@ -160,7 +161,6 @@ export class SessionSandboxEventProcessor {
     }
 
     if (event.type === "tool_call") {
-      this.recordActivity(now);
       if (shouldPersistToolCallEvent(event.status)) {
         this.repository.createEvent({
           id: generateId(),
@@ -249,7 +249,6 @@ export class SessionSandboxEventProcessor {
       }
 
       this.ctx.waitUntil(this.triggerSnapshot("execution_complete"));
-      this.recordActivity(now);
       await this.scheduleInactivityCheck();
       await this.processMessageQueue();
       this.sendAck(ackId);
@@ -263,10 +262,6 @@ export class SessionSandboxEventProcessor {
       messageId,
       createdAt: now,
     });
-
-    if (isSessionActivitySandboxEvent(event.type)) {
-      this.recordActivity(now);
-    }
 
     if (event.type === "git_sync") {
       this.repository.updateSandboxGitSyncStatus(event.status);

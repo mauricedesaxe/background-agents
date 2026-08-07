@@ -137,6 +137,7 @@ export function createChildSessionsHandler(deps: ChildSessionsHandlerDeps): Chil
         childSessionId: string;
         status: SessionStatus;
         title: string | null;
+        deliverResult?: boolean;
       };
 
       if (!body.childSessionId || !body.status) {
@@ -145,7 +146,7 @@ export function createChildSessionsHandler(deps: ChildSessionsHandlerDeps): Chil
 
       deps.recordTerminalActivity(Date.now());
 
-      if (isTerminalStatus(body.status)) {
+      if (body.deliverResult === true && isTerminalStatus(body.status)) {
         deps.onTerminalChild(body.childSessionId);
       }
 

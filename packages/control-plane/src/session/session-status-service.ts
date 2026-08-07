@@ -253,13 +253,7 @@ export class SessionStatusService {
     });
   }
 
-  /**
-   * Refresh the auto-archive deadline when a meaningful event arrives while
-   * the session is terminal. Extends `terminal_at` forward to `now`;
-   * `handleAutoArchiveAlarm` recomputes the deadline from `terminal_at` on
-   * every fire, so the existing alarm picks up the extension and re-arms
-   * itself. No-op when the session is not terminal.
-   */
+  /** Archive alarm re-reads `terminal_at` on each fire; extending it is enough. */
   recordTerminalActivity(now: number): void {
     const session = this.repository.getSession();
     if (!session) return;
@@ -313,7 +307,7 @@ export class SessionStatusService {
   notifyParentOfChildUpdate(
     session: Pick<SessionRow, "parent_session_id" | "title">,
     childSessionId: string,
-    update: { status: SessionStatus; title: string | null }
+    update: { status: SessionStatus; title: string | null; deliverResult?: boolean }
   ): void {
     const parentId = session.parent_session_id;
     if (!parentId || !this.sessions) return;
@@ -331,6 +325,7 @@ export class SessionStatusService {
               childSessionId,
               status: update.status,
               title: update.title,
+              deliverResult: update.deliverResult === true,
             }),
           })
         )
@@ -353,6 +348,7 @@ export class SessionStatusService {
     this.notifyParentOfChildUpdate(session, childSessionId, {
       status,
       title: session.title,
+      deliverResult: true,
     });
   }
 
