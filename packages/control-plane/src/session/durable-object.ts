@@ -428,6 +428,7 @@ export class SessionDO extends DurableObject<Env> {
         getPublicSessionId: (session) => this.getPublicSessionId(session),
         parseArtifactMetadata: (artifact) => this.parseArtifactMetadata(artifact),
         messenger: this.messenger,
+        recordTerminalActivity: (now) => this.statusService.recordTerminalActivity(now),
       });
     }
 

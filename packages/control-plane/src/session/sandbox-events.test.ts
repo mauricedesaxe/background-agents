@@ -71,6 +71,7 @@ function createProcessor() {
   const statusService = {
     reconcileAfterExecution: vi.fn(async (_success: boolean) => {}),
     recordCompletedOutput: vi.fn(async (_messageId: string, _completedAt: number) => {}),
+    recordTerminalActivity: vi.fn(),
   };
   const scheduleInactivityCheck = vi.fn(async () => {});
   const processMessageQueue = vi.fn(async () => {});

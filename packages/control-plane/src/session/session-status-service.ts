@@ -253,6 +253,19 @@ export class SessionStatusService {
     });
   }
 
+  /**
+   * Refresh the auto-archive deadline when a meaningful event arrives while
+   * the session is terminal. Extends `terminal_at` forward to `now`;
+   * `handleAutoArchiveAlarm` recomputes the deadline from `terminal_at` on
+   * every fire, so the existing alarm picks up the extension and re-arms
+   * itself. No-op when the session is not terminal.
+   */
+  recordTerminalActivity(now: number): void {
+    const session = this.repository.getSession();
+    if (!session) return;
+    this.repository.extendTerminalActivity(session.id, now);
+  }
+
   async handleAutoArchiveAlarm(now: number): Promise<void> {
     const session = this.repository.getSession();
     if (!session) return;
