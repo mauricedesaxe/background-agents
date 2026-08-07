@@ -51,7 +51,19 @@ def is_session_work(event_type: str | None) -> bool:
     OpenCode multiplexes file, lsp, storage and installation chatter onto the same stream. None of
     it means a prompt is progressing, so none of it may hold the session-progress deadline open.
     """
-    return bool(event_type) and event_type.startswith(("message.", "session."))
+    return event_type is not None and event_type.startswith(("message.", "session."))
+
+
+def session_id_from_sse_properties(props: dict[str, Any]) -> str | None:
+    """Return the session an OpenCode SSE event belongs to, when it names one."""
+    for container_name in (None, "info", "part"):
+        container = props if container_name is None else props.get(container_name)
+        if not isinstance(container, dict):
+            continue
+        session_id = container.get("sessionID")
+        if isinstance(session_id, str) and session_id:
+            return session_id
+    return None
 
 
 @dataclass(frozen=True)
@@ -1621,7 +1633,21 @@ class AgentBridge:
                                     f"stayed alive. Total elapsed: {elapsed:.0f}s"
                                 )
                         else:
-                            if is_session_work(event_type):
+                            event_session_id = session_id_from_sse_properties(props)
+                            status = props.get("status")
+                            is_provider_retry = (
+                                event_type == "session.status"
+                                and isinstance(status, dict)
+                                and status.get("type") == "retry"
+                            )
+                            if (
+                                is_session_work(event_type)
+                                and not is_provider_retry
+                                and (
+                                    event_session_id == self.opencode_session_id
+                                    or event_session_id in tracked_child_session_ids
+                                )
+                            ):
                                 last_progress_at = loop.time()
 
                             # Track direct child sessions before filtering
@@ -1631,6 +1657,7 @@ class AgentBridge:
                                 child_parent = info.get("parentID")
                                 if child_id and child_parent == self.opencode_session_id:
                                     tracked_child_session_ids.add(child_id)
+                                    last_progress_at = loop.time()
                                     self.log.info(
                                         "bridge.child_session_detected",
                                         child_session_id=child_id,

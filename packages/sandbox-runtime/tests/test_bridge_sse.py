@@ -1748,7 +1748,90 @@ class TestPromptMaxDuration:
                 (create_sse_event("server.connected", {}), 0),
                 (create_sse_event("file.edited", {"file": "/workspace/a.py"}), 0.15),
                 (create_sse_event("lsp.diagnostics", {"path": "/workspace/a.py"}), 0.15),
-                (create_sse_event("server.heartbeat", {}), 0.15),
+                (create_sse_event("storage.write", {"key": "cache"}), 0.15),
+                (create_sse_event("server.heartbeat", {}), 0),
+            ]
+        )
+        http_client = DelayedMockHttpClient(sse_response)
+        http_client.get_responses = [MockResponse(200, [])]
+        bridge.http_client = http_client
+
+        with pytest.raises(RuntimeError, match="produced nothing"):
+            async for _event in bridge._stream_opencode_response_sse("msg-1", "test"):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_provider_retries_do_not_hold_the_progress_deadline_open(self):
+        """A rejected request is still stalled even when OpenCode schedules another attempt."""
+        bridge = AgentBridge(
+            sandbox_id="test-sandbox",
+            session_id="test-session",
+            control_plane_url="http://localhost:8787",
+            auth_token="test-token",
+        )
+        bridge.opencode_session_id = "oc-session-123"
+        bridge.sse_inactivity_timeout = 2.0
+        bridge.session_progress_timeout_seconds = 0.25
+
+        retry = create_sse_event(
+            "session.status",
+            {
+                "sessionID": "oc-session-123",
+                "status": {
+                    "type": "retry",
+                    "attempt": 1,
+                    "message": "Rate limited",
+                    "next": 1786006100468,
+                },
+            },
+        )
+        sse_response = DelayedMockSSEResponse(
+            [
+                (create_sse_event("server.connected", {}), 0),
+                (retry, 0.15),
+                (retry, 0.15),
+                (retry, 0.15),
+                (create_sse_event("server.heartbeat", {}), 0),
+            ]
+        )
+        http_client = DelayedMockHttpClient(sse_response)
+        http_client.get_responses = [MockResponse(200, [])]
+        bridge.http_client = http_client
+
+        with pytest.raises(RuntimeError, match="produced nothing"):
+            async for _event in bridge._stream_opencode_response_sse("msg-1", "test"):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_unrelated_session_work_does_not_reset_the_progress_deadline(self):
+        """Activity from another session on the shared stream is not this prompt's progress."""
+        bridge = AgentBridge(
+            sandbox_id="test-sandbox",
+            session_id="test-session",
+            control_plane_url="http://localhost:8787",
+            auth_token="test-token",
+        )
+        bridge.opencode_session_id = "oc-session-123"
+        bridge.sse_inactivity_timeout = 2.0
+        bridge.session_progress_timeout_seconds = 0.25
+
+        unrelated_message = create_sse_event(
+            "message.updated",
+            {
+                "info": {
+                    "id": "oc-msg-other",
+                    "role": "assistant",
+                    "sessionID": "oc-session-other",
+                }
+            },
+        )
+        sse_response = DelayedMockSSEResponse(
+            [
+                (create_sse_event("server.connected", {}), 0),
+                (unrelated_message, 0.15),
+                (unrelated_message, 0.15),
+                (unrelated_message, 0.15),
+                (create_sse_event("server.heartbeat", {}), 0),
             ]
         )
         http_client = DelayedMockHttpClient(sse_response)
