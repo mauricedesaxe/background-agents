@@ -30,6 +30,7 @@ export interface ChildSessionsHandlerDeps {
   ) => Record<string, unknown> | null;
   messenger: SessionMessenger;
   recordTerminalActivity: (now: number) => void;
+  onTerminalChild: (childSessionId: string) => void;
 }
 
 export interface ChildSessionsHandler {
@@ -144,6 +145,10 @@ export function createChildSessionsHandler(deps: ChildSessionsHandlerDeps): Chil
 
       deps.recordTerminalActivity(Date.now());
 
+      if (isTerminalStatus(body.status)) {
+        deps.onTerminalChild(body.childSessionId);
+      }
+
       deps.messenger.broadcast({
         type: "child_session_update",
         childSessionId: body.childSessionId,
@@ -154,4 +159,10 @@ export function createChildSessionsHandler(deps: ChildSessionsHandlerDeps): Chil
       return Response.json({ ok: true });
     },
   };
+}
+
+const TERMINAL_CHILD_STATUSES = new Set<SessionStatus>(["completed", "failed", "cancelled"]);
+
+function isTerminalStatus(status: SessionStatus): boolean {
+  return TERMINAL_CHILD_STATUSES.has(status);
 }

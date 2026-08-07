@@ -152,6 +152,7 @@ function createHandler() {
   const broadcast = vi.fn();
   const messenger = { broadcast, sendToSandbox: vi.fn(() => true) };
   const recordTerminalActivity = vi.fn();
+  const onTerminalChild = vi.fn();
 
   const handler = createChildSessionsHandler({
     repository,
@@ -161,6 +162,7 @@ function createHandler() {
     parseArtifactMetadata,
     messenger,
     recordTerminalActivity,
+    onTerminalChild,
   });
 
   return {
@@ -172,6 +174,7 @@ function createHandler() {
     parseArtifactMetadata,
     broadcast,
     recordTerminalActivity,
+    onTerminalChild,
   };
 }
 
@@ -721,7 +724,7 @@ describe("createChildSessionsHandler", () => {
   });
 
   it("returns 400 when child session update body is missing required fields", async () => {
-    const { handler, broadcast, recordTerminalActivity } = createHandler();
+    const { handler, broadcast, recordTerminalActivity, onTerminalChild } = createHandler();
 
     const response = await handler.childSessionUpdate(
       new Request("http://internal/internal/child-session/update", {
@@ -735,10 +738,11 @@ describe("createChildSessionsHandler", () => {
     expect(await response.json()).toEqual({ error: "childSessionId and status are required" });
     expect(broadcast).not.toHaveBeenCalled();
     expect(recordTerminalActivity).not.toHaveBeenCalled();
+    expect(onTerminalChild).not.toHaveBeenCalled();
   });
 
   it("broadcasts child session update and refreshes the archive deadline when payload is valid", async () => {
-    const { handler, broadcast, recordTerminalActivity } = createHandler();
+    const { handler, broadcast, recordTerminalActivity, onTerminalChild } = createHandler();
 
     const response = await handler.childSessionUpdate(
       new Request("http://internal/internal/child-session/update", {
@@ -755,11 +759,44 @@ describe("createChildSessionsHandler", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true });
     expect(recordTerminalActivity).toHaveBeenCalledWith(expect.any(Number));
+    expect(onTerminalChild).toHaveBeenCalledWith("child-1");
     expect(broadcast).toHaveBeenCalledWith({
       type: "child_session_update",
       childSessionId: "child-1",
       status: "completed",
       title: "Child title",
     });
+  });
+
+  it("delivers child results only for terminal statuses", async () => {
+    const { handler, onTerminalChild } = createHandler();
+
+    await handler.childSessionUpdate(
+      new Request("http://internal/internal/child-session/update", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          childSessionId: "child-1",
+          status: "active",
+          title: "Still running",
+        }),
+      })
+    );
+
+    expect(onTerminalChild).not.toHaveBeenCalled();
+
+    await handler.childSessionUpdate(
+      new Request("http://internal/internal/child-session/update", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          childSessionId: "child-2",
+          status: "failed",
+          title: "Failed child",
+        }),
+      })
+    );
+
+    expect(onTerminalChild).toHaveBeenCalledWith("child-2");
   });
 });
