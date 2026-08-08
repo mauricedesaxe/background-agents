@@ -84,6 +84,16 @@ session archives its sandbox, and it cascades to the session's children. Pinned 
 **Why.** A stopped Daytona sandbox still holds its disk against the account cap. Only archiving
 frees it. Without this the cap is reached and new sandboxes stop booting.
 
+**What counts as "last active" is one shared set.** The sandbox inactivity timer and the
+auto-archive timer read a single activity definition from
+`packages/control-plane/src/session/session-activity.ts` instead of each tracking a different event
+set. Activity records through one choke point that refreshes the sandbox's `last_activity` and, when
+the session is terminal, extends `terminal_at` forward; `child_session_update` does the same via the
+status service. Otherwise a terminal session still receiving artifacts, tool calls, git syncs, or
+child reports would archive 12 hours after it first went terminal. This is retained behavior in its
+own right, not just a config value, and was unified with the child-result delivery work (`fc5eea9`,
+`3361bd8`).
+
 ### 5. Child sessions inherit the parent's model, and a zero cap disables fan-out
 
 `packages/control-plane/src/routes/session-child-spawn.ts` resolves the model from the spawn context
@@ -185,6 +195,11 @@ always true, which is a bug that reads correctly.
 sandbox sends OpenRouter reasoning effort as an OpenCode variant.
 
 **Why.** Several models we want are only reachable through OpenRouter.
+
+**Retention, not drop.** The retained-inventory issue #264 originally listed OpenRouter under `drop`
+("not used"). That is amended: OpenRouter and DeepSeek are retained today because DeepSeek V4 Flash
+and other models are only reachable through it. It stays a removal candidate if it stops being used,
+but it is live now, so a reconstructor must not delete it.
 
 ### 12. The automation forward is decoupled from bot dispatch
 
