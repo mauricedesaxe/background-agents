@@ -17,6 +17,7 @@ function createHandler() {
     handleAlarm: vi.fn<() => Promise<void>>().mockResolvedValue(),
   };
   const statusService = {
+    retryPendingParentNotifications: vi.fn<() => Promise<void>>().mockResolvedValue(),
     handleAutoArchiveAlarm: vi.fn<(_now: number) => Promise<void>>().mockResolvedValue(),
   };
   const now = vi.fn(() => 2000);

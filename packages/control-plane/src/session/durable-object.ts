@@ -432,9 +432,8 @@ export class SessionDO extends DurableObject<Env> {
         parseArtifactMetadata: (artifact) => this.parseArtifactMetadata(artifact),
         messenger: this.messenger,
         recordTerminalActivity: (now) => this.statusService.recordTerminalActivity(now),
-        onTerminalChild: (childSessionId) => {
-          this.ctx.waitUntil(this.deliverChildResult(childSessionId));
-        },
+        onTerminalChild: (childSessionId, childResultMessageId) =>
+          this.deliverChildResult(childSessionId, childResultMessageId),
       });
     }
 
@@ -442,45 +441,55 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   /** Enqueues the child outcome as an agent prompt so a stopped parent sandbox is resumed. */
-  private async deliverChildResult(childSessionId: string): Promise<void> {
+  private async deliverChildResult(
+    childSessionId: string,
+    childResultMessageId: string | null
+  ): Promise<boolean> {
+    if (await this.getActiveCompaction()) return false;
+
     const session = this.getSession();
-    if (!session) return;
-    if (session.status === "archived" || session.status === "cancelled") return;
+    if (!session) return false;
+    if (session.status === "archived" || session.status === "cancelled") return false;
 
     const sessions = this.env.SESSION;
-    if (!sessions) return;
+    if (!sessions) return false;
 
     const owner = this.repository
       .listParticipants()
       .find((participant) => participant.role === "owner");
-    if (!owner) return;
+    if (!owner) return false;
 
+    const resultMessageParam = childResultMessageId
+      ? `&resultMessageId=${encodeURIComponent(childResultMessageId)}`
+      : "";
     const childSummaryUrl = buildSessionInternalUrl(
       SessionInternalPaths.childSummary,
-      "?include=result"
+      `?include=result${resultMessageParam}`
     );
     let detail: ChildSessionDetail;
     try {
       const response = await sessions
         .get(sessions.idFromName(childSessionId))
         .fetch(childSummaryUrl);
-      if (!response.ok) return;
+      if (!response.ok) return false;
       detail = (await response.json()) as ChildSessionDetail;
     } catch (error) {
       this.log.error("child_result.fetch_failed", { child_id: childSessionId, error });
-      return;
+      return false;
     }
 
     const content = buildChildResultPrompt(childSessionId, detail);
     try {
       await this.messageQueue.enqueuePromptFromApi({
-        messageId: generateId(),
+        messageId: `child-result:${childSessionId}:${childResultMessageId ?? detail.session.updatedAt}`,
         content,
         authorId: owner.user_id,
         source: "agent",
       });
+      return true;
     } catch (error) {
       this.log.error("child_result.deliver_failed", { child_id: childSessionId, error });
+      return false;
     }
   }
 

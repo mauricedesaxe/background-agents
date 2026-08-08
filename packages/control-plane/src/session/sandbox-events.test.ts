@@ -444,7 +444,7 @@ describe("SessionSandboxEventProcessor", () => {
     expect(h.statusService.recordCompletedOutput).toHaveBeenCalledWith("msg-1", expect.any(Number));
     expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
-    expect(h.statusService.reconcileAfterExecution).toHaveBeenCalledWith(true);
+    expect(h.statusService.reconcileAfterExecution).toHaveBeenCalledWith(true, "msg-1");
     expect(h.triggerSnapshot).toHaveBeenCalledWith("execution_complete");
     expect(h.scheduleInactivityCheck).toHaveBeenCalledTimes(1);
     expect(h.processMessageQueue).toHaveBeenCalledTimes(1);

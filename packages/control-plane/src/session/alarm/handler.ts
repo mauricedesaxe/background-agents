@@ -9,7 +9,10 @@ export interface AlarmHandlerDeps {
   repository: Pick<SessionRepository, "getProcessingMessageWithStartedAt">;
   messageQueue: Pick<SessionMessageQueue, "failStuckProcessingMessage" | "failStuckPendingMessage">;
   lifecycleManager: Pick<SandboxLifecycleManager, "handleAlarm">;
-  statusService: Pick<SessionStatusService, "handleAutoArchiveAlarm">;
+  statusService: Pick<
+    SessionStatusService,
+    "handleAutoArchiveAlarm" | "retryPendingParentNotifications"
+  >;
   executionTimeoutMs: number;
   now: () => number;
   /** Session-scoped logger — alarms run outside any request, so there is no request correlation. */
@@ -59,6 +62,8 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
       // never connected. Self-guards (still pending, no sandbox, not processing,
       // aged out), so it's safe to run on every alarm regardless of what armed it.
       await deps.messageQueue.failStuckPendingMessage();
+
+      await deps.statusService.retryPendingParentNotifications();
 
       await deps.statusService.handleAutoArchiveAlarm(deps.now());
 

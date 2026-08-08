@@ -140,6 +140,7 @@ function createHandler() {
     listParticipants: vi.fn(),
     listArtifacts: vi.fn(),
     listEventPage: vi.fn(),
+    getMessageById: vi.fn(),
     getLatestTerminalMessage: vi.fn(),
     getEventTimelinePage: vi.fn(),
   };
@@ -152,7 +153,7 @@ function createHandler() {
   const broadcast = vi.fn();
   const messenger = { broadcast, sendToSandbox: vi.fn(() => true) };
   const recordTerminalActivity = vi.fn();
-  const onTerminalChild = vi.fn();
+  const onTerminalChild = vi.fn(async () => true);
 
   const handler = createChildSessionsHandler({
     repository,
@@ -496,6 +497,38 @@ describe("createChildSessionsHandler", () => {
     });
   });
 
+  it("builds the final response from the requested terminal message", async () => {
+    const { handler, getSession, getSandbox, getPublicSessionId, repository } = createHandler();
+    getSession.mockReturnValue(createSession({ status: "completed" }));
+    getSandbox.mockReturnValue(createSandbox({ status: "stopped" }));
+    getPublicSessionId.mockReturnValue("public-session-1");
+    repository.listArtifacts.mockReturnValue([]);
+    repository.getMessageById.mockReturnValue(createMessage({ id: "msg-requested" }));
+    repository.listEventPage
+      .mockReturnValueOnce({ events: [], hasMore: false, nextCursor: null })
+      .mockReturnValueOnce({
+        events: [
+          createEvent({
+            type: "token",
+            message_id: "msg-requested",
+            data: '{"content":"Requested turn"}',
+          }),
+        ],
+        hasMore: false,
+        nextCursor: null,
+      });
+
+    const response = handler.getChildSummary(
+      new URL("http://internal/internal/child-summary?include=result&resultMessageId=msg-requested")
+    );
+
+    expect(repository.getMessageById).toHaveBeenCalledWith("msg-requested");
+    expect(repository.getLatestTerminalMessage).not.toHaveBeenCalled();
+    expect(await response.json()).toMatchObject({
+      finalResponse: { messageId: "msg-requested", textContent: "Requested turn" },
+    });
+  });
+
   it("paginates final response events when requested", async () => {
     const { handler, getSession, getSandbox, getPublicSessionId, repository } = createHandler();
     getSession.mockReturnValue(createSession({ status: "completed" }));
@@ -783,7 +816,7 @@ describe("createChildSessionsHandler", () => {
         }),
       })
     );
-    expect(onTerminalChild).toHaveBeenCalledWith("child-1");
+    expect(onTerminalChild).toHaveBeenCalledWith("child-1", null);
 
     onTerminalChild.mockClear();
 
@@ -826,6 +859,6 @@ describe("createChildSessionsHandler", () => {
         }),
       })
     );
-    expect(onTerminalChild).toHaveBeenCalledWith("child-3");
+    expect(onTerminalChild).toHaveBeenCalledWith("child-3", null);
   });
 });

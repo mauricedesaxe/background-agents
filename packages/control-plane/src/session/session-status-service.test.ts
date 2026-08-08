@@ -101,10 +101,18 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
   const waitUntil = vi.fn();
   const getAlarm = vi.fn(async () => null as number | null);
   const setAlarm = vi.fn(async (_deadlineAt: number) => {});
+  const durableStorage = new Map<string, unknown>();
+  const get = vi.fn(async (key: string) => durableStorage.get(key));
+  const put = vi.fn(async (key: string, value: unknown) => {
+    durableStorage.set(key, value);
+  });
+  const deleteValue = vi.fn(async (key: string) => {
+    durableStorage.delete(key);
+  });
   const ctx = {
     waitUntil,
     id: { toString: () => "do-id" },
-    storage: { getAlarm, setAlarm },
+    storage: { getAlarm, setAlarm, get, put, delete: deleteValue },
   } as unknown as DurableObjectState;
 
   const parentFetch = vi.fn(async (_request: Request) => new Response(null, { status: 200 }));
@@ -141,6 +149,7 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
     waitUntil,
     getAlarm,
     setAlarm,
+    durableStorage,
     parentSessions,
     parentFetch,
     archiveSandbox,
@@ -355,8 +364,43 @@ describe("SessionStatusService.transition", () => {
       status: "completed",
       title: "Session title",
       deliverResult: true,
+      childResultMessageId: null,
     });
     expect(h.waitUntil).toHaveBeenCalled();
+  });
+
+  it("retries non-successful parent result delivery responses", async () => {
+    const h = harness({
+      session: createSession({ status: "active", parent_session_id: "parent-1" }),
+    });
+    h.parentFetch
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(new Response(null, { status: 200 }));
+
+    await h.service.transition("completed", "child-message-1");
+
+    expect(h.parentFetch).toHaveBeenCalledTimes(3);
+    const request = h.parentFetch.mock.calls[2][0];
+    expect(await request.json()).toMatchObject({ childResultMessageId: "child-message-1" });
+  });
+
+  it("retains failed parent result delivery for an alarm retry", async () => {
+    const h = harness({
+      session: createSession({ status: "active", parent_session_id: "parent-1" }),
+    });
+    h.parentFetch.mockRejectedValue(new Error("parent unavailable"));
+
+    await h.service.transition("completed", "child-message-1");
+
+    expect(h.parentFetch).toHaveBeenCalledTimes(3);
+    expect(h.durableStorage.get("pendingParentNotifications")).toHaveLength(1);
+    expect(h.setAlarm).toHaveBeenCalled();
+
+    h.parentFetch.mockResolvedValue(new Response(null, { status: 200 }));
+    await h.service.retryPendingParentNotifications();
+
+    expect(h.durableStorage.has("pendingParentNotifications")).toBe(false);
   });
 
   it("does not notify a parent when the session has none", async () => {
@@ -533,6 +577,19 @@ describe("SessionStatusService.handleAutoArchiveAlarm", () => {
 
     expect(h.archiveSandbox).not.toHaveBeenCalled();
     expect(h.setAlarm).toHaveBeenCalledWith(activityAt + 12 * 60 * 60 * 1000);
+  });
+
+  it("defers parent auto-archive while a child is unfinished", async () => {
+    const terminalAt = 10_000;
+    const h = harness({
+      session: createSession({ status: "completed", terminal_at: terminalAt }),
+    });
+    h.sessionIndex!.listByParent.mockResolvedValue([{ id: "child-1", status: "active" }] as never);
+
+    await h.service.handleAutoArchiveAlarm(terminalAt + 12 * 60 * 60 * 1000);
+
+    expect(h.archiveSandbox).not.toHaveBeenCalled();
+    expect(h.setAlarm).toHaveBeenCalledWith(terminalAt + 12 * 60 * 60 * 1000 + 5 * 60 * 1000);
   });
 
   it("never auto-archives an active session", async () => {

@@ -631,7 +631,7 @@ export class SessionMessageQueue {
     data: EnqueuePromptRequest
   ): Promise<{ messageId: string; status: "queued" }> {
     if (
-      this.repository.getSession()?.status === "cancelled" ||
+      ["archived", "cancelled"].includes(this.repository.getSession()?.status ?? "") ||
       this.sessionStatus.isArchiveInProgress()
     ) {
       throw new PromptEnqueueRejectedError();

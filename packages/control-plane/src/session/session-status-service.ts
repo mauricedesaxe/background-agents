@@ -21,8 +21,20 @@ import { SandboxProviderError } from "../sandbox/provider";
 
 /** Statuses that indicate a session is finished — metrics are synced to D1 on these transitions. */
 const TERMINAL_STATUSES: SessionStatus[] = ["completed", "failed", "cancelled"];
+const FINISHED_CHILD_STATUSES: SessionStatus[] = [...TERMINAL_STATUSES, "archived"];
 const CHILD_ARCHIVE_ATTEMPTS = 3;
+const PARENT_NOTIFY_ATTEMPTS = 3;
 const ARCHIVE_RETRY_DELAY_MS = 5 * 60 * 1000;
+const PENDING_PARENT_NOTIFICATIONS_KEY = "pendingParentNotifications";
+
+interface PendingParentNotification {
+  deliveryId: string;
+  parentId: string;
+  childSessionId: string;
+  status: SessionStatus;
+  title: string | null;
+  childResultMessageId: string | null;
+}
 
 export type ArchiveAttemptResult = "archived" | "in_progress" | "failed";
 
@@ -43,9 +55,12 @@ export class SessionStatusService {
    * session is missing or already in `status` (projections are still
    * refreshed in the same-status case).
    */
-  async transition(status: SessionStatus): Promise<boolean> {
+  async transition(
+    status: SessionStatus,
+    childResultMessageId: string | null = null
+  ): Promise<boolean> {
     if (status === "active" && this.isArchiveInProgress()) return false;
-    return this.applyTransition(status, false);
+    return this.applyTransition(status, false, childResultMessageId);
   }
 
   async unarchive(): Promise<boolean> {
@@ -96,7 +111,11 @@ export class SessionStatusService {
     }
   }
 
-  private async applyTransition(status: SessionStatus, restoreArchivedSession: boolean) {
+  private async applyTransition(
+    status: SessionStatus,
+    restoreArchivedSession: boolean,
+    childResultMessageId: string | null = null
+  ) {
     const session = this.repository.getSession();
     if (!session) return false;
 
@@ -148,7 +167,7 @@ export class SessionStatusService {
     }
 
     // Notify parent session (if this is a child) so its UI can refresh
-    this.notifyParentOfStatusChange(session, publicSessionId, status);
+    await this.notifyParentOfStatusChange(session, publicSessionId, status, childResultMessageId);
 
     if (status === "archived") {
       this.cascadeArchiveToChildren(publicSessionId);
@@ -231,11 +250,11 @@ export class SessionStatusService {
    * After an execution finishes, settle the session status: back to active
    * when more prompts are queued, otherwise completed/failed by outcome.
    */
-  async reconcileAfterExecution(success: boolean): Promise<void> {
+  async reconcileAfterExecution(success: boolean, messageId: string | null = null): Promise<void> {
     const pendingOrProcessing = this.repository.getPendingOrProcessingCount();
     const nextStatus: SessionStatus =
       pendingOrProcessing > 0 ? "active" : success ? "completed" : "failed";
-    await this.transition(nextStatus);
+    await this.transition(nextStatus, messageId);
   }
 
   async recordCompletedOutput(messageId: string, completedAt: number): Promise<void> {
@@ -251,6 +270,13 @@ export class SessionStatusService {
         error,
       });
     });
+  }
+
+  async retryPendingParentNotifications(): Promise<void> {
+    const pending = await this.getPendingParentNotifications();
+    for (const notification of pending) {
+      await this.deliverParentNotification(notification);
+    }
   }
 
   /** Archive alarm re-reads `terminal_at` on each fire; extending it is enough. */
@@ -289,6 +315,11 @@ export class SessionStatusService {
     }
 
     if (!TERMINAL_STATUSES.includes(session.status)) return;
+
+    if (await this.hasUnfinishedChildren(this.getPublicSessionId(session))) {
+      await this.scheduleAlarmNoLaterThan(now + ARCHIVE_RETRY_DELAY_MS);
+      return;
+    }
 
     const terminalAt = session.terminal_at ?? session.updated_at;
     const deadlineAt = terminalAt + getSessionAutoArchiveDelayMs(session.spawn_source);
@@ -340,16 +371,100 @@ export class SessionStatusService {
     );
   }
 
-  private notifyParentOfStatusChange(
+  private async notifyParentOfStatusChange(
     session: Pick<SessionRow, "parent_session_id" | "title">,
     childSessionId: string,
-    status: SessionStatus
-  ): void {
-    this.notifyParentOfChildUpdate(session, childSessionId, {
+    status: SessionStatus,
+    childResultMessageId: string | null
+  ): Promise<void> {
+    const parentId = session.parent_session_id;
+    if (!parentId || !this.sessions) return;
+
+    const notification: PendingParentNotification = {
+      deliveryId: childResultMessageId ?? `${childSessionId}:${status}`,
+      parentId,
+      childSessionId,
       status,
       title: session.title,
-      deliverResult: true,
-    });
+      childResultMessageId,
+    };
+    const pending = await this.getPendingParentNotifications();
+    const withoutCurrent = pending.filter(
+      (candidate) => candidate.deliveryId !== notification.deliveryId
+    );
+    await this.ctx.storage.put(PENDING_PARENT_NOTIFICATIONS_KEY, [...withoutCurrent, notification]);
+    await this.deliverParentNotification(notification);
+  }
+
+  private async deliverParentNotification(notification: PendingParentNotification): Promise<void> {
+    if (!this.sessions) return;
+
+    const parentStub = this.sessions.get(this.sessions.idFromName(notification.parentId));
+    for (let attempt = 1; attempt <= PARENT_NOTIFY_ATTEMPTS; attempt += 1) {
+      try {
+        const response = await parentStub.fetch(
+          new Request(buildSessionInternalUrl(SessionInternalPaths.childSessionUpdate), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              childSessionId: notification.childSessionId,
+              status: notification.status,
+              title: notification.title,
+              deliverResult: true,
+              childResultMessageId: notification.childResultMessageId,
+            }),
+          })
+        );
+        if (response.ok) {
+          await this.removePendingParentNotification(notification.deliveryId);
+          return;
+        }
+        if (attempt === PARENT_NOTIFY_ATTEMPTS) {
+          throw new Error(`Parent notification returned HTTP ${response.status}`);
+        }
+      } catch (error) {
+        if (attempt < PARENT_NOTIFY_ATTEMPTS) continue;
+        this.log.error("notify_parent.failed", {
+          parent_id: notification.parentId,
+          child_id: notification.childSessionId,
+          status: notification.status,
+          error,
+        });
+      }
+    }
+    await this.scheduleAlarmNoLaterThan(nowMs() + ARCHIVE_RETRY_DELAY_MS);
+  }
+
+  private async getPendingParentNotifications(): Promise<PendingParentNotification[]> {
+    return (
+      (await this.ctx.storage.get<PendingParentNotification[]>(PENDING_PARENT_NOTIFICATIONS_KEY)) ??
+      []
+    );
+  }
+
+  private async removePendingParentNotification(deliveryId: string): Promise<void> {
+    const remaining = (await this.getPendingParentNotifications()).filter(
+      (notification) => notification.deliveryId !== deliveryId
+    );
+    if (remaining.length > 0) {
+      await this.ctx.storage.put(PENDING_PARENT_NOTIFICATIONS_KEY, remaining);
+    } else {
+      await this.ctx.storage.delete(PENDING_PARENT_NOTIFICATIONS_KEY);
+    }
+  }
+
+  private async hasUnfinishedChildren(parentSessionId: string): Promise<boolean> {
+    if (!this.sessionIndex) return false;
+    try {
+      const children = await this.sessionIndex.listByParent(parentSessionId);
+      return children.some((child) => !FINISHED_CHILD_STATUSES.includes(child.status));
+    } catch (error) {
+      this.log.error("session_archive.children_lookup_failed", {
+        parent_id: parentSessionId,
+        error,
+      });
+      return true;
+    }
   }
 
   private getPublicSessionId(session: SessionRow): string {

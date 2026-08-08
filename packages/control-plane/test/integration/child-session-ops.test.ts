@@ -308,6 +308,7 @@ describe("Child session operations (list, get, cancel)", () => {
           status: "completed",
           title: "Child Session",
           deliverResult: true,
+          childResultMessageId: "msg-delivered-child-result",
         }),
       })
     );

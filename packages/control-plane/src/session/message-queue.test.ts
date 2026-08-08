@@ -876,6 +876,22 @@ describe("SessionMessageQueue", () => {
       expect(h.spawnSandbox).not.toHaveBeenCalled();
     });
 
+    it("rejects prompts after archival without reactivating the session", async () => {
+      const h = buildQueue();
+      h.getSession.mockReturnValue(createSession({ status: "archived" }));
+
+      await expect(
+        h.queue.enqueuePromptFromApi({
+          content: "Late child result",
+          authorId: "agent:child",
+          source: "agent",
+        })
+      ).rejects.toBeInstanceOf(PromptEnqueueRejectedError);
+
+      expect(h.repository.createMessage).not.toHaveBeenCalled();
+      expect(h.sessionStatus.transition).not.toHaveBeenCalled();
+    });
+
     it("creates participant with authorDisplayName when new", async () => {
       const h = buildQueue();
       h.participantService.getByUserId.mockReturnValue(null as unknown as ParticipantRow);

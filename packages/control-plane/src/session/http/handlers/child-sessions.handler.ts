@@ -19,6 +19,7 @@ export interface ChildSessionsHandlerDeps {
     | "listParticipants"
     | "listArtifacts"
     | "listEventPage"
+    | "getMessageById"
     | "getLatestTerminalMessage"
     | "getEventTimelinePage"
   >;
@@ -30,7 +31,10 @@ export interface ChildSessionsHandlerDeps {
   ) => Record<string, unknown> | null;
   messenger: SessionMessenger;
   recordTerminalActivity: (now: number) => void;
-  onTerminalChild: (childSessionId: string) => void;
+  onTerminalChild: (
+    childSessionId: string,
+    childResultMessageId: string | null
+  ) => Promise<boolean>;
 }
 
 export interface ChildSessionsHandler {
@@ -98,7 +102,10 @@ export function createChildSessionsHandler(deps: ChildSessionsHandlerDeps): Chil
       let trajectory: ChildSummaryTrajectoryInput | undefined;
 
       if (options.includeFinalResponse) {
-        const terminalMessage = deps.repository.getLatestTerminalMessage();
+        const resultMessageId = url?.searchParams.get("resultMessageId") ?? null;
+        const terminalMessage = resultMessageId
+          ? deps.repository.getMessageById(resultMessageId)
+          : deps.repository.getLatestTerminalMessage();
         const collectedEvents = terminalMessage
           ? collectFinalResponseEventRows(deps.repository, terminalMessage.id)
           : { eventRows: [], eventLimitReached: false };
@@ -138,6 +145,7 @@ export function createChildSessionsHandler(deps: ChildSessionsHandlerDeps): Chil
         status: SessionStatus;
         title: string | null;
         deliverResult?: boolean;
+        childResultMessageId?: string | null;
       };
 
       if (!body.childSessionId || !body.status) {
@@ -147,7 +155,13 @@ export function createChildSessionsHandler(deps: ChildSessionsHandlerDeps): Chil
       deps.recordTerminalActivity(Date.now());
 
       if (body.deliverResult === true && isTerminalStatus(body.status)) {
-        deps.onTerminalChild(body.childSessionId);
+        const delivered = await deps.onTerminalChild(
+          body.childSessionId,
+          body.childResultMessageId ?? null
+        );
+        if (!delivered) {
+          return Response.json({ error: "Child result delivery failed" }, { status: 503 });
+        }
       }
 
       deps.messenger.broadcast({

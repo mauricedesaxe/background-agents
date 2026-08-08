@@ -239,7 +239,7 @@ export class SessionSandboxEventProcessor {
           this.callbackService.notifyComplete(completionMessageId, event.success, event.error)
         );
 
-        await this.statusService.reconcileAfterExecution(event.success);
+        await this.statusService.reconcileAfterExecution(event.success, completionMessageId);
       } else {
         this.log.info("prompt.complete", {
           event: "prompt.complete",
