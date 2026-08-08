@@ -1,10 +1,11 @@
 # FORK.md
 
 `mauricedesaxe/background-agents` is a **tracked fork** of
-[`ColeMurray/background-agents`](https://github.com/ColeMurray/background-agents). This file records
-what diverges on purpose, why each divergence exists, and the rules that keep a sync from silently
-dropping one. It exists because that analysis has now been produced and lost twice, and a sync that
-starts by re-deriving it starts by getting it wrong.
+[`ColeMurray/background-agents`](https://github.com/ColeMurray/background-agents). This file is the
+**canonical downstream patch record**: the single inventory of every retained downstream capability
+and patch, why each one exists, and the rules that keep a sync from silently dropping one. It exists
+because that analysis has now been produced and lost twice, and a sync that starts by re-deriving it
+starts by getting it wrong.
 
 **Posture.** Upstream's architecture is adopted wholesale, including refactors that change no
 behaviour on their own, because sharing their file shape is what keeps the next fix cheap.
@@ -13,9 +14,38 @@ either a bug or a sync we have not done yet, and in both cases the answer is to 
 version.
 
 The convergence effort itself is tracked in
-[#78](https://github.com/mauricedesaxe/background-agents/issues/78). Everything below was verified
-against the tree, not against memory, at merge base `0a753421` and upstream pin `3e344bd0`. Both
-move, so recompute them rather than trusting them: `git merge-base HEAD upstream/main`.
+[#78](https://github.com/mauricedesaxe/background-agents/issues/78), and its decision map in
+[#263](https://github.com/mauricedesaxe/background-agents/issues/263). Everything below was verified
+against the tree, not against memory, at merge base `0a753421`. The baseline on 2026-08-07 was fork
+`3361bd8d`, upstream `b63d0175`, and the
+[#291 continuity probe](https://github.com/mauricedesaxe/background-agents/issues/291) verified the
+bridge seams against upstream HEAD `b28cfa7`. Both move, so recompute them rather than trusting
+them: `git merge-base HEAD upstream/main`.
+
+## How to read this record
+
+Every retained capability or patch below carries the same six fields. A field that genuinely does
+not apply is marked `none`; a stale one is marked `recompute`.
+
+- **Status.** One of `retained` (keep as-is), `retained-candidate` (kept but a named removal
+  candidate), `upstream-owned` (upstream now owns the behaviour; we keep only a regression guard),
+  or `config` (moved to a verified configuration value).
+- **Provenance.** The fork commit(s) and issue(s) that introduced it.
+- **Upstream link.** The upstream issue/PR, if one reports or fixes the same thing. `none` means
+  upstream has no such signal and the divergence will never arrive as a conflict.
+- **Acceptance ownership.** The test that proves the retained behaviour exists. On a sync, this test
+  is the gate: if a port needs it edited to go green, the port dropped a behaviour.
+- **Removal condition.** The concrete event that lets us delete this entry, stated so it is
+  checkable rather than vibes.
+- **Last-verified upstream SHA.** The upstream commit this entry was last checked against.
+
+**Canonical rationale vs. the sync runbook.** This file is the canonical _what and why_. The
+operational _how_ of running a whole-upstream sync (detection, throwaway integration, review,
+acceptance, promotion, recorded history) is a different artifact with a different lifecycle and
+belongs in the sync-method work
+[#267](https://github.com/mauricedesaxe/background-agents/issues/267), not here. Keep FORK.md to
+what a sync must not silently drop; the runbook is how a sync moves a range, and it already has a
+long decision handoff in #267's comments. Do not let the runbook's machinery bloat this file.
 
 ## The permanent divergences
 
@@ -23,6 +53,12 @@ Each of these is ours by design. A sync proposes changing one only with a reason
 recorded here.
 
 ### 1. The agent harness is installed into the sandbox image
+
+**Status:** retained · **Provenance:** fork `a508e47` (pin-invalidation note) and every subsequent
+harness pin bump (e.g. `be76407`, `680d6d1`, `53a21a7`, `137b266`) · **Upstream link:** none ·
+**Acceptance ownership:** `packages/sandbox-runtime/tests/test_install_harness.py` · **Removal
+condition:** none — the harness has no upstream counterpart by definition · **Last-verified upstream
+SHA:** `b63d0175`.
 
 Every provider's image build runs
 `packages/sandbox-runtime/src/sandbox_runtime/scripts/install-harness.sh`, which clones
@@ -39,9 +75,18 @@ a commit rather than a branch so two builds of the same source produce the same 
 name, which is the same divergence reaching a second package.
 
 Modal, Vercel, and OpenComputer include the installer in their image fingerprints. Daytona excludes
-shell files, so each harness pin bump also advances its `SANDBOX_VERSION`.
+shell files, so each harness pin bump also advances its `SANDBOX_VERSION`. This is why the four
+post-baseline `chore(sandbox-runtime)` pin bumps (`be76407`, `680d6d1`, `53a21a7`, `137b266`) are
+not separate divergences: they move the same retained pin on entry #1. A harness pin bump alone
+ships nothing on Daytona until `SANDBOX_VERSION` moves too and an apply rebuilds the snapshot (issue
+#94).
 
 ### 2. Daytona is the provider we actually run
+
+**Status:** retained · **Provenance:** fork `53a6950` (pin provider identity for stop retries),
+`d3fdd62` (serialize stop settlement before resume), plus the snapshot-sizing work · **Upstream
+link:** none · **Acceptance ownership:** Daytona integration tests · **Removal condition:** none —
+the provider under load carries this by definition · **Last-verified upstream SHA:** `b63d0175`.
 
 Upstream ships several providers and we retain all of them; the ones we do not run diverge only
 through the shared harness install. Daytona is the one under load here, so it carries fork-local
@@ -65,6 +110,11 @@ nothing.
 
 ### 3. The idle window is 7 minutes, not 15
 
+**Status:** retained · **Provenance:** fork (idle-window change) · **Upstream link:** none ·
+**Acceptance ownership:** control-plane inactivity tests · **Removal condition:** none while the
+cost of an idle Daytona sandbox stays — the short window is priced into the provider economics ·
+**Last-verified upstream SHA:** `b63d0175`.
+
 `INACTIVITY_TIMEOUT_MS` and `INACTIVITY_EXTENSION_MS` in
 `packages/control-plane/src/sandbox/lifecycle/decisions.ts` sum to 7 minutes where upstream's
 `DEFAULT_INACTIVITY_CONFIG` sums to 15. The extension is bounded, so 7 is a hard upper bound rather
@@ -75,6 +125,12 @@ nothing on disk, so a short window is close to free. Before this, roughly 94% of
 idle sandboxes.
 
 ### 4. Sandboxes can be archived
+
+**Status:** retained · **Provenance:** fork (archive cascade; unified later with the
+last-active-overlay work `fc5eea9`, `3361bd8`) · **Upstream link:** none · **Acceptance ownership:**
+`packages/control-plane/test/integration/archive-cascade.test.ts` · **Removal condition:** adopt
+upstream only if it gains an equivalent archive primitive at the same semantics; until then keep ·
+**Last-verified upstream SHA:** `b63d0175`.
 
 `supportsArchive`, `ArchiveConfig`, and `ArchiveResult` in
 `packages/control-plane/src/sandbox/provider.ts` have no upstream counterpart at all. Archiving a
@@ -96,6 +152,11 @@ own right, not just a config value, and was unified with the child-result delive
 
 ### 5. Child sessions inherit the parent's model, and a zero cap disables fan-out
 
+**Status:** retained · **Provenance:** fork (child spawn model inheritance) · **Upstream link:**
+none · **Acceptance ownership:** `packages/control-plane/test/integration/spawn-children.test.ts` ·
+**Removal condition:** none while silent model drift on fanned-out agents has a real cost ·
+**Last-verified upstream SHA:** `b63d0175`.
+
 `packages/control-plane/src/routes/session-child-spawn.ts` resolves the model from the spawn context
 rather than accepting a per-child override. A child-session cap of zero turns fan-out off instead of
 falling back to a default. Pinned by
@@ -106,6 +167,16 @@ invisible. Every fanned-out agent also gets its own sandbox, so a zero cap is th
 that cost.
 
 ### 6. A session reattaches on the same sandbox and fails closed after permanent loss
+
+**Status:** retained-candidate, sized by the
+[#291 measurement](https://github.com/mauricedesaxe/background-agents/issues/291) · **Provenance:**
+fork (bridge reattach work) · **Upstream link:** none for the retained core — upstream now owns
+several inner pieces natively · **Acceptance ownership:**
+`packages/sandbox-runtime/tests/test_bridge_session_reattach.py`,
+`packages/control-plane/test/integration/websocket-sandbox.test.ts` · **Removal condition:** reduce
+this entry to the genuinely-retained core below once upstream's split modules (`prompt_stream.py`,
+`event_forwarder.py`, `child_activity.py`, `opencode_identifier.py`) are adopted · **Last-verified
+upstream SHA:** `b28cfa7` (probe).
 
 `packages/sandbox-runtime/src/sandbox_runtime/bridge.py` takes a control-plane-supplied
 `opencodeSessionId` and reattaches, with a watchdog for messages that arrive before the sandbox is
@@ -128,10 +199,31 @@ The operation stays attached to the existing OpenCode session and is stored outs
 transcript. The native endpoint behavior and later message lineage were
 [probed against pinned OpenCode 1.14.41](https://github.com/mauricedesaxe/background-agents/issues/129#issuecomment-5044195365).
 
+The
+[#291 probe](https://github.com/mauricedesaxe/background-agents/issues/291#issuecomment-5224806472)
+is the sizes for this entry. Upstream `b28cfa7` decomposed `bridge.py` into four modules the fork
+does not have, so the fork's 2654-line bridge is largely an inline transcription of code upstream
+now owns natively. Of the 1470-line gap, roughly 600 LOC is genuinely retained across five seams,
+roughly 600 is upstream-native-now (droppable by adopting upstream's split modules), and the rest is
+refactor noise. The genuinely-retained seams, and their removal conditions:
+
+- **Reattach fail-closed** (~140 LOC): env-supplied `opencodeSessionId`, verify-before-ready,
+  `context_unavailable` gating. Mixed with native upstream reattach. Keep until upstream carries the
+  same verify-before-ready and fail-closed semantics.
+- **Manual compaction** (`summarize`, ~110 LOC): upstream has no `summarize` command, verified
+  absent (`b28cfa7`). Keep.
+- **Event-pump + OOM cgroup reader** (~130 LOC): the fork's `EventPump` is a pump task with
+  eviction; upstream's `BufferedEventForwarder` buffers inline, not a pump. Keep (this is entry #7).
+- **jj-aware PR helper** (~150 LOC): the jj core; see entry #8.
+- **Provider-retry / usage-limit surfacing** (~40 LOC): the seams in entries #24 and #25.
+
 Mixed-version deploys retain a narrow compatibility sink for old bridges. Legacy checkpoint uploads
 are checksummed and discarded, checkpoint lifecycle events are acknowledged without persistence or
 broadcast, and downloads return `404`. This prevents retries during rollout without making
-checkpoints part of the current protocol or recovery path.
+checkpoints part of the current protocol or recovery path. Acceptance ownership: the legacy
+checkpoint compatibility cases in
+`packages/control-plane/test/integration/legacy-checkpoint-compat.test.ts`, which `097afc6` reworked
+to stop depending on unrelated provider timing.
 
 Automatic overflow recovery is pinned by
 `packages/sandbox-runtime/scripts/reproduce_context_overflow.py` and the compaction cases in
@@ -150,6 +242,12 @@ does not download or import native conversation checkpoints.
 
 ### 7. The SSE reader is decoupled from the WebSocket send
 
+**Status:** retained · **Provenance:** fork (event pump) · **Upstream link:** none — upstream's
+`BufferedEventForwarder` is a different mechanism · **Acceptance ownership:**
+`packages/sandbox-runtime/tests/test_event_pump.py` and `tests/test_entrypoint_oom.py` · **Removal
+condition:** adopt upstream's forwarder only if it proves equivalent at the pump's eviction
+semantics; it is not today (`b28cfa7`) · **Last-verified upstream SHA:** `b28cfa7`.
+
 The bridge enqueues events onto a pump task rather than sending them inline, salvages partial output
 when the stream drops, and reports OOM as a readable cause. Pinned by
 `packages/sandbox-runtime/tests/test_event_pump.py` and `tests/test_entrypoint_oom.py`.
@@ -159,14 +257,23 @@ when the stream drops, and reports OOM as a readable cause. Pinned by
 
 ### 8. jj is installed in the sandbox and the PR helper is jj-aware
 
+**Status:** retained-candidate · **Provenance:** fork · **Upstream link:** none · **Acceptance
+ownership:** `packages/sandbox-runtime` PR-helper tests · **Removal condition:** none while the
+repos this fork works on stay jj-colocated · **Last-verified upstream SHA:** `b28cfa7`.
+
 `packages/daytona-infra/src/toolchain.py` installs a pinned, checksum-verified jj binary, and the
 pull-request helper finalises `@` before pushing rather than pushing a detached git `HEAD`.
 
 **Why.** The repos this fork works on are jj-colocated. Without the helper fix, a session branches
 from a detached HEAD, pushes an empty branch, and opens no PR, with nothing in the output saying
-why.
+why. Per #291, the jj core (`_run_jj`, `_jj_working_copy_has_changes`, no-commits-beyond-trunk) is
+the retained ~150 LOC; basic git push is native upstream.
 
 ### 9. The tldraw whiteboard
+
+**Status:** retained · **Provenance:** fork (`754ebbc`) · **Upstream link:** none · **Acceptance
+ownership:** control-plane + web board tests · **Removal condition:** none while the diagram-first
+explanation workflow is used · **Last-verified upstream SHA:** `b63d0175`.
 
 A `BoardRoom` Durable Object, board routes, a live board editor in the session view, and a
 `whiteboard` skill in the sandbox. Agents inspect the same document through short-lived read-only
@@ -182,6 +289,10 @@ board.
 
 ### 10. Epoch and duration values are branded in control-plane
 
+**Status:** retained · **Provenance:** fork (`5c3e6c5` brands service nonce expiry) · **Upstream
+link:** none · **Acceptance ownership:** typecheck · **Removal condition:** none — a compile-time
+guard worth keeping · **Last-verified upstream SHA:** `b63d0175`.
+
 `packages/control-plane/src/time.ts` brands `EpochMs` and `DurationMs`, and time subtraction goes
 through `elapsed()` so the result stays a `DurationMs` all the way to its comparison.
 
@@ -190,6 +301,11 @@ and only one of them means anything. An epoch timestamp compared against a 10-mi
 always true, which is a bug that reads correctly.
 
 ### 11. OpenRouter models are in the catalog
+
+**Status:** retained-candidate · **Provenance:** fork `339aca6` (add DeepSeek V4 Flash 0731) + the
+retained-inventory amendment below · **Upstream link:** none — upstream has no OpenRouter entries ·
+**Acceptance ownership:** `packages/shared/src/models.test.ts` · **Removal condition:** if
+OpenRouter/DeepSeek stops being used; live now · **Last-verified upstream SHA:** `b63d0175`.
 
 `packages/shared/src/models.ts` carries OpenRouter entries that upstream does not have, and the
 sandbox sends OpenRouter reasoning effort as an OpenCode variant.
@@ -202,6 +318,11 @@ and other models are only reachable through it. It stays a removal candidate if 
 but it is live now, so a reconstructor must not delete it.
 
 ### 12. The automation forward is decoupled from bot dispatch
+
+**Status:** retained · **Provenance:** fork (github-bot forward extraction) · **Upstream link:**
+none · **Acceptance ownership:** the fork-only `packages/github-bot/test/webhook-forward.test.ts` ·
+**Removal condition:** adopt upstream's inline placement only when upstream stops throwing past the
+forward or redelivery works · **Last-verified upstream SHA:** `b63d0175`.
 
 `packages/github-bot/src/index.ts` extracts the control-plane forward into its own
 `forwardNormalizedEvent()`, which runs whether or not the built-in handler threw, where upstream
@@ -217,6 +338,11 @@ scope. That value is threaded in as a parameter instead. Take upstream's _choice
 line, never its _placement_.
 
 ### 13. A fork-local `content-ideas` automation template
+
+**Status:** retained · **Provenance:** fork (web automation template) · **Upstream link:** none —
+upstream should not receive it · **Acceptance ownership:** none — nothing enforces it, so the three
+rot paths below are watch items, not gates · **Removal condition:** none while it is used; the rot
+paths below are the thing to check at each sync · **Last-verified upstream SHA:** `b63d0175`.
 
 `packages/web/src/lib/automation-templates.ts` carries a `content-ideas` template that upstream does
 not have and should not receive. It surveys a week of merged pull requests and closed issues and
@@ -238,6 +364,11 @@ template was judged not worth the taxonomy change.
 
 ### 14. `SessionStatusService` names its DO namespace `sessions`, not `parentSessions`
 
+**Status:** retained (name only) · **Provenance:** fork · **Upstream link:** none · **Acceptance
+ownership:** typecheck + the archive-cascade test · **Removal condition:** the rename is a name;
+re-site it to upstream's if a future sync needs the namespace for something else — expect a conflict
+· **Last-verified upstream SHA:** `b63d0175`.
+
 The sixth constructor parameter of `packages/control-plane/src/session/session-status-service.ts` is
 `sessions` here and `parentSessions` upstream. Same binding, same position, different name.
 
@@ -251,6 +382,10 @@ and the rename touches the same lines. Take upstream's _parameter list_ and keep
 
 ### 15. Follow-up prompts remain usable while a session runs
 
+**Status:** retained · **Provenance:** fork · **Upstream link:** none · **Acceptance ownership:**
+control-plane websocket tests · **Removal condition:** none while the old/new version overlap window
+matters · **Last-verified upstream SHA:** `b63d0175`.
+
 An acknowledgement carrying a server-generated message ID confirms the sole pending delivery on the
 requesting socket. This keeps retries safe while old and new control-plane versions overlap; the
 acknowledgement is never broadcast or correlated across requesters.
@@ -263,6 +398,10 @@ snapshot.
 
 ### 16. One-shot prompts use replay-safe automation launches
 
+**Status:** retained · **Provenance:** fork · **Upstream link:** none · **Acceptance ownership:**
+control-plane tests · **Removal condition:** none while scheduling exists · **Last-verified upstream
+SHA:** `b63d0175`.
+
 The new-session composer can persist a prompt for one future execution without creating or warming a
 session. The scheduler claims the task atomically, then initializes its preassigned session and
 message IDs. Matching retries succeed while conflicting ID reuse fails.
@@ -273,6 +412,10 @@ main promise that nothing runs before the due time.
 
 ### 17. Prompt composers accept draft-only voice input
 
+**Status:** retained · **Provenance:** fork · **Upstream link:** none · **Acceptance ownership:**
+web tests · **Removal condition:** none while the vocabulary-steering path is used · **Last-verified
+upstream SHA:** `b63d0175`.
+
 Both prompt composers can record one browser-native audio clip and send it to an authenticated web
 route for OpenAI transcription. The transcript is appended to the editable draft and never submits
 itself. Session creation, prompt delivery, persistence, and sandbox protocols remain unchanged.
@@ -282,6 +425,12 @@ unreliable. Server-side transcription allows vocabulary steering without exposin
 the browser, while keeping mistakes visible and editable before they can start agent work.
 
 ### 18. The terminal toggle keeps its functional state updater
+
+**Status:** retained · **Provenance:** fork (declined hunk of upstream `0273a0e5`) · **Upstream
+link:** upstream `0273a0e5` · **Acceptance ownership:** none — the race needs two clicks in one
+render pass, so nothing covers it; the risk is a re-proposal that goes green · **Removal
+condition:** none — upstream's version reintroduces a stale read; keep ours until upstream fixes the
+underlying race · **Last-verified upstream SHA:** `b63d0175`.
 
 `packages/web/src/app/(app)/session/[id]/page.tsx` toggles the terminal panel with
 `setTerminalOpen((prev) => ...)`. Upstream `0273a0e5` rewrote it to read `terminalOpen` from the
@@ -299,6 +448,12 @@ brings back, and it goes green.
 
 ### 19. Linear GraphQL responses are validated without the upstream callback rewrite
 
+**Status:** retained · **Provenance:** fork (`55aba67`) · **Upstream link:** none — upstream's
+validation arrived with a later auth rewrite we did not take · **Acceptance ownership:**
+`packages/linear-bot` response-schema tests · **Removal condition:** adopt upstream's client whole
+only if it preserves the issue-start transition; it does not yet · **Last-verified upstream SHA:**
+`b63d0175`.
+
 `packages/linear-bot/src/utils/linear-client.ts` parses each touched operation through an explicit
 Zod schema from `packages/linear-bot/src/types.ts`. The issue-start transition keeps its fork-local
 state handling while validating its own query and mutation responses.
@@ -308,6 +463,12 @@ This fork needs the boundary checks without changing its existing webhook and is
 so future syncs must port Linear client changes selectively rather than replace the package.
 
 ### 20. Child session trees default to collapsed in the sidebar
+
+**Status:** retained · **Provenance:** fork `0b12c30` (stabilize session tree pagination) ·
+**Upstream link:** none · **Acceptance ownership:**
+`packages/web/src/components/session-sidebar.test.tsx` and the control-plane D1 integration tests ·
+**Removal condition:** none while fan-out can create enough child rows to make the sidebar unusable
+· **Last-verified upstream SHA:** `b63d0175`.
 
 `packages/web/src/components/session-sidebar.tsx` hides a parent's full descendant tree until its
 disclosure control is opened. The control reports the descendant count and active-child signal, and
@@ -324,6 +485,10 @@ appearing as a standalone root until pagination happens to load its older parent
 
 ### 21. Session unread state is per user and message-scoped
 
+**Status:** retained · **Provenance:** fork `917ef9f` (per-user unread session state) · **Upstream
+link:** none · **Acceptance ownership:** web unread-state tests · **Removal condition:** none while
+multi-participant review of background sessions exists · **Last-verified upstream SHA:** `b63d0175`.
+
 Completed and failed turns project their latest message id into the D1 session index. A separate
 per-user read cursor drives the sidebar's unread dot, manual read/unread actions, and
 child-to-parent visual rollup. Viewing the latest output clears automatic unread state but never
@@ -336,6 +501,12 @@ normal and synthetic failure paths, the `9005_session_read_states.sql` migration
 desktop and mobile actions.
 
 ### 22. Daily upstream exchange scans have a durable commit ledger
+
+**Status:** retained · **Provenance:** fork `22b00e7` (daily upstream exchange automations) and the
+control-plane `UpstreamExchangeStore` · **Upstream link:** none — report-only by design ·
+**Acceptance ownership:** control-plane `UpstreamExchangeStore` tests · **Removal condition:** once
+a whole-upstream sync replaces the need for read-only per-commit classification (#267) ·
+**Last-verified upstream SHA:** `b63d0175`.
 
 `terraform/d1/migrations/9007_upstream_exchange_ledger.sql`, the control-plane
 `UpstreamExchangeStore`, and the sandbox's `upstream-exchange` tool persist one immutable
@@ -352,6 +523,12 @@ outbound boundary never writes upstream.
 
 ### 23. Restored sessions preserve workspace state
 
+**Status:** retained · **Provenance:** fork `569af58` (preserve workspace state across resumes) +
+`8fe85fa` (restore OpenCode readiness on Daytona resume) · **Upstream link:** none · **Acceptance
+ownership:** the real-Git resume cases in
+`packages/sandbox-runtime/tests/test_entrypoint_build_mode.py` · **Removal condition:** none while
+the filesystem is the session's working state · **Last-verified upstream SHA:** `b63d0175`.
+
 Snapshot restores and persistent Daytona resumes fetch each repository's remote tracking ref without
 checking it out. Local commits, dirty tracked files, and untracked files remain unchanged. A missing
 upstream branch records a warning and does not prevent the session from starting. Fresh boots,
@@ -365,6 +542,78 @@ remains a fresh boot and still runs setup.
 must not decide whether work survives an inactivity stop, provider restart, or snapshot restore.
 Fetching preserves visibility into remote movement without choosing a merge policy or discarding
 either side.
+
+### 24. Finished child results are delivered to the parent agent
+
+**Status:** retained · **Provenance:** fork `707f756` (deliver finished child results) and `3361bd8`
+(edge-trigger child delivery), issues
+[#285](https://github.com/mauricedesaxe/background-agents/issues/285) and
+[#289](https://github.com/mauricedesaxe/background-agents/issues/289) · **Upstream link:** none ·
+**Acceptance ownership:** `packages/control-plane/src/session/child-result-prompt.test.ts` and the
+`delivers child results only on status-transition notifies for terminal statuses` case in
+`packages/control-plane/src/session/http/handlers/child-sessions.handler.test.ts` · **Removal
+condition:** adopt upstream only when it wakes the parent agent with the finished child's result; it
+does not yet · **Last-verified upstream SHA:** `b63d0175`.
+
+When a child session goes terminal, the parent now fetches the child's summary (final response plus
+PR artifacts), enqueues an agent-sourced prompt with that result, and lets the existing message
+queue resume the sandbox and dispatch it. Archived and cancelled parents are left alone. Delivery is
+edge-triggered: only a child _status transition_ to a terminal state enqueues the result, so a title
+update after a child finishes does not re-enqueue a duplicate parent prompt. Activity records
+through the one shared choke point after the non-activity early outs.
+
+**Why.** A child's finished summary sat unused while its parent's sandbox could already be stopped,
+so the user had to prompt by hand. Delivering the outcome to the parent agent keeps fan-out
+self-driving.
+
+### 25. Provider failure and stalls surface instead of reading as "thinking"
+
+**Status:** retained · **Provenance:** fork `e7bbf0d` (stop retrying a provider usage limit),
+`647303c` (surface a provider retry), and `bfac2fc` (fail a prompt that stops making progress),
+issues [#278](https://github.com/mauricedesaxe/background-agents/issues/278) and
+[#279](https://github.com/mauricedesaxe/background-agents/issues/279) · **Upstream link:** none —
+upstream's retry is silently infinite · **Acceptance ownership:** the provider-failure and
+session-progress cases in `packages/sandbox-runtime/tests/test_bridge_sse.py` · **Removal
+condition:** adopt upstream only when it bounds a provider retry and fails a stalled prompt; it does
+not yet (`b28cfa7`) · **Last-verified upstream SHA:** `b28cfa7`.
+
+A provider usage-limit `429` sits in the SDK's retry set, so it was retried behind OpenCode's back:
+the assistant message stayed empty, no error was recorded, and the prompt ran to its 90-minute
+ceiling before the control plane killed it with a generic timeout. The plugin now recognizes that
+one body and hands back a status the SDK reports rather than retries, putting the provider's own
+words (plan and reset time included) onto OpenCode's error path, which the bridge forwards to the
+UI. Every other rejection passes through untouched, since the SDK's retry is how a transient
+upstream failure gets absorbed.
+
+OpenCode still retries a rejected provider request on a schedule with no attempt cap, so the bridge
+forwards OpenCode's own published retry status (attempt number, next attempt time, normalized
+provider message) as a `provider_retry` event. That covers every provider without parsing any
+vendor's error body, and it makes the stall visible rather than read as a thinking session.
+
+A second, separate deadline asks whether the agent is working, not just whether the socket is alive.
+OpenCode heartbeats every 30 seconds, so a session that produced nothing could previously hold the
+stream open to the ceiling. Only message and session events answer the session-progress deadline,
+because OpenCode multiplexes file, lsp, and storage chatter onto the same stream. Ten minutes rather
+than five, so a legitimate context compaction, bounded at five minutes, cannot trip it.
+
+**Why.** Three sessions lost roughly four hours each to a usage-limit stall on 2026-08-05 with no
+signal anywhere. A provider-rejection stall and a session that stopped producing are both invisible
+until they fail; surfacing them is what makes the difference between a recoverable prompt and a
+silent 90 minutes.
+
+### 26. The sandbox-runtime node test suites run in CI
+
+**Status:** retained · **Provenance:** fork `49b3978` · **Upstream link:** none · **Acceptance
+ownership:** the `test-js-sandbox-runtime` CI job itself · **Removal condition:** none — it is the
+acceptance harness for the JS-side seams above · **Last-verified upstream SHA:** `b63d0175`.
+
+The sandbox-runtime package ships JavaScript (OpenCode plugins, in-sandbox agent tools) alongside
+Python, and its `node:test` files had no runner in CI, so they passed by never executing. A bare
+directory is resolved as a module rather than expanded, so the glob in the new
+`test-js-sandbox-runtime` job (`node --test "tests/*.test.mjs"`) is load-bearing.
+
+**Why.** A test that never runs is not a test. This closes the acceptance gap for the bridge and
+plugin seams on this record that are written in `*.test.mjs`.
 
 ## Where we match upstream against our own docs
 
@@ -392,6 +641,16 @@ rather than add to the duplication.
 
 Expect a reviewer to flag the placement; upstream's `#1059` (`ef820591`) is the commit that would
 re-site it, and taking that is the moment to revisit this note rather than before.
+
+## Watch items: renames and behaviours to adopt, not fight
+
+These are not divergences. They are upstream changes a sync should pick up wholesale, noted here so
+a sync does not read them as conflicts.
+
+**Upstream renamed the fan-out scripts from `task` to `child`.** This is a rename to adopt, not a
+conflict. When syncing, take upstream's `child` naming and let the rename land; do not keep a
+`task`-named copy alive to "avoid churn". Confirm the rename covers the script files and any
+references across `packages/` before closing the sync. (Source: #263's probe evidence, 2026-08-07.)
 
 ## The reserved migration range
 
@@ -454,18 +713,18 @@ own, because they are claimed again.
 
 The shape matters when sequencing a sync. Ordered by how much diverges, heaviest first:
 
-| Package              | What diverges                                               |
-| -------------------- | ----------------------------------------------------------- |
-| `control-plane`      | Nearly all of our behaviour. By far the heaviest package.   |
-| `sandbox-runtime`    | Bridge recovery/reattachment, harness install, whiteboard   |
-| `web`                | Board UI, compaction status, sidebar, settings, automations |
-| `shared`             | Models, artifacts, compaction event, Slack `truncated`      |
-| `github-bot`         | Review prompt sources `lazar-review`; forward decoupling    |
-| `daytona-infra`      | Toolchain: jj, sandbox version                              |
-| `modal-infra`        | The harness install call in the image build, nothing else   |
-| `opencomputer-infra` | The harness install call in the image build, nothing else   |
-| `slack-bot`          | Page-cap warning, and a Terraform binding parity guard      |
-| `linear-bot`         | GraphQL response validation; fork-local start transitions   |
+| Package              | What diverges                                                                         |
+| -------------------- | ------------------------------------------------------------------------------------- |
+| `control-plane`      | Nearly all of our behaviour. By far the heaviest package.                             |
+| `sandbox-runtime`    | Bridge recovery/reattachment, provider-failure surfacing, harness install, whiteboard |
+| `web`                | Board UI, compaction status, sidebar, settings, automations                           |
+| `shared`             | Models, artifacts, compaction event, Slack `truncated`                                |
+| `github-bot`         | Review prompt sources `lazar-review`; forward decoupling                              |
+| `daytona-infra`      | Toolchain: jj, sandbox version                                                        |
+| `modal-infra`        | The harness install call in the image build, nothing else                             |
+| `opencomputer-infra` | The harness install call in the image build, nothing else                             |
+| `slack-bot`          | Page-cap warning, and a Terraform binding parity guard                                |
+| `linear-bot`         | GraphQL response validation; fork-local start transitions                             |
 
 Recompute the counts rather than remembering them, since any commit changes them:
 
@@ -542,7 +801,7 @@ sync.
   checking its claims against the tree on every PR that touches them.
 - **`terraform/d1/migrations/9xxx_*.sql`.** Fork-local D1 schema changes use the reserved 9000+
   range so upstream can keep allocating lower migration identifiers without silently shadowing ours.
-  These files stay beside the migration runner that deploys them.
+  These files sit beside the migration runner that deploys them.
 
 General harness configuration is still not committed here, and the exception above is narrow: a
 reviewer that encodes _this repo's_ invariants has nowhere else to live, because a global agent
