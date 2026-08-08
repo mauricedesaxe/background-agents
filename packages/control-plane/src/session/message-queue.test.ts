@@ -275,6 +275,22 @@ describe("SessionMessageQueue", () => {
     });
   });
 
+  it("rejects WebSocket request IDs reserved for child delivery", async () => {
+    const h = buildQueue();
+
+    await h.queue.handlePromptMessage({} as WebSocket, createClientInfo(), {
+      requestId: "child-result:child-1:message-1",
+      content: "unrelated content",
+    });
+
+    expect(h.repository.createMessage).not.toHaveBeenCalled();
+    expect(h.wsManager.send).toHaveBeenCalledWith(expect.anything(), {
+      type: "prompt_rejected",
+      requestId: "child-result:child-1:message-1",
+      message: "Request ID uses a reserved prefix",
+    });
+  });
+
   it("rejects a prompt while provider archival is in progress", async () => {
     const h = buildQueue();
     h.sessionStatus.isArchiveInProgress.mockReturnValue(true);
@@ -890,6 +906,21 @@ describe("SessionMessageQueue", () => {
 
       expect(h.repository.createMessage).not.toHaveBeenCalled();
       expect(h.sessionStatus.transition).not.toHaveBeenCalled();
+    });
+
+    it("rejects API message IDs reserved for child delivery", async () => {
+      const h = buildQueue();
+
+      await expect(
+        h.queue.enqueuePromptFromApi({
+          messageId: "child-result:child-1:message-1",
+          content: "unrelated content",
+          authorId: "agent:child",
+          source: "agent",
+        })
+      ).rejects.toBeInstanceOf(PromptIdConflictError);
+
+      expect(h.repository.createMessage).not.toHaveBeenCalled();
     });
 
     it("creates participant with authorDisplayName when new", async () => {

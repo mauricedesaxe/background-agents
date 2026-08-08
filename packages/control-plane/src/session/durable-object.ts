@@ -485,12 +485,15 @@ export class SessionDO extends DurableObject<Env> {
 
     const content = buildChildResultPrompt(childSessionId, detail);
     try {
-      await this.messageQueue.enqueuePromptFromApi({
-        messageId: parentMessageId,
-        content,
-        authorId: owner.user_id,
-        source: "agent",
-      });
+      await this.messageQueue.enqueuePromptFromApi(
+        {
+          messageId: parentMessageId,
+          content,
+          authorId: owner.user_id,
+          source: "agent",
+        },
+        true
+      );
       return true;
     } catch (error) {
       this.log.error("child_result.deliver_failed", { child_id: childSessionId, error });

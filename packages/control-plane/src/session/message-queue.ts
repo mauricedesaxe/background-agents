@@ -47,6 +47,7 @@ export const PENDING_SANDBOX_CONNECT_TIMEOUT_MS = 5 * 60 * 1000;
 export const STOP_CONFIRMATION_TIMEOUT_MS = 3_000;
 
 const MS_PER_MINUTE = 60 * 1000;
+const CHILD_RESULT_MESSAGE_ID_PREFIX = "child-result:";
 
 /**
  * Generic connect-timeout message for a pending message whose sandbox never
@@ -128,6 +129,15 @@ export class SessionMessageQueue {
   ): Promise<void> {
     const messageId = data.requestId ?? generateId();
     const now = Date.now();
+
+    if (messageId.startsWith(CHILD_RESULT_MESSAGE_ID_PREFIX)) {
+      this.wsManager.send(ws, {
+        type: "prompt_rejected",
+        requestId: messageId,
+        message: "Request ID uses a reserved prefix",
+      } as ServerMessage);
+      return;
+    }
 
     if (["archived", "cancelled"].includes(this.repository.getSession()?.status ?? "")) {
       this.wsManager.send(ws, {
@@ -628,8 +638,12 @@ export class SessionMessageQueue {
   }
 
   async enqueuePromptFromApi(
-    data: EnqueuePromptRequest
+    data: EnqueuePromptRequest,
+    allowChildResultMessageId = false
   ): Promise<{ messageId: string; status: "queued" }> {
+    if (data.messageId?.startsWith(CHILD_RESULT_MESSAGE_ID_PREFIX) && !allowChildResultMessageId) {
+      throw new PromptIdConflictError();
+    }
     if (
       ["archived", "cancelled"].includes(this.repository.getSession()?.status ?? "") ||
       this.sessionStatus.isArchiveInProgress()
