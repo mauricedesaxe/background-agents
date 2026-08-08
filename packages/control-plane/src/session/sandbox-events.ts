@@ -80,7 +80,7 @@ export class SessionSandboxEventProcessor {
           isLatestCompletion &&
           this.repository.getPendingOrProcessingCount() === 0
         ) {
-          return;
+          await this.statusService.reconcileAfterExecution(event.success, event.messageId);
         }
       }
       if (acknowledge) this.sendAck(ackId);

@@ -162,6 +162,25 @@ describe("SessionSandboxEventProcessor", () => {
 
     expect(h.statusService.transition).not.toHaveBeenCalled();
   });
+
+  it("resumes reconciliation for a latest completion interrupted before terminal status", async () => {
+    const h = createProcessor();
+    h.repository.hasEvent.mockReturnValue(true);
+    h.repository.getLatestTerminalMessage.mockReturnValue({ id: "msg-interrupted" });
+    h.repository.getSession.mockReturnValue({ status: "active" } as never);
+    h.repository.getPendingOrProcessingCount.mockReturnValue(0);
+
+    await h.processor.processSandboxEvent({
+      type: "execution_complete",
+      messageId: "msg-interrupted",
+      success: true,
+      sandboxId: "sandbox-1",
+      timestamp: 1,
+      ackId: "execution_complete:msg-interrupted",
+    });
+
+    expect(h.statusService.reconcileAfterExecution).toHaveBeenCalledWith(true, "msg-interrupted");
+  });
   it("updates heartbeat without broadcasting", async () => {
     const h = createProcessor();
     const event: SandboxEvent = {
