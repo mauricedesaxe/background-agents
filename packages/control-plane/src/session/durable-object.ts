@@ -445,6 +445,9 @@ export class SessionDO extends DurableObject<Env> {
     childSessionId: string,
     childResultMessageId: string | null
   ): Promise<boolean> {
+    const parentMessageId = `child-result:${childSessionId}:${childResultMessageId ?? "terminal"}`;
+    if (this.repository.getMessageById(parentMessageId)) return true;
+
     if (await this.getActiveCompaction()) return false;
 
     const session = this.getSession();
@@ -458,9 +461,6 @@ export class SessionDO extends DurableObject<Env> {
       .listParticipants()
       .find((participant) => participant.role === "owner");
     if (!owner) return false;
-
-    const parentMessageId = `child-result:${childSessionId}:${childResultMessageId ?? "terminal"}`;
-    if (this.repository.getMessageById(parentMessageId)) return true;
 
     const resultMessageParam = childResultMessageId
       ? `&resultMessageId=${encodeURIComponent(childResultMessageId)}`
@@ -570,6 +570,7 @@ export class SessionDO extends DurableObject<Env> {
         statusService: this.statusService,
         applySessionTitleUpdate: (title, options) => this.applySessionTitleUpdate(title, options),
         stopExecution: (options) => this.stopExecution(options),
+        getProcessingMessageId: () => this.repository.getProcessingMessage()?.id ?? null,
         getSandboxSocket: () => this.wsManager.getSandboxSocket(),
         sendToSandbox: (ws, message) => this.wsManager.send(ws, message),
         terminateSandbox: (reason) => this.lifecycleManager.terminateSandbox(reason),

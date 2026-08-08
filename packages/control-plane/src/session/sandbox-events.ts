@@ -71,9 +71,8 @@ export class SessionSandboxEventProcessor {
     if (ackId && this.repository.hasEvent(ackId)) {
       if (event.type === "execution_complete" && event.messageId) {
         const session = this.repository.getSession();
-        if (session && ["completed", "failed"].includes(session.status)) {
-          await this.statusService.transition(session.status, event.messageId);
-        }
+        if (!session || !["completed", "failed"].includes(session.status)) return;
+        await this.statusService.transition(session.status, event.messageId);
       }
       if (acknowledge) this.sendAck(ackId);
       return;
