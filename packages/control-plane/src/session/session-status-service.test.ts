@@ -586,6 +586,20 @@ describe("SessionStatusService.handleAutoArchiveAlarm", () => {
     expect(h.setAlarm).toHaveBeenCalledWith(activityAt + 12 * 60 * 60 * 1000);
   });
 
+  it("re-reads terminal activity after checking descendants", async () => {
+    const terminalAt = 10_000;
+    const activityAt = terminalAt + 6 * 60 * 60 * 1000;
+    const staleSession = createSession({ status: "completed", terminal_at: terminalAt });
+    const latestSession = createSession({ status: "completed", terminal_at: activityAt });
+    const h = harness({ session: staleSession });
+    h.repository.getSession.mockReturnValueOnce(staleSession).mockReturnValueOnce(latestSession);
+
+    await h.service.handleAutoArchiveAlarm(terminalAt + 12 * 60 * 60 * 1000);
+
+    expect(h.archiveSandbox).not.toHaveBeenCalled();
+    expect(h.setAlarm).toHaveBeenCalledWith(activityAt + 12 * 60 * 60 * 1000);
+  });
+
   it("defers parent auto-archive while a child is unfinished", async () => {
     const terminalAt = 10_000;
     const h = harness({

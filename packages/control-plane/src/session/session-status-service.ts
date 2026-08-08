@@ -348,8 +348,10 @@ export class SessionStatusService {
       return;
     }
 
-    const terminalAt = session.terminal_at ?? session.updated_at;
-    const deadlineAt = terminalAt + getSessionAutoArchiveDelayMs(session.spawn_source);
+    const latestSession = this.repository.getSession();
+    if (!latestSession || !TERMINAL_STATUSES.includes(latestSession.status)) return;
+    const terminalAt = latestSession.terminal_at ?? latestSession.updated_at;
+    const deadlineAt = terminalAt + getSessionAutoArchiveDelayMs(latestSession.spawn_source);
     if (now < deadlineAt) {
       await this.scheduleAlarmNoLaterThan(deadlineAt);
       return;

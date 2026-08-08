@@ -107,7 +107,8 @@ export class SessionMessageQueue {
     private readonly sandboxLifecycle: SandboxLifecycle,
     private readonly sessionIndex: SessionIndexStore | null,
     private readonly scmProvider: SourceControlProviderName,
-    private readonly executionTimeoutMs: number
+    private readonly executionTimeoutMs: number,
+    private readonly isCompacting: () => Promise<boolean>
   ) {}
 
   /**
@@ -641,6 +642,9 @@ export class SessionMessageQueue {
     data: EnqueuePromptRequest,
     allowChildResultMessageId = false
   ): Promise<{ messageId: string; status: "queued" }> {
+    if (await this.isCompacting()) {
+      throw new PromptEnqueueRejectedError();
+    }
     if (data.messageId?.startsWith(CHILD_RESULT_MESSAGE_ID_PREFIX) && !allowChildResultMessageId) {
       throw new PromptIdConflictError();
     }

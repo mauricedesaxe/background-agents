@@ -150,6 +150,7 @@ function buildQueue() {
   const waitUntil = vi.fn();
   const getAlarm = vi.fn(async () => null as number | null);
   const setAlarm = vi.fn(async (_timestamp: number) => {});
+  const isCompacting = vi.fn(async () => false);
 
   const queue = new SessionMessageQueue(
     { waitUntil, storage: { getAlarm, setAlarm } } as unknown as DurableObjectState,
@@ -169,7 +170,8 @@ function buildQueue() {
     sandboxLifecycle,
     null,
     "github",
-    EXECUTION_TIMEOUT_MS
+    EXECUTION_TIMEOUT_MS,
+    isCompacting
   );
 
   return {
@@ -182,6 +184,7 @@ function buildQueue() {
     spawnSandbox,
     sessionStatus,
     sandboxLifecycle,
+    isCompacting,
     getAlarm,
     setAlarm,
     waitUntil,
@@ -919,6 +922,21 @@ describe("SessionMessageQueue", () => {
           source: "agent",
         })
       ).rejects.toBeInstanceOf(PromptIdConflictError);
+
+      expect(h.repository.createMessage).not.toHaveBeenCalled();
+    });
+
+    it("rejects API prompts while context compaction is active", async () => {
+      const h = buildQueue();
+      h.isCompacting.mockResolvedValue(true);
+
+      await expect(
+        h.queue.enqueuePromptFromApi({
+          content: "Race compaction",
+          authorId: "user-1",
+          source: "web",
+        })
+      ).rejects.toBeInstanceOf(PromptEnqueueRejectedError);
 
       expect(h.repository.createMessage).not.toHaveBeenCalled();
     });

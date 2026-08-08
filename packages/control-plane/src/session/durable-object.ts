@@ -384,7 +384,8 @@ export class SessionDO extends DurableObject<Env> {
         this.lifecycleManager,
         this.db ? new SessionIndexStore(this.db) : null,
         resolveScmProviderFromEnv(this.env.SCM_PROVIDER),
-        this.executionTimeoutMs
+        this.executionTimeoutMs,
+        async () => (await this.getActiveCompaction()) !== null
       );
     }
 
@@ -1682,7 +1683,11 @@ export class SessionDO extends DurableObject<Env> {
     }
 
     const activeCompaction = await this.getActiveCompaction();
-    if (this.repository.getPendingOrProcessingCount() > 0 || activeCompaction) {
+    if (
+      this.repository.getPendingOrProcessingCount() > 0 ||
+      activeCompaction ||
+      this.statusService.isArchiveInProgress()
+    ) {
       this.safeSend(ws, {
         type: "error",
         code: "SESSION_BUSY",
@@ -1716,9 +1721,9 @@ export class SessionDO extends DurableObject<Env> {
 
     const now = Date.now();
     const deadlineAt = now + COMPACTION_TIMEOUT_MS;
-    await this.setActiveCompaction({ requestId: data.requestId, deadlineAt });
     this.updateLastActivity(now);
     this.statusService.recordTerminalActivity(now);
+    await this.setActiveCompaction({ requestId: data.requestId, deadlineAt });
     await this.scheduleInactivityCheck();
     await this.scheduleAlarmNoLaterThan(deadlineAt);
     const command = {
