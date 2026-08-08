@@ -419,6 +419,12 @@ describe("Client WebSocket (via SELF.fetch)", () => {
   it("compacts an idle session and accepts a later prompt", async () => {
     const name = `ws-client-compact-${Date.now()}`;
     const { stub } = await initNamedSession(name);
+    const originalTerminalAt = Date.now() - 12 * 60 * 60 * 1000 - 1000;
+    await queryDO(
+      stub,
+      "UPDATE session SET status = 'completed', terminal_at = ?",
+      originalTerminalAt
+    );
     await seedSandboxAuth(stub, { authToken: SANDBOX_TOKEN, sandboxId: SANDBOX_ID });
     const { ws: sandboxWs } = await openSandboxWs(name, {
       authToken: SANDBOX_TOKEN,
@@ -457,6 +463,21 @@ describe("Client WebSocket (via SELF.fetch)", () => {
         sandboxId: SANDBOX_ID,
       }),
     });
+
+    const [{ terminal_at: terminalAt }] = await queryDO<{ terminal_at: number }>(
+      stub,
+      "SELECT terminal_at FROM session"
+    );
+    expect(terminalAt).toBeGreaterThan(originalTerminalAt);
+
+    const nextAlarm = await runInDurableObject(stub, async (instance: SessionDO) => {
+      await instance.alarm();
+      return instance.ctx.storage.getAlarm();
+    });
+    const [{ status }] = await queryDO<{ status: string }>(stub, "SELECT status FROM session");
+    expect(status).not.toBe("archived");
+    expect(nextAlarm).not.toBeNull();
+    expect(nextAlarm!).toBeGreaterThan(Date.now());
 
     const startedEvents = await queryDO<{ count: number }>(
       stub,

@@ -69,6 +69,20 @@ export class SessionSandboxEventProcessor {
     const ackId = event.ackId;
 
     if (ackId && this.repository.hasEvent(ackId)) {
+      if (event.type === "execution_complete" && event.messageId) {
+        const session = this.repository.getSession();
+        const latestTerminalMessage = this.repository.getLatestTerminalMessage();
+        const isLatestCompletion = latestTerminalMessage?.id === event.messageId;
+        if (session && isLatestCompletion && ["completed", "failed"].includes(session.status)) {
+          await this.statusService.transition(session.status, event.messageId);
+        } else if (
+          session?.status === "active" &&
+          isLatestCompletion &&
+          this.repository.getPendingOrProcessingCount() === 0
+        ) {
+          await this.statusService.reconcileAfterExecution(event.success, event.messageId);
+        }
+      }
       if (acknowledge) this.sendAck(ackId);
       return;
     }
@@ -239,7 +253,7 @@ export class SessionSandboxEventProcessor {
           this.callbackService.notifyComplete(completionMessageId, event.success, event.error)
         );
 
-        await this.statusService.reconcileAfterExecution(event.success);
+        await this.statusService.reconcileAfterExecution(event.success, completionMessageId);
       } else {
         this.log.info("prompt.complete", {
           event: "prompt.complete",

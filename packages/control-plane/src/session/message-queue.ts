@@ -47,6 +47,7 @@ export const PENDING_SANDBOX_CONNECT_TIMEOUT_MS = 5 * 60 * 1000;
 export const STOP_CONFIRMATION_TIMEOUT_MS = 3_000;
 
 const MS_PER_MINUTE = 60 * 1000;
+const CHILD_RESULT_MESSAGE_ID_PREFIX = "child-result:";
 
 /**
  * Generic connect-timeout message for a pending message whose sandbox never
@@ -106,7 +107,8 @@ export class SessionMessageQueue {
     private readonly sandboxLifecycle: SandboxLifecycle,
     private readonly sessionIndex: SessionIndexStore | null,
     private readonly scmProvider: SourceControlProviderName,
-    private readonly executionTimeoutMs: number
+    private readonly executionTimeoutMs: number,
+    private readonly isCompacting: () => Promise<boolean>
   ) {}
 
   /**
@@ -129,7 +131,16 @@ export class SessionMessageQueue {
     const messageId = data.requestId ?? generateId();
     const now = Date.now();
 
-    if (this.repository.getSession()?.status === "cancelled") {
+    if (messageId.startsWith(CHILD_RESULT_MESSAGE_ID_PREFIX)) {
+      this.wsManager.send(ws, {
+        type: "prompt_rejected",
+        requestId: messageId,
+        message: "Request ID uses a reserved prefix",
+      } as ServerMessage);
+      return;
+    }
+
+    if (["archived", "cancelled"].includes(this.repository.getSession()?.status ?? "")) {
       this.wsManager.send(ws, {
         type: "prompt_rejected",
         requestId: messageId,
@@ -446,7 +457,7 @@ export class SessionMessageQueue {
     }
 
     if (!options.suppressStatusReconcile) {
-      await this.sessionStatus.reconcileAfterExecution(false);
+      await this.sessionStatus.reconcileAfterExecution(false, messageId);
       await this.processMessageQueue();
     }
   }
@@ -488,7 +499,7 @@ export class SessionMessageQueue {
     this.ctx.waitUntil(
       this.callbackService.notifyComplete(processingMessage.id, false, stuckError)
     );
-    await this.sessionStatus.reconcileAfterExecution(false);
+    await this.sessionStatus.reconcileAfterExecution(false, processingMessage.id);
   }
 
   /**
@@ -546,7 +557,7 @@ export class SessionMessageQueue {
     this.messenger.broadcast({ type: "processing_status", isProcessing: false });
     this.broadcastPromptQueue();
     this.ctx.waitUntil(this.callbackService.notifyComplete(pending.id, false, timeoutError));
-    await this.sessionStatus.reconcileAfterExecution(false);
+    await this.sessionStatus.reconcileAfterExecution(false, pending.id);
     await this.failStuckPendingMessage();
   }
 
@@ -593,7 +604,7 @@ export class SessionMessageQueue {
 
     this.messenger.broadcast({ type: "processing_status", isProcessing: false });
     this.broadcastPromptQueue();
-    await this.sessionStatus.reconcileAfterExecution(false);
+    await this.sessionStatus.reconcileAfterExecution(false, events.at(-1)?.message.id ?? null);
   }
 
   writeUserMessageEvent(
@@ -628,10 +639,17 @@ export class SessionMessageQueue {
   }
 
   async enqueuePromptFromApi(
-    data: EnqueuePromptRequest
+    data: EnqueuePromptRequest,
+    allowChildResultMessageId = false
   ): Promise<{ messageId: string; status: "queued" }> {
+    if (await this.isCompacting()) {
+      throw new PromptEnqueueRejectedError();
+    }
+    if (data.messageId?.startsWith(CHILD_RESULT_MESSAGE_ID_PREFIX) && !allowChildResultMessageId) {
+      throw new PromptIdConflictError();
+    }
     if (
-      this.repository.getSession()?.status === "cancelled" ||
+      ["archived", "cancelled"].includes(this.repository.getSession()?.status ?? "") ||
       this.sessionStatus.isArchiveInProgress()
     ) {
       throw new PromptEnqueueRejectedError();

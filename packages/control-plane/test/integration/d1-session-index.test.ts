@@ -725,6 +725,31 @@ describe("D1 SessionIndexStore", () => {
       expect(count).toBe(1); // child1 is "created" (active), child2 is "completed" (excluded)
     });
 
+    it("finds unfinished children anywhere in the descendant tree", async () => {
+      await store.updateStatus(childId2, "active");
+      await store.create({
+        id: "grandchild-session-1",
+        title: "Grandchild",
+        repoOwner: "owner",
+        repoName: "repo",
+        model: "anthropic/claude-sonnet-4-6",
+        reasoningEffort: null,
+        baseBranch: null,
+        status: "active",
+        parentSessionId: childId2,
+        spawnSource: "agent",
+        spawnDepth: 2,
+        createdAt: Date.now() + 2,
+        updatedAt: Date.now() + 2,
+      });
+      await store.updateStatus(childId1, "completed");
+      await store.updateStatus(childId2, "completed");
+
+      expect(await store.hasUnfinishedDescendants(parentId)).toBe(true);
+      await store.updateStatus("grandchild-session-1", "completed");
+      expect(await store.hasUnfinishedDescendants(parentId)).toBe(false);
+    });
+
     it("countTotalChildren counts all children regardless of status", async () => {
       const count = await store.countTotalChildren(parentId);
       expect(count).toBe(2);

@@ -384,7 +384,8 @@ export class SessionDO extends DurableObject<Env> {
         this.lifecycleManager,
         this.db ? new SessionIndexStore(this.db) : null,
         resolveScmProviderFromEnv(this.env.SCM_PROVIDER),
-        this.executionTimeoutMs
+        this.executionTimeoutMs,
+        async () => (await this.getActiveCompaction()) !== null
       );
     }
 
@@ -432,9 +433,8 @@ export class SessionDO extends DurableObject<Env> {
         parseArtifactMetadata: (artifact) => this.parseArtifactMetadata(artifact),
         messenger: this.messenger,
         recordTerminalActivity: (now) => this.statusService.recordTerminalActivity(now),
-        onTerminalChild: (childSessionId) => {
-          this.ctx.waitUntil(this.deliverChildResult(childSessionId));
-        },
+        onTerminalChild: (childSessionId, childResultMessageId) =>
+          this.deliverChildResult(childSessionId, childResultMessageId),
       });
     }
 
@@ -442,45 +442,63 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   /** Enqueues the child outcome as an agent prompt so a stopped parent sandbox is resumed. */
-  private async deliverChildResult(childSessionId: string): Promise<void> {
+  private async deliverChildResult(
+    childSessionId: string,
+    childResultMessageId: string | null
+  ): Promise<boolean> {
+    const parentMessageId = `child-result:${childSessionId}:${childResultMessageId ?? "terminal"}`;
+    if (this.repository.getMessageById(parentMessageId)) return true;
+
+    if (await this.getActiveCompaction()) return false;
+
     const session = this.getSession();
-    if (!session) return;
-    if (session.status === "archived" || session.status === "cancelled") return;
+    if (!session) return false;
+    if (session.status === "archived" || session.status === "cancelled") return false;
 
     const sessions = this.env.SESSION;
-    if (!sessions) return;
+    if (!sessions) return false;
 
     const owner = this.repository
       .listParticipants()
       .find((participant) => participant.role === "owner");
-    if (!owner) return;
+    if (!owner) return false;
 
+    const resultMessageParam = childResultMessageId
+      ? `&resultMessageId=${encodeURIComponent(childResultMessageId)}`
+      : "";
     const childSummaryUrl = buildSessionInternalUrl(
       SessionInternalPaths.childSummary,
-      "?includeFinalResponse=true"
+      `?include=result${resultMessageParam}`
     );
     let detail: ChildSessionDetail;
     try {
       const response = await sessions
         .get(sessions.idFromName(childSessionId))
         .fetch(childSummaryUrl);
-      if (!response.ok) return;
+      if (!response.ok) return false;
       detail = (await response.json()) as ChildSessionDetail;
     } catch (error) {
       this.log.error("child_result.fetch_failed", { child_id: childSessionId, error });
-      return;
+      return false;
     }
+
+    if (await this.getActiveCompaction()) return false;
 
     const content = buildChildResultPrompt(childSessionId, detail);
     try {
-      await this.messageQueue.enqueuePromptFromApi({
-        messageId: generateId(),
-        content,
-        authorId: owner.user_id,
-        source: "agent",
-      });
+      await this.messageQueue.enqueuePromptFromApi(
+        {
+          messageId: parentMessageId,
+          content,
+          authorId: owner.user_id,
+          source: "agent",
+        },
+        true
+      );
+      return true;
     } catch (error) {
       this.log.error("child_result.deliver_failed", { child_id: childSessionId, error });
+      return false;
     }
   }
 
@@ -556,6 +574,7 @@ export class SessionDO extends DurableObject<Env> {
         statusService: this.statusService,
         applySessionTitleUpdate: (title, options) => this.applySessionTitleUpdate(title, options),
         stopExecution: (options) => this.stopExecution(options),
+        getProcessingMessageId: () => this.repository.getProcessingMessage()?.id ?? null,
         getSandboxSocket: () => this.wsManager.getSandboxSocket(),
         sendToSandbox: (ws, message) => this.wsManager.send(ws, message),
         terminateSandbox: (reason) => this.lifecycleManager.terminateSandbox(reason),
@@ -1664,7 +1683,11 @@ export class SessionDO extends DurableObject<Env> {
     }
 
     const activeCompaction = await this.getActiveCompaction();
-    if (this.repository.getProcessingMessage() || activeCompaction) {
+    if (
+      this.repository.getPendingOrProcessingCount() > 0 ||
+      activeCompaction ||
+      this.statusService.isArchiveInProgress()
+    ) {
       this.safeSend(ws, {
         type: "error",
         code: "SESSION_BUSY",
@@ -1698,8 +1721,9 @@ export class SessionDO extends DurableObject<Env> {
 
     const now = Date.now();
     const deadlineAt = now + COMPACTION_TIMEOUT_MS;
-    await this.setActiveCompaction({ requestId: data.requestId, deadlineAt });
     this.updateLastActivity(now);
+    this.statusService.recordTerminalActivity(now);
+    await this.setActiveCompaction({ requestId: data.requestId, deadlineAt });
     await this.scheduleInactivityCheck();
     await this.scheduleAlarmNoLaterThan(deadlineAt);
     const command = {

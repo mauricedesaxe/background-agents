@@ -120,6 +120,7 @@ function createHandler() {
   const statusService = { transition, unarchive, archive } as unknown as SessionStatusService;
   const applySessionTitleUpdate = vi.fn((title: string) => ({ ok: true as const, title }));
   const stopExecution = vi.fn();
+  const getProcessingMessageId = vi.fn(() => null as string | null);
   const getSandboxSocket = vi.fn<() => WebSocket | null>();
   const sendToSandbox = vi.fn();
   const terminateSandbox = vi.fn(async () => {});
@@ -142,6 +143,7 @@ function createHandler() {
     statusService,
     applySessionTitleUpdate,
     stopExecution,
+    getProcessingMessageId,
     getSandboxSocket,
     sendToSandbox,
     terminateSandbox,
@@ -182,6 +184,7 @@ function createHandler() {
     archive,
     applySessionTitleUpdate,
     stopExecution,
+    getProcessingMessageId,
     getSandboxSocket,
     sendToSandbox,
     terminateSandbox,
@@ -1138,6 +1141,7 @@ describe("createSessionLifecycleHandler", () => {
       getSession,
       getSandbox,
       stopExecution,
+      getProcessingMessageId,
       transition,
       getSandboxSocket,
       sendToSandbox,
@@ -1147,6 +1151,7 @@ describe("createSessionLifecycleHandler", () => {
     getSession.mockReturnValue(createSession({ status: "active" }));
     getSandbox.mockReturnValue(createSandbox({ status: "running" }));
     stopExecution.mockResolvedValue(undefined);
+    getProcessingMessageId.mockReturnValue("msg-current");
     transition.mockResolvedValue(true);
     getSandboxSocket.mockReturnValue(ws);
 
@@ -1155,7 +1160,10 @@ describe("createSessionLifecycleHandler", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: "cancelled" });
     expect(stopExecution).toHaveBeenCalledWith({ suppressStatusReconcile: true });
-    expect(transition).toHaveBeenCalledWith("cancelled");
+    expect(transition).toHaveBeenCalledWith("cancelled", "msg-current");
+    expect(transition.mock.invocationCallOrder[0]).toBeGreaterThan(
+      stopExecution.mock.invocationCallOrder[0]
+    );
     expect(sendToSandbox).toHaveBeenCalledWith(ws, { type: "shutdown" });
     expect(terminateSandbox).toHaveBeenCalledWith("session_cancelled");
   });

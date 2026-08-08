@@ -81,6 +81,7 @@ export interface SessionLifecycleHandlerDeps {
     options?: SessionTitleUpdateOptions
   ) => SessionTitleUpdateResult;
   stopExecution: (options?: { suppressStatusReconcile?: boolean }) => Promise<void>;
+  getProcessingMessageId: () => string | null;
   getSandboxSocket: () => WebSocket | null;
   sendToSandbox: (ws: WebSocket, message: string | object) => boolean;
   /** Mark the sandbox dead and stop the provider sandbox with it. */
@@ -520,8 +521,9 @@ export function createSessionLifecycleHandler(
         return Response.json({ error: `Session already ${session.status}` }, { status: 409 });
       }
 
-      await deps.statusService.transition("cancelled");
+      const processingMessageId = deps.getProcessingMessageId();
       await deps.stopExecution({ suppressStatusReconcile: true });
+      await deps.statusService.transition("cancelled", processingMessageId);
 
       const sandbox = deps.getSandbox();
       if (sandbox) {
