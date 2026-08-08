@@ -786,6 +786,33 @@ export class SessionIndexStore {
     return (result.results || []).map(toEntry);
   }
 
+  async hasUnfinishedDescendants(parentSessionId: string): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `WITH RECURSIVE descendants(id, status, path) AS (
+           SELECT id, status,
+             '/' || hex(CAST(? AS BLOB)) || '/' || hex(CAST(id AS BLOB)) || '/'
+           FROM sessions WHERE parent_session_id = ?
+           UNION ALL
+           SELECT sessions.id, sessions.status,
+             descendants.path || hex(CAST(sessions.id AS BLOB)) || '/'
+           FROM sessions
+           JOIN descendants ON sessions.parent_session_id = descendants.id
+           WHERE instr(
+             descendants.path,
+             '/' || hex(CAST(sessions.id AS BLOB)) || '/'
+           ) = 0
+         )
+         SELECT EXISTS(
+           SELECT 1 FROM descendants
+           WHERE status NOT IN ('completed', 'failed', 'cancelled', 'archived')
+         ) AS has_unfinished`
+      )
+      .bind(parentSessionId, parentSessionId)
+      .first<{ has_unfinished: number }>();
+    return result?.has_unfinished === 1;
+  }
+
   async archiveDescendants(parentSessionId: string, updatedAt: EpochMs): Promise<void> {
     await this.db
       .prepare(

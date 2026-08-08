@@ -21,7 +21,6 @@ import { SandboxProviderError } from "../sandbox/provider";
 
 /** Statuses that indicate a session is finished — metrics are synced to D1 on these transitions. */
 const TERMINAL_STATUSES: SessionStatus[] = ["completed", "failed", "cancelled"];
-const FINISHED_CHILD_STATUSES: SessionStatus[] = [...TERMINAL_STATUSES, "archived"];
 const CHILD_ARCHIVE_ATTEMPTS = 3;
 const PARENT_NOTIFY_ATTEMPTS = 3;
 const ARCHIVE_RETRY_DELAY_MS = 5 * 60 * 1000;
@@ -34,6 +33,7 @@ interface PendingParentNotification {
   status: SessionStatus;
   title: string | null;
   childResultMessageId: string | null;
+  updatedAt: number;
 }
 
 export type ArchiveAttemptResult = "archived" | "in_progress" | "failed";
@@ -120,16 +120,28 @@ export class SessionStatusService {
     if (!session) return false;
 
     const publicSessionId = this.getPublicSessionId(session);
+    const deferTerminalIndex =
+      session.parent_session_id != null && TERMINAL_STATUSES.includes(status);
     if (session.status === status) {
       const updatedAt = epochMs(session.updated_at);
-      await this.syncSessionIndexStatus(
-        publicSessionId,
-        status,
-        updatedAt,
-        restoreArchivedSession
-      ).catch((error) =>
-        this.logSessionIndexStatusSyncError(publicSessionId, status, updatedAt, error)
-      );
+      if (deferTerminalIndex) {
+        await this.notifyParentOfStatusChange(
+          session,
+          publicSessionId,
+          status,
+          childResultMessageId,
+          updatedAt
+        );
+      } else {
+        await this.syncSessionIndexStatus(
+          publicSessionId,
+          status,
+          updatedAt,
+          restoreArchivedSession
+        ).catch((error) =>
+          this.logSessionIndexStatusSyncError(publicSessionId, status, updatedAt, error)
+        );
+      }
       if (status === "archived") {
         await this.archiveDescendantIndexRows(publicSessionId, updatedAt);
         this.cascadeArchiveToChildren(publicSessionId);
@@ -146,14 +158,16 @@ export class SessionStatusService {
 
     const updatedAt = epochMs(Math.max(nowMs(), session.updated_at + 1));
     this.repository.updateSessionStatus(session.id, status, updatedAt);
-    await this.syncSessionIndexStatus(
-      publicSessionId,
-      status,
-      updatedAt,
-      restoreArchivedSession
-    ).catch((error) =>
-      this.logSessionIndexStatusSyncError(publicSessionId, status, updatedAt, error)
-    );
+    if (!deferTerminalIndex) {
+      await this.syncSessionIndexStatus(
+        publicSessionId,
+        status,
+        updatedAt,
+        restoreArchivedSession
+      ).catch((error) =>
+        this.logSessionIndexStatusSyncError(publicSessionId, status, updatedAt, error)
+      );
+    }
 
     if (status === "archived") {
       await this.archiveDescendantIndexRows(publicSessionId, updatedAt);
@@ -167,7 +181,20 @@ export class SessionStatusService {
     }
 
     // Notify parent session (if this is a child) so its UI can refresh
-    await this.notifyParentOfStatusChange(session, publicSessionId, status, childResultMessageId);
+    if (deferTerminalIndex) {
+      await this.notifyParentOfStatusChange(
+        session,
+        publicSessionId,
+        status,
+        childResultMessageId,
+        updatedAt
+      );
+    } else {
+      this.notifyParentOfChildUpdate(session, publicSessionId, {
+        status,
+        title: session.title,
+      });
+    }
 
     if (status === "archived") {
       this.cascadeArchiveToChildren(publicSessionId);
@@ -375,7 +402,8 @@ export class SessionStatusService {
     session: Pick<SessionRow, "parent_session_id" | "title">,
     childSessionId: string,
     status: SessionStatus,
-    childResultMessageId: string | null
+    childResultMessageId: string | null,
+    updatedAt: number
   ): Promise<void> {
     const parentId = session.parent_session_id;
     if (!parentId || !this.sessions) return;
@@ -387,6 +415,7 @@ export class SessionStatusService {
       status,
       title: session.title,
       childResultMessageId,
+      updatedAt,
     };
     const pending = await this.getPendingParentNotifications();
     const withoutCurrent = pending.filter(
@@ -416,6 +445,13 @@ export class SessionStatusService {
           })
         );
         if (response.ok) {
+          if (this.sessionIndex) {
+            await this.sessionIndex.updateStatus(
+              notification.childSessionId,
+              notification.status,
+              epochMs(notification.updatedAt)
+            );
+          }
           await this.removePendingParentNotification(notification.deliveryId);
           return;
         }
@@ -456,8 +492,7 @@ export class SessionStatusService {
   private async hasUnfinishedChildren(parentSessionId: string): Promise<boolean> {
     if (!this.sessionIndex) return false;
     try {
-      const children = await this.sessionIndex.listByParent(parentSessionId);
-      return children.some((child) => !FINISHED_CHILD_STATUSES.includes(child.status));
+      return await this.sessionIndex.hasUnfinishedDescendants(parentSessionId);
     } catch (error) {
       this.log.error("session_archive.children_lookup_failed", {
         parent_id: parentSessionId,

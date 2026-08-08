@@ -601,7 +601,7 @@ describe("SessionMessageQueue", () => {
     expect(h.sessionStatus.recordCompletedOutput).toHaveBeenCalledWith("msg-9", expect.any(Number));
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
     expect(h.wsManager.close).toHaveBeenCalledWith(sandboxWs, 1012, "Stop confirmation timed out");
-    expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
+    expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false, "msg-9");
     vi.useRealTimers();
   });
 
@@ -632,7 +632,7 @@ describe("SessionMessageQueue", () => {
 
     await h.queue.failStuckProcessingMessage({ type: "execution_timeout", elapsedMs: 90 * 60_000 });
 
-    expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
+    expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false, "msg-timeout");
   });
 
   describe("failStuckProcessingMessage cause messages", () => {
@@ -702,7 +702,7 @@ describe("SessionMessageQueue", () => {
         type: "processing_status",
         isProcessing: false,
       });
-      expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
+      expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false, "msg-stuck");
     });
 
     it("surfaces the recorded spawn error when one is present", async () => {

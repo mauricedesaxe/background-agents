@@ -459,6 +459,9 @@ export class SessionDO extends DurableObject<Env> {
       .find((participant) => participant.role === "owner");
     if (!owner) return false;
 
+    const parentMessageId = `child-result:${childSessionId}:${childResultMessageId ?? "terminal"}`;
+    if (this.repository.getMessageById(parentMessageId)) return true;
+
     const resultMessageParam = childResultMessageId
       ? `&resultMessageId=${encodeURIComponent(childResultMessageId)}`
       : "";
@@ -478,10 +481,12 @@ export class SessionDO extends DurableObject<Env> {
       return false;
     }
 
+    if (await this.getActiveCompaction()) return false;
+
     const content = buildChildResultPrompt(childSessionId, detail);
     try {
       await this.messageQueue.enqueuePromptFromApi({
-        messageId: `child-result:${childSessionId}:${childResultMessageId ?? detail.session.updatedAt}`,
+        messageId: parentMessageId,
         content,
         authorId: owner.user_id,
         source: "agent",
@@ -1673,7 +1678,7 @@ export class SessionDO extends DurableObject<Env> {
     }
 
     const activeCompaction = await this.getActiveCompaction();
-    if (this.repository.getProcessingMessage() || activeCompaction) {
+    if (this.repository.getPendingOrProcessingCount() > 0 || activeCompaction) {
       this.safeSend(ws, {
         type: "error",
         code: "SESSION_BUSY",

@@ -96,6 +96,7 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
           archiveDescendants: vi.fn(async () => 0),
           restoreArchivedSession: vi.fn(async () => true),
           listByParent: vi.fn(async () => []),
+          hasUnfinishedDescendants: vi.fn(async () => false),
         };
 
   const waitUntil = vi.fn();
@@ -396,11 +397,17 @@ describe("SessionStatusService.transition", () => {
     expect(h.parentFetch).toHaveBeenCalledTimes(3);
     expect(h.durableStorage.get("pendingParentNotifications")).toHaveLength(1);
     expect(h.setAlarm).toHaveBeenCalled();
+    expect(h.sessionIndex!.updateStatus).not.toHaveBeenCalled();
 
     h.parentFetch.mockResolvedValue(new Response(null, { status: 200 }));
     await h.service.retryPendingParentNotifications();
 
     expect(h.durableStorage.has("pendingParentNotifications")).toBe(false);
+    expect(h.sessionIndex!.updateStatus).toHaveBeenCalledWith(
+      "public-session-1",
+      "completed",
+      expect.any(Number)
+    );
   });
 
   it("does not notify a parent when the session has none", async () => {
@@ -584,7 +591,7 @@ describe("SessionStatusService.handleAutoArchiveAlarm", () => {
     const h = harness({
       session: createSession({ status: "completed", terminal_at: terminalAt }),
     });
-    h.sessionIndex!.listByParent.mockResolvedValue([{ id: "child-1", status: "active" }] as never);
+    h.sessionIndex!.hasUnfinishedDescendants.mockResolvedValue(true);
 
     await h.service.handleAutoArchiveAlarm(terminalAt + 12 * 60 * 60 * 1000);
 

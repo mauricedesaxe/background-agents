@@ -69,6 +69,7 @@ function createProcessor() {
   const messenger = { broadcast, sendToSandbox: vi.fn(() => true) };
   const triggerSnapshot = vi.fn(async (_reason: string) => {});
   const statusService = {
+    transition: vi.fn(async () => true),
     reconcileAfterExecution: vi.fn(async (_success: boolean) => {}),
     recordCompletedOutput: vi.fn(async (_messageId: string, _completedAt: number) => {}),
     recordTerminalActivity: vi.fn(),
@@ -120,6 +121,26 @@ function createProcessor() {
 }
 
 describe("SessionSandboxEventProcessor", () => {
+  it("reconciles a replayed terminal completion before acknowledging it", async () => {
+    const h = createProcessor();
+    h.repository.hasEvent.mockReturnValue(true);
+    h.repository.getSession.mockReturnValue({
+      id: "do-session-1",
+      session_name: "session-1",
+      status: "completed",
+    } as never);
+
+    await h.processor.processSandboxEvent({
+      type: "execution_complete",
+      messageId: "msg-replayed",
+      success: true,
+      sandboxId: "sandbox-1",
+      timestamp: 1,
+      ackId: "execution_complete:msg-replayed",
+    });
+
+    expect(h.statusService.transition).toHaveBeenCalledWith("completed", "msg-replayed");
+  });
   it("updates heartbeat without broadcasting", async () => {
     const h = createProcessor();
     const event: SandboxEvent = {
