@@ -11,6 +11,7 @@ import type { PromptSnapshotItem, SessionAttachmentReference } from "@open-inspe
 import type { ClientInfo, MessageSource, SandboxEvent, ServerMessage } from "../types";
 import type { SourceControlProviderName } from "../source-control";
 import type { SandboxLifecycle, SandboxTerminationReason } from "../sandbox/lifecycle/manager";
+import { addDuration, durationMs, elapsed, nowMs, type EpochMs } from "../time";
 import type { MessageRow, ParticipantRow, SandboxCommand } from "./types";
 import type { SessionRepository } from "./repository";
 import type { SessionMessenger } from "./messenger";
@@ -43,10 +44,16 @@ interface PromptMessageData {
  * mid-reconnect. This is intentionally generous — cold boots plus git sync can
  * take a while — and only fires when nothing has started processing.
  */
-export const PENDING_SANDBOX_CONNECT_TIMEOUT_MS = 5 * 60 * 1000;
+export const PENDING_SANDBOX_CONNECT_TIMEOUT_MS = durationMs(5 * 60 * 1000);
 export const STOP_CONFIRMATION_TIMEOUT_MS = 3_000;
 
 const MS_PER_MINUTE = 60 * 1000;
+const PENDING_SANDBOX_CONNECT_DEADLINE_KEY = "pendingSandboxConnectDeadline";
+
+interface PendingSandboxConnectDeadline {
+  messageId: string;
+  deadlineAtMs: EpochMs;
+}
 
 /**
  * Generic connect-timeout message for a pending message whose sandbox never
@@ -121,13 +128,36 @@ export class SessionMessageQueue {
     }
   }
 
+  private async getPendingConnectDeadlineMs(messageId: string, now: EpochMs): Promise<EpochMs> {
+    const stored = await this.ctx.storage.get<PendingSandboxConnectDeadline>(
+      PENDING_SANDBOX_CONNECT_DEADLINE_KEY
+    );
+    if (stored?.messageId === messageId) return stored.deadlineAtMs;
+
+    const deadlineAtMs = addDuration(now, PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
+    await this.ctx.storage.put(PENDING_SANDBOX_CONNECT_DEADLINE_KEY, {
+      messageId,
+      deadlineAtMs,
+    } satisfies PendingSandboxConnectDeadline);
+    return deadlineAtMs;
+  }
+
+  private async clearPendingConnectDeadline(messageId: string): Promise<void> {
+    const stored = await this.ctx.storage.get<PendingSandboxConnectDeadline>(
+      PENDING_SANDBOX_CONNECT_DEADLINE_KEY
+    );
+    if (stored?.messageId === messageId) {
+      await this.ctx.storage.delete(PENDING_SANDBOX_CONNECT_DEADLINE_KEY);
+    }
+  }
+
   async handlePromptMessage(
     ws: WebSocket,
     client: ClientInfo,
     data: PromptMessageData
   ): Promise<void> {
     const messageId = data.requestId ?? generateId();
-    const now = Date.now();
+    const now = nowMs();
 
     if (this.repository.getSession()?.status === "cancelled") {
       this.wsManager.send(ws, {
@@ -300,7 +330,7 @@ export class SessionMessageQueue {
     if (!message) {
       return;
     }
-    const now = Date.now();
+    const now = nowMs();
 
     const sandboxWs = this.wsManager.getSandboxSocket();
     if (!sandboxWs) {
@@ -311,21 +341,19 @@ export class SessionMessageQueue {
         reason: "no_sandbox",
       });
       this.messenger.broadcast({ type: "sandbox_spawning" });
-      // Arm the watchdog before spawning so a spawn/resume that never yields a
-      // connected sandbox eventually fails the message instead of stalling
-      // silently. A successful connect moves the message to `processing`, which
-      // neutralizes the watchdog (it only acts on a still-pending message).
-      await this.scheduleAlarm(message.created_at + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
+      const deadlineAtMs = await this.getPendingConnectDeadlineMs(message.id, now);
+      await this.scheduleAlarm(deadlineAtMs);
       await this.sandboxLifecycle.spawnSandbox();
       return;
     }
 
+    await this.clearPendingConnectDeadline(message.id);
     this.repository.updateMessageToProcessing(message.id, now);
     this.messenger.broadcast({ type: "processing_status", isProcessing: true });
     this.broadcastPromptQueue();
     this.sandboxLifecycle.updateLastActivity(now);
 
-    await this.scheduleAlarm(now + this.executionTimeoutMs);
+    await this.scheduleAlarm(addDuration(now, durationMs(this.executionTimeoutMs)));
 
     const author = this.repository.getParticipantById(message.author_id);
     const session = this.repository.getSession();
@@ -491,12 +519,6 @@ export class SessionMessageQueue {
     await this.sessionStatus.reconcileAfterExecution(false);
   }
 
-  /**
-   * The DO's single alarm slot is shared with lifecycle work, so each prompt's
-   * persisted creation time remains the source of truth. Reconstructing the
-   * next deadline on every wake prevents an unrelated alarm or an older queued
-   * prompt from consuming the only watchdog.
-   */
   async failStuckPendingMessage(): Promise<void> {
     // A connected sandbox or an in-flight message means dispatch is handling
     // this normally; the watchdog must not interfere.
@@ -506,12 +528,14 @@ export class SessionMessageQueue {
     const pending = this.repository.getNextPendingMessage();
     if (!pending) return;
 
-    const now = Date.now();
-    if (now - pending.created_at < PENDING_SANDBOX_CONNECT_TIMEOUT_MS) {
-      await this.scheduleAlarm(pending.created_at + PENDING_SANDBOX_CONNECT_TIMEOUT_MS);
+    const now = nowMs();
+    const deadlineAtMs = await this.getPendingConnectDeadlineMs(pending.id, now);
+    if (now < deadlineAtMs) {
+      await this.scheduleAlarm(deadlineAtMs);
       return;
     }
 
+    await this.clearPendingConnectDeadline(pending.id);
     this.repository.updateMessageCompletion(pending.id, "failed", now);
 
     // A failed spawn (e.g. the Daytona disk-quota 400) records the real cause on
@@ -539,7 +563,10 @@ export class SessionMessageQueue {
     this.log.warn("prompt.pending_timeout", {
       event: "prompt.pending_timeout",
       message_id: pending.id,
-      waited_ms: now - pending.created_at,
+      waited_ms: elapsed(
+        addDuration(deadlineAtMs, durationMs(-PENDING_SANDBOX_CONNECT_TIMEOUT_MS)),
+        now
+      ),
     });
 
     this.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });
