@@ -29,6 +29,8 @@ function createProcessor() {
     createArtifact: vi.fn(),
     createEvent: vi.fn(),
     hasEvent: vi.fn(() => false),
+    getLatestTerminalMessage: vi.fn(() => null as { id: string } | null),
+    getPendingOrProcessingCount: vi.fn(() => 0),
     addSessionCost: vi.fn(),
     setSessionCost: vi.fn(),
     getSession: vi.fn(() => ({ id: "do-session-1", session_name: "session-1" })),
@@ -124,6 +126,7 @@ describe("SessionSandboxEventProcessor", () => {
   it("reconciles a replayed terminal completion before acknowledging it", async () => {
     const h = createProcessor();
     h.repository.hasEvent.mockReturnValue(true);
+    h.repository.getLatestTerminalMessage.mockReturnValue({ id: "msg-replayed" });
     h.repository.getSession.mockReturnValue({
       id: "do-session-1",
       session_name: "session-1",
@@ -140,6 +143,24 @@ describe("SessionSandboxEventProcessor", () => {
     });
 
     expect(h.statusService.transition).toHaveBeenCalledWith("completed", "msg-replayed");
+  });
+
+  it("does not redeliver an older completion after a later turn finishes", async () => {
+    const h = createProcessor();
+    h.repository.hasEvent.mockReturnValue(true);
+    h.repository.getLatestTerminalMessage.mockReturnValue({ id: "msg-latest" });
+    h.repository.getSession.mockReturnValue({ status: "completed" } as never);
+
+    await h.processor.processSandboxEvent({
+      type: "execution_complete",
+      messageId: "msg-old",
+      success: true,
+      sandboxId: "sandbox-1",
+      timestamp: 1,
+      ackId: "execution_complete:msg-old",
+    });
+
+    expect(h.statusService.transition).not.toHaveBeenCalled();
   });
   it("updates heartbeat without broadcasting", async () => {
     const h = createProcessor();

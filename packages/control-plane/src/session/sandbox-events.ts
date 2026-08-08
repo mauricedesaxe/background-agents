@@ -71,8 +71,17 @@ export class SessionSandboxEventProcessor {
     if (ackId && this.repository.hasEvent(ackId)) {
       if (event.type === "execution_complete" && event.messageId) {
         const session = this.repository.getSession();
-        if (!session || !["completed", "failed"].includes(session.status)) return;
-        await this.statusService.transition(session.status, event.messageId);
+        const latestTerminalMessage = this.repository.getLatestTerminalMessage();
+        const isLatestCompletion = latestTerminalMessage?.id === event.messageId;
+        if (session && isLatestCompletion && ["completed", "failed"].includes(session.status)) {
+          await this.statusService.transition(session.status, event.messageId);
+        } else if (
+          session?.status === "active" &&
+          isLatestCompletion &&
+          this.repository.getPendingOrProcessingCount() === 0
+        ) {
+          return;
+        }
       }
       if (acknowledge) this.sendAck(ackId);
       return;
