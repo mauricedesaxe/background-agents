@@ -457,7 +457,7 @@ export class SessionDO extends DurableObject<Env> {
 
     const childSummaryUrl = buildSessionInternalUrl(
       SessionInternalPaths.childSummary,
-      "?includeFinalResponse=true"
+      "?include=result"
     );
     let detail: ChildSessionDetail;
     try {
@@ -1700,6 +1700,7 @@ export class SessionDO extends DurableObject<Env> {
     const deadlineAt = now + COMPACTION_TIMEOUT_MS;
     await this.setActiveCompaction({ requestId: data.requestId, deadlineAt });
     this.updateLastActivity(now);
+    this.statusService.recordTerminalActivity(now);
     await this.scheduleInactivityCheck();
     await this.scheduleAlarmNoLaterThan(deadlineAt);
     const command = {

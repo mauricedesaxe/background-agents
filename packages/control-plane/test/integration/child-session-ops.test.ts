@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { SELF, env } from "cloudflare:test";
 import { ParentSessionSpawnRejectedError, SessionIndexStore } from "../../src/db/session-index";
+import { buildSessionInternalUrl, SessionInternalPaths } from "../../src/session/contracts";
 import { cleanD1Tables } from "./cleanup";
 import {
   initNamedSession,
@@ -258,6 +259,69 @@ describe("Child session operations (list, get, cancel)", () => {
       );
 
       expect(res.status).toBe(404);
+    });
+  });
+
+  it("delivers a terminal child's final response to the parent agent", async () => {
+    const { childName, parentStub, childStub } = await setupParentAndChild();
+    const [{ id: participantId }] = await queryDO<{ id: string }>(
+      childStub,
+      "SELECT id FROM participants LIMIT 1"
+    );
+
+    await queryDO(
+      childStub,
+      `INSERT INTO messages (id, author_id, content, source, status, created_at, started_at, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      "msg-delivered-child-result",
+      participantId,
+      "Do the child task",
+      "agent",
+      "completed",
+      100,
+      110,
+      200
+    );
+    await seedEvents(childStub, [
+      {
+        id: "evt-delivered-child-token",
+        type: "token",
+        data: JSON.stringify({ content: "The child completed the requested investigation." }),
+        messageId: "msg-delivered-child-result",
+        createdAt: 180,
+      },
+      {
+        id: "evt-delivered-child-complete",
+        type: "execution_complete",
+        data: JSON.stringify({ success: true }),
+        messageId: "msg-delivered-child-result",
+        createdAt: 200,
+      },
+    ]);
+
+    const response = await parentStub.fetch(
+      new Request(buildSessionInternalUrl(SessionInternalPaths.childSessionUpdate), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          childSessionId: childName,
+          status: "completed",
+          title: "Child Session",
+          deliverResult: true,
+        }),
+      })
+    );
+    expect(response.status).toBe(200);
+
+    await vi.waitFor(async () => {
+      const messages = await queryDO<{ content: string; source: string }>(
+        parentStub,
+        "SELECT content, source FROM messages WHERE source = 'agent'"
+      );
+      expect(messages).toContainEqual({
+        content: expect.stringContaining("The child completed the requested investigation."),
+        source: "agent",
+      });
     });
   });
 
