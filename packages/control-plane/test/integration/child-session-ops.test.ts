@@ -222,6 +222,70 @@ describe("Child session operations (list, get, cancel)", () => {
       ]);
     });
 
+    it("delivers the completed child's response text to the parent prompt", async () => {
+      const { childName, parentStub, childStub } = await setupParentAndChild();
+      const [{ id: participantId }] = await queryDO<{ id: string }>(
+        childStub,
+        "SELECT id FROM participants LIMIT 1"
+      );
+
+      await queryDO(
+        childStub,
+        `INSERT INTO messages (id, author_id, content, source, status, created_at, started_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        "msg-delivered-child-result",
+        participantId,
+        "Do the child task",
+        "web",
+        "completed",
+        100,
+        110,
+        200
+      );
+      await seedEvents(childStub, [
+        {
+          id: "evt-delivered-child-token",
+          type: "token",
+          data: JSON.stringify({ content: "usable delivered child result" }),
+          messageId: "msg-delivered-child-result",
+          createdAt: 180,
+        },
+        {
+          id: "evt-delivered-child-complete",
+          type: "execution_complete",
+          data: JSON.stringify({ success: true }),
+          messageId: "msg-delivered-child-result",
+          createdAt: 200,
+        },
+      ]);
+
+      const response = await parentStub.fetch("http://internal/internal/child-session-update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          childSessionId: childName,
+          status: "completed",
+          title: "Child Session",
+          deliverResult: true,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+
+      let delivered = false;
+      for (let attempt = 0; attempt < 20 && !delivered; attempt += 1) {
+        const messages = await queryDO<{ content: string }>(
+          parentStub,
+          "SELECT content FROM messages"
+        );
+        delivered = messages.some(({ content }) =>
+          content.includes("usable delivered child result")
+        );
+        if (!delivered) await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(delivered).toBe(true);
+    });
+
     it("returns 404 for wrong parent", async () => {
       const { childName } = await setupParentAndChild();
 

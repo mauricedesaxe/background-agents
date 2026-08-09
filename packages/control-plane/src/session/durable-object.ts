@@ -457,7 +457,7 @@ export class SessionDO extends DurableObject<Env> {
 
     const childSummaryUrl = buildSessionInternalUrl(
       SessionInternalPaths.childSummary,
-      "?includeFinalResponse=true"
+      "?include=result"
     );
     let detail: ChildSessionDetail;
     try {
