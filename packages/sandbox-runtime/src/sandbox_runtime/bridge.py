@@ -51,7 +51,11 @@ def is_session_work(event_type: str | None) -> bool:
     OpenCode multiplexes file, lsp, storage and installation chatter onto the same stream. None of
     it means a prompt is progressing, so none of it may hold the session-progress deadline open.
     """
-    return bool(event_type) and event_type.startswith(("message.", "session."))
+    return (
+        bool(event_type)
+        and event_type != "session.status"
+        and event_type.startswith(("message.", "session."))
+    )
 
 
 @dataclass(frozen=True)

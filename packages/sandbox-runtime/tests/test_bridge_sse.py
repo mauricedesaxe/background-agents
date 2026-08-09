@@ -1731,6 +1731,49 @@ class TestPromptMaxDuration:
         assert any(url.endswith("/abort") for url in http_client.post_urls)
 
     @pytest.mark.asyncio
+    async def test_provider_retries_do_not_reset_the_progress_deadline(self):
+        bridge = AgentBridge(
+            sandbox_id="test-sandbox",
+            session_id="test-session",
+            control_plane_url="http://localhost:8787",
+            auth_token="test-token",
+        )
+        bridge.opencode_session_id = "oc-session-123"
+        bridge.sse_inactivity_timeout = 2.0
+        bridge.session_progress_timeout_seconds = 0.2
+
+        sse_response = DelayedMockSSEResponse(
+            [
+                (create_sse_event("server.connected", {}), 0),
+                (
+                    create_sse_event(
+                        "session.status",
+                        {
+                            "sessionID": "oc-session-123",
+                            "status": {
+                                "type": "retry",
+                                "attempt": 1,
+                                "message": "Rate limited",
+                                "next": 1786006100468,
+                            },
+                        },
+                    ),
+                    0.15,
+                ),
+                (create_sse_event("server.heartbeat", {}), 0.15),
+            ]
+        )
+        http_client = DelayedMockHttpClient(sse_response)
+        http_client.get_responses = [MockResponse(200, [])]
+        bridge.http_client = http_client
+
+        with pytest.raises(RuntimeError, match="produced nothing"):
+            async for _event in bridge._stream_opencode_response_sse("msg-1", "test"):
+                pass
+
+        assert any(url.endswith("/abort") for url in http_client.post_urls)
+
+    @pytest.mark.asyncio
     async def test_server_chatter_does_not_hold_the_progress_deadline_open(self):
         """File and lsp traffic share the stream but say nothing about the prompt progressing."""
         bridge = AgentBridge(
