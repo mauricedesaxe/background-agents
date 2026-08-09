@@ -72,7 +72,7 @@ jj-aware PR helper, and the Slack thread-truncation warning, which is pinned in
 makes, and each edit must carry a reason that beats the FORK.md entry it touches. See
 `packages/sandbox-runtime/tests/test_bridge_session_reattach.py`,
 `packages/control-plane/test/integration/websocket-sandbox.test.ts`, and
-`packages/slack-bot/test/webhook-forward.test.ts` as the homes of the pinned behavior.
+`packages/github-bot/test/webhook-forward.test.ts` as the homes of the pinned behavior.
 
 **Threshold.** Zero fork tests replaced by upstream's; zero fork tests edited without a written
 reason; all retained-behavior tests green.
@@ -82,7 +82,7 @@ that judgment lands on the PR as a review comment before merge, not after.
 
 ## 3. Local-fix regressions: kept regression guards still hold
 
-**Class: blocking (automated).**
+**Class: blocking (automated), with a human signal on guard-list edits.**
 
 **What.** The regression guards that exist only because nothing upstream pins them still pass. These
 are distinct from retained-behavior tests: they overlap with upstream's current behavior but are not
@@ -95,7 +95,8 @@ pin, so it stays as a guard.
 **Threshold.** Green, and the guard list is not silently trimmed. Removing a guard that still passes
 green loses the canary with no conflict.
 
-**Who.** Automated.
+**Who.** Automated for the pass/fail. Human judgment that the guard list is not silently trimmed,
+and that judgment lands on the PR as a review comment before merge, not after.
 
 ## 4. Migration upgrade and rollback matrix
 
@@ -119,11 +120,15 @@ the `9xxx_*.sql` files.
 - **Upgrade from each actor.** Starting schema = the previous version the overlay replaces; the
   migration (`up`/forward) applies cleanly and leaves the schema matching the new code's
   expectations.
-- **The id-collision case is checked explicitly.** Because `applyMigrations()` is a set-membership
-  check with no content check, a deployed store that already carries an id skips it offline. The
-  matrix must include the case "store already has this id" and assert the store's final shape is
-  correct, not merely that the runner reported success. FORK.md's 35/36 collision shows a store can
-  report itself fully migrated while the tables the code queries never exist.
+- **The id-collision case is checked against a named predicate.** Because `applyMigrations()` is a
+  set-membership check with no content check, a deployed store that already carries an id skips it
+  offline. A collision row is required for any migration that adopts, reuses, or renumbers an id a
+  deployed store could already carry: an upstream-owned id below the 9000 floor, a retired id, or a
+  renumbered one. The row seeds a store with the id already recorded, applies the migration, and
+  asserts the store's final shape is correct, not merely that the runner reported success. FORK.md's
+  35/36 collision shows a store can report itself fully migrated while the tables the code queries
+  never exist. The row is waived in writing only when the id is provably brand-new this release,
+  with no deployed-history overlap.
 - **Rollback to the previous version.** The `down`/reverse path runs and returns the store to a
   state the previous code can serve. FORK.md's `releaseRetiredIdentifiers()` release is rollback
   proof; the matrix treats any migration that cannot roll back as needing a written irreversibility
@@ -137,9 +142,10 @@ a store seeded with a prior schema and then upgraded, that is a new test in the 
 one-off script.
 
 **Threshold.** Every overlay-added or overlay-modified migration has one passing upgrade row and one
-passing rollback row, a row for the already-has-the-id case if it could collide, and a written
-reason where rollback is impossible. The control-plane integration job that hosts them must be
-green.
+passing rollback row. A collision row is required wherever the migration adopts, reuses, or
+renumbers an id a deployed store could already carry, and is waived in writing only for an id
+provably brand-new this release. A written reason is required where rollback is impossible. The
+control-plane integration job that hosts them must be green.
 
 **Who.** Human judgment. The matrix is produced by running the tests, but a person has to confirm
 the rows chosen cover the real deployed histories (which migrations are live in production now),
@@ -224,14 +230,17 @@ the WebSocket send (#7). A probe must exercise a real prompt that triggers compa
 long-running turn through those seams, because their failure mode is the stream dropping or the
 recovered response never reaching the user, which no unit test reproduces.
 
-**How.** A production or staging probe is run by a person: create a session, send a prompt that runs
-long enough to exercise the retained seams, and confirm the transcript and streamed events arrive
-intact. Where a bot package is in the overlay, send a real webhook and confirm the forward fires
-(the #12 behavior pinned by `webhook-forward.test.ts`).
+**How.** A person runs the probe against the deployed production surface, not staging: create a
+session, send a prompt that runs long enough to exercise the retained seams, and confirm the
+transcript and streamed events arrive intact. Where a bot package is in the overlay, send a real
+webhook and confirm the forward fires (the #12 behavior pinned by
+`packages/github-bot/test/webhook-forward.test.ts`). A staging environment cannot stand in, because
+the seams the probe exists to catch (binding-parity 503s, the event pump, the webhook forward) are
+production-configuration-dependent and behave differently under the deployed configuration.
 
-**Threshold.** The probe session completes end to end with the transcript and events intact, and any
-bot forwarding fires. A skipped probe is a block; the probe is not satisfiable by saying "the tests
-passed."
+**Threshold.** The probe runs against the deployed production surface and completes end to end with
+the transcript and events intact, and any bot forwarding fires. A skipped probe is a block; the
+probe is not satisfiable by saying "the tests passed" or by a staging run.
 
 **Who.** Human run. This is the gate between "merged" and "declared promoted".
 
@@ -272,15 +281,17 @@ human is required and conversation on the PR is the record of the decision.
 2. [ ] Section 2 retained behavior: no fork test taken wholesale, no fork test edited without a
        written reason, all pinned-behavior tests green.
 3. [ ] Section 3 local-fix regressions: guards green and untrimmed.
-4. [ ] Section 4 migrations: one upgrade row, one rollback row, a collision row where an id could
-       already be recorded, a written reason where rollback is impossible; host integration suite
-       green, and a person confirms the rows cover the deployed histories.
+4. [ ] Section 4 migrations: one upgrade row, one rollback row; a collision row for any migration
+       that adopts, reuses, or renumbers an id a deployed store could already carry, waived in
+       writing only for an id provably brand-new this release; a written reason where rollback is
+       impossible; host integration suite green, and a person confirms the rows cover the deployed
+       histories.
 5. [ ] Section 5 Terraform: validate green, plan reviewed (or bindings hand-checked when secrets are
        unconfigured), binding parity guard extended and passing for every touched package.
 6. [ ] Section 6 Daytona: `SANDBOX_VERSION` bumped with any harness pin; a real sandbox booted and
-       resumed from the rebuilt image, evidenced by the named snapshot.
-7. [ ] Section 7 probes: a live round trip ran end to end with transcript and events intact; bot
-       forwarding confirmed where touched.
+       resumed from the rebuilt image in a staging environment, evidenced by the named snapshot.
+7. [ ] Section 7 probes: a live round trip ran end to end against the deployed production surface
+       with transcript and events intact; bot forwarding confirmed where touched.
 8. [ ] Section 8 production: a workflow run exists for the merge and succeeded; the applied plan
        shows no unexpected creates; the deployed surface responds to the section 7 probe.
 
