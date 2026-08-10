@@ -12,9 +12,10 @@ function createHandler() {
       .fn<SessionMessageQueue["failStuckProcessingMessage"]>()
       .mockResolvedValue(),
     failStuckPendingMessage: vi.fn<() => Promise<void>>().mockResolvedValue(),
+    processMessageQueue: vi.fn<() => Promise<void>>().mockResolvedValue(),
   };
   const lifecycleManager = {
-    handleAlarm: vi.fn<() => Promise<void>>().mockResolvedValue(),
+    handleAlarm: vi.fn<() => Promise<boolean>>().mockResolvedValue(true),
   };
   const statusService = {
     handleAutoArchiveAlarm: vi.fn<(_now: number) => Promise<void>>().mockResolvedValue(),
@@ -61,6 +62,7 @@ describe("createAlarmHandler", () => {
     expect(messageQueue.failStuckProcessingMessage).not.toHaveBeenCalled();
     expect(statusService.handleAutoArchiveAlarm).toHaveBeenCalledWith(2000);
     expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
+    expect(messageQueue.processMessageQueue).toHaveBeenCalledTimes(1);
   });
 
   it("does not fail processing message when execution timeout is not reached", async () => {
@@ -77,7 +79,7 @@ describe("createAlarmHandler", () => {
     expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
   });
 
-  it("fails stuck processing message when execution timeout is reached", async () => {
+  it("fails the message and stops its sandbox when execution timeout is reached", async () => {
     const { handler, repository, messageQueue, lifecycleManager, log } = createHandler();
     repository.getProcessingMessageWithStartedAt.mockReturnValue({
       id: "message-1",
@@ -97,6 +99,46 @@ describe("createAlarmHandler", () => {
       elapsedMs: 1500,
     });
     expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
+    expect(lifecycleManager.handleAlarm).toHaveBeenCalledWith({ executionTimedOut: true });
+    expect(messageQueue.processMessageQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes after a coincident execution timeout and settled teardown", async () => {
+    const { handler, repository, messageQueue, lifecycleManager } = createHandler();
+    repository.getProcessingMessageWithStartedAt.mockReturnValue({
+      id: "message-1",
+      started_at: 500,
+    });
+    lifecycleManager.handleAlarm.mockResolvedValue(true);
+
+    await handler.handle();
+
+    expect(messageQueue.failStuckProcessingMessage).toHaveBeenCalledTimes(1);
+    expect(lifecycleManager.handleAlarm).toHaveBeenCalledWith({ executionTimedOut: true });
+    expect(messageQueue.processMessageQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps queued work paused when execution-timeout teardown does not settle", async () => {
+    const { handler, repository, messageQueue, lifecycleManager } = createHandler();
+    repository.getProcessingMessageWithStartedAt.mockReturnValue({
+      id: "message-1",
+      started_at: 500,
+    });
+    lifecycleManager.handleAlarm.mockResolvedValue(false);
+
+    await handler.handle();
+
+    expect(messageQueue.processMessageQueue).not.toHaveBeenCalled();
+  });
+
+  it("keeps queued work paused while provider teardown is unreconciled", async () => {
+    const { handler, repository, messageQueue, lifecycleManager } = createHandler();
+    repository.getProcessingMessageWithStartedAt.mockReturnValue(null);
+    lifecycleManager.handleAlarm.mockResolvedValue(false);
+
+    await handler.handle();
+
+    expect(messageQueue.processMessageQueue).not.toHaveBeenCalled();
   });
 
   it("always runs the pending-message watchdog before lifecycle handling", async () => {
@@ -107,5 +149,22 @@ describe("createAlarmHandler", () => {
 
     // Self-guarded, so it runs unconditionally; it decides internally whether to act.
     expect(messageQueue.failStuckPendingMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes queued work after lifecycle handling settles", async () => {
+    const { handler, repository, messageQueue, lifecycleManager } = createHandler();
+    repository.getProcessingMessageWithStartedAt.mockReturnValue(null);
+    const calls: string[] = [];
+    lifecycleManager.handleAlarm.mockImplementation(async () => {
+      calls.push("lifecycle");
+      return true;
+    });
+    messageQueue.processMessageQueue.mockImplementation(async () => {
+      calls.push("queue");
+    });
+
+    await handler.handle();
+
+    expect(calls).toEqual(["lifecycle", "queue"]);
   });
 });

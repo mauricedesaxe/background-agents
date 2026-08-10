@@ -295,11 +295,15 @@ export type SandboxTerminationReason =
 export interface LifecycleCallbacks {
   /** Called when the sandbox is being terminated, with the reason it's going away. */
   onSandboxTerminating?: (reason: SandboxTerminationReason) => Promise<void>;
-  /** Recheck queued work after an unobserved failed stop later settles. */
-  onRecoveredInactivityStop?: () => Promise<void>;
 }
 
 type ProviderStopSettlement = { success: true } | { success: false; error: string };
+
+export type LifecycleAlarmOutcome = "no_teardown" | "teardown_settled" | "teardown_unsettled";
+
+interface LifecycleAlarmOptions {
+  executionTimedOut?: boolean;
+}
 
 // ==================== Manager ====================
 
@@ -311,7 +315,10 @@ type ProviderStopSettlement = { success: true } | { success: false; error: strin
 export interface SandboxLifecycle {
   spawnSandbox(): Promise<void>;
   updateLastActivity(timestamp: number): void;
+  isTeardownPending(): boolean;
 }
+
+type FailedSandboxStopReason = "context_unavailable" | "execution_timeout";
 
 /**
  * Manages sandbox lifecycle operations.
@@ -466,18 +473,6 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       session.archive_claimed_at == null &&
       !["completed", "failed", "cancelled", "archived"].includes(session.status)
     );
-  }
-
-  private async notifyRecoveredInactivityStop(): Promise<void> {
-    if (this.inactivityStopResumeWaiters !== 0 || !this.sessionAllowsSandboxResume()) return;
-    try {
-      await this.callbacks.onRecoveredInactivityStop?.();
-    } catch (error) {
-      this.log.error("Failed to process queued work after recovered inactivity stop", {
-        event: "sandbox.stop_recovery_callback_failed",
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
   }
 
   /**
@@ -1211,6 +1206,16 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
     }
   }
 
+  private async settleProviderStopForAlarm(
+    reason: string,
+    providerObjectId: string | undefined
+  ): Promise<LifecycleAlarmOutcome> {
+    if (!this.canStopProviderSandbox()) return "teardown_settled";
+    if (!providerObjectId) return "teardown_unsettled";
+    const settlement = await this.stopProviderSandboxOrRecord(reason, providerObjectId);
+    return settlement.success ? "teardown_settled" : "teardown_unsettled";
+  }
+
   private joinInactivityStop(providerObjectId: string): Promise<boolean> {
     return this.joinProviderStop(providerObjectId, this.getPendingProviderStopReason());
   }
@@ -1272,15 +1277,20 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
     }
 
     const contextUnavailable = reason === "context_unavailable";
+    const executionTimedOut = reason === "execution_timeout";
     await beforeSocketClose?.();
     this.storage.setLastSpawnError(null, null);
     this.storage.updateSandboxStatus("stopped");
     this.wsManager.closeSandboxWebSocket(
       1000,
-      contextUnavailable ? "Context recovery failed" : "Inactivity timeout"
+      contextUnavailable
+        ? "Context recovery failed"
+        : executionTimedOut
+          ? "Execution timed out"
+          : "Inactivity timeout"
     );
     this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });
-    if (!contextUnavailable) {
+    if (reason === "inactivity_timeout") {
       this.broadcaster.broadcast({
         type: "sandbox_warning",
         message: "Sandbox stopped due to inactivity",
@@ -1319,21 +1329,23 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
    * an attempt count keeps this stateless, the same trade evaluateInactivityTimeout
    * makes.
    */
-  private async reconcileUnstoppedSandbox(sandbox: SandboxRow, now: EpochMs): Promise<void> {
+  private async reconcileUnstoppedSandbox(
+    sandbox: SandboxRow,
+    now: EpochMs
+  ): Promise<LifecycleAlarmOutcome> {
     const unreconciledAt = sandbox.stop_unreconciled_at;
     if (unreconciledAt == null) {
-      return;
+      return "no_teardown";
     }
 
     if (now - unreconciledAt >= STOP_RECONCILE_WINDOW_MS) {
-      this.storage.updateSandboxStopUnreconciled(null, null);
-      return;
+      return "teardown_unsettled";
     }
 
     const providerObjectId = sandbox.stop_unreconciled_provider_id;
     if (!providerObjectId) {
       this.abandonUnpinnedStop();
-      return;
+      return "teardown_unsettled";
     }
 
     try {
@@ -1343,12 +1355,14 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         event: "sandbox.stop_reconciled",
         unreconciled_for_ms: now - unreconciledAt,
       });
+      return "teardown_settled";
     } catch (error) {
       this.log.warn("Stop reconcile failed, will retry", {
         event: "sandbox.stop_reconcile_failed",
         error: error instanceof Error ? error.message : String(error),
       });
       await this.alarmScheduler.scheduleAlarm(now + STOP_RECONCILE_INTERVAL_MS);
+      return "teardown_unsettled";
     }
   }
 
@@ -1534,7 +1548,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
   }
 
   async stopSandboxAfterFailure(
-    reason: string,
+    reason: FailedSandboxStopReason,
     beforeSocketClose?: () => void | Promise<void>
   ): Promise<boolean> {
     const sandbox = this.storage.getSandbox();
@@ -1556,7 +1570,10 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
     await beforeSocketClose?.();
     this.storage.setLastSpawnError(null, null);
     this.storage.updateSandboxStatus("stopped");
-    this.wsManager.closeSandboxWebSocket(1000, "Context recovery failed");
+    this.wsManager.closeSandboxWebSocket(
+      1000,
+      reason === "context_unavailable" ? "Context recovery failed" : "Execution timed out"
+    );
     this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });
     return true;
   }
@@ -1564,11 +1581,23 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
   /**
    * Handle alarm for inactivity and heartbeat monitoring.
    */
-  async handleAlarm(): Promise<void> {
+  async handleAlarm(options: LifecycleAlarmOptions = {}): Promise<boolean> {
+    let outcome = await this.handleLifecycleAlarm();
+    if (options.executionTimedOut && outcome === "no_teardown") {
+      const settled = await this.stopSandboxAfterFailure("execution_timeout");
+      outcome = settled ? "teardown_settled" : "teardown_unsettled";
+    }
+    return (
+      outcome !== "teardown_unsettled" &&
+      (!options.executionTimedOut || outcome === "teardown_settled")
+    );
+  }
+
+  private async handleLifecycleAlarm(): Promise<LifecycleAlarmOutcome> {
     const sandbox = this.storage.getSandbox();
     if (!sandbox) {
       this.log.debug("Alarm fired: no sandbox found");
-      return;
+      return "no_teardown";
     }
     const providerObjectId = sandbox.modal_object_id ?? undefined;
 
@@ -1594,14 +1623,13 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
           provider_object_id: providerObjectId,
           duration_ms: now - sandbox.stop_unreconciled_at,
         });
-        this.storage.updateSandboxStopUnreconciled(null, null);
-        return;
+        return "teardown_unsettled";
       }
       if (providerObjectId) {
         const settled = await this.joinInactivityStop(providerObjectId);
-        if (settled) await this.notifyRecoveredInactivityStop();
+        return settled ? "teardown_settled" : "teardown_unsettled";
       }
-      return;
+      return "teardown_unsettled";
     }
 
     // Skip if sandbox is already in terminal state. A dead row whose stop never
@@ -1611,8 +1639,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       this.log.debug("Alarm: sandbox in terminal state, skipping", {
         sandbox_status: sandbox.status,
       });
-      await this.reconcileUnstoppedSandbox(sandbox, now);
-      return;
+      return this.reconcileUnstoppedSandbox(sandbox, now);
     }
 
     // Check connecting timeout — sandbox failed to connect within allowed time
@@ -1632,16 +1659,14 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       await this.callbacks.onSandboxTerminating?.("connecting_timeout");
       this.storage.updateSandboxStatus("failed");
       this.clearSandboxAccessState();
-      if (this.canStopProviderSandbox() && providerObjectId) {
-        await this.stopProviderSandboxOrRecord("connecting_timeout", providerObjectId);
-      }
+      const outcome = await this.settleProviderStopForAlarm("connecting_timeout", providerObjectId);
       this.broadcaster.broadcast({ type: "sandbox_status", status: "failed" });
       this.broadcaster.broadcast({
         type: "sandbox_error",
         error:
           "Sandbox failed to connect within the allowed time. It will be retried on your next message.",
       });
-      return;
+      return outcome;
     }
 
     // Check heartbeat health
@@ -1663,16 +1688,9 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       this.clearSandboxAccessState();
       this.broadcaster.broadcast({ type: "sandbox_status", status: "stale" });
 
-      if (this.usesProviderManagedStop()) {
-        if (providerObjectId) {
-          await this.stopProviderSandboxOrRecord("heartbeat_timeout", providerObjectId);
-        }
-      } else {
+      if (!this.usesProviderManagedStop()) {
         if (this.canStopProviderSandbox()) {
           await this.triggerSnapshot("heartbeat_timeout", providerObjectId);
-          if (providerObjectId) {
-            await this.stopProviderSandboxOrRecord("heartbeat_timeout", providerObjectId);
-          }
         } else {
           // Fire-and-forget snapshot so status broadcast isn't delayed.
           this.triggerSnapshot("heartbeat_timeout").catch((e) =>
@@ -1684,8 +1702,10 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         this.wsManager.sendToSandbox({ type: "shutdown" });
       }
 
+      const outcome = await this.settleProviderStopForAlarm("heartbeat_timeout", providerObjectId);
+
       this.wsManager.closeSandboxWebSocket(1000, "Heartbeat stale");
-      return;
+      return outcome;
     }
 
     // Evaluate inactivity timeout
@@ -1704,15 +1724,15 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
     );
 
     switch (inactivityDecision.action) {
-      case "timeout":
+      case "timeout": {
         this.log.info("Inactivity timeout", {
           event: "sandbox.timeout",
           last_activity: sandbox.last_activity,
           timeout_ms: this.config.inactivity.timeoutMs,
         });
         if (this.usesProviderManagedStop() && providerObjectId) {
-          await this.joinInactivityStop(providerObjectId);
-          return;
+          const settled = await this.joinInactivityStop(providerObjectId);
+          return settled ? "teardown_settled" : "teardown_unsettled";
         }
 
         // Fail any stuck processing message before terminating
@@ -1725,10 +1745,12 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         if (!this.usesProviderManagedStop()) {
           await this.triggerSnapshot("inactivity_timeout", providerObjectId);
           this.wsManager.sendToSandbox({ type: "shutdown" });
-          if (this.canStopProviderSandbox() && providerObjectId) {
-            await this.stopProviderSandboxOrRecord("inactivity_timeout", providerObjectId);
-          }
         }
+
+        const outcome = await this.settleProviderStopForAlarm(
+          "inactivity_timeout",
+          providerObjectId
+        );
 
         this.wsManager.closeSandboxWebSocket(1000, "Inactivity timeout");
 
@@ -1738,7 +1760,8 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
             ? "Sandbox stopped due to inactivity"
             : "Sandbox stopped due to inactivity, snapshot saved",
         });
-        return;
+        return outcome;
+      }
 
       case "extend":
         this.log.info("Inactivity extended", {
@@ -1752,12 +1775,12 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
           });
         }
         await this.alarmScheduler.scheduleAlarm(now + inactivityDecision.extensionMs);
-        return;
+        return "no_teardown";
 
       case "schedule":
         this.log.debug("Scheduling next alarm", { next_check_ms: inactivityDecision.nextCheckMs });
         await this.alarmScheduler.scheduleAlarm(now + inactivityDecision.nextCheckMs);
-        return;
+        return "no_teardown";
     }
   }
 
@@ -1790,6 +1813,11 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
    */
   updateLastActivity(timestamp: number): void {
     this.storage.updateSandboxLastActivity(timestamp);
+  }
+
+  isTeardownPending(): boolean {
+    const sandbox = this.storage.getSandbox();
+    return sandbox?.status === "stopping" || sandbox?.stop_unreconciled_at != null;
   }
 
   /**
