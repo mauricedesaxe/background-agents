@@ -233,10 +233,6 @@ export const MODEL_CATALOG = [
         id: "openrouter/deepseek/deepseek-v4-flash-0731",
         name: "DeepSeek V4 Flash 0731",
         description: "DeepSeek, fast and cheap agentic coding",
-        reasoning: {
-          efforts: ["low", "high", "max"],
-          default: "high",
-        },
       },
     ],
   },
