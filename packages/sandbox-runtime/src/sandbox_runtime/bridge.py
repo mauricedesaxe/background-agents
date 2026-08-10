@@ -315,8 +315,8 @@ class AgentBridge:
     HTTP_DEFAULT_TIMEOUT = 30.0
     OPENCODE_REQUEST_TIMEOUT = 30.0
     SESSION_VERIFY_TIMEOUT_SECONDS = 10.0
-    SESSION_VERIFY_MAX_ATTEMPTS = 2
-    SESSION_VERIFY_RETRY_DELAY_SECONDS = 2.0
+    SESSION_VERIFY_BACKOFF_BASE_SECONDS = 2.0
+    SESSION_VERIFY_BACKOFF_MAX_SECONDS = 30.0
     GIT_PUSH_TIMEOUT_SECONDS = 300.0
     GIT_PUSH_TERMINATE_GRACE_SECONDS = 5.0
     JJ_COMMAND_TIMEOUT_SECONDS = 30.0
@@ -449,11 +449,10 @@ class AgentBridge:
                 connect=self.HTTP_CONNECT_TIMEOUT,
             )
         )
-        await self._load_session_id()
-
         reconnect_attempts = 0
 
         try:
+            await self._load_session_id()
             while not self.shutdown_event.is_set():
                 try:
                     await self._connect_and_run()
@@ -575,6 +574,7 @@ class AgentBridge:
                             "type": "ready",
                             "sandboxId": self.sandbox_id,
                             "opencodeSessionId": self.opencode_session_id,
+                            "contextStatus": ("existing" if self.opencode_session_id else "fresh"),
                         }
                     )
 
@@ -2508,53 +2508,55 @@ class AgentBridge:
                 f"OpenCode session {self.opencode_session_id} is unavailable; "
                 "refusing to continue without its conversation context"
             )
-            for attempt in range(self.SESSION_VERIFY_MAX_ATTEMPTS):
+            attempt = 0
+            delay_seconds = self.SESSION_VERIFY_BACKOFF_BASE_SECONDS
+            while not self.shutdown_event.is_set():
+                attempt += 1
+                verification_error = None
+                verification_status = None
                 try:
                     resp = await self.http_client.get(
                         f"{self.opencode_base_url}/session/{self.opencode_session_id}",
                         timeout=self.SESSION_VERIFY_TIMEOUT_SECONDS,
                     )
-                except httpx.TimeoutException as error:
-                    if attempt + 1 < self.SESSION_VERIFY_MAX_ATTEMPTS:
-                        self.log.warn(
-                            "opencode.session.verify_retry",
-                            exc=error,
+                except httpx.RequestError as error:
+                    verification_error = error
+                else:
+                    verification_status = resp.status_code
+                    if resp.status_code == 200:
+                        return
+                    if resp.status_code == 404:
+                        self.log.error(
+                            "opencode.session.invalid",
                             opencode_session_id=self.opencode_session_id,
                             source=source,
-                            attempt=attempt + 1,
-                            max_attempts=self.SESSION_VERIFY_MAX_ATTEMPTS,
-                            delay_s=self.SESSION_VERIFY_RETRY_DELAY_SECONDS,
+                            status_code=resp.status_code,
                         )
-                        await asyncio.sleep(self.SESSION_VERIFY_RETRY_DELAY_SECONDS)
-                        continue
-                    self.log.error(
-                        "opencode.session.verify_error",
-                        exc=error,
-                        opencode_session_id=self.opencode_session_id,
-                        source=source,
-                    )
-                    self.opencode_session_error = error_message
-                    break
-                except Exception as error:
-                    self.log.error(
-                        "opencode.session.verify_error",
-                        exc=error,
-                        opencode_session_id=self.opencode_session_id,
-                        source=source,
-                    )
-                    self.opencode_session_error = error_message
-                    break
+                        self.opencode_session_error = error_message
+                        return
+                    if resp.status_code < 500 and resp.status_code not in (408, 425, 429):
+                        raise RuntimeError(
+                            f"OpenCode session verification rejected with HTTP {resp.status_code}"
+                        )
 
-                if resp.status_code == 200:
-                    break
-                self.log.error(
-                    "opencode.session.invalid",
+                self.log.warn(
+                    "opencode.session.verify_retry",
+                    exc=verification_error,
                     opencode_session_id=self.opencode_session_id,
                     source=source,
-                    status_code=resp.status_code,
+                    status_code=verification_status,
+                    attempt=attempt,
+                    delay_s=delay_seconds,
                 )
-                self.opencode_session_error = error_message
-                break
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        self.shutdown_event.wait(),
+                        timeout=delay_seconds,
+                    )
+                delay_seconds = min(
+                    delay_seconds * 2,
+                    self.SESSION_VERIFY_BACKOFF_MAX_SECONDS,
+                )
 
     async def _save_session_id(self) -> None:
         """Save OpenCode session ID to file for persistence."""
