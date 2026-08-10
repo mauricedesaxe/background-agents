@@ -455,7 +455,7 @@ describe("SessionStatusService.handleAutoArchiveAlarm", () => {
     expect(h.archiveSandbox).toHaveBeenCalledWith("session_auto_archived");
   });
 
-  it("durably retries timed archival after the provider recovers", async () => {
+  it("retries timed archival after the provider recovers while honoring later activity", async () => {
     const terminalAt = 10_000;
     const session = createSession({
       status: "completed",
@@ -468,10 +468,17 @@ describe("SessionStatusService.handleAutoArchiveAlarm", () => {
     await h.service.handleAutoArchiveAlarm(terminalAt + 12 * 60 * 60 * 1000);
 
     expect(session.archive_claimed_at).toBeNull();
-    expect(session.archive_requested_at).not.toBeNull();
+    expect(session.archive_requested_at).toBeNull();
     expect(h.setAlarm).toHaveBeenCalled();
 
-    await h.service.handleAutoArchiveAlarm(terminalAt + 13 * 60 * 60 * 1000);
+    const activityAt = terminalAt + 13 * 60 * 60 * 1000;
+    h.service.recordTerminalActivity(activityAt);
+    await h.service.handleAutoArchiveAlarm(activityAt + 5 * 60 * 1000);
+
+    expect(h.archiveSandbox).toHaveBeenCalledTimes(1);
+    expect(h.setAlarm).toHaveBeenCalledWith(activityAt + 12 * 60 * 60 * 1000);
+
+    await h.service.handleAutoArchiveAlarm(activityAt + 12 * 60 * 60 * 1000);
 
     expect(h.archiveSandbox).toHaveBeenCalledTimes(2);
     expect(session.status).toBe("archived");
