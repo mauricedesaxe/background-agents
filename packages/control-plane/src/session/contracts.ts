@@ -46,6 +46,11 @@ export const SessionInternalPaths = {
   childSessionUpdate: "/internal/child-session-update",
 } as const;
 
+export const SessionChildSummaryIncludes = {
+  result: "result",
+  trajectory: "trajectory",
+} as const;
+
 export type SessionInternalPath = (typeof SessionInternalPaths)[keyof typeof SessionInternalPaths];
 
 const INTERNAL_ORIGIN = "http://internal";

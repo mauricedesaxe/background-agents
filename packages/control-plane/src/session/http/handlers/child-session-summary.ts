@@ -13,8 +13,9 @@ import {
   type EventTimelineCursor,
 } from "../../event-cursor";
 import type { ArtifactRow, EventRow, MessageRow, SandboxRow, SessionRow } from "../../types";
+import { SessionChildSummaryIncludes } from "../../contracts";
 
-const CHILD_SESSION_DETAIL_INCLUDES = ["result", "trajectory"] as const;
+const CHILD_SESSION_DETAIL_INCLUDES = Object.values(SessionChildSummaryIncludes);
 
 export const RECENT_EVENT_FETCH_LIMIT = 50;
 export const FINAL_RESPONSE_EVENT_PAGE_LIMIT = 200;
@@ -86,8 +87,8 @@ export function parseChildSummaryOptions(url?: URL): ChildSummaryOptionsResult {
     return { ok: false, error: includeValuesResult.error };
   }
 
-  const includeTrajectory = includeValuesResult.values.has("trajectory");
-  const includeFinalResponse = includeValuesResult.values.has("result");
+  const includeTrajectory = includeValuesResult.values.has(SessionChildSummaryIncludes.trajectory);
+  const includeFinalResponse = includeValuesResult.values.has(SessionChildSummaryIncludes.result);
   const trajectoryLimitResult = includeTrajectory
     ? parseLimit(
         url?.searchParams.get("trajectoryLimit"),
