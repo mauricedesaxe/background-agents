@@ -7,7 +7,10 @@ import type { SessionStatusService } from "../session-status-service";
 
 export interface AlarmHandlerDeps {
   repository: Pick<SessionRepository, "getProcessingMessageWithStartedAt">;
-  messageQueue: Pick<SessionMessageQueue, "failStuckProcessingMessage" | "failStuckPendingMessage">;
+  messageQueue: Pick<
+    SessionMessageQueue,
+    "failStuckProcessingMessage" | "failStuckPendingMessage" | "processMessageQueue"
+  >;
   lifecycleManager: Pick<SandboxLifecycleManager, "handleAlarm">;
   statusService: Pick<SessionStatusService, "handleAutoArchiveAlarm">;
   executionTimeoutMs: number;
@@ -29,6 +32,7 @@ export interface AlarmHandler {
 export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
   return {
     async handle(): Promise<void> {
+      let executionTimedOut = false;
       // Execution timeout check: if a message has been in 'processing' longer than
       // the configured timeout, fail it. This is idempotent - if the message was
       // already failed (by onSandboxTerminating or a prior alarm),
@@ -42,6 +46,7 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
           now
         );
         if (result.isTimedOut) {
+          executionTimedOut = true;
           deps.log.warn("Execution timeout: message stuck in processing", {
             event: "execution.timeout",
             message_id: processing.id,
@@ -62,7 +67,8 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
 
       await deps.statusService.handleAutoArchiveAlarm(deps.now());
 
-      await deps.lifecycleManager.handleAlarm();
+      const canAdvanceQueue = await deps.lifecycleManager.handleAlarm({ executionTimedOut });
+      if (canAdvanceQueue) await deps.messageQueue.processMessageQueue();
     },
   };
 }

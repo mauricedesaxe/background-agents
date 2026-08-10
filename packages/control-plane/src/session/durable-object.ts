@@ -890,7 +890,6 @@ export class SessionDO extends DurableObject<Env> {
           });
           await this.failActiveCompaction("Sandbox stopped before context compaction completed");
         },
-        onRecoveredInactivityStop: () => this.messageQueue.processMessageQueue(),
       },
       imageBuildLookup
     );

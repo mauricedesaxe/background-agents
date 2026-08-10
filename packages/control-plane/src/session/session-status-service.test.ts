@@ -369,6 +369,19 @@ describe("SessionStatusService.transition", () => {
 });
 
 describe("SessionStatusService.reconcileAfterExecution", () => {
+  it.each(["cancelled", "archived"] as const)(
+    "preserves %s when execution reconciliation finishes later",
+    async (status) => {
+      const h = harness({ session: createSession({ status }) });
+      h.repository.getPendingOrProcessingCount.mockReturnValue(1);
+
+      await h.service.reconcileAfterExecution(false);
+
+      expect(h.repository.updateSessionStatus).not.toHaveBeenCalled();
+      expect(h.broadcast).not.toHaveBeenCalled();
+    }
+  );
+
   it("returns to active when more prompts are pending", async () => {
     const h = harness({ session: createSession({ status: "created" }) });
     h.repository.getPendingOrProcessingCount.mockReturnValue(2);

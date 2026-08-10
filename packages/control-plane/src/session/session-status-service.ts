@@ -232,6 +232,8 @@ export class SessionStatusService {
    * when more prompts are queued, otherwise completed/failed by outcome.
    */
   async reconcileAfterExecution(success: boolean): Promise<void> {
+    const currentStatus = this.repository.getSession()?.status;
+    if (currentStatus === "cancelled" || currentStatus === "archived") return;
     const pendingOrProcessing = this.repository.getPendingOrProcessingCount();
     const nextStatus: SessionStatus =
       pendingOrProcessing > 0 ? "active" : success ? "completed" : "failed";
