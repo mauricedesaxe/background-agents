@@ -25,6 +25,7 @@ const CHILD_ARCHIVE_ATTEMPTS = 3;
 const ARCHIVE_RETRY_DELAY_MS = 5 * 60 * 1000;
 
 export type ArchiveAttemptResult = "archived" | "in_progress" | "failed";
+type ArchiveRetryPolicy = "none" | "preserve-request" | "recheck-retention";
 
 export class SessionStatusService {
   constructor(
@@ -64,26 +65,35 @@ export class SessionStatusService {
       beforeProviderArchive?: () => Promise<void>;
     } = {}
   ): Promise<ArchiveAttemptResult> {
+    const retryPolicy: ArchiveRetryPolicy = options.retryOnFailure ? "preserve-request" : "none";
+    return this.archiveWithRetryPolicy(reason, retryPolicy, options.beforeProviderArchive);
+  }
+
+  private async archiveWithRetryPolicy(
+    reason: string,
+    retryPolicy: ArchiveRetryPolicy,
+    beforeProviderArchive?: () => Promise<void>
+  ): Promise<ArchiveAttemptResult> {
     const session = this.repository.getSession();
     if (!session) return "failed";
 
     const claimedAt = nowMs();
-    const retryOnFailure = options.retryOnFailure ?? false;
     if (!this.repository.claimSessionArchive(session.id, claimedAt)) {
       return "in_progress";
     }
 
     try {
       await this.scheduleAlarmNoLaterThan(claimedAt + ARCHIVE_RETRY_DELAY_MS);
-      await options.beforeProviderArchive?.();
+      await beforeProviderArchive?.();
       await this.archiveSandbox(reason);
       await this.transition("archived");
       return "archived";
     } catch (error) {
       const shouldRetry =
-        retryOnFailure &&
+        retryPolicy !== "none" &&
         !(error instanceof SandboxProviderError && error.errorType === "permanent");
-      this.repository.clearSessionArchiveClaim(session.id, shouldRetry);
+      const keepRetryRequest = shouldRetry && retryPolicy === "preserve-request";
+      this.repository.clearSessionArchiveClaim(session.id, keepRetryRequest);
       this.log.error("session_archive.failed", {
         session_id: this.getPublicSessionId(session),
         reason,
@@ -299,7 +309,7 @@ export class SessionStatusService {
       return;
     }
 
-    await this.archive("session_auto_archived", { retryOnFailure: true });
+    await this.archiveWithRetryPolicy("session_auto_archived", "recheck-retention");
   }
 
   /**
