@@ -45,13 +45,15 @@ KEEPALIVE_EVENT_TYPES = frozenset({"server.heartbeat", "server.connected"})
 """SSE events that prove the connection is alive but say nothing about the agent's progress."""
 
 
-def is_session_work(event_type: str | None) -> bool:
-    """Whether an event is the session working, rather than the server talking about itself.
+def should_reset_progress_deadline(event_type: str | None, props: dict[str, Any]) -> bool:
+    """OpenCode multiplexes unrelated server chatter onto the prompt event stream."""
+    if not event_type or not event_type.startswith(("message.", "session.")):
+        return False
+    if event_type != "session.status":
+        return True
 
-    OpenCode multiplexes file, lsp, storage and installation chatter onto the same stream. None of
-    it means a prompt is progressing, so none of it may hold the session-progress deadline open.
-    """
-    return bool(event_type) and event_type.startswith(("message.", "session."))
+    status = props.get("status")
+    return not isinstance(status, dict) or status.get("type") not in {"busy", "retry"}
 
 
 @dataclass(frozen=True)
@@ -1621,7 +1623,7 @@ class AgentBridge:
                                     f"stayed alive. Total elapsed: {elapsed:.0f}s"
                                 )
                         else:
-                            if is_session_work(event_type):
+                            if should_reset_progress_deadline(event_type, props):
                                 last_progress_at = loop.time()
 
                             # Track direct child sessions before filtering
