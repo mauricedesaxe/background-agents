@@ -127,10 +127,11 @@ idle sandboxes.
 ### 4. Sandboxes can be archived
 
 **Status:** retained · **Provenance:** fork (archive cascade; unified later with the
-last-active-overlay work `fc5eea9`, `3361bd8`) · **Upstream link:** none · **Acceptance ownership:**
-`packages/control-plane/test/integration/archive-cascade.test.ts` · **Removal condition:** adopt
-upstream only if it gains an equivalent archive primitive at the same semantics; until then keep ·
-**Last-verified upstream SHA:** `b63d0175`.
+last-active-overlay work `fc5eea9`, `3361bd8`; activity-aware retry `77459fe`) · **Upstream link:**
+none · **Acceptance ownership:** `packages/control-plane/test/integration/archive-cascade.test.ts`
+and the auto-archive cases in `packages/control-plane/src/session/session-status-service.test.ts` ·
+**Removal condition:** adopt upstream only if it gains an equivalent archive primitive at the same
+semantics; until then keep · **Last-verified upstream SHA:** `b63d0175`.
 
 `supportsArchive`, `ArchiveConfig`, and `ArchiveResult` in
 `packages/control-plane/src/sandbox/provider.ts` have no upstream counterpart at all. Archiving a
@@ -148,7 +149,8 @@ the session is terminal, extends `terminal_at` forward; `child_session_update` d
 status service. Otherwise a terminal session still receiving artifacts, tool calls, git syncs, or
 child reports would archive 12 hours after it first went terminal. This is retained behavior in its
 own right, not just a config value, and was unified with the child-result delivery work (`fc5eea9`,
-`3361bd8`).
+`3361bd8`). A failed automatic archive clears its explicit retry marker so the retry alarm rechecks
+the extended deadline; cascade archive retries retain their retry marker.
 
 ### 5. Child sessions inherit the parent's model, and a zero cap disables fan-out
 
@@ -302,13 +304,15 @@ always true, which is a bug that reads correctly.
 
 ### 11. OpenRouter models are in the catalog
 
-**Status:** retained-candidate · **Provenance:** fork `339aca6` (add DeepSeek V4 Flash 0731) + the
-retained-inventory amendment below · **Upstream link:** none — upstream has no OpenRouter entries ·
-**Acceptance ownership:** `packages/shared/src/models.test.ts` · **Removal condition:** if
-OpenRouter/DeepSeek stops being used; live now · **Last-verified upstream SHA:** `b63d0175`.
+**Status:** retained-candidate · **Provenance:** fork `339aca6` (add DeepSeek V4 Flash 0731),
+`9d42d02` (remove unsupported DeepSeek reasoning variants), and the retained-inventory amendment
+below · **Upstream link:** none — upstream has no OpenRouter entries · **Acceptance ownership:**
+`packages/shared/src/models.test.ts` · **Removal condition:** if OpenRouter/DeepSeek stops being
+used; live now · **Last-verified upstream SHA:** `b63d0175`.
 
-`packages/shared/src/models.ts` carries OpenRouter entries that upstream does not have, and the
-sandbox sends OpenRouter reasoning effort as an OpenCode variant.
+`packages/shared/src/models.ts` carries OpenRouter entries that upstream does not have. Reasoning
+effort is exposed only for models where pinned OpenCode defines matching variants; it defines none
+for DeepSeek V4 Flash 0731.
 
 **Why.** Several models we want are only reachable through OpenRouter.
 
@@ -545,11 +549,12 @@ either side.
 
 ### 24. Finished child results are delivered to the parent agent
 
-**Status:** retained · **Provenance:** fork `707f756` (deliver finished child results) and `3361bd8`
-(edge-trigger child delivery), issues
-[#285](https://github.com/mauricedesaxe/background-agents/issues/285) and
+**Status:** retained · **Provenance:** fork `707f756` (deliver finished child results), `3361bd8`
+(edge-trigger child delivery), and `1a7aeda` (request the final response through the supported
+summary contract), issues [#285](https://github.com/mauricedesaxe/background-agents/issues/285) and
 [#289](https://github.com/mauricedesaxe/background-agents/issues/289) · **Upstream link:** none ·
-**Acceptance ownership:** `packages/control-plane/src/session/child-result-prompt.test.ts` and the
+**Acceptance ownership:** `packages/control-plane/src/session/child-result-prompt.test.ts`, the
+parent prompt case in `packages/control-plane/test/integration/child-session-ops.test.ts`, and the
 `delivers child results only on status-transition notifies for terminal statuses` case in
 `packages/control-plane/src/session/http/handlers/child-sessions.handler.test.ts` · **Removal
 condition:** adopt upstream only when it wakes the parent agent with the finished child's result; it
@@ -569,8 +574,9 @@ self-driving.
 ### 25. Provider failure and stalls surface instead of reading as "thinking"
 
 **Status:** retained · **Provenance:** fork `e7bbf0d` (stop retrying a provider usage limit),
-`647303c` (surface a provider retry), and `bfac2fc` (fail a prompt that stops making progress),
-issues [#278](https://github.com/mauricedesaxe/background-agents/issues/278) and
+`647303c` (surface a provider retry), `bfac2fc` (fail a prompt that stops making progress), and
+`074e988` (exclude retry statuses from progress), issues
+[#278](https://github.com/mauricedesaxe/background-agents/issues/278) and
 [#279](https://github.com/mauricedesaxe/background-agents/issues/279) · **Upstream link:** none —
 upstream's retry is silently infinite · **Acceptance ownership:** the provider-failure and
 session-progress cases in `packages/sandbox-runtime/tests/test_bridge_sse.py` · **Removal
@@ -592,9 +598,11 @@ vendor's error body, and it makes the stall visible rather than read as a thinki
 
 A second, separate deadline asks whether the agent is working, not just whether the socket is alive.
 OpenCode heartbeats every 30 seconds, so a session that produced nothing could previously hold the
-stream open to the ceiling. Only message and session events answer the session-progress deadline,
-because OpenCode multiplexes file, lsp, and storage chatter onto the same stream. Ten minutes rather
-than five, so a legitimate context compaction, bounded at five minutes, cannot trip it.
+stream open to the ceiling. Message events and session events other than `busy` and `retry` status
+reports answer the session-progress deadline, because those reports describe a wait rather than
+forward progress. OpenCode multiplexes file, lsp, and storage chatter onto the same stream, so those
+events do not count either. Ten minutes rather than five, so a legitimate context compaction,
+bounded at five minutes, cannot trip it.
 
 **Why.** Three sessions lost roughly four hours each to a usage-limit stall on 2026-08-05 with no
 signal anywhere. A provider-rejection stall and a session that stopped producing are both invisible

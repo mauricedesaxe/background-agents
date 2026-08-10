@@ -73,4 +73,4 @@ OpenRouter models require `OPENROUTER_API_KEY` as a global or repository secret.
 | `openrouter/google/gemini-3.1-pro-preview`   | Gemini 3.1 Pro         | Google, most capable                    | none, low, medium, high, xhigh | high           |
 | `openrouter/x-ai/grok-4.3`                   | Grok 4.3               | xAI, balanced                           | Not supported                  | N/A            |
 | `openrouter/x-ai/grok-4.5`                   | Grok 4.5               | xAI, most capable                       | Not supported                  | N/A            |
-| `openrouter/deepseek/deepseek-v4-flash-0731` | DeepSeek V4 Flash 0731 | DeepSeek, fast and cheap agentic coding | low, high, max                 | high           |
+| `openrouter/deepseek/deepseek-v4-flash-0731` | DeepSeek V4 Flash 0731 | DeepSeek, fast and cheap agentic coding | Not supported                  | N/A            |
