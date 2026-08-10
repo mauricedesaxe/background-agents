@@ -606,6 +606,66 @@ describe("Child session operations (list, get, cancel)", () => {
   });
 
   describe("POST /internal/child-session-update", () => {
+    it("queues the child's final response for the parent agent", async () => {
+      const { childName, parentStub, childStub } = await setupParentAndChild();
+      const [{ id: childParticipantId }] = await queryDO<{ id: string }>(
+        childStub,
+        "SELECT id FROM participants LIMIT 1"
+      );
+
+      await queryDO(
+        childStub,
+        `INSERT INTO messages (id, author_id, content, source, status, created_at, started_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        "child-result-message",
+        childParticipantId,
+        "Complete the child task",
+        "web",
+        "completed",
+        100,
+        110,
+        200
+      );
+      await seedEvents(childStub, [
+        {
+          id: "child-result-token",
+          type: "token",
+          data: JSON.stringify({ content: "The child fixed the failing workflow." }),
+          messageId: "child-result-message",
+          createdAt: 180,
+        },
+        {
+          id: "child-result-complete",
+          type: "execution_complete",
+          data: JSON.stringify({ success: true }),
+          messageId: "child-result-message",
+          createdAt: 200,
+        },
+      ]);
+
+      const response = await parentStub.fetch("http://internal/internal/child-session-update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          childSessionId: childName,
+          status: "completed",
+          title: "Child Session",
+          deliverResult: true,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await expect
+        .poll(async () => {
+          const messages = await queryDO<{ content: string }>(
+            parentStub,
+            "SELECT content FROM messages WHERE source = 'agent'"
+          );
+          return messages[0]?.content;
+        })
+        .toContain("The child fixed the failing workflow.");
+    });
+
     it("broadcasts child_session_update to authenticated clients", async () => {
       const pName = parentName();
       await initNamedSession(pName, { repoOwner: "acme", repoName: "web-app" });

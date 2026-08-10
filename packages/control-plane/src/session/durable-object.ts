@@ -95,7 +95,11 @@ import { SessionMessageQueue } from "./message-queue";
 import { SessionSandboxEventProcessor } from "./sandbox-events";
 import { SessionEventStream } from "./event-stream";
 import { createSessionInternalRoutes } from "./http/routes";
-import { buildSessionInternalUrl, SessionInternalPaths } from "./contracts";
+import {
+  buildSessionInternalUrl,
+  SessionChildSummaryIncludes,
+  SessionInternalPaths,
+} from "./contracts";
 import { createMessagesHandler, type MessagesHandler } from "./http/handlers/messages.handler";
 import {
   createChildSessionsHandler,
@@ -459,7 +463,7 @@ export class SessionDO extends DurableObject<Env> {
 
     const childSummaryUrl = buildSessionInternalUrl(
       SessionInternalPaths.childSummary,
-      "?includeFinalResponse=true"
+      `?include=${SessionChildSummaryIncludes.result}`
     );
     let detail: ChildSessionDetail;
     try {
