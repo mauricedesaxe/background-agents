@@ -441,6 +441,20 @@ describe("SandboxLifecycleManager", () => {
       ).toBe(true);
     });
 
+    it("does not spawn while a previous provider stop is unreconciled", async () => {
+      const sandbox = createMockSandbox({
+        status: "stale",
+        stop_unreconciled_at: Date.now(),
+        stop_unreconciled_provider_id: "provider-obj-123",
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const { manager, provider } = buildManager({ storage });
+
+      await manager.spawnSandbox();
+
+      expect(provider.createSandbox).not.toHaveBeenCalled();
+    });
+
     it("broadcasts sandbox_dashboard_url after spawn when builder is configured", async () => {
       const sandbox = createMockSandbox({ status: "pending", created_at: Date.now() - 60000 });
       const storage = createMockStorage(createMockSession(), sandbox);
@@ -1029,6 +1043,39 @@ describe("SandboxLifecycleManager", () => {
   });
 
   describe("handleAlarm", () => {
+    it("blocks concurrent spawns until lifecycle work settles", async () => {
+      const now = Date.now();
+      const sandbox = createMockSandbox({
+        status: "ready",
+        last_heartbeat: now - 100_000,
+        modal_object_id: "provider-obj-123",
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      let releaseStop!: () => void;
+      const stopSandbox = vi.fn(
+        () =>
+          new Promise<StopResult>((resolve) => {
+            releaseStop = () => resolve({ success: true });
+          })
+      );
+      const provider = createMockProvider({
+        capabilities: { supportsExplicitStop: true, supportsPersistentResume: false },
+        stopSandbox,
+      });
+      const { manager } = buildManager({ provider, storage });
+
+      const alarm = manager.handleAlarm();
+      await vi.waitFor(() => expect(stopSandbox).toHaveBeenCalledTimes(1));
+      expect(manager.isTeardownPending()).toBe(true);
+
+      await manager.spawnSandbox();
+
+      expect(provider.createSandbox).not.toHaveBeenCalled();
+      releaseStop();
+      await alarm;
+      expect(manager.isTeardownPending()).toBe(false);
+    });
+
     it("settles execution-timeout teardown before allowing queue advancement", async () => {
       const now = Date.now();
       const sandbox = createMockSandbox({

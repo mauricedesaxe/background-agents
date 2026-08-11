@@ -49,6 +49,7 @@ export const STOP_CONFIRMATION_TIMEOUT_MS = 3_000;
 
 const MS_PER_MINUTE = 60 * 1000;
 const PENDING_SANDBOX_CONNECT_DEADLINE_KEY = "pendingSandboxConnectDeadline";
+const QUEUE_RECOVERY_DELAY_MS = durationMs(1_000);
 
 interface PendingSandboxConnectDeadline {
   messageId: string;
@@ -236,6 +237,7 @@ export class SessionMessageQueue {
         ...(position !== undefined && { position }),
       } as ServerMessage);
       this.broadcastPromptQueue();
+      if (existing.status === "pending") await this.processQueueWithRecoveryAlarm();
       return;
     }
 
@@ -295,7 +297,16 @@ export class SessionMessageQueue {
     } as ServerMessage);
 
     this.broadcastPromptQueue();
-    await this.processMessageQueue();
+    await this.processQueueWithRecoveryAlarm();
+  }
+
+  private async processQueueWithRecoveryAlarm(): Promise<void> {
+    try {
+      await this.processMessageQueue();
+    } catch (error) {
+      await this.scheduleAlarm(addDuration(nowMs(), QUEUE_RECOVERY_DELAY_MS));
+      throw error;
+    }
   }
 
   getPromptQueue(): PromptSnapshotItem[] {

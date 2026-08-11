@@ -196,6 +196,7 @@ function buildQueue() {
     sandboxLifecycle,
     getAlarm,
     setAlarm,
+    put,
     storageValues,
     deleteValue,
     waitUntil,
@@ -447,6 +448,9 @@ describe("SessionMessageQueue", () => {
     h.repository.getPendingMessages.mockReturnValue([
       createMessage({ id: "request-1", content: "follow up", status: "pending" }),
     ]);
+    h.repository.getNextPendingMessage.mockReturnValue(
+      createMessage({ id: "request-1", content: "follow up", status: "pending" })
+    );
 
     await h.queue.handlePromptMessage({} as WebSocket, createClientInfo(), {
       requestId: "request-1",
@@ -458,6 +462,24 @@ describe("SessionMessageQueue", () => {
       expect.anything(),
       expect.objectContaining({ type: "prompt_queued", messageId: "request-1", status: "pending" })
     );
+    expect(h.spawnSandbox).toHaveBeenCalledTimes(1);
+  });
+
+  it("arms a retry when pending deadline persistence fails", async () => {
+    const h = buildQueue();
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "request-1" }));
+    h.put.mockRejectedValueOnce(new Error("storage unavailable"));
+    const before = Date.now();
+
+    await expect(
+      h.queue.handlePromptMessage({} as WebSocket, createClientInfo(), {
+        requestId: "request-1",
+        content: "hello",
+      })
+    ).rejects.toThrow("storage unavailable");
+
+    expect(h.setAlarm).toHaveBeenCalledTimes(1);
+    expect(h.setAlarm.mock.calls[0][0]).toBeGreaterThanOrEqual(before + 1_000);
   });
 
   it("acknowledges a completed retry without putting it back in the queue", async () => {

@@ -131,6 +131,21 @@ describe("createAlarmHandler", () => {
     expect(messageQueue.processMessageQueue).not.toHaveBeenCalled();
   });
 
+  it("tears down the sandbox when timeout finalization fails partway through", async () => {
+    const { handler, repository, messageQueue, lifecycleManager } = createHandler();
+    repository.getProcessingMessageWithStartedAt.mockReturnValue({
+      id: "message-1",
+      started_at: 500,
+    });
+    messageQueue.failStuckProcessingMessage.mockRejectedValue(new Error("SQLite unavailable"));
+
+    await expect(handler.handle()).rejects.toThrow("SQLite unavailable");
+
+    expect(lifecycleManager.handleAlarm).toHaveBeenCalledWith({ executionTimedOut: true });
+    expect(messageQueue.failStuckPendingMessage).not.toHaveBeenCalled();
+    expect(messageQueue.processMessageQueue).not.toHaveBeenCalled();
+  });
+
   it("keeps queued work paused while provider teardown is unreconciled", async () => {
     const { handler, repository, messageQueue, lifecycleManager } = createHandler();
     repository.getProcessingMessageWithStartedAt.mockReturnValue(null);

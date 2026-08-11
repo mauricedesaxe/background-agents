@@ -53,10 +53,15 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
             elapsed_ms: result.elapsedMs,
             timeout_ms: deps.executionTimeoutMs,
           });
-          await deps.messageQueue.failStuckProcessingMessage({
-            type: "execution_timeout",
-            elapsedMs: result.elapsedMs,
-          });
+          try {
+            await deps.messageQueue.failStuckProcessingMessage({
+              type: "execution_timeout",
+              elapsedMs: result.elapsedMs,
+            });
+          } catch (error) {
+            await deps.lifecycleManager.handleAlarm({ executionTimedOut: true });
+            throw error;
+          }
         }
       }
 

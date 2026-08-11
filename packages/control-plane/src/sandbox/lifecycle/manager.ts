@@ -337,6 +337,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
   private inFlightInactivityStop: Promise<boolean> | null = null;
   private providerStopReason: string | null = null;
   private inactivityStopResumeWaiters = 0;
+  private lifecycleAlarmInProgress = false;
 
   /** Session-scoped logger. Falls back to module-level logger if no sessionId configured. */
   private readonly log: Logger;
@@ -364,6 +365,11 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
    * - Fresh spawn if all conditions pass
    */
   async spawnSandbox(): Promise<void> {
+    await this.spawnSandboxInternal(false);
+  }
+
+  private async spawnSandboxInternal(afterSettledStop: boolean): Promise<void> {
+    const sandbox = this.storage.getSandbox();
     const sandboxState = this.storage.getSandboxWithCircuitBreaker();
     if (sandboxState?.status === "stopping") {
       const providerObjectId = sandboxState.modal_object_id;
@@ -379,11 +385,19 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       this.inactivityStopResumeWaiters += 1;
       try {
         const settled = await this.joinInactivityStop(providerObjectId);
-        if (settled && this.sessionAllowsSandboxResume()) await this.spawnSandbox();
+        if (settled && this.sessionAllowsSandboxResume()) {
+          await this.spawnSandboxInternal(true);
+        }
         return;
       } finally {
         this.inactivityStopResumeWaiters -= 1;
       }
+    }
+    if (
+      (!afterSettledStop && this.lifecycleAlarmInProgress) ||
+      sandbox?.stop_unreconciled_at != null
+    ) {
+      return;
     }
     const now = Date.now();
 
@@ -1582,15 +1596,20 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
    * Handle alarm for inactivity and heartbeat monitoring.
    */
   async handleAlarm(options: LifecycleAlarmOptions = {}): Promise<boolean> {
-    let outcome = await this.handleLifecycleAlarm();
-    if (options.executionTimedOut && outcome === "no_teardown") {
-      const settled = await this.stopSandboxAfterFailure("execution_timeout");
-      outcome = settled ? "teardown_settled" : "teardown_unsettled";
+    this.lifecycleAlarmInProgress = true;
+    try {
+      let outcome = await this.handleLifecycleAlarm();
+      if (options.executionTimedOut && outcome === "no_teardown") {
+        const settled = await this.stopSandboxAfterFailure("execution_timeout");
+        outcome = settled ? "teardown_settled" : "teardown_unsettled";
+      }
+      return (
+        outcome !== "teardown_unsettled" &&
+        (!options.executionTimedOut || outcome === "teardown_settled")
+      );
+    } finally {
+      this.lifecycleAlarmInProgress = false;
     }
-    return (
-      outcome !== "teardown_unsettled" &&
-      (!options.executionTimedOut || outcome === "teardown_settled")
-    );
   }
 
   private async handleLifecycleAlarm(): Promise<LifecycleAlarmOutcome> {
@@ -1817,7 +1836,11 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
 
   isTeardownPending(): boolean {
     const sandbox = this.storage.getSandbox();
-    return sandbox?.status === "stopping" || sandbox?.stop_unreconciled_at != null;
+    return (
+      this.lifecycleAlarmInProgress ||
+      sandbox?.status === "stopping" ||
+      sandbox?.stop_unreconciled_at != null
+    );
   }
 
   /**
