@@ -22,6 +22,7 @@ from daytona import CreateSnapshotParams, Daytona, Image, Resources
 OPENCODE_VERSION = "1.14.41"
 CODE_SERVER_VERSION = "4.109.5"
 AGENT_BROWSER_VERSION = "0.21.2"
+PLAYWRIGHT_MCP_VERSION = "0.0.79"  # deployment MCP config must run this same version; its bundled Playwright revision keys the browser cache
 # Railway CLI — provides the `railway` binary the railway MCP (`railway mcp`)
 # needs. stdio MCPs run a local binary, so it must live in the image.
 RAILWAY_CLI_VERSION = "5.26.0"
@@ -37,7 +38,7 @@ JJ_SHA256 = "59e5588583ac82b623239929368c65b90735931c0f26b5a16c1f04d5bb97643d"
 # the Jujutsu binary. tldraw-cli is now removed — diagrams are authored as JSON
 # records and posted to the interactive board endpoint (see the whiteboard
 # skill), so nothing renders tldraw in the sandbox.
-SANDBOX_VERSION = "daytona-v19-testing-workflows"
+SANDBOX_VERSION = "daytona-v20-playwright-chromium"  # warm @playwright/mcp chromium into the browser cache
 
 # Resources baked into the base snapshot. Daytona applies these to every sandbox
 # created from it and rejects overriding them at create time.
@@ -90,6 +91,8 @@ def build_base_image(repo_root: Path) -> Image:
             "rm /tmp/code-server.deb",
             f"npm install -g agent-browser@{AGENT_BROWSER_VERSION}",
             "agent-browser install",
+            f"npm install -g @playwright/mcp@{PLAYWRIGHT_MCP_VERSION}",
+            '"$(npm root -g)/@playwright/mcp/node_modules/.bin/playwright" install chromium',  # global install doesn't link the playwright bin; warms the cache so sessions skip the ~114MB download
             f"npm install -g @railway/cli@{RAILWAY_CLI_VERSION}",
             # Jujutsu (jj) static binary — retry download, sha256-verify, non-fatal.
             f"n=0; until [ $n -ge 5 ]; do curl -fsSL -o /tmp/jj.tar.gz https://github.com/jj-vcs/jj/releases/download/v{JJ_VERSION}/jj-v{JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz && break; n=$((n+1)); sleep 3; done; "
