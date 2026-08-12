@@ -51,7 +51,14 @@ export interface SessionWebSocketManager {
   getSandboxSocket(): WebSocket | null;
   hasSandboxSocket(): boolean;
   closeSandboxSocket(code: number, reason: string): boolean;
+  closeSandboxSocketIfMatch(
+    ws: WebSocket,
+    code: number,
+    reason: string,
+    track?: "control_plane_teardown" | "socket_error"
+  ): boolean;
   getSandboxCloseInitiator(ws: WebSocket): string | null;
+  getSandboxCloseTrack(ws: WebSocket): "control_plane_teardown" | "socket_error" | null;
 
   isCurrentSandboxSocket(ws: WebSocket): boolean;
 
@@ -206,13 +213,24 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
   }
 
   closeSandboxSocket(code: number, reason: string): boolean {
-    const ws = Array.from(this.ctx.getWebSockets()).find(
-      (candidate) =>
-        this.classify(candidate).kind === "sandbox" && candidate.readyState === WebSocket.OPEN
-    );
+    const ws = this.getRawActiveSandboxSocket();
     if (!ws) return false;
+    return this.closeSandboxSocketIfMatch(ws, code, reason);
+  }
+
+  closeSandboxSocketIfMatch(
+    ws: WebSocket,
+    code: number,
+    reason: string,
+    track: "control_plane_teardown" | "socket_error" = "control_plane_teardown"
+  ): boolean {
+    if (ws.readyState !== WebSocket.OPEN || !this.isCurrentSandboxSocket(ws)) return false;
     const attachment = this.readSandboxAttachment(ws);
-    ws.serializeAttachment({ ...attachment, controlPlaneCloseReason: reason });
+    ws.serializeAttachment({
+      ...attachment,
+      controlPlaneCloseReason: reason,
+      controlPlaneCloseTrack: track,
+    });
     this.close(ws, code, reason);
     this.clearSandboxSocketIfMatch(ws);
     return true;
@@ -222,14 +240,31 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
     return this.readSandboxAttachment(ws).controlPlaneCloseReason ?? null;
   }
 
+  getSandboxCloseTrack(ws: WebSocket): "control_plane_teardown" | "socket_error" | null {
+    return this.readSandboxAttachment(ws).controlPlaneCloseTrack ?? null;
+  }
+
+  private getRawActiveSandboxSocket(): WebSocket | null {
+    if (this.sandboxWs?.readyState === WebSocket.OPEN) return this.sandboxWs;
+    return (
+      Array.from(this.ctx.getWebSockets()).find((candidate) => {
+        if (this.classify(candidate).kind !== "sandbox") return false;
+        if (candidate.readyState !== WebSocket.OPEN) return false;
+        return this.readSandboxAttachment(candidate).activeSandboxConnection === true;
+      }) ?? null
+    );
+  }
+
   private readSandboxAttachment(ws: WebSocket): {
     activeSandboxConnection?: boolean;
     controlPlaneCloseReason?: string;
+    controlPlaneCloseTrack?: "control_plane_teardown" | "socket_error";
   } {
     return (
       (ws.deserializeAttachment() as {
         activeSandboxConnection?: boolean;
         controlPlaneCloseReason?: string;
+        controlPlaneCloseTrack?: "control_plane_teardown" | "socket_error";
       } | null) ?? {}
     );
   }

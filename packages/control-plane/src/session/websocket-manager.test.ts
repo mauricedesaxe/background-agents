@@ -216,14 +216,42 @@ describe("SessionWebSocketManagerImpl", () => {
   });
 
   it("preserves control-plane close provenance in the socket attachment", () => {
-    const { manager, sockets } = createManager();
+    const { manager } = createManager();
     const ws = createFakeWebSocket();
-    sockets.set(ws, ["sandbox"]);
+    manager.acceptAndSetSandboxSocket(ws);
 
     expect(manager.closeSandboxSocket(1012, "Stop confirmation timed out")).toBe(true);
 
     expect(manager.getSandboxCloseInitiator(ws)).toBe("Stop confirmation timed out");
+    expect(manager.getSandboxCloseTrack(ws)).toBe("control_plane_teardown");
     expect(ws.close).toHaveBeenCalledWith(1012, "Stop confirmation timed out");
+  });
+
+  it("does not close a replacement when a stale socket stop times out", () => {
+    const { manager } = createManager();
+    const stale = createFakeWebSocket();
+    const replacement = createFakeWebSocket();
+    manager.acceptAndSetSandboxSocket(stale);
+    manager.acceptAndSetSandboxSocket(replacement);
+
+    vi.mocked(replacement.close).mockClear();
+
+    expect(manager.closeSandboxSocketIfMatch(stale, 1012, "Stop confirmation timed out")).toBe(
+      false
+    );
+    expect(replacement.close).not.toHaveBeenCalled();
+  });
+
+  it("records socket errors separately from lifecycle teardown", () => {
+    const { manager, sockets } = createManager();
+    const ws = createFakeWebSocket();
+    sockets.set(ws, ["sandbox"]);
+    manager.acceptAndSetSandboxSocket(ws);
+
+    expect(manager.closeSandboxSocketIfMatch(ws, 1011, "Internal error", "socket_error")).toBe(
+      true
+    );
+    expect(manager.getSandboxCloseTrack(ws)).toBe("socket_error");
   });
 
   describe("classify", () => {

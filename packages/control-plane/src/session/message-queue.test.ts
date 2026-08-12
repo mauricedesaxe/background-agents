@@ -121,6 +121,7 @@ function buildQueue() {
     getSandboxSocket: vi.fn(() => null as WebSocket | null),
     send: vi.fn(() => true),
     closeSandboxSocket: vi.fn(() => true),
+    closeSandboxSocketIfMatch: vi.fn(() => true),
     clearSandboxSocketIfMatch: vi.fn(() => true),
   };
 
@@ -700,7 +701,8 @@ describe("SessionMessageQueue", () => {
     );
     expect(h.sessionStatus.recordCompletedOutput).toHaveBeenCalledWith("msg-9", expect.any(Number));
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
-    expect(h.wsManager.closeSandboxSocket).toHaveBeenCalledWith(
+    expect(h.wsManager.closeSandboxSocketIfMatch).toHaveBeenCalledWith(
+      sandboxWs,
       1012,
       "Stop confirmation timed out"
     );

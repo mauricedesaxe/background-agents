@@ -1150,13 +1150,14 @@ export class SessionDO extends DurableObject<Env> {
             code,
             reason,
             disconnect_track:
-              this.wsManager.getSandboxCloseInitiator(ws) !== null ||
+              this.wsManager.getSandboxCloseTrack(ws) ??
+              (this.wsManager.getSandboxCloseInitiator(ws) !== null ||
               sandbox?.status === "stopping" ||
               sandbox?.status === "stopped" ||
               sandbox?.status === "stale" ||
               sandbox?.status === "failed"
                 ? "control_plane_teardown"
-                : "bridge_first",
+                : "bridge_first"),
             control_plane_close_reason: this.wsManager.getSandboxCloseInitiator(ws),
             sandbox_status: sandbox?.status ?? null,
             sandbox_created_at: sandbox?.created_at ?? null,
@@ -1200,7 +1201,11 @@ export class SessionDO extends DurableObject<Env> {
       socket_kind: this.wsManager.classify(ws).kind,
       disconnect_track: "socket_error",
     });
-    ws.close(1011, "Internal error");
+    if (this.wsManager.classify(ws).kind === "sandbox") {
+      this.wsManager.closeSandboxSocketIfMatch(ws, 1011, "Internal error", "socket_error");
+    } else {
+      ws.close(1011, "Internal error");
+    }
   }
 
   /**
