@@ -6,12 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import {
-  DaytonaRestClient,
-  DaytonaNotFoundError,
-  DaytonaApiError,
-  type DaytonaRestConfig,
-} from "./daytona-rest-client";
+import { DaytonaRestClient, DaytonaApiError, type DaytonaRestConfig } from "./daytona-rest-client";
 
 // ==================== Helpers ====================
 
@@ -208,10 +203,21 @@ describe("DaytonaRestClient", () => {
 
   describe("error classification", () => {
     it("throws DaytonaNotFoundError on 404", async () => {
+      const infoSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
       const client = new DaytonaRestClient(defaultConfig);
-      fetchSpy.mockResolvedValue(new Response("not found", { status: 404 }));
+      fetchSpy.mockResolvedValue(
+        new Response("private provider detail", {
+          status: 404,
+          headers: { "x-request-id": "daytona-request-404" },
+        })
+      );
 
-      await expect(client.getSandbox("missing")).rejects.toThrow(DaytonaNotFoundError);
+      await expect(client.getSandbox("missing")).rejects.toMatchObject({
+        name: "DaytonaNotFoundError",
+        message: "Daytona API resource not found: /sandbox/missing",
+      });
+      expect(JSON.stringify(infoSpy.mock.calls)).not.toContain("private provider detail");
+      expect(JSON.stringify(infoSpy.mock.calls)).toContain("daytona-request-404");
     });
 
     it("throws DaytonaApiError on 500", async () => {

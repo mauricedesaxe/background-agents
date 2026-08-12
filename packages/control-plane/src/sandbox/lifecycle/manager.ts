@@ -1605,7 +1605,6 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
 
     const now = nowMs();
     const alarmState = {
-      alarm_evaluated_at: now,
       sandbox_status: sandbox.status,
       sandbox_created_at: sandbox.created_at,
       last_heartbeat_at: sandbox.last_heartbeat,
@@ -1754,19 +1753,9 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
 
     switch (inactivityDecision.action) {
       case "timeout": {
-        const inactivityDeadlineAt =
-          sandbox.last_activity == null
-            ? null
-            : sandbox.last_activity +
-              this.config.inactivity.timeoutMs +
-              (alarmState.connected_client_count > 0 ? this.config.inactivity.extensionMs : 0);
         this.log.info("Inactivity timeout", {
           event: "sandbox.timeout",
           alarm_reason: "inactivity_timeout",
-          inactivity_extension_ms: this.config.inactivity.extensionMs,
-          alarm_deadline_at: inactivityDeadlineAt,
-          alarm_late_by_ms:
-            inactivityDeadlineAt == null ? null : Math.max(0, now - inactivityDeadlineAt),
           last_activity: sandbox.last_activity,
           timeout_ms: this.config.inactivity.timeoutMs,
           ...alarmState,

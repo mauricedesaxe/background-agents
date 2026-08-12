@@ -220,9 +220,10 @@ describe("SessionWebSocketManagerImpl", () => {
     const ws = createFakeWebSocket();
     sockets.set(ws, ["sandbox"]);
 
-    manager.markSandboxCloseInitiated(ws, "Stop confirmation timed out");
+    expect(manager.closeSandboxSocket(1012, "Stop confirmation timed out")).toBe(true);
 
     expect(manager.getSandboxCloseInitiator(ws)).toBe("Stop confirmation timed out");
+    expect(ws.close).toHaveBeenCalledWith(1012, "Stop confirmation timed out");
   });
 
   describe("classify", () => {

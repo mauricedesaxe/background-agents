@@ -489,9 +489,7 @@ export class SessionMessageQueue {
     this.ctx.waitUntil(this.callbackService.notifyComplete(messageId, false, stopError));
 
     if (sandboxWs) {
-      this.wsManager.markSandboxCloseInitiated(sandboxWs, "Stop confirmation timed out");
-      this.wsManager.close(sandboxWs, 1012, "Stop confirmation timed out");
-      this.wsManager.clearSandboxSocketIfMatch(sandboxWs);
+      this.wsManager.closeSandboxSocket(1012, "Stop confirmation timed out");
     }
 
     if (!options.suppressStatusReconcile) {

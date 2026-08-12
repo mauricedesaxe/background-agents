@@ -207,28 +207,27 @@ export class DaytonaRestClient {
       }
 
       const response = await fetch(url, init);
+      const responseMetadata = {
+        event: "daytona.api_error",
+        http_method: method,
+        http_path: path,
+        http_status: response.status,
+        duration_ms: Date.now() - requestedAt,
+        retry_after: response.headers.get("retry-after"),
+        provider_request_id: response.headers.get("x-request-id"),
+        rate_limit_limit: response.headers.get("x-ratelimit-limit"),
+        rate_limit_remaining: response.headers.get("x-ratelimit-remaining"),
+        rate_limit_reset: response.headers.get("x-ratelimit-reset"),
+      };
 
       if (response.status === 404) {
-        const text = await response.text();
-        throw new DaytonaNotFoundError(text || `Not found: ${path}`);
+        log.info("daytona.api_error", responseMetadata);
+        throw new DaytonaNotFoundError(`Daytona API resource not found: ${path}`);
       }
 
       if (!response.ok) {
-        const retryAfter = response.headers.get("retry-after");
-        const requestId = response.headers.get("x-request-id");
         const logApiError = response.status === 409 ? log.info.bind(log) : log.error.bind(log);
-        logApiError("daytona.api_error", {
-          event: "daytona.api_error",
-          http_method: method,
-          http_path: path,
-          http_status: response.status,
-          duration_ms: Date.now() - requestedAt,
-          retry_after: retryAfter,
-          provider_request_id: requestId,
-          rate_limit_limit: response.headers.get("x-ratelimit-limit"),
-          rate_limit_remaining: response.headers.get("x-ratelimit-remaining"),
-          rate_limit_reset: response.headers.get("x-ratelimit-reset"),
-        });
+        logApiError("daytona.api_error", responseMetadata);
         throw new DaytonaApiError(
           `Daytona API request failed with HTTP ${response.status}`,
           response.status
