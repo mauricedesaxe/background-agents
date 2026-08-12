@@ -1602,6 +1602,16 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
     const providerObjectId = sandbox.modal_object_id ?? undefined;
 
     const now = nowMs();
+    const alarmState = {
+      alarm_evaluated_at: now,
+      sandbox_status: sandbox.status,
+      sandbox_created_at: sandbox.created_at,
+      last_heartbeat_at: sandbox.last_heartbeat,
+      last_activity_at: sandbox.last_activity,
+      has_sandbox_websocket: this.wsManager.getSandboxWebSocket() !== null,
+      has_processing_message: this.storage.hasProcessingMessage(),
+      connected_client_count: this.getConnectedClientCount(),
+    };
 
     this.log.debug("Alarm fired", {
       sandbox_status: sandbox.status,
@@ -1653,8 +1663,15 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
     if (connectingResult.isTimedOut) {
       this.log.warn("Connecting timeout", {
         event: "sandbox.connecting_timeout",
+        alarm_reason: "connecting_timeout",
+        alarm_deadline_at: sandbox.created_at + this.config.connectingTimeout.timeoutMs,
+        alarm_late_by_ms: Math.max(
+          0,
+          now - (sandbox.created_at + this.config.connectingTimeout.timeoutMs)
+        ),
         elapsed_ms: connectingResult.elapsedMs,
         timeout_ms: this.config.connectingTimeout.timeoutMs,
+        ...alarmState,
       });
       await this.callbacks.onSandboxTerminating?.("connecting_timeout");
       this.storage.updateSandboxStatus("failed");
@@ -1679,8 +1696,18 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
     if (heartbeatHealth.isStale) {
       this.log.warn("Heartbeat stale", {
         event: "sandbox.heartbeat_stale",
+        alarm_reason: "heartbeat_timeout",
+        alarm_deadline_at:
+          sandbox.last_heartbeat == null
+            ? null
+            : sandbox.last_heartbeat + this.config.heartbeat.timeoutMs,
+        alarm_late_by_ms:
+          sandbox.last_heartbeat == null
+            ? null
+            : Math.max(0, now - (sandbox.last_heartbeat + this.config.heartbeat.timeoutMs)),
         last_heartbeat_ms: heartbeatHealth.ageMs || 0,
         threshold_ms: this.config.heartbeat.timeoutMs,
+        ...alarmState,
       });
       // Fail any stuck processing message before terminating
       await this.callbacks.onSandboxTerminating?.("heartbeat_stale");
@@ -1727,8 +1754,10 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       case "timeout": {
         this.log.info("Inactivity timeout", {
           event: "sandbox.timeout",
+          alarm_reason: "inactivity_timeout",
           last_activity: sandbox.last_activity,
           timeout_ms: this.config.inactivity.timeoutMs,
+          ...alarmState,
         });
         if (this.usesProviderManagedStop() && providerObjectId) {
           const settled = await this.joinInactivityStop(providerObjectId);

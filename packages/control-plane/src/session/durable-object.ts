@@ -45,7 +45,10 @@ import { McpServerStore } from "../db/mcp-servers";
 import { IntegrationSettingsStore, resolveSlackSettings } from "../db/integration-settings";
 import { SessionIndexStore } from "../db/session-index";
 import { SessionUsageStore } from "../db/session-usage-store";
-import { DEFAULT_EXECUTION_TIMEOUT_MS } from "../sandbox/lifecycle/decisions";
+import {
+  classifyAbnormalCloseTrack,
+  DEFAULT_EXECUTION_TIMEOUT_MS,
+} from "../sandbox/lifecycle/decisions";
 import {
   createSourceControlProviderFromEnv,
   resolveScmProviderFromEnv,
@@ -1146,10 +1149,20 @@ export class SessionDO extends DurableObject<Env> {
         } else {
           // Abnormal close (e.g., 1006): leave status unchanged so the bridge can reconnect.
           // Schedule a heartbeat check to detect truly dead sandboxes.
+          const sandbox = this.getSandbox();
+          const processingMessage = this.repository.getProcessingMessage();
           this.log.warn("Sandbox WebSocket abnormal close", {
             event: "sandbox.abnormal_close",
             code,
             reason,
+            disconnect_track: classifyAbnormalCloseTrack(sandbox?.status ?? null),
+            sandbox_status: sandbox?.status ?? null,
+            sandbox_created_at: sandbox?.created_at ?? null,
+            last_heartbeat_at: sandbox?.last_heartbeat ?? null,
+            heartbeat_age_ms:
+              sandbox?.last_heartbeat == null ? null : Date.now() - sandbox.last_heartbeat,
+            last_activity_at: sandbox?.last_activity ?? null,
+            processing_message_id: processingMessage?.id ?? null,
           });
           await this.lifecycleManager.scheduleDisconnectCheck();
         }

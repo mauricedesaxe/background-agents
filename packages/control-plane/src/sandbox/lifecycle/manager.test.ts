@@ -1069,6 +1069,7 @@ describe("SandboxLifecycleManager", () => {
     });
 
     it("detects heartbeat timeout and sets stale", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
       const now = Date.now();
       const sandbox = createMockSandbox({
         status: "ready",
@@ -1088,6 +1089,54 @@ describe("SandboxLifecycleManager", () => {
       );
       expect(wsManager.sendToSandbox).toHaveBeenCalledWith({ type: "shutdown" });
       expect(wsManager.closeSandboxWebSocket).toHaveBeenCalledWith(1000, "Heartbeat stale");
+      const staleRecord = warnSpy.mock.calls
+        .map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+        .find((record) => record.event === "sandbox.heartbeat_stale");
+      expect(staleRecord).toEqual(
+        expect.objectContaining({
+          alarm_reason: "heartbeat_timeout",
+          sandbox_status: "ready",
+          sandbox_created_at: sandbox.created_at,
+          last_heartbeat_at: sandbox.last_heartbeat,
+          last_activity_at: sandbox.last_activity,
+          has_sandbox_websocket: false,
+          has_processing_message: false,
+          connected_client_count: 0,
+        })
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("records the stale timestamp inputs behind a connecting timeout", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const now = Date.now();
+      const sandbox = createMockSandbox({
+        status: "connecting",
+        created_at: now - 10 * 60 * 1000,
+        last_heartbeat: null,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox, undefined, [], true);
+      const wsManager = createMockWebSocketManager(true, 1);
+      const { manager } = buildManager({ storage, wsManager });
+
+      await manager.handleAlarm();
+
+      const timeoutRecord = warnSpy.mock.calls
+        .map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+        .find((record) => record.event === "sandbox.connecting_timeout");
+      expect(timeoutRecord).toEqual(
+        expect.objectContaining({
+          alarm_reason: "connecting_timeout",
+          sandbox_status: "connecting",
+          sandbox_created_at: sandbox.created_at,
+          last_heartbeat_at: null,
+          last_activity_at: sandbox.last_activity,
+          has_sandbox_websocket: true,
+          has_processing_message: true,
+          connected_client_count: 1,
+        })
+      );
+      warnSpy.mockRestore();
     });
 
     it("handles inactivity timeout", async () => {

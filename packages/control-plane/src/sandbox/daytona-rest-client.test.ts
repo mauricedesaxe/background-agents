@@ -240,6 +240,47 @@ describe("DaytonaRestClient", () => {
       }
     });
 
+    it("records Daytona rate-limit headers without logging the response body", async () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const client = new DaytonaRestClient(defaultConfig);
+      fetchSpy.mockResolvedValue(
+        new Response("account quota details", {
+          status: 429,
+          headers: {
+            "retry-after": "17",
+            "x-request-id": "daytona-request-123",
+            "x-ratelimit-limit": "60",
+            "x-ratelimit-remaining": "0",
+            "x-ratelimit-reset": "1786554000",
+          },
+        })
+      );
+
+      await expect(client.startSandbox("sb-1")).rejects.toMatchObject({
+        status: 429,
+        retryAfter: "17",
+        requestId: "daytona-request-123",
+      });
+
+      const records = errorSpy.mock.calls.map(
+        ([line]) => JSON.parse(String(line)) as Record<string, unknown>
+      );
+      expect(records).toContainEqual(
+        expect.objectContaining({
+          event: "daytona.api_error",
+          http_method: "POST",
+          http_path: "/sandbox/sb-1/start",
+          http_status: 429,
+          retry_after: "17",
+          provider_request_id: "daytona-request-123",
+          rate_limit_limit: "60",
+          rate_limit_remaining: "0",
+          rate_limit_reset: "1786554000",
+        })
+      );
+      expect(JSON.stringify(records)).not.toContain("account quota details");
+    });
+
     it("throws DaytonaApiError on 401", async () => {
       const client = new DaytonaRestClient(defaultConfig);
       fetchSpy.mockResolvedValue(new Response("unauthorized", { status: 401 }));
