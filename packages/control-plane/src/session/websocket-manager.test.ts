@@ -254,6 +254,15 @@ describe("SessionWebSocketManagerImpl", () => {
     expect(manager.getSandboxCloseTrack(ws)).toBe("socket_error");
   });
 
+  it("records socket errors after the socket starts closing", () => {
+    const { manager } = createManager();
+    const ws = createFakeWebSocket(WebSocket.CLOSING);
+    manager.acceptAndSetSandboxSocket(ws);
+
+    expect(manager.markSandboxSocketCloseIfMatch(ws, "Internal error", "socket_error")).toBe(true);
+    expect(manager.getSandboxCloseTrack(ws)).toBe("socket_error");
+  });
+
   describe("classify", () => {
     it("classifies sandbox socket with sandbox ID", () => {
       const { manager, sockets } = createManager();

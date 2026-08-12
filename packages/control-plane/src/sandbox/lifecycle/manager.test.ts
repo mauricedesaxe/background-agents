@@ -267,6 +267,7 @@ function createMockWebSocketManager(
     sendCalls,
     getSandboxWebSocket: vi.fn(() => (hasSandboxWs ? ({} as WebSocket) : null)),
     hasSandboxWebSocket: vi.fn(() => hasSandboxWs),
+    markSandboxTeardown: vi.fn(),
     closeSandboxWebSocket: vi.fn(),
     sendToSandbox: vi.fn((message: object) => {
       sendCalls.push(message);
