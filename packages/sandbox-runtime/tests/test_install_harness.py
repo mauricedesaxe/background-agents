@@ -329,6 +329,13 @@ class TestPinnedHarness:
         standup = (opencode / "skills" / "lazar-standup" / "SKILL.md").read_text()
         assert "mergedBy" in standup  # the widened gather, the other half of the same bump
 
+        web_pack = (opencode / "rules" / "packs" / "web.md").read_text()
+        assert (
+            "## §34. UI and UX design principles" in web_pack
+        )  # §34 body lives in the pack, not the spine; lazar-ux-audit ships it
+        assert (opencode / "skills" / "lazar-ux-audit" / "SKILL.md").is_file()
+        assert (claude / "skills" / "lazar-ux-audit" / "SKILL.md").is_file()
+
 
 class TestScriptIsExecutable:
     def test_script_has_execute_bit(self):
