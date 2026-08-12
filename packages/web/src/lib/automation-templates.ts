@@ -1,0 +1,498 @@
+/**
+ * Static, code-defined catalog of automation "ideas" shown in the templates
+ * gallery. Adding a template pre-fills the existing Create Automation form
+ * (`/automations/new?template=<id>`); it never creates or runs anything on its
+ * own. Repository is intentionally never pre-filled so the existing
+ * repo-required-at-creation invariant is untouched.
+ */
+
+import type { AutomationTriggerType } from "@open-inspect/shared";
+import type { AutomationFormValues } from "@/components/automations/automation-form";
+
+export type TemplateCategory =
+  | "popular"
+  | "code-review"
+  | "security"
+  | "incidents"
+  | "data-research";
+
+/**
+ * The create-form fields a template pre-fills. The repository selection and
+ * `scheduleTz` are statically excluded (repos are always the user's choice; the
+ * form's timezone default applies), and `name`/`triggerType`/`instructions` are
+ * required so every template is complete by construction — making these
+ * invariants compile-time rather than test-only.
+ */
+export type AutomationTemplatePrefill = Omit<
+  Partial<AutomationFormValues>,
+  "repositories" | "scheduleTz"
+> & {
+  name: string;
+  triggerType: AutomationTriggerType;
+  instructions: string;
+};
+
+export interface AutomationTemplate {
+  /** Stable slug used in `?template=<id>`. */
+  id: string;
+  title: string;
+  description: string;
+  categories: TemplateCategory[];
+  primaryOutput: "pr" | "slack";
+  /**
+   * Static "needs setup" copy surfaced on the card. Present when the template
+   * requires configuration beyond picking a repository (Slack, Sentry secret,
+   * GitHub event delivery). Informational only — the gallery performs no checks.
+   */
+  setupNote?: string;
+  prefill: AutomationTemplatePrefill;
+}
+
+/** Curated category order. */
+export const TEMPLATE_CATEGORIES: ReadonlyArray<{ id: TemplateCategory; label: string }> = [
+  { id: "popular", label: "Popular" },
+  { id: "code-review", label: "Code Review" },
+  { id: "security", label: "Security" },
+  { id: "incidents", label: "Incidents" },
+  { id: "data-research", label: "Data & Research" },
+];
+
+const DAILY_9AM = "0 9 * * *";
+const DAILY_8AM = "0 8 * * *";
+const WEEKLY_MON_9AM = "0 9 * * 1";
+
+/**
+ * The starter catalog. Array order is curated and is the order templates appear
+ * within each category (no sort applied) — the Popular ordering relies on it.
+ */
+export const automationTemplates: AutomationTemplate[] = [
+  {
+    id: "find-bugs",
+    title: "Find bugs",
+    description:
+      "Analyze recent commits for high-severity correctness bugs and open a PR with safe fixes.",
+    categories: ["popular", "code-review"],
+    primaryOutput: "pr",
+    prefill: {
+      name: "Find bugs",
+      triggerType: "schedule",
+      scheduleCron: DAILY_9AM,
+      instructions:
+        "Review the most recent commits on this repository for high-severity correctness bugs — " +
+        "logic errors, off-by-one mistakes, unhandled error cases, race conditions, and incorrect " +
+        "edge-case handling — focusing on changes from roughly the last day.\n\n" +
+        "For each issue you are confident about, implement a minimal, well-scoped fix. Open a single " +
+        "pull request containing the fixes, with a clear description of each bug and why the change " +
+        "is correct. Do not make unrelated refactors. If you find no high-confidence bugs, do not " +
+        "open a pull request.",
+    },
+  },
+  {
+    id: "scan-vulnerabilities",
+    title: "Scan codebase for vulnerabilities",
+    description:
+      "Run a scheduled application-security review and post validated high-impact findings to Slack.",
+    categories: ["popular", "security"],
+    primaryOutput: "slack",
+    setupNote:
+      "Posts to Slack — requires Slack agent notifications enabled and the bot invited to the channel.",
+    prefill: {
+      name: "Scan codebase for vulnerabilities",
+      triggerType: "schedule",
+      scheduleCron: WEEKLY_MON_9AM,
+      // Security review benefits from a stronger model; coerced if the user hasn't enabled it.
+      model: "anthropic/claude-opus-4-8",
+      reasoningEffort: "high",
+      instructions:
+        "Perform an application-security review of this repository. Look for validated, exploitable " +
+        "vulnerabilities with a realistic attack path — for example injection (SQL/command/template), " +
+        "authentication or authorization flaws, insecure deserialization, SSRF, secrets committed to " +
+        "the repository, and unsafe handling of untrusted input.\n\n" +
+        "Only report issues you can substantiate with a concrete code path; avoid generic or " +
+        "theoretical findings. When finished, post a concise summary of the medium/high/critical " +
+        "findings (with file references and recommended fixes) to the #security Slack channel using " +
+        "the slack-notify tool. If you find nothing credible, post a short “no new findings” note.",
+    },
+  },
+  {
+    id: "add-test-coverage",
+    title: "Add test coverage",
+    description: "Find high-risk, under-tested logic in recent changes, add tests, and open a PR.",
+    categories: ["popular", "code-review"],
+    primaryOutput: "pr",
+    prefill: {
+      name: "Add test coverage",
+      triggerType: "schedule",
+      scheduleCron: WEEKLY_MON_9AM,
+      instructions:
+        "Identify high-risk application logic in this repository that lacks adequate automated test " +
+        "coverage, prioritizing recently changed files and core business logic.\n\n" +
+        "Add focused unit or integration tests that capture the important behaviors and edge cases, " +
+        "following the project's existing test conventions and framework, and make sure the new tests " +
+        "pass. Open a pull request with the added tests and a short summary of what they cover and why. " +
+        "Do not modify production code except where a trivial, clearly-correct change is required to " +
+        "make code testable.",
+    },
+  },
+  {
+    id: "review-new-prs",
+    title: "Review new PRs",
+    description:
+      "When a pull request is opened, review the diff and leave actionable review comments.",
+    categories: ["popular", "code-review"],
+    primaryOutput: "pr",
+    setupNote:
+      "Runs only when GitHub events reach this repo (GitHub App installed and the repo enabled for events).",
+    prefill: {
+      name: "Review new PRs",
+      triggerType: "github_event",
+      eventType: "pull_request.opened",
+      instructions:
+        "A pull request was opened; its number and details are shown above. Review it using the " +
+        "GitHub CLI, which is already authenticated in this environment.\n\n" +
+        "1. Read the changes with `gh pr diff <number>`.\n" +
+        "2. Assess them for correctness bugs, security issues, missing tests, and deviations from the " +
+        "project's conventions.\n" +
+        "3. Post your feedback as a review on the existing PR with " +
+        '`gh pr review <number> --comment --body "..."`. Lead with a short overall summary, then the ' +
+        "most important issues with file/line references. For line-anchored comments you may use " +
+        "`gh api repos/{owner}/{repo}/pulls/<number>/comments`.\n\n" +
+        "Be concise and prioritize high-impact issues; do not nitpick formatting that automated tooling " +
+        "already handles. Do not open a new pull request — comment on the existing one.",
+    },
+  },
+  {
+    id: "generate-docs",
+    title: "Generate docs",
+    description:
+      "Create or update developer docs for recently changed or under-documented code, via a PR.",
+    categories: ["code-review"],
+    primaryOutput: "pr",
+    prefill: {
+      name: "Generate docs",
+      triggerType: "schedule",
+      scheduleCron: WEEKLY_MON_9AM,
+      instructions:
+        "Improve developer documentation for this repository. Find recently changed or " +
+        "under-documented modules, public functions, and APIs, and create or update their " +
+        "documentation (docstrings, README sections, or docs/ pages) to match the project's existing " +
+        "style.\n\n" +
+        "Keep documentation accurate to the current code. Open a pull request with the documentation " +
+        "updates and a summary of what changed. Do not alter application behavior.",
+    },
+  },
+  {
+    id: "investigate-sentry",
+    title: "Investigate Sentry issues",
+    description: "When Sentry reports a new error, find the root cause and open a fix PR.",
+    categories: ["security", "incidents"],
+    primaryOutput: "pr",
+    setupNote:
+      "Requires a Sentry client secret at creation and completing the Sentry webhook setup shown afterward.",
+    prefill: {
+      name: "Investigate Sentry issues",
+      triggerType: "sentry",
+      eventType: "issue.created",
+      instructions:
+        "A Sentry error was reported (details are included above). Investigate the root cause in this " +
+        "codebase: trace the stack trace to the responsible code, determine why the error occurs, and " +
+        "identify the correct fix.\n\n" +
+        "Implement a minimal fix and open a pull request that explains the root cause and the change. " +
+        "If the issue cannot be safely fixed automatically, open a pull request with a clear write-up " +
+        "of the root cause and a proposed approach instead.",
+    },
+  },
+  {
+    id: "triage-ci-failures",
+    title: "Triage failed CI",
+    description:
+      "When a CI check suite fails, reproduce the failure locally, diagnose it, and report to Slack.",
+    categories: ["incidents"],
+    primaryOutput: "slack",
+    setupNote:
+      "Requires GitHub events for this repo and Slack agent notifications enabled with the bot in the channel.",
+    prefill: {
+      name: "Triage failed CI",
+      triggerType: "github_event",
+      eventType: "check_suite.completed",
+      // Only fire on failed suites — avoids spawning a run on every green build.
+      triggerConfig: {
+        conditions: [{ type: "check_conclusion", operator: "eq", value: "failure" }],
+      },
+      instructions:
+        "A CI check suite failed on this repository; the failing branch and commit are shown above.\n\n" +
+        "Diagnose it from the codebase (this environment cannot read GitHub Actions logs):\n" +
+        "1. Check out the failing commit/branch and run the project's build and test commands to " +
+        "reproduce the failure locally.\n" +
+        "2. Read the failing output and the related code to determine the most likely cause — a failing " +
+        "test, a flaky test, a build/config error, or a real regression.\n\n" +
+        "Post a concise summary — what failed, the most probable cause with file references, and a " +
+        "recommended next step — to the #ci-alerts Slack channel using the slack-notify tool. Do not " +
+        "open a pull request.",
+    },
+  },
+  {
+    id: "auto-triage-slack-reports",
+    title: "Auto-triage Slack reports",
+    description:
+      "When a message in a watched Slack channel reports a bug or incident, investigate it and reply in the thread.",
+    categories: ["incidents"],
+    primaryOutput: "slack",
+    setupNote:
+      "Requires Slack triggers enabled, the bot invited to the channel, and a channel ID filled into the Slack Channel condition.",
+    prefill: {
+      name: "Auto-triage Slack reports",
+      triggerType: "slack_event",
+      eventType: "message.posted",
+      // The text_match keeps the trigger from firing on every channel message.
+      // The Slack Channel condition is intentionally omitted — add your own
+      // channel ID(s) on the form (a slack_event needs at least one).
+      triggerConfig: {
+        conditions: [
+          {
+            type: "text_match",
+            operator: "regex",
+            value: { pattern: "\\b(bug|broken|error|failing|down|incident)\\b", flags: "i" },
+          },
+        ],
+      },
+      instructions:
+        "A message was posted in a watched Slack channel (the message is shown above). Treat it as a " +
+        "bug or incident report and triage it against this repository.\n\n" +
+        "Investigate the most likely cause from the codebase: trace the described symptom to the " +
+        "responsible code, check recent related changes, and determine whether it is a real defect, a " +
+        "configuration problem, or expected behavior. When you have a concise, well-supported " +
+        "assessment — what is wrong, the relevant file references, and a recommended next step — that " +
+        "becomes the run result posted back into the thread. Do not open a pull request unless the fix " +
+        "is small and clearly correct.",
+    },
+  },
+  {
+    id: "upstream-exchange-outbound",
+    title: "Find work to contribute upstream",
+    description:
+      "Classify new fork commits for upstream usefulness and post a read-only daily Slack digest.",
+    categories: ["data-research"],
+    primaryOutput: "slack",
+    setupNote:
+      "For the tracked background-agents fork. Requires Slack notifications and the bot in #upstream-exchange.",
+    prefill: {
+      name: "Daily outbound upstream exchange",
+      triggerType: "schedule",
+      scheduleCron: DAILY_8AM,
+      model: "openai/gpt-5.6-sol",
+      reasoningEffort: "high",
+      instructions:
+        "Produce the daily outbound exchange report for the tracked fork mauricedesaxe/background-agents. " +
+        "This is classification and reporting only. Never write to ColeMurray/background-agents. Do not " +
+        "create or edit issues, comments, branches, commits, pull requests, releases, or repository settings " +
+        "in either repository. Do not modify the working tree. Use gh only for read operations.\n\n" +
+        "Read docs/FORK.md before classifying anything. Fetch the current upstream main without changing " +
+        "the checkout: `git fetch https://github.com/ColeMurray/background-agents.git " +
+        "+refs/heads/main:refs/remotes/upstream/main`. The sandbox clone is shallow, so deepen or fetch " +
+        "specific commits until the fork head, upstream head, durable cursor, and merge base are all " +
+        "available. Recompute the fork head, upstream head, and merge base. Never trust a pin written in a " +
+        "document.\n\n" +
+        "Call upstream-exchange with action=cursor, direction=outbound, and " +
+        "sourceRepository=mauricedesaxe/background-agents. The returned SHA is the last finalized to_sha. " +
+        "If there is no cursor, begin at the merge base. Verify the chosen start is an ancestor of the fork " +
+        "head. Examine every fork commit after that start through the fork head, oldest first. Call " +
+        "upstream-exchange action=begin with the exact ordered SHA list plus fromSha (null when there was no " +
+        "durable cursor), toSha=fork head, both heads, and merge base. Keep the returned scanId and " +
+        "classifiedCommitShas.\n\n" +
+        "Classify each expected commit absent from classifiedCommitShas with upstream-exchange action=classify. " +
+        "Never recreate an existing durable disposition. Use only these " +
+        "outbound classifications: candidate, intentional_divergence, deployment_specific, already_upstream, " +
+        "or not_useful_upstream. A candidate must say whether its useful unit is an idea, bug report, test " +
+        "case, or implementation. Record concrete evidence, affected packages, Terraform impact, migration " +
+        "impact, touched docs/FORK.md divergence entries, whether overlapping tests require hand-merging, and " +
+        "semantic-port evidence, and usefulUnit for candidates (idea, bug_report, test_case, or implementation). " +
+        "proposedArtifact must be null because outbound reporting cannot propose local fork work. " +
+        "Use commit diffs, commit and PR context, and current upstream code as evidence rather than judging the " +
+        "subject line alone.\n\n" +
+        "Post one concise digest to #upstream-exchange with slack-notify and pass scan_id=scanId. Include the " +
+        "examined compare range, fork head, upstream head, merge base, links to candidate commits, the useful " +
+        "unit and rationale for each candidate, and explicit grouped exclusions. If there are no commits, " +
+        "post a short no-op report with the unchanged range and heads. The run is successful only after that " +
+        "Slack call returns ok=true. Do not call slack-notify without scan_id.",
+    },
+  },
+  {
+    id: "upstream-exchange-inbound",
+    title: "Review new upstream changes",
+    description:
+      "Classify new upstream commits against fork behavior and post a read-only daily Slack digest.",
+    categories: ["data-research"],
+    primaryOutput: "slack",
+    setupNote:
+      "For the tracked background-agents fork. Requires Slack notifications and the bot in #upstream-exchange.",
+    prefill: {
+      name: "Daily inbound upstream exchange",
+      triggerType: "schedule",
+      scheduleCron: DAILY_9AM,
+      model: "openai/gpt-5.6-sol",
+      reasoningEffort: "high",
+      instructions:
+        "Produce the daily inbound exchange report for mauricedesaxe/background-agents from " +
+        "ColeMurray/background-agents. This is classification and reporting only. Do not create or edit " +
+        "issues, comments, branches, commits, pull requests, releases, or repository settings. Never merge, " +
+        "cherry-pick, rebase, or modify the working tree. Use gh only for read operations. A human will create " +
+        "or update a local issue after reading the digest.\n\n" +
+        "Read docs/FORK.md before classifying anything. Fetch current upstream main without changing the " +
+        "checkout: `git fetch https://github.com/ColeMurray/background-agents.git " +
+        "+refs/heads/main:refs/remotes/upstream/main`. The sandbox clone is shallow, so deepen or fetch " +
+        "specific commits until the fork head, upstream head, durable cursor, and merge base are all " +
+        "available. Recompute the fork head, upstream head, and merge base. Never trust a pin written in a " +
+        "document.\n\n" +
+        "Call upstream-exchange with action=cursor, direction=inbound, and " +
+        "sourceRepository=ColeMurray/background-agents. The returned SHA is the last finalized to_sha. If " +
+        "there is no cursor, begin at the merge base. Verify the chosen start is an ancestor of upstream main. " +
+        "Examine every upstream commit after that start through upstream main, oldest first. Call " +
+        "upstream-exchange action=begin with the exact ordered SHA list plus fromSha (null when there was no " +
+        "durable cursor), toSha=upstream head, both heads, and merge base. Keep the returned scanId and " +
+        "classifiedCommitShas.\n\n" +
+        "Classify each expected commit absent from classifiedCommitShas with upstream-exchange action=classify. " +
+        "Never recreate an existing durable disposition. Use only these " +
+        "inbound classifications: present, not_applicable, divergence_conflict, clean_candidate, or " +
+        "needs_decision. Record concrete evidence, affected packages, Terraform or binding impact, migration " +
+        "impact, touched docs/FORK.md divergence entries, whether overlapping tests require hand-merging, and " +
+        "semantic-port evidence. usefulUnit must be null for inbound classifications. proposedArtifact is a " +
+        "short human follow-up description when local work is proposed, otherwise null. " +
+        "Inspect the upstream diff and the current fork implementation. Preserve all intentional behavior in " +
+        "docs/FORK.md. Test files must be hand-merged, upstream migrations retain upstream IDs, fork-local " +
+        "migrations use 9000+, and package contract changes include Terraform review.\n\n" +
+        "Post one concise digest to #upstream-exchange with slack-notify and pass scan_id=scanId. Include the " +
+        "examined compare range, fork head, upstream head, merge base, a link and rationale for every clean " +
+        "candidate or needs-decision commit, divergence conflicts, and grouped present/not-applicable " +
+        "exclusions. Include any proposed local artifact only as a human follow-up description, never create " +
+        "it. If there are no commits, post a short no-op report with the unchanged range and heads. The run is " +
+        "successful only after Slack returns ok=true. Do not call slack-notify without scan_id.",
+    },
+  },
+  {
+    id: "dependency-digest",
+    title: "Weekly dependency digest",
+    description:
+      "Summarize dependency updates, changelogs, and advisories and post the digest to Slack.",
+    categories: ["data-research"],
+    primaryOutput: "slack",
+    setupNote:
+      "Posts to Slack — requires Slack agent notifications enabled and the bot invited to the channel.",
+    prefill: {
+      name: "Weekly dependency digest",
+      triggerType: "schedule",
+      scheduleCron: WEEKLY_MON_9AM,
+      instructions:
+        "Produce a weekly dependency digest for this repository. Use the project's package manager to " +
+        "inspect dependencies — check for outdated packages and known security advisories (for example " +
+        "`npm outdated` and `npm audit`, or the equivalent for this stack) — and review notable " +
+        "changelog entries and deprecations for the versions in use.\n\n" +
+        "Summarize the most important items and any recommended upgrades (call out breaking changes), " +
+        "and post the digest to the #dependencies Slack channel using the slack-notify tool. Do not " +
+        "modify dependencies or open a pull request — this is a read-only report.",
+    },
+  },
+  {
+    // Fork-local: hardcodes personal audience/ICP sources and exemplar videos,
+    // so it is deliberately not upstreamable. See docs/FORK.md.
+    id: "content-ideas",
+    title: "Weekly content ideas from your changelog",
+    description:
+      "Survey what shipped this week and turn the decisions behind it into content ideas, posted to Slack.",
+    categories: ["data-research"],
+    primaryOutput: "slack",
+    setupNote:
+      "Posts to Slack — requires Slack agent notifications enabled and the bot invited to the channel.",
+    prefill: {
+      name: "Weekly content ideas",
+      triggerType: "schedule",
+      scheduleCron: WEEKLY_MON_9AM,
+      // Judgement-and-taste task rather than a coding task, so the frontier
+      // general model beats the codex variants.
+      model: "openai/gpt-5.6-sol",
+      reasoningEffort: "high",
+      instructions:
+        "Survey everything that landed in this repository over the last 7 days and propose 3-5 " +
+        "content ideas drawn from it. Ideas, not titles, and not a summary of the week.\n\n" +
+        "First, understand who this is for. Read https://alexlazar.dev/about, " +
+        "https://alexlazar.dev/services and https://alexlazar.dev/projects. The audience is the " +
+        "buyer described there: founders, CTOs, engineering managers and product managers at " +
+        "3-50 person startups. The goal is client work and reputation, never audience growth. " +
+        "The test for every idea is whether it shows judgement that buyer would want to rent.\n\n" +
+        "Then look at what has already been made, so you do not propose it again. Read " +
+        "https://alexlazar.dev/blog and https://www.youtube.com/@_alexlazar_. The channel also " +
+        "contains recorded interviews and conversations with guests: ignore them entirely. They " +
+        "are a separate kind of content, they are not a format you may propose, and they are not " +
+        "a reference for the style of anything you propose.\n\n" +
+        "These are the solo videos that define the style and format to aim for. Study them as " +
+        "exemplars, and do not propose a topic any of them already covers:\n" +
+        "- https://youtu.be/jfE3iYVXjhg (build: WalkUp demo)\n" +
+        "- https://youtu.be/uxG5TFsDXGw (build: I made my job search easier with LLMs)\n" +
+        "- https://youtu.be/FnSULR1FV70 (build: an AI 'testosterone doctor' chatbot)\n" +
+        "- https://youtu.be/IK3btzdIhSc (explainer: RAG for busy people)\n" +
+        "- https://youtu.be/3uOlxH0lZkI (explainer: the 101 of SEO)\n" +
+        "- https://youtu.be/T9iaRB6hyG8 (take: latency and architecture)\n" +
+        "- https://youtu.be/2e2Fpq3IXLE (take: cut scope, ship iteratively)\n" +
+        "- https://youtu.be/mSIvR6D3bFs (take: HTMX is fast, you may not need local first)\n" +
+        "- https://youtu.be/5xLJ9vIGCvs (take: the future is self hosted)\n" +
+        "- https://youtu.be/gKS3yXa2PRw (take: indie hackers, get a job)\n" +
+        "- https://youtu.be/-ry-h2_HynI (technique: pre-compute for backend performance)\n" +
+        "- https://youtu.be/WIMY-s7yOT0 (technique: more SEO juice out of free tools)\n\n" +
+        "Now survey the week. Do not read only the diff. Read merged pull request bodies, closed " +
+        "issues and their comments, and commit messages. The reasoning behind a change is what " +
+        "makes it worth talking about; the diff alone tells you what changed but not why it was " +
+        "chosen over the alternative. Weight most heavily any change where a non-obvious option " +
+        "was rejected for a stated reason.\n\n" +
+        "Treat two kinds of change as high value rather than as internal chores.\n\n" +
+        "First, the agentic harness, tooling, review process and developer workflow. Consulting " +
+        "work is sold on that kind of judgement, and an agentic harness setup is an advertised " +
+        "service, so a change to how agents are configured or how work gets reviewed is usually " +
+        "a stronger idea than a product feature.\n\n" +
+        "Second, anything that touches go-to-market engineering: SEO, the newsletter, analytics, " +
+        "landing and content pages, distribution, and automations that drive any of them. This " +
+        "is a service area being deliberately built toward without much public proof yet, so " +
+        "real work in it is disproportionately worth talking about. Do not skip a change just " +
+        "because it landed on a marketing site rather than in application code.\n\n" +
+        "Now apply the maturity test, which is the most important filter and the one you are " +
+        "most likely to get wrong. An idea qualifies only if the thing it is about is finished " +
+        "and can be shown today, or the decision stands on its own without that thing existing. " +
+        "Most of what lands in any week is mid-project work, and a decision taken inside an " +
+        "unfinished project is not a story yet: the outcome is not known and there is nothing to " +
+        "demonstrate. A well-argued decision is not enough on its own. Do not propose it.\n\n" +
+        "When several decisions cluster inside one unfinished project, do not pitch them " +
+        "separately. Collapse them into a single parked idea: say the project is worth a demo " +
+        "and a behind-the-scenes explanation once it ships, and name the decisions that would go " +
+        "into it. One parked idea beats three premature ones.\n\n" +
+        "Propose at most two ideas from any one project, so a single busy area cannot fill the " +
+        "whole list.\n\n" +
+        "Each idea must fit one of these formats:\n" +
+        "- The take: a decision that was made, argued, ideally against the obvious choice.\n" +
+        "- The explainer: a concept compressed for a busy technical person.\n" +
+        "- The technique: one tactic, shown applied to real code.\n" +
+        "- The build: something shipped, demoed.\n\n" +
+        "Where a finished thing can be shown, prefer the build format over arguing about it. A " +
+        "demo of something working is more convincing to this buyer than a claim, and it is the " +
+        "format most often missed because it needs finished work to point at.\n\n" +
+        "For each idea give: the angle in one or two sentences, the format tag, a link to the " +
+        "pull request or issue it came from, and one line on why it lands with that buyer. No " +
+        "titles, no scripts, no outlines.\n\n" +
+        "Post the ideas to the #content Slack channel using the slack-notify tool. Keep it short " +
+        "enough to read on a phone. Return fewer than three ideas whenever fewer than three " +
+        "clear the maturity test, and say plainly that the week was thin. Padding the list with " +
+        "premature or obvious ideas is the fastest way to make this message ignorable, so one " +
+        "good idea is a better result than five weak ones.",
+    },
+  },
+];
+
+export function getTemplateById(id: string): AutomationTemplate | undefined {
+  return automationTemplates.find((t) => t.id === id);
+}
+
+export function getTemplatesForCategory(category: TemplateCategory): AutomationTemplate[] {
+  return automationTemplates.filter((t) => t.categories.includes(category));
+}
+
+export function getVisibleCategories(): Array<{ id: TemplateCategory; label: string }> {
+  return TEMPLATE_CATEGORIES.filter((c) => getTemplatesForCategory(c.id).length > 0);
+}

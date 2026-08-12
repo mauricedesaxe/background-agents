@@ -1,0 +1,301 @@
+import { describe, expect, it, vi } from "vitest";
+import type { Logger } from "../../../logger";
+import { createMessagesHandler } from "./messages.handler";
+import { PromptEnqueueRejectedError, type MessageService } from "../../services/message.service";
+
+function createHandler() {
+  const messageService = {
+    enqueuePrompt: vi.fn(),
+    stop: vi.fn(),
+    listEvents: vi.fn(),
+    listArtifacts: vi.fn(),
+    getArtifact: vi.fn(),
+    listMessages: vi.fn(),
+  } as unknown as MessageService;
+
+  const log = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    child: vi.fn(),
+  } as unknown as Logger;
+
+  return {
+    handler: createMessagesHandler({
+      messageService,
+    }),
+    messageService,
+    log,
+  };
+}
+
+describe("createMessagesHandler", () => {
+  it("enqueues prompt and returns queued response", async () => {
+    const { handler, messageService, log } = createHandler();
+    vi.mocked(messageService.enqueuePrompt).mockResolvedValue({
+      messageId: "msg-1",
+      status: "queued",
+    });
+
+    const response = await handler.enqueuePrompt(
+      new Request("http://internal/internal/prompt", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          content: "hello",
+          authorId: "user-1",
+          source: "web",
+        }),
+      }),
+      log
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ messageId: "msg-1", status: "queued" });
+    expect(messageService.enqueuePrompt).toHaveBeenCalledWith({
+      content: "hello",
+      authorId: "user-1",
+      source: "web",
+    });
+  });
+
+  it("returns 409 when the session no longer accepts prompts", async () => {
+    const { handler, messageService, log } = createHandler();
+    vi.mocked(messageService.enqueuePrompt).mockRejectedValue(new PromptEnqueueRejectedError());
+
+    const response = await handler.enqueuePrompt(
+      new Request("http://internal/internal/prompt", {
+        method: "POST",
+        body: JSON.stringify({ content: "hello", authorId: "user-1", source: "agent" }),
+      }),
+      log
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ error: "Session no longer accepts prompts" });
+  });
+
+  it("logs and rethrows when enqueue prompt parsing fails", async () => {
+    const { handler, log } = createHandler();
+
+    await expect(
+      handler.enqueuePrompt(
+        new Request("http://internal/internal/prompt", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{invalid",
+        }),
+        log
+      )
+    ).rejects.toBeTruthy();
+
+    expect(log.error).toHaveBeenCalledWith(
+      "handleEnqueuePrompt error",
+      expect.objectContaining({ error: expect.anything() })
+    );
+  });
+
+  it("returns 400 for invalid event type", async () => {
+    const { handler } = createHandler();
+
+    const response = handler.listEvents(new URL("http://internal/internal/events?type=invalid"));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Invalid event type: invalid" });
+  });
+
+  it("does not expose legacy checkpoint events as a current filter", async () => {
+    const { handler } = createHandler();
+
+    const response = handler.listEvents(new URL("http://internal/internal/events?type=checkpoint"));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Invalid event type: checkpoint" });
+  });
+
+  it("returns 400 for malformed event cursors", async () => {
+    const { handler, messageService } = createHandler();
+
+    const response = handler.listEvents(new URL("http://internal/internal/events?cursor=bad"));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Invalid cursor" });
+    expect(messageService.listEvents).not.toHaveBeenCalled();
+  });
+
+  it("returns listEvents response from service", async () => {
+    const { handler, messageService } = createHandler();
+    vi.mocked(messageService.listEvents).mockReturnValue({
+      events: [
+        {
+          id: "e1",
+          type: "token",
+          data: { x: 1 },
+          messageId: "m1",
+          createdAt: 1000,
+        },
+      ],
+      cursor: "1000",
+      hasMore: false,
+    });
+
+    const response = handler.listEvents(new URL("http://internal/internal/events?limit=10"));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      events: [{ id: "e1", type: "token", data: { x: 1 }, messageId: "m1", createdAt: 1000 }],
+      cursor: "1000",
+      hasMore: false,
+    });
+    expect(messageService.listEvents).toHaveBeenCalledWith({
+      cursor: null,
+      limit: 10,
+      type: null,
+      messageId: null,
+    });
+  });
+
+  it("parses composite event cursors before delegating to the service", async () => {
+    const { handler, messageService } = createHandler();
+    vi.mocked(messageService.listEvents).mockReturnValue({
+      events: [],
+      cursor: undefined,
+      hasMore: false,
+    });
+
+    const response = handler.listEvents(
+      new URL("http://internal/internal/events?cursor=5000:event-id")
+    );
+
+    expect(response.status).toBe(200);
+    expect(messageService.listEvents).toHaveBeenCalledWith({
+      cursor: { kind: "timeline", createdAt: 5000, id: "event-id" },
+      limit: 50,
+      type: null,
+      messageId: null,
+    });
+  });
+
+  it("returns artifacts from service unchanged", async () => {
+    const { handler, messageService } = createHandler();
+    vi.mocked(messageService.listArtifacts).mockReturnValue({
+      artifacts: [
+        {
+          id: "a1",
+          type: "pr",
+          url: "https://example.com",
+          metadata: null,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+    });
+
+    const response = handler.listArtifacts(new URL("http://internal/internal/artifacts"));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      artifacts: [
+        {
+          id: "a1",
+          type: "pr",
+          url: "https://example.com",
+          metadata: null,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+    });
+  });
+
+  it("returns a single artifact when artifactId is provided", async () => {
+    const { handler, messageService } = createHandler();
+    vi.mocked(messageService.getArtifact).mockReturnValue({
+      artifact: {
+        id: "artifact-1",
+        type: "screenshot",
+        url: "sessions/session-1/media/artifact-1.png",
+        metadata: { mimeType: "image/png" },
+        createdAt: 1000,
+        updatedAt: 1000,
+      },
+    });
+
+    const response = handler.listArtifacts(
+      new URL("http://internal/internal/artifacts?artifactId=artifact-1")
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      artifact: {
+        id: "artifact-1",
+        type: "screenshot",
+        url: "sessions/session-1/media/artifact-1.png",
+        metadata: { mimeType: "image/png" },
+        createdAt: 1000,
+        updatedAt: 1000,
+      },
+    });
+    expect(messageService.getArtifact).toHaveBeenCalledWith("artifact-1");
+    expect(messageService.listArtifacts).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for invalid message status", async () => {
+    const { handler } = createHandler();
+
+    const response = handler.listMessages(
+      new URL("http://internal/internal/messages?status=invalid")
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Invalid message status: invalid" });
+  });
+
+  it("maps listMessages response", async () => {
+    const { handler, messageService } = createHandler();
+    vi.mocked(messageService.listMessages).mockReturnValue({
+      messages: [
+        {
+          id: "m1",
+          author_id: "p1",
+          content: "hello",
+          source: "web",
+          model: null,
+          reasoning_effort: null,
+          attachments: null,
+          callback_context: null,
+          status: "completed",
+          error_message: null,
+          created_at: 1000,
+          started_at: 1100,
+          completed_at: 1200,
+        },
+      ],
+      cursor: "1000",
+      hasMore: false,
+    });
+
+    const response = handler.listMessages(new URL("http://internal/internal/messages?limit=10"));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      messages: [
+        {
+          id: "m1",
+          authorId: "p1",
+          content: "hello",
+          source: "web",
+          status: "completed",
+          createdAt: 1000,
+          startedAt: 1100,
+          completedAt: 1200,
+        },
+      ],
+      cursor: "1000",
+      hasMore: false,
+    });
+  });
+
+  it("returns stopping status for stop endpoint", async () => {
+    const { handler, messageService } = createHandler();
+    vi.mocked(messageService.stop).mockResolvedValue({ status: "stopping" });
+
+    const response = await handler.stop();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "stopping" });
+  });
+});

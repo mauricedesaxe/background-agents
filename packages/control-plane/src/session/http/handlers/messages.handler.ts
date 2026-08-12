@@ -1,0 +1,135 @@
+import type { Logger } from "../../../logger";
+import {
+  PromptEnqueueRejectedError,
+  PromptIdConflictError,
+  type EnqueuePromptRequest,
+  type MessageService,
+} from "../../services/message.service";
+import { parseEventListCursor } from "../../event-cursor";
+
+/**
+ * Valid event types for filtering.
+ * Includes both external types (from types.ts) and internal types used by the sandbox.
+ */
+const VALID_EVENT_TYPES = [
+  "tool_call",
+  "tool_result",
+  "token",
+  "error",
+  "warning",
+  "git_sync",
+  "step_start",
+  "step_finish",
+  "execution_complete",
+  "heartbeat",
+  "push_complete",
+  "push_error",
+  "artifact",
+  "user_message",
+] as const;
+
+/**
+ * Valid message statuses for filtering.
+ */
+const VALID_MESSAGE_STATUSES = ["pending", "processing", "completed", "failed"] as const;
+
+export interface MessagesHandlerDeps {
+  messageService: MessageService;
+}
+
+export interface MessagesHandler {
+  enqueuePrompt: (request: Request, log: Logger) => Promise<Response>;
+  stop: () => Promise<Response>;
+  listEvents: (url: URL) => Response;
+  listArtifacts: (url: URL) => Response;
+  listMessages: (url: URL) => Response;
+}
+
+export function createMessagesHandler(deps: MessagesHandlerDeps): MessagesHandler {
+  return {
+    async enqueuePrompt(request: Request, log: Logger): Promise<Response> {
+      try {
+        const body = (await request.json()) as EnqueuePromptRequest;
+        return Response.json(await deps.messageService.enqueuePrompt(body));
+      } catch (error) {
+        if (error instanceof PromptEnqueueRejectedError) {
+          return Response.json({ error: error.message }, { status: 409 });
+        }
+        if (error instanceof PromptIdConflictError) {
+          return Response.json({ error: error.message }, { status: 409 });
+        }
+        log.error("handleEnqueuePrompt error", {
+          error: error instanceof Error ? error : String(error),
+        });
+        throw error;
+      }
+    },
+
+    async stop(): Promise<Response> {
+      return Response.json(await deps.messageService.stop());
+    },
+
+    listEvents(url: URL): Response {
+      const cursorResult = parseEventListCursor(url.searchParams.get("cursor"));
+      const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50"), 200);
+      const type = url.searchParams.get("type");
+      const messageId = url.searchParams.get("message_id");
+
+      if (type && !VALID_EVENT_TYPES.includes(type as (typeof VALID_EVENT_TYPES)[number])) {
+        return Response.json({ error: `Invalid event type: ${type}` }, { status: 400 });
+      }
+
+      if (!cursorResult.ok) {
+        return Response.json({ error: cursorResult.error }, { status: 400 });
+      }
+
+      const result = deps.messageService.listEvents({
+        cursor: cursorResult.cursor,
+        limit,
+        type,
+        messageId,
+      });
+
+      return Response.json(result);
+    },
+
+    listArtifacts(url: URL): Response {
+      const artifactId = url.searchParams.get("artifactId");
+      if (artifactId) {
+        return Response.json(deps.messageService.getArtifact(artifactId));
+      }
+
+      return Response.json(deps.messageService.listArtifacts());
+    },
+
+    listMessages(url: URL): Response {
+      const cursor = url.searchParams.get("cursor");
+      const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50"), 100);
+      const status = url.searchParams.get("status");
+
+      if (
+        status &&
+        !VALID_MESSAGE_STATUSES.includes(status as (typeof VALID_MESSAGE_STATUSES)[number])
+      ) {
+        return Response.json({ error: `Invalid message status: ${status}` }, { status: 400 });
+      }
+
+      const result = deps.messageService.listMessages({ cursor, limit, status });
+
+      return Response.json({
+        messages: result.messages.map((message) => ({
+          id: message.id,
+          authorId: message.author_id,
+          content: message.content,
+          source: message.source,
+          status: message.status,
+          createdAt: message.created_at,
+          startedAt: message.started_at,
+          completedAt: message.completed_at,
+        })),
+        cursor: result.cursor,
+        hasMore: result.hasMore,
+      });
+    },
+  };
+}

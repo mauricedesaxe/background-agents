@@ -1,0 +1,396 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-typescript:
+    name: Lint & Format (TypeScript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Check Prettier formatting
+        run: npm run format:check
+
+  typecheck-typescript:
+    name: TypeCheck (TypeScript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w @open-inspect/shared
+
+      - name: TypeCheck all packages
+        run: npm run typecheck
+
+  build-web:
+    name: Build (Web)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w @open-inspect/shared
+
+      - name: Build web package
+        run: npm run build -w @open-inspect/web
+
+  lint-python-sandbox-runtime:
+    name: Lint & Format (Python - sandbox-runtime)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: packages/sandbox-runtime
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run Ruff linter
+        run: ruff check src/ tests/
+
+      - name: Run Ruff formatter check
+        run: ruff format --check src/ tests/
+
+  lint-python:
+    name: Lint & Format (Python - modal-infra)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: packages/modal-infra
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ../sandbox-runtime
+          pip install -e ".[dev]"
+
+      - name: Run Ruff linter
+        run: ruff check src/
+
+      - name: Run Ruff formatter check
+        run: ruff format --check src/
+
+  typecheck-python:
+    name: TypeCheck (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: packages/modal-infra
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ../sandbox-runtime
+          pip install -e ".[dev]"
+
+      - name: Run MyPy
+        run: mypy src/
+        continue-on-error: true # Allow failures initially as types are added
+
+  typecheck-python-sandbox-runtime:
+    name: TypeCheck (Python - sandbox-runtime)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lint-python-sandbox-runtime]
+    defaults:
+      run:
+        working-directory: packages/sandbox-runtime
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run MyPy
+        run: mypy src/
+        continue-on-error: true # Allow failures initially as types are added
+
+  test-cp-unit:
+    name: Test (control-plane unit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lint-typescript, typecheck-typescript]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w @open-inspect/shared
+
+      - name: Run shared tests
+        run: npm test -w @open-inspect/shared
+
+      - name: Run control-plane unit tests
+        run: npm test -w @open-inspect/control-plane
+
+  test-cp-integration:
+    name: Test (control-plane integration)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lint-typescript, typecheck-typescript]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w @open-inspect/shared
+
+      - name: Install workerd runtime dependency
+        run: sudo apt-get update && sudo apt-get install -y libc++1
+
+      - name: Run control-plane integration tests
+        run: npm run test:integration -w @open-inspect/control-plane
+
+  test-web:
+    name: Test (web)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [lint-typescript, typecheck-typescript]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w @open-inspect/shared
+
+      - name: Run web tests
+        run: npm test -w @open-inspect/web
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run web browser tests
+        run: npm run test:browser -w @open-inspect/web
+
+  test-bots:
+    name: Test (bots)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lint-typescript, typecheck-typescript]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w @open-inspect/shared
+
+      - name: Run github-bot tests
+        run: npm test -w @open-inspect/github-bot
+
+      - name: Run slack-bot tests
+        run: npm test -w @open-inspect/slack-bot
+
+      - name: Run linear-bot tests
+        run: npm test -w @open-inspect/linear-bot
+
+  test-python-sandbox-runtime:
+    name: Test (Python - sandbox-runtime)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lint-python-sandbox-runtime]
+    defaults:
+      run:
+        working-directory: packages/sandbox-runtime
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # The push tests build a real jj-colocated repo rather than mocking one, because the bug
+      # they cover only exists in a checkout where git HEAD and the jj working copy disagree.
+      # Without jj on PATH they fail with FileNotFoundError, which is what happened on the first
+      # CI run to reach them.
+      - name: Install jj
+        run: |
+          tmp=$(mktemp -d)
+          curl -sSL "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C "$tmp"
+          sudo install -m 0755 "$tmp/jj" /usr/local/bin/jj
+          rm -rf "$tmp"
+          jj --version
+        working-directory: .
+        env:
+          JJ_VERSION: "0.43.0"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest tests/ -v
+
+  # The sandbox-runtime ships JS (OpenCode plugins, in-sandbox agent tools) alongside Python.
+  test-js-sandbox-runtime:
+    name: Test (JS - sandbox-runtime)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: packages/sandbox-runtime
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      # A bare directory is resolved as a module rather than expanded, so the glob is load-bearing.
+      - name: Run tests
+        run: node --test "tests/*.test.mjs"
+
+  test-python:
+    name: Test (Python - modal-infra)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lint-python]
+    defaults:
+      run:
+        working-directory: packages/modal-infra
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ../sandbox-runtime
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest tests/ -v

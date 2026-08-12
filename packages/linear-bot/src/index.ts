@@ -1,0 +1,186 @@
+/**
+ * Open-Inspect Linear Agent Worker
+ *
+ * Cloudflare Worker handling Linear AgentSessionEvent webhooks.
+ * Routes-only entry point — orchestration lives in webhook-handler.ts.
+ */
+
+import { Hono } from "hono";
+import type { Env, AgentSessionWebhook } from "./types";
+import {
+  buildOAuthAuthorizeUrl,
+  completeLinearOAuthInstallation,
+  verifyLinearWebhook,
+} from "./utils/linear-client";
+import { callbacksRouter } from "./callbacks";
+import { createLogger } from "./logger";
+import { resolveAppName } from "@open-inspect/shared";
+import { handleAgentSessionEvent, escapeHtml } from "./webhook-handler";
+import { isDuplicateEvent } from "./kv-store";
+
+// Re-export pure functions for existing test imports
+export {
+  resolveStaticTarget,
+  extractModelFromLabels,
+  resolveSessionModelSettings,
+} from "./model-resolution";
+
+const log = createLogger("handler");
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function readStringField(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key];
+  return typeof value === "string" ? value : null;
+}
+
+export function buildOAuthSuccessHtml(appName: string, orgName: string): string {
+  return `
+      <html>
+        <head><title>OAuth Success</title></head>
+        <body>
+          <h1>${escapeHtml(appName)} Agent Installed!</h1>
+          <p>Successfully connected to workspace: <strong>${escapeHtml(orgName)}</strong></p>
+          <p>You can now @mention or assign the agent on Linear issues.</p>
+        </body>
+      </html>
+    `;
+}
+
+function isAgentSessionWebhookPayload(payload: unknown): payload is AgentSessionWebhook {
+  if (!isObjectRecord(payload)) return false;
+
+  const type = readStringField(payload, "type");
+  const action = readStringField(payload, "action");
+  const organizationId = readStringField(payload, "organizationId");
+  const appUserId = readStringField(payload, "appUserId");
+  const webhookId = readStringField(payload, "webhookId");
+  const agentSession = payload.agentSession;
+
+  if (
+    !type ||
+    !action ||
+    !organizationId ||
+    !appUserId ||
+    !isObjectRecord(agentSession) ||
+    !webhookId
+  ) {
+    return false;
+  }
+
+  return typeof agentSession.id === "string";
+}
+
+// ─── Routes ──────────────────────────────────────────────────────────────────
+
+const app = new Hono<{ Bindings: Env }>();
+
+app.get("/health", (c) => {
+  return c.json({ status: "healthy", service: "open-inspect-linear-bot" });
+});
+
+// ─── OAuth Routes ────────────────────────────────────────────────────────────
+
+app.get("/oauth/authorize", (c) => {
+  return c.redirect(buildOAuthAuthorizeUrl(c.env), 302);
+});
+
+app.get("/oauth/callback", async (c) => {
+  const error = c.req.query("error");
+  if (error) return c.text(`OAuth Error: ${error}`, 400);
+
+  const code = c.req.query("code");
+  if (!code) return c.text("Missing required OAuth parameters", 400);
+
+  try {
+    const { orgName } = await completeLinearOAuthInstallation(c.env, code);
+    return c.html(buildOAuthSuccessHtml(resolveAppName(c.env), orgName));
+  } catch (err) {
+    log.error("oauth.callback_error", {
+      error: err instanceof Error ? err : new Error(String(err)),
+    });
+    return c.text("Linear authentication setup failed", 500);
+  }
+});
+
+// ─── Webhook Handler ─────────────────────────────────────────────────────────
+
+app.post("/webhook", async (c) => {
+  const startTime = Date.now();
+  const traceId = crypto.randomUUID();
+  const body = await c.req.text();
+  const signature = c.req.header("linear-signature") ?? null;
+
+  const isValid = await verifyLinearWebhook(body, signature, c.env.LINEAR_WEBHOOK_SECRET);
+  if (!isValid) {
+    log.warn("http.request", {
+      trace_id: traceId,
+      http_path: "/webhook",
+      http_status: 401,
+      outcome: "rejected",
+      reject_reason: "invalid_signature",
+      duration_ms: Date.now() - startTime,
+    });
+    return c.json({ error: "Invalid signature" }, 401);
+  }
+
+  const payload: unknown = JSON.parse(body);
+  if (!isObjectRecord(payload)) {
+    log.warn("webhook.invalid_payload", { trace_id: traceId, reason: "payload_not_object" });
+    return c.json({ error: "Invalid payload" }, 400);
+  }
+
+  const eventType = readStringField(payload, "type") ?? "unknown";
+  const action = readStringField(payload, "action") ?? "unknown";
+
+  if (eventType === "AgentSessionEvent") {
+    if (!isAgentSessionWebhookPayload(payload)) {
+      log.warn("webhook.invalid_payload", {
+        trace_id: traceId,
+        reason: "invalid_agent_session_event_shape",
+      });
+      return c.json({ error: "Invalid payload" }, 400);
+    }
+
+    // Linear's `Linear-Delivery` header is a UUID v4 that uniquely identifies
+    // each delivery. The `webhookId` field in the body is the registered-webhook
+    // configuration ID and is constant across deliveries, so we must not dedup
+    // on it. https://linear.app/developers/webhooks#webhook-payload-details
+    const deliveryId = c.req.header("linear-delivery");
+    if (!deliveryId) {
+      log.warn("webhook.invalid_payload", {
+        trace_id: traceId,
+        reason: "missing_linear_delivery_header",
+      });
+      return c.json({ error: "Missing Linear-Delivery header" }, 400);
+    }
+
+    const isDuplicate = await isDuplicateEvent(c.env, deliveryId);
+    if (isDuplicate) {
+      log.info("webhook.deduplicated", { trace_id: traceId, event_key: deliveryId });
+      return c.json({ ok: true, skipped: true, reason: "duplicate" });
+    }
+
+    c.executionCtx.waitUntil(handleAgentSessionEvent(payload, c.env, traceId));
+
+    log.info("http.request", {
+      trace_id: traceId,
+      http_path: "/webhook",
+      http_status: 200,
+      type: eventType,
+      action,
+      duration_ms: Date.now() - startTime,
+    });
+    return c.json({ ok: true });
+  }
+
+  log.debug("webhook.skipped", { trace_id: traceId, type: eventType, action });
+  return c.json({ ok: true, skipped: true, reason: `unhandled event type: ${eventType}` });
+});
+
+// Mount callbacks router
+app.route("/callbacks", callbacksRouter);
+
+export default app;

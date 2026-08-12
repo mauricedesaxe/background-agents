@@ -1,0 +1,388 @@
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import { env } from "cloudflare:test";
+import { cleanD1Tables } from "./cleanup";
+import { initSession, queryDO, seedEvents } from "./helpers";
+import type { SpawnContext, ChildSessionDetail } from "@open-inspect/shared";
+
+const originalFetch = globalThis.fetch;
+
+function installModalFetchMock(): void {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (!url.includes(".modal.run")) {
+        return originalFetch(input, init);
+      }
+
+      const body = JSON.parse(String(init?.body ?? "{}")) as { sandbox_id?: string };
+      const sandboxId = body.sandbox_id ?? "sandbox-test";
+
+      return Response.json({
+        success: true,
+        data: {
+          sandbox_id: sandboxId,
+          modal_object_id: `modal-${sandboxId}`,
+          status: "running",
+          created_at: Date.now(),
+        },
+      });
+    })
+  );
+}
+
+async function waitForSandboxSpawn(stub: DurableObjectStub): Promise<void> {
+  const deadline = Date.now() + 1000;
+
+  while (Date.now() < deadline) {
+    const rows = await queryDO<{ status: string }>(stub, "SELECT status FROM sandbox LIMIT 1");
+    const status = rows[0]?.status;
+    if (status === "connecting" || status === "running") {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error("Timed out waiting for sandbox spawn");
+}
+
+describe("DO internal sub-session routes", () => {
+  beforeEach(async () => {
+    await cleanD1Tables();
+    installModalFetchMock();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  describe("GET /internal/spawn-context", () => {
+    it("returns SpawnContext with session and owner info", async () => {
+      const { stub } = await initSession({
+        repoOwner: "acme",
+        repoName: "web-app",
+        repoId: 12345,
+        userId: "user-1",
+        scmLogin: "acmedev",
+        model: "anthropic/claude-sonnet-4-6",
+      });
+
+      const res = await stub.fetch("http://internal/internal/spawn-context");
+
+      expect(res.status).toBe(200);
+      const context = await res.json<SpawnContext>();
+
+      expect(context.repoOwner).toBe("acme");
+      expect(context.repoName).toBe("web-app");
+      expect(context.repoId).toBe(12345);
+      expect(context.model).toBe("anthropic/claude-sonnet-4-6");
+      expect(context.reasoningEffort).toBeNull();
+
+      // Owner fields
+      expect(context.owner).toBeDefined();
+      expect(context.owner.userId).toBe("user-1");
+      expect(context.owner.scmLogin).toBe("acmedev");
+      // Encrypted token fields may be null in tests (no SCM token provided at init)
+      expect(context.owner).toHaveProperty("scmAccessTokenEncrypted");
+      expect(context.owner).toHaveProperty("scmRefreshTokenEncrypted");
+      expect(context.owner).toHaveProperty("scmTokenExpiresAt");
+    });
+
+    it("returns 404 when session is not initialized", async () => {
+      // Create a bare DO without calling /internal/init
+      const id = env.SESSION.newUniqueId();
+      const stub = env.SESSION.get(id);
+
+      const res = await stub.fetch("http://internal/internal/spawn-context");
+
+      expect(res.status).toBe(404);
+      const body = await res.json<{ error: string }>();
+      expect(body.error).toBe("Session not found");
+    });
+  });
+
+  describe("GET /internal/child-summary", () => {
+    it("returns ChildSessionDetail shape with session, sandbox, artifacts, and events", async () => {
+      const externalSessionId = `child-summary-${Date.now()}`;
+      const { stub } = await initSession({
+        sessionName: externalSessionId,
+        repoOwner: "acme",
+        repoName: "web-app",
+        title: "Child task",
+        userId: "user-1",
+      });
+
+      // Seed some events (tool_call should appear, token/heartbeat should be filtered)
+      await seedEvents(stub, [
+        {
+          id: "evt-tool-1",
+          type: "tool_call",
+          data: JSON.stringify({
+            tool: "write_file",
+            args: { path: "/src/fix.ts", content: "fixed" },
+          }),
+          createdAt: Date.now(),
+        },
+        {
+          id: "evt-token-1",
+          type: "token",
+          data: JSON.stringify({ content: "some token" }),
+          createdAt: Date.now() + 1,
+        },
+        {
+          id: "evt-heartbeat-1",
+          type: "heartbeat",
+          data: JSON.stringify({ status: "running" }),
+          createdAt: Date.now() + 2,
+        },
+      ]);
+
+      // Seed an artifact
+      await queryDO(
+        stub,
+        "INSERT INTO artifacts (id, type, url, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "art-1",
+        "branch",
+        "https://github.com/acme/web-app/tree/fix-branch",
+        JSON.stringify({ branchName: "fix-branch" }),
+        Date.now(),
+        Date.now()
+      );
+
+      const res = await stub.fetch("http://internal/internal/child-summary");
+
+      expect(res.status).toBe(200);
+      const detail = await res.json<ChildSessionDetail>();
+
+      // Session info
+      expect(detail.session).toBeDefined();
+      expect(detail.session.id).toBe(externalSessionId);
+      expect(detail.session.repoOwner).toBe("acme");
+      expect(detail.session.title).toBe("Child task");
+      expect(detail.session.status).toBe("created");
+      expect(detail.session.createdAt).toEqual(expect.any(Number));
+
+      // Sandbox should exist (init creates it)
+      expect(detail.sandbox).not.toBeNull();
+      expect(detail.sandbox!.status).toEqual(expect.any(String));
+
+      // Artifacts
+      expect(detail.artifacts).toHaveLength(1);
+      expect(detail.artifacts[0].type).toBe("branch");
+
+      // Recent events should be filtered (no token or heartbeat)
+      const eventTypes = detail.recentEvents.map((e) => e.type);
+      expect(eventTypes).toContain("tool_call");
+      expect(eventTypes).not.toContain("token");
+      expect(eventTypes).not.toContain("heartbeat");
+    });
+
+    it("can include final response and trajectory when requested", async () => {
+      const externalSessionId = `child-summary-rich-${Date.now()}`;
+      const { stub } = await initSession({
+        sessionName: externalSessionId,
+        repoOwner: "acme",
+        repoName: "web-app",
+        title: "Child task",
+        userId: "user-1",
+      });
+      const [{ id: participantId }] = await queryDO<{ id: string }>(
+        stub,
+        "SELECT id FROM participants LIMIT 1"
+      );
+
+      await queryDO(
+        stub,
+        `INSERT INTO messages (id, author_id, content, source, status, created_at, started_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        "msg-rich-1",
+        participantId,
+        "Do the task",
+        "web",
+        "completed",
+        100,
+        110,
+        200
+      );
+
+      await seedEvents(stub, [
+        {
+          id: "evt-tool-rich",
+          type: "tool_call",
+          data: JSON.stringify({ tool: "Bash", args: { command: "npm test" } }),
+          messageId: "msg-rich-1",
+          createdAt: 120,
+        },
+        {
+          id: "evt-token-rich",
+          type: "token",
+          data: JSON.stringify({ content: "Child final answer" }),
+          messageId: "msg-rich-1",
+          createdAt: 180,
+        },
+        {
+          id: "evt-complete-rich",
+          type: "execution_complete",
+          data: JSON.stringify({ success: true }),
+          messageId: "msg-rich-1",
+          createdAt: 200,
+        },
+      ]);
+
+      const res = await stub.fetch(
+        "http://internal/internal/child-summary?include=result,trajectory"
+      );
+
+      expect(res.status).toBe(200);
+      const detail = await res.json<ChildSessionDetail>();
+
+      expect(detail.finalResponse).toMatchObject({
+        messageId: "msg-rich-1",
+        completedAt: 200,
+        textContent: "Child final answer",
+        success: true,
+        toolCalls: [{ tool: "Bash", summary: "Ran: npm test" }],
+      });
+      expect(detail.trajectory?.hasMore).toBe(false);
+      expect(detail.trajectory?.limit).toBe(200);
+      expect(detail.trajectory?.events.map((event) => event.id)).toEqual([
+        "evt-tool-rich",
+        "evt-token-rich",
+        "evt-complete-rich",
+      ]);
+    });
+
+    it("rejects malformed trajectory cursors", async () => {
+      const externalSessionId = `child-summary-bad-cursor-${Date.now()}`;
+      const { stub } = await initSession({
+        sessionName: externalSessionId,
+        repoOwner: "acme",
+        repoName: "web-app",
+        userId: "user-1",
+      });
+
+      const res = await stub.fetch(
+        "http://internal/internal/child-summary?include=trajectory&trajectoryCursor=bad"
+      );
+
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toEqual({ error: "Invalid trajectoryCursor" });
+    });
+
+    it.each(["0", "-1", "abc", "1.5"])(
+      "rejects invalid trajectory limits (%s)",
+      async (trajectoryLimit) => {
+        const externalSessionId = `child-summary-bad-limit-${Date.now()}`;
+        const { stub } = await initSession({
+          sessionName: externalSessionId,
+          repoOwner: "acme",
+          repoName: "web-app",
+          userId: "user-1",
+        });
+
+        const res = await stub.fetch(
+          `http://internal/internal/child-summary?include=trajectory&trajectoryLimit=${trajectoryLimit}`
+        );
+
+        expect(res.status).toBe(400);
+        await expect(res.json()).resolves.toEqual({ error: "Invalid trajectoryLimit" });
+      }
+    );
+
+    it("rejects invalid child summary include values", async () => {
+      const externalSessionId = `child-summary-bad-include-${Date.now()}`;
+      const { stub } = await initSession({
+        sessionName: externalSessionId,
+        repoOwner: "acme",
+        repoName: "web-app",
+        userId: "user-1",
+      });
+
+      const res = await stub.fetch("http://internal/internal/child-summary?include=result,unknown");
+
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toEqual({ error: "Invalid include: unknown" });
+    });
+
+    it("returns 404 when session is not initialized", async () => {
+      const id = env.SESSION.newUniqueId();
+      const stub = env.SESSION.get(id);
+
+      const res = await stub.fetch("http://internal/internal/child-summary");
+
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("POST /internal/cancel", () => {
+    it("transitions session status to cancelled", async () => {
+      const { stub } = await initSession({
+        repoOwner: "acme",
+        repoName: "web-app",
+        userId: "user-1",
+      });
+
+      const res = await stub.fetch("http://internal/internal/cancel", { method: "POST" });
+
+      expect(res.status).toBe(200);
+      const body = await res.json<{ status: string }>();
+      expect(body.status).toBe("cancelled");
+
+      // Verify session status in DO SQLite
+      const rows = await queryDO<{ status: string }>(stub, "SELECT status FROM session LIMIT 1");
+      expect(rows[0].status).toBe("cancelled");
+    });
+
+    it.each(["completed", "cancelled", "archived"])(
+      "returns 409 for session in terminal status (%s)",
+      async (status) => {
+        const { stub } = await initSession({
+          repoOwner: "acme",
+          repoName: "web-app",
+          userId: "user-1",
+        });
+
+        await queryDO(stub, `UPDATE session SET status = '${status}'`);
+
+        const res = await stub.fetch("http://internal/internal/cancel", { method: "POST" });
+
+        expect(res.status).toBe(409);
+        const body = await res.json<{ error: string }>();
+        expect(body.error).toContain(status);
+      }
+    );
+
+    it("returns 404 when no session exists (fresh DO without init)", async () => {
+      const id = env.SESSION.newUniqueId();
+      const stub = env.SESSION.get(id);
+
+      const res = await stub.fetch("http://internal/internal/cancel", { method: "POST" });
+
+      expect(res.status).toBe(404);
+      const body = await res.json<{ error: string }>();
+      expect(body.error).toBe("Session not found");
+    });
+
+    it("stops sandbox when cancelling an active session", async () => {
+      const { stub } = await initSession({
+        repoOwner: "acme",
+        repoName: "web-app",
+        userId: "user-1",
+      });
+
+      await waitForSandboxSpawn(stub);
+
+      // Set session to active to simulate a running session
+      await queryDO(stub, "UPDATE session SET status = 'active'");
+
+      const res = await stub.fetch("http://internal/internal/cancel", { method: "POST" });
+      expect(res.status).toBe(200);
+
+      // Verify sandbox was stopped
+      const sandbox = await queryDO<{ status: string }>(stub, "SELECT status FROM sandbox LIMIT 1");
+      expect(sandbox[0].status).toBe("stopped");
+    });
+  });
+});

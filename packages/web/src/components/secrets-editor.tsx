@@ -1,0 +1,545 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useState, type ClipboardEvent } from "react";
+import useSWR, { mutate } from "swr";
+import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+
+import { normalizeKey, parseMaybeEnvContent, type ParsedEnvEntry } from "@/lib/env-paste";
+
+const VALID_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MAX_KEY_LENGTH = 256;
+const MAX_VALUE_SIZE = 16384;
+const MAX_TOTAL_VALUE_SIZE = 65536;
+const MAX_SECRETS_PER_SCOPE = 50;
+
+const RESERVED_KEYS = new Set([
+  "PYTHONUNBUFFERED",
+  "SANDBOX_ID",
+  "CONTROL_PLANE_URL",
+  "SANDBOX_AUTH_TOKEN",
+  "REPO_OWNER",
+  "REPO_NAME",
+  "GITHUB_APP_TOKEN",
+  "SESSION_CONFIG",
+  "RESTORED_FROM_SNAPSHOT",
+  "OPENCODE_CONFIG_CONTENT",
+  "PATH",
+  "HOME",
+  "USER",
+  "SHELL",
+  "TERM",
+  "PWD",
+  "LANG",
+]);
+
+type SecretRow = {
+  id: string;
+  key: string;
+  value: string;
+  existing: boolean;
+};
+
+type GlobalSecretMeta = {
+  key: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+interface SecretsResponse {
+  secrets: { key: string }[];
+  globalSecrets?: GlobalSecretMeta[];
+}
+
+function validateKey(value: string): string | null {
+  if (!value) return "Key is required";
+  if (value.length > MAX_KEY_LENGTH) return "Key is too long";
+  if (!VALID_KEY_PATTERN.test(value)) return "Key must match [A-Za-z_][A-Za-z0-9_]*";
+  if (RESERVED_KEYS.has(value.toUpperCase())) return `Key '${value}' is reserved`;
+  return null;
+}
+
+function getUtf8Size(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
+function createRow(partial?: Partial<SecretRow>): SecretRow {
+  const id =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2);
+  return {
+    id,
+    key: "",
+    value: "",
+    existing: false,
+    ...partial,
+  };
+}
+
+type SecretsScope = "repo" | "global" | "environment";
+
+/**
+ * Everything scope-specific in one place: where the secrets live, when the
+ * scope is addressable, and the scope's copy. Adding a scope means adding a
+ * case here, not another conditional in the component body.
+ */
+interface SecretsScopePolicy {
+  apiBase: string;
+  ready: boolean;
+  description: string;
+  emptyStateText: string;
+  notReadyText: string;
+  /** Names the scope in the inherited-global override note; null hides the
+   *  inherited section entirely (the global scope inherits from nothing). */
+  overriddenByLabel: string | null;
+}
+
+function resolveScopePolicy(
+  scope: SecretsScope,
+  owner: string | undefined,
+  name: string | undefined,
+  environmentId: string | undefined
+): SecretsScopePolicy {
+  switch (scope) {
+    case "global":
+      return {
+        apiBase: "/api/secrets",
+        ready: true,
+        description: "Secrets apply to all repositories.",
+        emptyStateText: "No global secrets set.",
+        notReadyText: "",
+        overriddenByLabel: null,
+      };
+    case "environment":
+      return {
+        apiBase: `/api/environments/${environmentId}/secrets`,
+        ready: Boolean(environmentId),
+        description:
+          "Values are never shown after save. Secrets apply to sessions launched from this environment.",
+        emptyStateText: "No secrets set for this environment.",
+        notReadyText: "Select an environment to manage secrets.",
+        overriddenByLabel: "environment",
+      };
+    case "repo": {
+      const repoLabel = owner && name ? `${owner}/${name}` : "";
+      return {
+        apiBase: `/api/repos/${owner}/${name}/secrets`,
+        ready: Boolean(owner && name),
+        description: `Values are never shown after save. Secrets apply to ${repoLabel || "the selected repo"}.`,
+        emptyStateText: "No secrets set for this repo.",
+        notReadyText: "Select a repository to manage secrets.",
+        overriddenByLabel: "repo",
+      };
+    }
+  }
+}
+
+export function SecretsEditor({
+  owner,
+  name,
+  environmentId,
+  disabled = false,
+  scope = "repo",
+}: {
+  owner?: string;
+  name?: string;
+  /** Required for scope "environment". */
+  environmentId?: string;
+  disabled?: boolean;
+  scope?: SecretsScope;
+}) {
+  const [rows, setRows] = useState<SecretRow[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
+
+  const scopePolicy = resolveScopePolicy(scope, owner, name, environmentId);
+  const { apiBase, ready } = scopePolicy;
+
+  const {
+    data: secretsData,
+    isLoading: loading,
+    error: fetchError,
+  } = useSWR<SecretsResponse>(ready ? apiBase : null);
+
+  // Sync SWR data into local editable rows
+  const secrets = secretsData?.secrets;
+  useEffect(() => {
+    if (!Array.isArray(secrets)) {
+      setRows([]);
+      return;
+    }
+    setRows(
+      secrets.map((secret: { key: string }) =>
+        createRow({ key: secret.key, value: "", existing: true })
+      )
+    );
+  }, [secrets]);
+
+  // Show fetch errors to the user
+  useEffect(() => {
+    if (fetchError) {
+      setError("Failed to load secrets");
+    }
+  }, [fetchError]);
+
+  const globalRows: GlobalSecretMeta[] =
+    scopePolicy.overriddenByLabel !== null && Array.isArray(secretsData?.globalSecrets)
+      ? secretsData.globalSecrets
+      : [];
+
+  const existingKeySet = useMemo(() => {
+    return new Set(rows.filter((row) => row.existing).map((row) => normalizeKey(row.key)));
+  }, [rows]);
+
+  const applyEnvEntries = useCallback((entries: ParsedEnvEntry[]) => {
+    setRows((current) => {
+      const next = [...current];
+      const keyToIndex = new Map<string, number>();
+
+      next.forEach((row, index) => {
+        const normalized = normalizeKey(row.key);
+        if (normalized) {
+          keyToIndex.set(normalized, index);
+        }
+      });
+
+      for (const entry of entries) {
+        const normalizedKey = normalizeKey(entry.key);
+        const existingIndex = keyToIndex.get(normalizedKey);
+
+        if (existingIndex !== undefined) {
+          next[existingIndex] = {
+            ...next[existingIndex],
+            key: normalizedKey,
+            value: entry.value,
+          };
+          continue;
+        }
+
+        const emptyRowIndex = next.findIndex(
+          (row) => !row.existing && row.key.trim() === "" && row.value.trim() === ""
+        );
+
+        if (emptyRowIndex >= 0) {
+          next[emptyRowIndex] = {
+            ...next[emptyRowIndex],
+            key: normalizedKey,
+            value: entry.value,
+          };
+          keyToIndex.set(normalizedKey, emptyRowIndex);
+          continue;
+        }
+
+        next.push(createRow({ key: normalizedKey, value: entry.value }));
+        keyToIndex.set(normalizedKey, next.length - 1);
+      }
+
+      return next;
+    });
+  }, []);
+
+  // Only the key field uses this — it's the point of entry where pasting
+  // structured `.env` content (a single `KEY=VALUE` or a whole blob) should be
+  // auto-detected and imported. The value field deliberately does NOT parse:
+  // a value is a value. Reinterpreting it as `KEY=VALUE` would corrupt inputs
+  // that legitimately contain `=` (e.g. Azure connection strings begin with
+  // `DefaultEndpointsProtocol=...`).
+  const handlePasteIntoKey = useCallback(
+    (event: ClipboardEvent<HTMLInputElement>) => {
+      const pastedText = event.clipboardData.getData("text");
+      const parsed = parseMaybeEnvContent(pastedText);
+      if (parsed.length === 0) {
+        return;
+      }
+
+      const valid = parsed.filter((entry) => !RESERVED_KEYS.has(entry.key));
+      const skipped = parsed.length - valid.length;
+
+      if (valid.length === 0 && skipped > 0) {
+        event.preventDefault();
+        setError(`All ${skipped} pasted key${skipped === 1 ? " is" : "s are"} reserved`);
+        return;
+      }
+
+      event.preventDefault();
+      applyEnvEntries(valid);
+      setError("");
+
+      const imported = `Imported ${valid.length} secret${valid.length === 1 ? "" : "s"} from paste`;
+      const skippedMsg = skipped > 0 ? ` (skipped ${skipped} reserved)` : "";
+      toast.success(imported + skippedMsg);
+    },
+    [applyEnvEntries]
+  );
+
+  const handleAddRow = () => {
+    setRows((current) => [...current, createRow()]);
+  };
+
+  const handleDeleteRow = async (row: SecretRow) => {
+    if (!ready) return;
+
+    if (!row.existing || !row.key) {
+      setRows((current) => current.filter((item) => item.id !== row.id));
+      return;
+    }
+
+    const normalizedKey = normalizeKey(row.key);
+    setDeletingKey(normalizedKey);
+    setError("");
+
+    try {
+      const response = await fetch(`${apiBase}/${normalizedKey}`, {
+        method: "DELETE",
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        toast.error(data?.error || "Failed to delete secret");
+        return;
+      }
+      toast.success(`Deleted ${normalizedKey}`);
+      mutate(apiBase);
+    } catch {
+      toast.error("Failed to delete secret");
+    } finally {
+      setDeletingKey(null);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!ready) return;
+
+    setError("");
+
+    const entries = rows
+      .filter((row) => row.value.trim().length > 0)
+      .map((row) => ({
+        key: normalizeKey(row.key),
+        value: row.value,
+        existing: row.existing,
+      }));
+
+    if (entries.length === 0) {
+      toast("No changes to save");
+      return;
+    }
+
+    const uniqueKeys = new Set<string>();
+    let totalSize = 0;
+
+    for (const entry of entries) {
+      const keyError = validateKey(entry.key);
+      if (keyError) {
+        setError(keyError);
+        return;
+      }
+      if (uniqueKeys.has(entry.key)) {
+        setError(`Duplicate key '${entry.key}'`);
+        return;
+      }
+      uniqueKeys.add(entry.key);
+
+      const valueSize = getUtf8Size(entry.value);
+      if (valueSize > MAX_VALUE_SIZE) {
+        setError(`Value for '${entry.key}' exceeds ${MAX_VALUE_SIZE} bytes`);
+        return;
+      }
+      totalSize += valueSize;
+    }
+
+    if (totalSize > MAX_TOTAL_VALUE_SIZE) {
+      setError(`Total secret size exceeds ${MAX_TOTAL_VALUE_SIZE} bytes`);
+      return;
+    }
+
+    const netNew = entries.filter((entry) => !existingKeySet.has(entry.key)).length;
+    if (existingKeySet.size + netNew > MAX_SECRETS_PER_SCOPE) {
+      setError(`Would exceed ${MAX_SECRETS_PER_SCOPE} secrets limit`);
+      return;
+    }
+
+    const hasIncompleteNewRow = rows.some(
+      (row) => !row.existing && row.key.trim().length > 0 && row.value.trim().length === 0
+    );
+    if (hasIncompleteNewRow) {
+      setError("Enter a value for new secrets or remove the empty row");
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      const payload: Record<string, string> = {};
+      for (const entry of entries) {
+        payload[entry.key] = entry.value;
+      }
+
+      const response = await fetch(apiBase, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ secrets: payload }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        toast.error(data?.error || "Failed to update secrets");
+        return;
+      }
+
+      toast.success("Secrets updated");
+      mutate(apiBase);
+    } catch {
+      toast.error("Failed to update secrets");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 rounded-md border border-border bg-background p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">Secrets</h3>
+          <p className="text-xs text-muted-foreground">{scopePolicy.description}</p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="xs"
+          onClick={handleAddRow}
+          disabled={!ready || disabled}
+        >
+          Add secret
+        </Button>
+      </div>
+
+      {!ready && <p className="text-xs text-muted-foreground">{scopePolicy.notReadyText}</p>}
+
+      {ready && (
+        <>
+          {loading && <p className="text-xs text-muted-foreground">Loading secrets...</p>}
+
+          {!loading && rows.length === 0 && globalRows.length === 0 && (
+            <p className="text-xs text-muted-foreground">{scopePolicy.emptyStateText}</p>
+          )}
+
+          <div className="space-y-2">
+            {rows.map((row) => (
+              <div key={row.id} className="flex flex-col gap-2 border border-border-muted p-2">
+                <div className="flex flex-wrap gap-2">
+                  <Input
+                    type="text"
+                    value={row.key}
+                    onChange={(e) => {
+                      const keyValue = e.target.value;
+                      setRows((current) =>
+                        current.map((item) =>
+                          item.id === row.id ? { ...item, key: keyValue } : item
+                        )
+                      );
+                    }}
+                    onBlur={(e) => {
+                      const normalized = normalizeKey(e.target.value);
+                      setRows((current) =>
+                        current.map((item) =>
+                          item.id === row.id ? { ...item, key: normalized } : item
+                        )
+                      );
+                    }}
+                    placeholder="KEY_NAME"
+                    disabled={disabled || row.existing}
+                    onPaste={handlePasteIntoKey}
+                    className="flex-1 min-w-[160px] h-auto px-2 py-1 text-xs"
+                  />
+                  <Input
+                    type="password"
+                    value={row.value}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setRows((current) =>
+                        current.map((item) => (item.id === row.id ? { ...item, value: val } : item))
+                      );
+                    }}
+                    placeholder={row.existing ? "••••••••" : "value"}
+                    disabled={disabled}
+                    className="flex-1 min-w-[200px] h-auto px-2 py-1 text-xs"
+                  />
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    size="xs"
+                    onClick={() => handleDeleteRow(row)}
+                    disabled={disabled || deletingKey === normalizeKey(row.key)}
+                  >
+                    {deletingKey === normalizeKey(row.key) ? "Deleting..." : "Delete"}
+                  </Button>
+                </div>
+                {row.existing && (
+                  <p className="text-xs text-muted-foreground">
+                    To update, enter a new value and save.
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Inherited global secrets (scopes that layer on top of global) */}
+          {globalRows.length > 0 && (
+            <div className="mt-4">
+              <p className="text-xs text-muted-foreground mb-2">Inherited from global scope</p>
+              <div className="space-y-2">
+                {globalRows.map((g) => {
+                  const overridden = existingKeySet.has(g.key);
+                  return (
+                    <div
+                      key={g.key}
+                      className={`flex flex-wrap items-center gap-2 border border-border-muted p-2 ${
+                        overridden ? "opacity-40" : "opacity-70"
+                      }`}
+                    >
+                      <Badge variant="info">Global</Badge>
+                      <span className="text-xs text-foreground font-mono">{g.key}</span>
+                      <Input
+                        type="password"
+                        value=""
+                        placeholder="••••••••"
+                        disabled
+                        className="flex-1 min-w-[200px] h-auto px-2 py-1 text-xs"
+                      />
+                      {overridden && (
+                        <span className="text-xs text-muted-foreground">
+                          (overridden by {scopePolicy.overriddenByLabel})
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {error && <p className="mt-3 text-xs text-destructive">{error}</p>}
+
+          <div className="mt-3 flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              onClick={handleSave}
+              disabled={disabled || saving || !ready}
+            >
+              {saving ? "Saving..." : "Save secrets"}
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              Keys are automatically uppercased. Paste a `.env` block into either field to import.
+            </span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

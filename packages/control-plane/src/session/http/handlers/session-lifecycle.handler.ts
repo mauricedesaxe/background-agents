@@ -1,0 +1,543 @@
+import type { Logger } from "../../../logger";
+import type { ParticipantRow, SandboxRow, SessionRow } from "../../types";
+import {
+  getValidModelOrDefault,
+  isValidModel,
+  type RepositoryRef,
+  type SandboxSettings,
+} from "@open-inspect/shared";
+import type { SessionStatus, SpawnSource } from "../../../types";
+import type { SessionRepository } from "../../repository";
+import type { SessionStatusService } from "../../session-status-service";
+import { isDeadSandboxStatus } from "../../../sandbox/lifecycle/decisions";
+import {
+  normalizeSessionTitle,
+  type SessionTitleUpdateOptions,
+  type SessionTitleUpdateResult,
+} from "../../title";
+
+const TERMINAL_STATUSES = new Set<SessionStatus>(["completed", "archived", "cancelled", "failed"]);
+
+/**
+ * Request body for the /internal/init endpoint.
+ * The router constructs this from SessionInitInput — see session/initialize.ts.
+ * Note: `userId` here is the participantUserId from SessionInitInput.
+ */
+interface InitRequest {
+  sessionName: string;
+  repoOwner: string | null;
+  repoName: string | null;
+  repoId?: number | null;
+  defaultBranch?: string | null;
+  branch?: string | null;
+  /**
+   * Ordered member list ([0] = primary, matching the scalar fields).
+   * initialize.ts always sends it for repository sessions (synthesizing a
+   * one-entry list for scalar callers) and an empty list for repo-less ones.
+   */
+  repositories?: RepositoryRef[];
+  /** Launch environment provenance; null for repo-launched/ad-hoc sessions. */
+  environmentId?: string | null;
+  title?: string;
+  model?: string;
+  reasoningEffort?: string;
+  userId: string;
+  scmLogin?: string;
+  scmName?: string;
+  scmEmail?: string;
+  scmToken?: string | null;
+  scmTokenEncrypted?: string | null;
+  scmRefreshTokenEncrypted?: string | null;
+  scmTokenExpiresAt?: number | null;
+  scmUserId?: string | null;
+  parentSessionId?: string | null;
+  spawnSource?: SpawnSource;
+  spawnDepth?: number;
+  codeServerEnabled?: boolean;
+  sandboxSettings?: SandboxSettings;
+}
+
+export interface SessionLifecycleHandlerDeps {
+  repository: Pick<
+    SessionRepository,
+    "upsertSession" | "replaceSessionRepositories" | "createSandbox" | "createParticipant"
+  >;
+  getDurableObjectId: () => string;
+  tokenEncryptionKey?: string;
+  encryptToken: (token: string, encryptionKey: string) => Promise<string>;
+  validateReasoningEffort: (model: string, effort: string | undefined) => string | null;
+  generateId: (bytes?: number) => string;
+  now: () => number;
+  scheduleWarmSandbox: () => void;
+  canInitializeSession: (sessionId: string) => Promise<boolean>;
+  getSession: () => SessionRow | null;
+  getSandbox: () => SandboxRow | null;
+  getSessionRepositoryRows: () => ReturnType<SessionRepository["getSessionRepositoryRows"]>;
+  getPublicSessionId: (session: SessionRow) => string;
+  getParticipantByUserId: (userId: string) => ParticipantRow | null;
+  statusService: SessionStatusService;
+  applySessionTitleUpdate: (
+    title: string,
+    options?: SessionTitleUpdateOptions
+  ) => SessionTitleUpdateResult;
+  stopExecution: (options?: { suppressStatusReconcile?: boolean }) => Promise<void>;
+  getSandboxSocket: () => WebSocket | null;
+  sendToSandbox: (ws: WebSocket, message: string | object) => boolean;
+  /** Mark the sandbox dead and stop the provider sandbox with it. */
+  terminateSandbox: (reason: string) => Promise<void>;
+}
+
+function sessionTitleUpdateStatus(
+  result: Extract<SessionTitleUpdateResult, { ok: false }>
+): 400 | 404 | 409 {
+  switch (result.reason) {
+    case "invalid":
+      return 400;
+    case "not_found":
+      return 404;
+    case "already_set":
+      return 409;
+  }
+}
+
+export interface SessionLifecycleHandler {
+  init: (request: Request, log: Logger) => Promise<Response>;
+  getState: () => Response;
+  updateTitle: (request: Request) => Promise<Response>;
+  archive: (request: Request, log: Logger) => Promise<Response>;
+  unarchive: (request: Request) => Promise<Response>;
+  archiveCascade: (request: Request, url: URL, log: Logger) => Promise<Response>;
+  cancel: () => Promise<Response>;
+}
+
+function parseUserIdBody(body: unknown): { userId?: string } {
+  return body as { userId?: string };
+}
+
+export function createSessionLifecycleHandler(
+  deps: SessionLifecycleHandlerDeps
+): SessionLifecycleHandler {
+  return {
+    async init(request: Request, log: Logger): Promise<Response> {
+      const body = (await request.json()) as InitRequest;
+
+      const sessionId = deps.getDurableObjectId();
+      const sessionName = body.sessionName;
+      const now = deps.now();
+      const repoOwner = body.repoOwner?.trim() || null;
+      const repoName = body.repoName?.trim() || null;
+      const hasRepoOwner = repoOwner !== null;
+      const hasRepoName = repoName !== null;
+      const hasRepoId = body.repoId != null;
+      if (
+        hasRepoOwner !== hasRepoName ||
+        (!hasRepoOwner && hasRepoId) ||
+        (hasRepoOwner && !hasRepoId)
+      ) {
+        return Response.json(
+          { error: "Repository context must include repoOwner, repoName, and repoId together" },
+          { status: 400 }
+        );
+      }
+
+      let encryptedToken = body.scmTokenEncrypted ?? null;
+      if (body.scmToken && deps.tokenEncryptionKey) {
+        try {
+          encryptedToken = await deps.encryptToken(body.scmToken, deps.tokenEncryptionKey);
+          log.debug("Encrypted SCM token for storage");
+        } catch (error) {
+          log.error("Failed to encrypt SCM token", {
+            error: error instanceof Error ? error : String(error),
+          });
+        }
+      }
+
+      const model = getValidModelOrDefault(body.model);
+      if (body.model && !isValidModel(body.model)) {
+        log.warn("Invalid model name, using default", {
+          requested_model: body.model,
+          default_model: model,
+        });
+      }
+
+      const reasoningEffort = deps.validateReasoningEffort(model, body.reasoningEffort);
+      const baseBranch = hasRepoOwner ? body.branch || body.defaultBranch || "main" : null;
+
+      const repositories = body.repositories ?? [];
+      if (repositories.length > 0) {
+        const primary = repositories[0];
+        if (
+          !hasRepoOwner ||
+          primary.repoOwner !== repoOwner ||
+          primary.repoName !== repoName ||
+          primary.repoId !== body.repoId ||
+          primary.baseBranch !== baseBranch
+        ) {
+          return Response.json(
+            { error: "repositories[0] must match the scalar repository mirror" },
+            { status: 400 }
+          );
+        }
+      } else if (hasRepoOwner && body.repositories !== undefined) {
+        return Response.json(
+          { error: "repositories must include the scalar repository" },
+          { status: 400 }
+        );
+      }
+      const memberRepositories: RepositoryRef[] =
+        repositories.length > 0
+          ? repositories
+          : repoOwner !== null && repoName !== null && body.repoId != null && baseBranch !== null
+            ? [{ repoOwner, repoName, repoId: body.repoId, baseBranch }]
+            : [];
+
+      if (!(await deps.canInitializeSession(sessionName))) {
+        return Response.json({ error: "Session initialization was cancelled" }, { status: 409 });
+      }
+
+      const existing = deps.getSession();
+      if (existing) {
+        const matches =
+          existing.session_name === sessionName &&
+          existing.repo_owner === repoOwner &&
+          existing.repo_name === repoName &&
+          existing.repo_id === (hasRepoOwner ? body.repoId : null) &&
+          existing.base_branch === baseBranch &&
+          existing.model === model &&
+          existing.reasoning_effort === reasoningEffort &&
+          existing.parent_session_id === (body.parentSessionId ?? null) &&
+          existing.spawn_source === (body.spawnSource ?? "user") &&
+          existing.spawn_depth === (body.spawnDepth ?? 0) &&
+          existing.environment_id === (body.environmentId ?? null);
+        if (!matches) {
+          return Response.json({ error: "Session ID belongs to another session" }, { status: 409 });
+        }
+        const storedRepositories = deps.getSessionRepositoryRows();
+        const repositoriesAreMatchingPrefix = storedRepositories.every((stored, position) => {
+          const requested = memberRepositories[position];
+          return (
+            requested !== undefined &&
+            stored.position === position &&
+            stored.repo_owner === requested.repoOwner &&
+            stored.repo_name === requested.repoName &&
+            stored.repo_id === requested.repoId &&
+            stored.base_branch === requested.baseBranch
+          );
+        });
+        const repositoriesMatch =
+          storedRepositories.length === memberRepositories.length && repositoriesAreMatchingPrefix;
+        const sandbox = deps.getSandbox();
+        const participant = deps.getParticipantByUserId(body.userId);
+        const canRepairRepositoryPrefix = !sandbox && !participant;
+        if (!repositoriesMatch && (!repositoriesAreMatchingPrefix || !canRepairRepositoryPrefix)) {
+          return Response.json({ error: "Session ID belongs to another session" }, { status: 409 });
+        }
+        if (!repositoriesMatch) {
+          deps.repository.replaceSessionRepositories(
+            memberRepositories.map((repo, position) => ({
+              position,
+              repoOwner: repo.repoOwner,
+              repoName: repo.repoName,
+              repoId: repo.repoId,
+              baseBranch: repo.baseBranch,
+            }))
+          );
+        }
+        let repaired = false;
+        if (!sandbox) {
+          deps.repository.createSandbox({
+            id: deps.generateId(),
+            status: "pending",
+            gitSyncStatus: "pending",
+            createdAt: 0,
+          });
+          repaired = true;
+        }
+        if (!participant) {
+          deps.repository.createParticipant({
+            id: deps.generateId(),
+            userId: body.userId,
+            scmUserId: body.scmUserId ?? null,
+            scmLogin: body.scmLogin ?? null,
+            scmName: body.scmName ?? null,
+            scmEmail: body.scmEmail ?? null,
+            scmAccessTokenEncrypted: encryptedToken,
+            scmRefreshTokenEncrypted: body.scmRefreshTokenEncrypted ?? null,
+            scmTokenExpiresAt: body.scmTokenExpiresAt ?? null,
+            role: "owner",
+            joinedAt: now,
+          });
+          repaired = true;
+        }
+        if (repaired) deps.scheduleWarmSandbox();
+        return Response.json({ sessionId, status: existing.status });
+      }
+
+      deps.repository.upsertSession({
+        id: sessionId,
+        sessionName,
+        title: body.title ?? null,
+        repoOwner,
+        repoName,
+        repoId: hasRepoOwner ? body.repoId : null,
+        baseBranch,
+        model,
+        reasoningEffort,
+        status: "created",
+        parentSessionId: body.parentSessionId ?? null,
+        spawnSource: body.spawnSource ?? "user",
+        spawnDepth: body.spawnDepth ?? 0,
+        codeServerEnabled: body.codeServerEnabled ?? false,
+        sandboxSettings: body.sandboxSettings ? JSON.stringify(body.sandboxSettings) : null,
+        environmentId: body.environmentId ?? null,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      deps.repository.replaceSessionRepositories(
+        memberRepositories.map((repo, position) => ({
+          position,
+          repoOwner: repo.repoOwner,
+          repoName: repo.repoName,
+          repoId: repo.repoId,
+          baseBranch: repo.baseBranch,
+        }))
+      );
+
+      const sandboxId = deps.generateId();
+      deps.repository.createSandbox({
+        id: sandboxId,
+        status: "pending",
+        gitSyncStatus: "pending",
+        createdAt: 0,
+      });
+
+      const participantId = deps.generateId();
+      deps.repository.createParticipant({
+        id: participantId,
+        userId: body.userId,
+        scmUserId: body.scmUserId ?? null,
+        scmLogin: body.scmLogin ?? null,
+        scmName: body.scmName ?? null,
+        scmEmail: body.scmEmail ?? null,
+        scmAccessTokenEncrypted: encryptedToken,
+        scmRefreshTokenEncrypted: body.scmRefreshTokenEncrypted ?? null,
+        scmTokenExpiresAt: body.scmTokenExpiresAt ?? null,
+        role: "owner",
+        joinedAt: now,
+      });
+
+      log.info("Triggering sandbox spawn for new session");
+      deps.scheduleWarmSandbox();
+
+      return Response.json({ sessionId, status: "created" });
+    },
+
+    getState(): Response {
+      const session = deps.getSession();
+      if (!session) {
+        return new Response("Session not found", { status: 404 });
+      }
+
+      const sandbox = deps.getSandbox();
+
+      return Response.json({
+        id: deps.getPublicSessionId(session),
+        title: session.title,
+        repoOwner: session.repo_owner,
+        repoName: session.repo_name,
+        baseBranch: session.base_branch,
+        branchName: session.branch_name,
+        baseSha: session.base_sha,
+        currentSha: session.current_sha,
+        opencodeSessionId: session.opencode_session_id,
+        status: session.status,
+        model: session.model,
+        reasoningEffort: session.reasoning_effort ?? undefined,
+        createdAt: session.created_at,
+        updatedAt: session.updated_at,
+        sandbox: sandbox
+          ? {
+              id: sandbox.id,
+              modalSandboxId: sandbox.modal_sandbox_id,
+              status: sandbox.status,
+              gitSyncStatus: sandbox.git_sync_status,
+              lastHeartbeat: sandbox.last_heartbeat,
+            }
+          : null,
+      });
+    },
+
+    async updateTitle(request: Request): Promise<Response> {
+      const session = deps.getSession();
+      if (!session) {
+        return Response.json({ error: "Session not found" }, { status: 404 });
+      }
+
+      let body: { userId?: string; title?: string };
+      try {
+        body = (await request.json()) as { userId?: string; title?: string };
+      } catch {
+        return Response.json({ error: "Invalid request body" }, { status: 400 });
+      }
+
+      if (!body.userId) {
+        return Response.json({ error: "userId is required" }, { status: 400 });
+      }
+
+      const normalizedTitle = normalizeSessionTitle(body.title);
+      if (!normalizedTitle.ok) {
+        return Response.json({ error: normalizedTitle.error }, { status: 400 });
+      }
+
+      const participant = deps.getParticipantByUserId(body.userId);
+      if (!participant) {
+        return Response.json(
+          { error: "Not authorized to update the session title" },
+          { status: 403 }
+        );
+      }
+
+      const result = deps.applySessionTitleUpdate(normalizedTitle.title, { onlyIfUnset: false });
+      if (!result.ok) {
+        return Response.json({ error: result.error }, { status: sessionTitleUpdateStatus(result) });
+      }
+
+      return Response.json({ title: result.title });
+    },
+
+    async archive(request: Request, _log: Logger): Promise<Response> {
+      const session = deps.getSession();
+      if (!session) {
+        return Response.json({ error: "Session not found" }, { status: 404 });
+      }
+
+      let body: { userId?: string };
+      try {
+        body = parseUserIdBody(await request.json());
+      } catch {
+        return Response.json({ error: "Invalid request body" }, { status: 400 });
+      }
+
+      if (!body.userId) {
+        return Response.json({ error: "userId is required" }, { status: 400 });
+      }
+
+      const participant = deps.getParticipantByUserId(body.userId);
+      if (!participant) {
+        return Response.json({ error: "Not authorized to archive this session" }, { status: 403 });
+      }
+
+      const result = await deps.statusService.archive("session_archived", {
+        beforeProviderArchive: async () => {
+          if (!TERMINAL_STATUSES.has(session.status)) {
+            await deps.stopExecution({ suppressStatusReconcile: true });
+          }
+        },
+      });
+      if (result === "in_progress") {
+        return Response.json({ error: "Session archive is already in progress" }, { status: 409 });
+      }
+      if (result === "failed") {
+        return Response.json({ error: "Sandbox archive must be retried" }, { status: 503 });
+      }
+
+      return Response.json({ status: "archived" });
+    },
+
+    async unarchive(request: Request): Promise<Response> {
+      const session = deps.getSession();
+      if (!session) {
+        return Response.json({ error: "Session not found" }, { status: 404 });
+      }
+
+      let body: { userId?: string };
+      try {
+        body = parseUserIdBody(await request.json());
+      } catch {
+        return Response.json({ error: "Invalid request body" }, { status: 400 });
+      }
+
+      if (!body.userId) {
+        return Response.json({ error: "userId is required" }, { status: 400 });
+      }
+
+      const participant = deps.getParticipantByUserId(body.userId);
+      if (!participant) {
+        return Response.json(
+          { error: "Not authorized to unarchive this session" },
+          { status: 403 }
+        );
+      }
+
+      if (!(await deps.statusService.unarchive())) {
+        return Response.json({ error: "Session archive is in progress" }, { status: 409 });
+      }
+
+      return Response.json({ status: "active" });
+    },
+
+    /**
+     * Trusted DO-to-DO archive used by the parent→child archive cascade. The
+     * only caller is another SessionDO (never a client), so there is no
+     * participant check. Any in-flight execution is stopped with the status
+     * reconcile suppressed so the archived status sticks instead of being
+     * flipped back to active/completed once the current run finishes.
+     *
+     * transitionSessionStatus("archived") cascades onward to this session's own
+     * children, so grandchildren are archived without extra recursion here.
+     */
+    async archiveCascade(_request: Request, _url: URL, _log: Logger): Promise<Response> {
+      const session = deps.getSession();
+      // Child DO may never have been created (or was already torn down); the
+      // cascade is best-effort, so treat a missing session as already done.
+      if (!session) {
+        return Response.json({ status: "archived" });
+      }
+
+      const result = await deps.statusService.archive("session_archived", {
+        retryOnFailure: true,
+        beforeProviderArchive: async () => {
+          if (session.status !== "archived" && !TERMINAL_STATUSES.has(session.status)) {
+            await deps.stopExecution({ suppressStatusReconcile: true });
+          }
+        },
+      });
+      if (result !== "archived") {
+        return Response.json({ status: "archive_pending" }, { status: 202 });
+      }
+
+      return Response.json({ status: "archived" });
+    },
+
+    async cancel(): Promise<Response> {
+      const session = deps.getSession();
+      if (!session) {
+        return Response.json({ error: "Session not found" }, { status: 404 });
+      }
+
+      if (TERMINAL_STATUSES.has(session.status)) {
+        return Response.json({ error: `Session already ${session.status}` }, { status: 409 });
+      }
+
+      await deps.statusService.transition("cancelled");
+      await deps.stopExecution({ suppressStatusReconcile: true });
+
+      const sandbox = deps.getSandbox();
+      if (sandbox) {
+        if (!isDeadSandboxStatus(sandbox.status)) {
+          const sandboxWs = deps.getSandboxSocket();
+          if (sandboxWs) {
+            deps.sendToSandbox(sandboxWs, { type: "shutdown" });
+          }
+        }
+        // Dead rows go through too. terminateSandbox owns the policy: it no-ops
+        // on a row whose stop already landed, and retries one whose stop didn't.
+        // Filtering them out here is what left a `stale` row's VM running.
+        await deps.terminateSandbox("session_cancelled");
+      }
+
+      return Response.json({ status: "cancelled" });
+    },
+  };
+}

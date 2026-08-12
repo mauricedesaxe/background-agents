@@ -1,0 +1,178 @@
+"use client";
+
+import { useState, useCallback } from "react";
+import Link from "next/link";
+import useSWR, { mutate } from "swr";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { buildSessionHref, type SessionItem } from "@/components/session-sidebar";
+import { formatRepoLabel } from "@/lib/repo-label";
+import {
+  buildSessionsPageKey,
+  isUnarchivedSessionListKey,
+  removeSessionFromList,
+  type SessionListResponse,
+} from "@/lib/session-list";
+import { formatRelativeTime } from "@/lib/time";
+
+const PAGE_SIZE = 20;
+const ARCHIVED_SESSIONS_KEY = buildSessionsPageKey({
+  status: "archived",
+  limit: PAGE_SIZE,
+  offset: 0,
+});
+
+export function DataControlsSettings() {
+  const [extraSessions, setExtraSessions] = useState<SessionItem[]>([]);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [offset, setOffset] = useState(0);
+
+  const { data, isLoading: loading } = useSWR<SessionListResponse>(ARCHIVED_SESSIONS_KEY, {
+    onSuccess: (data) => {
+      const fetched = data.sessions || [];
+      setHasMore(data.hasMore);
+      setOffset(fetched.length);
+      setExtraSessions([]);
+    },
+  });
+
+  const firstPageSessions = data?.sessions ?? [];
+  const sessions = [...firstPageSessions, ...extraSessions];
+
+  const handleLoadMore = useCallback(async () => {
+    setLoadingMore(true);
+    try {
+      const res = await fetch(
+        buildSessionsPageKey({
+          status: "archived",
+          limit: PAGE_SIZE,
+          offset,
+        })
+      );
+      if (res.ok) {
+        const resData: SessionListResponse = await res.json();
+        const fetched: SessionItem[] = resData.sessions || [];
+        setExtraSessions((prev) => [...prev, ...fetched]);
+        setHasMore(resData.hasMore);
+        setOffset((prev) => prev + fetched.length);
+      }
+    } catch (error) {
+      console.error("Failed to fetch archived sessions:", error);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [offset]);
+
+  const handleUnarchive = async (sessionId: string) => {
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/unarchive`, { method: "POST" });
+      if (!res.ok) {
+        toast.error("Failed to unarchive session");
+        return;
+      }
+      toast.success("Session unarchived");
+      await mutate<SessionListResponse>(
+        ARCHIVED_SESSIONS_KEY,
+        (current) =>
+          current
+            ? { ...current, sessions: removeSessionFromList(current.sessions, sessionId) }
+            : current,
+        { revalidate: false, populateCache: true }
+      );
+      setExtraSessions((prev) => prev.filter((s) => s.id !== sessionId));
+      // Server-side list shifts down by one, so the next Load more must
+      // start one offset earlier to avoid skipping the session that took
+      // this row's slot.
+      setOffset((prev) => prev - 1);
+      mutate(isUnarchivedSessionListKey);
+    } catch {
+      toast.error("Failed to unarchive session");
+    }
+  };
+
+  const sessionCount = sessions.length;
+
+  return (
+    <div>
+      <h2 className="text-xl font-semibold text-foreground mb-1">Data Controls</h2>
+      <p className="text-sm text-muted-foreground mb-6">Manage your archived chats and data.</p>
+
+      <div>
+        <h3 className="text-base font-medium text-foreground mb-1">Archived chats</h3>
+        <p className="text-sm text-muted-foreground mb-4">
+          {loading
+            ? "Loading..."
+            : sessionCount === 0
+              ? "No archived sessions"
+              : `${sessionCount}${hasMore ? "+" : ""} archived session${sessionCount !== 1 ? "s" : ""}`}
+        </p>
+
+        {loading ? (
+          <div className="flex justify-center py-8">
+            <div className="animate-spin rounded-full h-6 w-6 border-2 border-current border-t-transparent text-muted-foreground" />
+          </div>
+        ) : sessions.length === 0 ? (
+          <div className="py-8 text-center text-sm text-muted-foreground">
+            No archived sessions. Sessions you archive will appear here.
+          </div>
+        ) : (
+          <div className="border border-border rounded-md divide-y divide-border-muted">
+            {sessions.map((session) => (
+              <ArchivedSessionRow
+                key={session.id}
+                session={session}
+                onUnarchive={handleUnarchive}
+              />
+            ))}
+          </div>
+        )}
+
+        {hasMore && !loading && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleLoadMore}
+            disabled={loadingMore}
+            className="mt-4 w-full"
+          >
+            {loadingMore ? "Loading..." : "Load more"}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ArchivedSessionRow({
+  session,
+  onUnarchive,
+}: {
+  session: SessionItem;
+  onUnarchive: (id: string) => void;
+}) {
+  const repoInfo = formatRepoLabel(session.repoOwner, session.repoName);
+  const displayTitle = session.title || repoInfo;
+  const timestamp = session.updatedAt || session.createdAt;
+  const relativeTime = formatRelativeTime(timestamp);
+  return (
+    <div className="group flex items-center justify-between px-4 py-3 hover:bg-muted transition">
+      <Link href={buildSessionHref(session)} className="flex-1 min-w-0 mr-3">
+        <div className="truncate text-sm font-medium text-foreground">{displayTitle}</div>
+        <div className="flex items-center gap-1 mt-0.5 text-xs text-muted-foreground">
+          <span>{relativeTime}</span>
+          <span>&middot;</span>
+          <span className="truncate">{repoInfo}</span>
+        </div>
+      </Link>
+      <Button
+        variant="outline"
+        size="xs"
+        onClick={() => onUnarchive(session.id)}
+        className="flex-shrink-0 opacity-0 group-hover:opacity-100"
+      >
+        Unarchive
+      </Button>
+    </div>
+  );
+}

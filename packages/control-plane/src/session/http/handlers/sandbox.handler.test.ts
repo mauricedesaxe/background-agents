@@ -1,0 +1,670 @@
+import { describe, expect, it, vi } from "vitest";
+import type { Logger } from "../../../logger";
+import type { SandboxRow, SessionRow } from "../../types";
+import { createSandboxHandler } from "./sandbox.handler";
+
+function createHandler() {
+  const repository = {
+    createParticipant: vi.fn(),
+    createArtifact: vi.fn(),
+    createEvent: vi.fn(),
+    getProcessingMessage: vi.fn(),
+  };
+  const processSandboxEvent = vi.fn();
+  const getSandbox = vi.fn<() => SandboxRow | null>();
+  const isValidSandboxToken = vi.fn();
+  const getSession = vi.fn<() => SessionRow | null>();
+  const refreshOpenAIToken = vi.fn();
+  const isOpenAISecretsConfigured = vi.fn();
+  const getScmCredentials = vi.fn();
+  const broadcast = vi.fn();
+  const messenger = { broadcast, sendToSandbox: vi.fn(() => true) };
+  const generateId = vi.fn(() => "participant-1");
+  const now = vi.fn(() => 1234);
+
+  const log = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    child: vi.fn(),
+  } as unknown as Logger;
+
+  const sandboxHandler = createSandboxHandler({
+    repository,
+    processSandboxEvent,
+    getSandbox,
+    isValidSandboxToken,
+    getSession,
+    refreshOpenAIToken,
+    isOpenAISecretsConfigured,
+    getScmCredentials,
+    messenger,
+    generateId,
+    now,
+  });
+
+  // Bind the request-scoped log so call sites exercise the threading without
+  // repeating it at every invocation.
+  const handler = {
+    ...sandboxHandler,
+    verifySandboxToken: (request: Request) => sandboxHandler.verifySandboxToken(request, log),
+    openaiTokenRefresh: () => sandboxHandler.openaiTokenRefresh(log),
+    scmCredentials: () => sandboxHandler.scmCredentials(log),
+    tunnelUrls: () => sandboxHandler.tunnelUrls(log),
+  };
+
+  return {
+    handler,
+    repository,
+    processSandboxEvent,
+    getSandbox,
+    isValidSandboxToken,
+    getSession,
+    refreshOpenAIToken,
+    isOpenAISecretsConfigured,
+    getScmCredentials,
+    broadcast,
+    generateId,
+    now,
+    log,
+  };
+}
+
+describe("createSandboxHandler", () => {
+  it("processes sandbox event and returns ok response", async () => {
+    const { handler, processSandboxEvent } = createHandler();
+    const event = {
+      type: "heartbeat",
+      sandboxId: "sandbox-1",
+      status: "running",
+      timestamp: 123,
+    };
+
+    const response = await handler.sandboxEvent(
+      new Request("http://internal/internal/sandbox/event", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(event),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "ok" });
+    expect(processSandboxEvent).toHaveBeenCalledWith(event);
+  });
+
+  it("rejects malformed sandbox events", async () => {
+    const { handler, processSandboxEvent } = createHandler();
+
+    const response = await handler.sandboxEvent(
+      new Request("http://internal/internal/sandbox/event", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "heartbeat" }),
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Invalid sandbox event" });
+    expect(processSandboxEvent).not.toHaveBeenCalled();
+  });
+
+  it("adds participant with defaults and returns id", async () => {
+    const { handler, repository, generateId, now } = createHandler();
+
+    const response = await handler.addParticipant(
+      new Request("http://internal/internal/participants", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          userId: "user-1",
+          scmLogin: "octocat",
+          scmName: "The Octocat",
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ id: "participant-1", status: "added" });
+    expect(generateId).toHaveBeenCalled();
+    expect(now).toHaveBeenCalled();
+    expect(repository.createParticipant).toHaveBeenCalledWith({
+      id: "participant-1",
+      userId: "user-1",
+      scmLogin: "octocat",
+      scmName: "The Octocat",
+      scmEmail: null,
+      role: "member",
+      joinedAt: 1234,
+    });
+  });
+
+  it("creates a media artifact row and matching timeline event", async () => {
+    const { handler, getSandbox, repository, broadcast, generateId } = createHandler();
+    getSandbox.mockReturnValue({
+      id: "sandbox-row-1",
+      modal_sandbox_id: "sandbox-1",
+    } as SandboxRow);
+    repository.getProcessingMessage.mockReturnValue({ id: "msg-1" });
+    generateId.mockReturnValueOnce("event-1");
+
+    const response = await handler.createMediaArtifact(
+      new Request("http://internal/internal/create-media-artifact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          artifactId: "artifact-1",
+          artifactType: "screenshot",
+          objectKey: "sessions/session-1/media/artifact-1.png",
+          metadata: {
+            objectKey: "sessions/session-1/media/artifact-1.png",
+            mimeType: "image/png",
+            sizeBytes: 128,
+          },
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "ok", artifactId: "artifact-1" });
+    expect(repository.createArtifact).toHaveBeenCalledWith({
+      id: "artifact-1",
+      type: "screenshot",
+      url: "sessions/session-1/media/artifact-1.png",
+      metadata: JSON.stringify({
+        objectKey: "sessions/session-1/media/artifact-1.png",
+        mimeType: "image/png",
+        sizeBytes: 128,
+      }),
+      createdAt: 1234,
+    });
+    expect(repository.createEvent).toHaveBeenCalledWith({
+      id: "event-1",
+      type: "artifact",
+      data: JSON.stringify({
+        type: "artifact",
+        artifactType: "screenshot",
+        artifactId: "artifact-1",
+        url: "sessions/session-1/media/artifact-1.png",
+        metadata: {
+          objectKey: "sessions/session-1/media/artifact-1.png",
+          mimeType: "image/png",
+          sizeBytes: 128,
+        },
+        messageId: "msg-1",
+        sandboxId: "sandbox-1",
+        timestamp: 1.234,
+      }),
+      messageId: "msg-1",
+      createdAt: 1234,
+    });
+    expect(broadcast).toHaveBeenNthCalledWith(1, {
+      type: "artifact_created",
+      artifact: {
+        id: "artifact-1",
+        type: "screenshot",
+        url: "sessions/session-1/media/artifact-1.png",
+        metadata: {
+          objectKey: "sessions/session-1/media/artifact-1.png",
+          mimeType: "image/png",
+          sizeBytes: 128,
+        },
+        createdAt: 1234,
+        updatedAt: 1234,
+      },
+    });
+    expect(broadcast).toHaveBeenNthCalledWith(2, {
+      type: "sandbox_event",
+      event: {
+        type: "artifact",
+        artifactType: "screenshot",
+        artifactId: "artifact-1",
+        url: "sessions/session-1/media/artifact-1.png",
+        metadata: {
+          objectKey: "sessions/session-1/media/artifact-1.png",
+          mimeType: "image/png",
+          sizeBytes: 128,
+        },
+        messageId: "msg-1",
+        sandboxId: "sandbox-1",
+        timestamp: 1.234,
+      },
+    });
+  });
+
+  it("rejects malformed media artifact bodies", async () => {
+    const { handler, repository, broadcast } = createHandler();
+
+    const response = await handler.createMediaArtifact(
+      new Request("http://internal/internal/create-media-artifact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ artifactId: "artifact-1", objectKey: 123 }),
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Invalid media artifact body" });
+    expect(repository.createArtifact).not.toHaveBeenCalled();
+    expect(repository.createEvent).not.toHaveBeenCalled();
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  it("rejects media artifacts when no prompt is active", async () => {
+    const { handler, getSandbox, repository, broadcast } = createHandler();
+    getSandbox.mockReturnValue({
+      id: "sandbox-row-1",
+      modal_sandbox_id: "sandbox-1",
+    } as SandboxRow);
+    repository.getProcessingMessage.mockReturnValue(null);
+
+    const response = await handler.createMediaArtifact(
+      new Request("http://internal/internal/create-media-artifact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          artifactId: "artifact-1",
+          artifactType: "screenshot",
+          objectKey: "sessions/session-1/media/artifact-1.png",
+        }),
+      })
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "No active prompt" });
+    expect(repository.createArtifact).not.toHaveBeenCalled();
+    expect(repository.createEvent).not.toHaveBeenCalled();
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when sandbox token is missing", async () => {
+    const { handler } = createHandler();
+
+    const response = await handler.verifySandboxToken(
+      new Request("http://internal/internal/verify-sandbox-token", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ valid: false, error: "Missing token" });
+  });
+
+  it("returns 400 when sandbox token is not a string", async () => {
+    const { handler, isValidSandboxToken } = createHandler();
+
+    const response = await handler.verifySandboxToken(
+      new Request("http://internal/internal/verify-sandbox-token", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: 123 }),
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ valid: false, error: "Missing token" });
+    expect(isValidSandboxToken).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 when sandbox is missing", async () => {
+    const { handler, getSandbox, log } = createHandler();
+    getSandbox.mockReturnValue(null);
+
+    const response = await handler.verifySandboxToken(
+      new Request("http://internal/internal/verify-sandbox-token", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: "abc" }),
+      })
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ valid: false, error: "No sandbox" });
+    expect(log.warn).toHaveBeenCalledWith("Sandbox token verification failed: no sandbox");
+  });
+
+  it.each(["stopped", "stale", "failed"] as const)(
+    "returns 410 without comparing the token when sandbox is %s",
+    async (status) => {
+      const { handler, getSandbox, isValidSandboxToken, log } = createHandler();
+      getSandbox.mockReturnValue({ status } as SandboxRow);
+
+      const response = await handler.verifySandboxToken(
+        new Request("http://internal/internal/verify-sandbox-token", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ token: "abc" }),
+        })
+      );
+
+      expect(response.status).toBe(410);
+      expect(await response.json()).toEqual({ valid: false, error: "Sandbox not active" });
+      expect(log.warn).toHaveBeenCalledWith("Sandbox token verification failed: sandbox is dead", {
+        status,
+      });
+      expect(isValidSandboxToken).not.toHaveBeenCalled();
+    }
+  );
+
+  // Boot-time states (spawning/connecting) must authenticate — the git
+  // credential broker is called during the initial clone, before the sandbox
+  // WebSocket connect flips the status to ready. "running" is not currently
+  // produced by any lifecycle path but remains a valid live state.
+  it.each([
+    "pending",
+    "spawning",
+    "connecting",
+    "warming",
+    "syncing",
+    "ready",
+    "running",
+    "snapshotting",
+  ] as const)("accepts a valid token when sandbox is %s", async (status) => {
+    const { handler, getSandbox, isValidSandboxToken } = createHandler();
+    getSandbox.mockReturnValue({ status } as SandboxRow);
+    vi.mocked(isValidSandboxToken).mockResolvedValue(true);
+
+    const response = await handler.verifySandboxToken(
+      new Request("http://internal/internal/verify-sandbox-token", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: "abc" }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ valid: true });
+  });
+
+  it("returns 401 when sandbox token is invalid", async () => {
+    const { handler, getSandbox, isValidSandboxToken, log } = createHandler();
+    getSandbox.mockReturnValue({ status: "running" } as SandboxRow);
+    vi.mocked(isValidSandboxToken).mockResolvedValue(false);
+
+    const response = await handler.verifySandboxToken(
+      new Request("http://internal/internal/verify-sandbox-token", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: "abc" }),
+      })
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ valid: false, error: "Invalid token" });
+    expect(log.warn).toHaveBeenCalledWith("Sandbox token verification failed: token mismatch");
+  });
+
+  it("returns 200 when sandbox token is valid", async () => {
+    const { handler, getSandbox, isValidSandboxToken, log } = createHandler();
+    getSandbox.mockReturnValue({ status: "running" } as SandboxRow);
+    vi.mocked(isValidSandboxToken).mockResolvedValue(true);
+
+    const response = await handler.verifySandboxToken(
+      new Request("http://internal/internal/verify-sandbox-token", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: "abc" }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ valid: true });
+    expect(log.info).toHaveBeenCalledWith("Sandbox token verified successfully");
+  });
+
+  it("returns 404 when openai token refresh has no session", async () => {
+    const { handler, getSession } = createHandler();
+    getSession.mockReturnValue(null);
+
+    const response = await handler.openaiTokenRefresh();
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "No session" });
+  });
+
+  it("returns 500 when openai secrets are not configured", async () => {
+    const { handler, getSession, isOpenAISecretsConfigured } = createHandler();
+    getSession.mockReturnValue({} as SessionRow);
+    isOpenAISecretsConfigured.mockReturnValue(false);
+
+    const response = await handler.openaiTokenRefresh();
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "Secrets not configured" });
+  });
+
+  it("returns mapped service error from openai token refresh", async () => {
+    const { handler, getSession, isOpenAISecretsConfigured, refreshOpenAIToken } = createHandler();
+    getSession.mockReturnValue({ id: "session-1" } as SessionRow);
+    isOpenAISecretsConfigured.mockReturnValue(true);
+    refreshOpenAIToken.mockResolvedValue({
+      ok: false,
+      status: 502,
+      error: "OpenAI token refresh failed",
+    });
+
+    const response = await handler.openaiTokenRefresh();
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: "OpenAI token refresh failed" });
+  });
+
+  it("returns openai access token payload on success", async () => {
+    const { handler, getSession, isOpenAISecretsConfigured, refreshOpenAIToken, log } =
+      createHandler();
+    const session = { id: "session-1" } as SessionRow;
+    getSession.mockReturnValue(session);
+    isOpenAISecretsConfigured.mockReturnValue(true);
+    refreshOpenAIToken.mockResolvedValue({
+      ok: true,
+      accessToken: "access-token",
+      expiresIn: 3600,
+      accountId: "acct_123",
+    });
+
+    const response = await handler.openaiTokenRefresh();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      access_token: "access-token",
+      expires_in: 3600,
+      account_id: "acct_123",
+    });
+    expect(refreshOpenAIToken).toHaveBeenCalledWith(session, log);
+  });
+
+  it("returns 404 when scm credentials have no session", async () => {
+    const { handler, getSession, getScmCredentials } = createHandler();
+    getSession.mockReturnValue(null);
+
+    const response = await handler.scmCredentials();
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "No session" });
+    expect(getScmCredentials).not.toHaveBeenCalled();
+  });
+
+  it("returns mapped service error from scm credentials", async () => {
+    const { handler, getSession, getScmCredentials } = createHandler();
+    getSession.mockReturnValue({
+      id: "session-1",
+      repo_owner: "acme",
+      repo_name: "web-app",
+    } as SessionRow);
+    getScmCredentials.mockResolvedValue({
+      ok: false,
+      status: 503,
+      error: "GitHub App not configured",
+    });
+
+    const response = await handler.scmCredentials();
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "GitHub App not configured" });
+  });
+
+  it("rejects scm credentials for no-repository sessions", async () => {
+    const { handler, getSession, getScmCredentials } = createHandler();
+    getSession.mockReturnValue({
+      id: "session-1",
+      repo_owner: null,
+      repo_name: null,
+    } as SessionRow);
+
+    const response = await handler.scmCredentials();
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "SCM credentials require a repository context",
+    });
+    expect(getScmCredentials).not.toHaveBeenCalled();
+  });
+
+  it("returns scm credentials payload on success", async () => {
+    const { handler, getSession, getScmCredentials } = createHandler();
+    getSession.mockReturnValue({
+      id: "session-1",
+      repo_owner: "acme",
+      repo_name: "web-app",
+    } as SessionRow);
+    const expiresAt = Date.now() + 60 * 60 * 1000;
+    getScmCredentials.mockResolvedValue({
+      ok: true,
+      username: "x-access-token",
+      password: "ghs_secret",
+      expiresAtEpochMs: expiresAt,
+    });
+
+    const response = await handler.scmCredentials();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toEqual({
+      username: "x-access-token",
+      password: "ghs_secret",
+      expires_at_epoch_ms: expiresAt,
+    });
+  });
+
+  it("returns 404 when tunnel URLs have no sandbox", async () => {
+    const { handler, getSandbox } = createHandler();
+    getSandbox.mockReturnValue(null);
+
+    const response = await handler.tunnelUrls();
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "No sandbox" });
+  });
+
+  it("returns an empty map when no tunnel URLs are stored yet", async () => {
+    const { handler, getSandbox } = createHandler();
+    getSandbox.mockReturnValue({ tunnel_urls: null } as unknown as SandboxRow);
+
+    const response = await handler.tunnelUrls();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toEqual({ tunnelUrls: {} });
+  });
+
+  it("returns parsed tunnel URLs on success", async () => {
+    const { handler, getSandbox } = createHandler();
+    getSandbox.mockReturnValue({
+      tunnel_urls: JSON.stringify({ "3000": "https://a.example", "5000": "https://b.example" }),
+    } as unknown as SandboxRow);
+
+    const response = await handler.tunnelUrls();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toEqual({
+      tunnelUrls: { "3000": "https://a.example", "5000": "https://b.example" },
+    });
+  });
+
+  it("returns 500 when stored tunnel URLs are malformed JSON", async () => {
+    const { handler, getSandbox, log } = createHandler();
+    getSandbox.mockReturnValue({ tunnel_urls: "{not json" } as unknown as SandboxRow);
+
+    const response = await handler.tunnelUrls();
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "Invalid stored tunnel URLs" });
+    expect(log.warn).toHaveBeenCalled();
+  });
+
+  it("returns 500 when stored tunnel URLs are not an object", async () => {
+    const { handler, getSandbox, log } = createHandler();
+    getSandbox.mockReturnValue({
+      tunnel_urls: JSON.stringify(["3000", "5000"]),
+    } as unknown as SandboxRow);
+
+    const response = await handler.tunnelUrls();
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "Invalid stored tunnel URLs" });
+    expect(log.warn).toHaveBeenCalled();
+  });
+
+  it("returns 500 when a stored tunnel URL value is not a string", async () => {
+    const { handler, getSandbox, log } = createHandler();
+    getSandbox.mockReturnValue({
+      tunnel_urls: JSON.stringify({ "3000": "https://a.example", "5000": 5000 }),
+    } as unknown as SandboxRow);
+
+    const response = await handler.tunnelUrls();
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "Invalid stored tunnel URLs" });
+    expect(log.warn).toHaveBeenCalled();
+  });
+
+  describe("createBoardArtifact", () => {
+    function boardRequest(body: unknown): Request {
+      return new Request("http://internal/internal/create-board-artifact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+
+    it("returns 400 when artifactId, boardId, or title is missing", async () => {
+      const { handler, repository, broadcast } = createHandler();
+      const response = await handler.createBoardArtifact(
+        boardRequest({ boardId: "b1", title: "x" })
+      );
+      expect(response.status).toBe(400);
+      expect(repository.createArtifact).not.toHaveBeenCalled();
+      expect(broadcast).not.toHaveBeenCalled();
+    });
+
+    it("persists a board artifact and broadcasts artifact_created", async () => {
+      const { handler, repository, broadcast } = createHandler();
+      const response = await handler.createBoardArtifact(
+        boardRequest({ artifactId: "art-1", boardId: "board-1", title: "Arch" })
+      );
+
+      expect(response.status).toBe(200);
+      expect(repository.createArtifact).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: "art-1",
+          type: "board",
+          url: null,
+          metadata: JSON.stringify({ boardId: "board-1", title: "Arch" }),
+        })
+      );
+      expect(broadcast).toHaveBeenCalledWith({
+        type: "artifact_created",
+        artifact: expect.objectContaining({
+          id: "art-1",
+          type: "board",
+          url: null,
+          metadata: { boardId: "board-1", title: "Arch" },
+        }),
+      });
+    });
+  });
+});

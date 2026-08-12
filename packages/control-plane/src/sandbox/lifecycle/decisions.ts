@@ -1,0 +1,675 @@
+/**
+ * Pure decision functions for sandbox lifecycle management.
+ *
+ * These functions contain no side effects - they take state and configuration
+ * as input and return decisions as output. This enables comprehensive unit
+ * testing without mocking external dependencies.
+ *
+ * The SandboxLifecycleManager uses these functions to make decisions,
+ * then executes the appropriate side effects (API calls, broadcasts, etc.)
+ */
+
+import type { SandboxStatus } from "../../types";
+import { durationMs, elapsed, type DurationMs, type EpochMs } from "../../time";
+
+// ==================== Dead-Sandbox Policy ====================
+
+/**
+ * States in which no live sandbox can legitimately act on the session: spawn
+ * gave up (failed) or the sandbox was shut down (stopped/stale). Deny-list,
+ * not allowlist: an unknown future state is treated as live, so callers fall
+ * through to their own checks (e.g. token comparison) instead of locking out
+ * every sandbox.
+ */
+export const DEAD_SANDBOX_STATUSES: ReadonlySet<SandboxStatus> = new Set([
+  "stopped",
+  "stale",
+  "failed",
+]);
+
+export function isDeadSandboxStatus(status: SandboxStatus): boolean {
+  return DEAD_SANDBOX_STATUSES.has(status);
+}
+
+// ==================== Circuit Breaker ====================
+
+/**
+ * Circuit breaker state from the database.
+ */
+export interface CircuitBreakerState {
+  /** Number of consecutive spawn failures */
+  failureCount: number;
+  /** Timestamp of the last spawn failure */
+  lastFailureTime: number;
+}
+
+/**
+ * Circuit breaker configuration.
+ */
+export interface CircuitBreakerConfig {
+  /** Number of failures before circuit opens (default: 3) */
+  threshold: number;
+  /** Time window in ms after which failures reset (default: 5 minutes) */
+  windowMs: number;
+}
+
+/**
+ * Default circuit breaker configuration.
+ */
+export const DEFAULT_CIRCUIT_BREAKER_CONFIG: CircuitBreakerConfig = {
+  threshold: 3,
+  windowMs: 5 * 60 * 1000, // 5 minutes
+};
+
+/**
+ * Circuit breaker decision result.
+ */
+export interface CircuitBreakerDecision {
+  /** Whether spawning should proceed */
+  shouldProceed: boolean;
+  /** Whether the failure count should be reset (window passed) */
+  shouldReset: boolean;
+  /** Time remaining in ms until the circuit closes (only set if blocked) */
+  waitTimeMs?: number;
+}
+
+/**
+ * Evaluate whether the circuit breaker allows spawning.
+ *
+ * The circuit breaker prevents rapid spawn attempts after repeated failures,
+ * giving the underlying infrastructure time to recover.
+ *
+ * @param state - Current circuit breaker state from database
+ * @param config - Circuit breaker configuration
+ * @param now - Current timestamp
+ * @returns Decision with shouldProceed, shouldReset, and optional waitTimeMs
+ *
+ * @example
+ * ```typescript
+ * const decision = evaluateCircuitBreaker(
+ *   { failureCount: 3, lastFailureTime: now - 60000 },
+ *   { threshold: 3, windowMs: 300000 },
+ *   now
+ * );
+ * if (!decision.shouldProceed) {
+ *   console.log(`Wait ${decision.waitTimeMs}ms before retrying`);
+ * }
+ * ```
+ */
+export function evaluateCircuitBreaker(
+  state: CircuitBreakerState,
+  config: CircuitBreakerConfig,
+  now: number
+): CircuitBreakerDecision {
+  const timeSinceLastFailure = now - state.lastFailureTime;
+
+  // Check if circuit breaker window has passed - reset failures
+  if (state.failureCount > 0 && timeSinceLastFailure >= config.windowMs) {
+    return {
+      shouldProceed: true,
+      shouldReset: true,
+    };
+  }
+
+  // Check if circuit breaker is open (too many failures within window)
+  if (state.failureCount >= config.threshold && timeSinceLastFailure < config.windowMs) {
+    return {
+      shouldProceed: false,
+      shouldReset: false,
+      waitTimeMs: config.windowMs - timeSinceLastFailure,
+    };
+  }
+
+  // Circuit is closed, spawning allowed
+  return {
+    shouldProceed: true,
+    shouldReset: false,
+  };
+}
+
+// ==================== Spawn Decision ====================
+
+/**
+ * Sandbox state for spawn decision.
+ */
+export interface SandboxState {
+  /** Current sandbox status */
+  status: SandboxStatus;
+  /** When the sandbox was created/spawned */
+  createdAt: number;
+  /** Provider object ID if the sandbox exists remotely */
+  providerObjectId?: string | null;
+  /** Snapshot image ID if available for restore */
+  snapshotImageId: string | null;
+  /** Whether an active WebSocket connection exists */
+  hasActiveWebSocket: boolean;
+}
+
+/**
+ * Spawn decision configuration.
+ */
+export interface SpawnConfig {
+  /** Cooldown period in ms between spawn attempts (default: 30s) */
+  cooldownMs: number;
+  /** Time to wait for WebSocket after spawn (default: 60s) */
+  readyWaitMs: number;
+  /**
+   * Max time a sandbox may remain in "spawning"/"connecting" before it is
+   * treated as dead and a fresh spawn is allowed (default: 120s).
+   *
+   * Guards against spawns interrupted before the sandbox connects (provider
+   * crash, redeploy, cancelled provider call). Such a spawn can leave the
+   * persisted status pinned at "spawning"/"connecting" indefinitely — the
+   * connecting-timeout alarm may never have been scheduled — which otherwise
+   * makes every later spawn attempt skip with "already spawning" forever.
+   */
+  spawningTimeoutMs: number;
+}
+
+/**
+ * Default spawn configuration.
+ */
+export const DEFAULT_SPAWN_CONFIG: SpawnConfig = {
+  cooldownMs: 30000, // 30 seconds
+  readyWaitMs: 60000, // 60 seconds
+  spawningTimeoutMs: 120000, // 2 minutes — matches the connecting-timeout watchdog
+};
+
+/**
+ * Possible spawn actions.
+ */
+export type SpawnAction =
+  | { action: "spawn" }
+  | { action: "resume"; providerObjectId: string }
+  | { action: "restore"; snapshotImageId: string }
+  | { action: "skip"; reason: string }
+  | { action: "wait"; reason: string };
+
+/**
+ * Evaluate what spawn action to take.
+ *
+ * This function encapsulates the complex spawn decision logic:
+ * - Resume provider-owned state if available and sandbox is stopped/stale/failed
+ * - Restore from snapshot if available and sandbox is stopped/stale/failed
+ * - Skip if already spawning/connecting
+ * - Skip if ready with active WebSocket
+ * - Wait if ready without WebSocket but recently spawned
+ * - Wait during cooldown period (unless failed/stopped)
+ * - Skip if already spawning in memory
+ * - Spawn if all conditions pass
+ *
+ * @param state - Current sandbox state
+ * @param config - Spawn configuration
+ * @param now - Current timestamp
+ * @param isSpawningInMemory - Whether spawn is already in progress (in-memory flag)
+ * @returns The action to take
+ *
+ * @example
+ * ```typescript
+ * const decision = evaluateSpawnDecision(
+ *   { status: "stopped", createdAt: ..., snapshotImageId: "img-123", hasActiveWebSocket: false },
+ *   { cooldownMs: 30000, readyWaitMs: 60000 },
+ *   Date.now(),
+ *   false
+ * );
+ * if (decision.action === "restore") {
+ *   await provider.restoreFromSnapshot({ snapshotImageId: decision.snapshotImageId, ... });
+ * }
+ * ```
+ */
+export function evaluateSpawnDecision(
+  state: SandboxState,
+  config: SpawnConfig,
+  now: number,
+  isSpawningInMemory: boolean,
+  supportsPersistentResume = false
+): SpawnAction {
+  const timeSinceLastSpawn = now - state.createdAt;
+
+  if (
+    supportsPersistentResume &&
+    state.providerObjectId &&
+    (state.status === "stopped" || state.status === "stale" || state.status === "failed")
+  ) {
+    return { action: "resume", providerObjectId: state.providerObjectId };
+  }
+
+  // Check if we have a snapshot to restore from
+  // This implements the Ramp spec: restore if sandbox has exited and user sends a follow-up
+  if (
+    state.snapshotImageId &&
+    (state.status === "stopped" || state.status === "stale" || state.status === "failed")
+  ) {
+    return { action: "restore", snapshotImageId: state.snapshotImageId };
+  }
+
+  // Don't spawn if a spawn/connect is genuinely in progress (persisted status).
+  // But a spawn interrupted before the sandbox connects (provider crash,
+  // redeploy, cancelled provider call) can pin the status at "spawning"/
+  // "connecting" forever — the connecting-timeout alarm may never have been
+  // scheduled. Treat a stale spawn/connect as dead so a fresh spawn can recover
+  // the session, instead of skipping indefinitely.
+  if (
+    (state.status === "spawning" || state.status === "connecting") &&
+    timeSinceLastSpawn < config.spawningTimeoutMs
+  ) {
+    return { action: "skip", reason: `already ${state.status}` };
+  }
+
+  // Don't spawn if status is "ready" and we have an active WebSocket
+  if (state.status === "ready") {
+    if (state.hasActiveWebSocket) {
+      return { action: "skip", reason: "sandbox ready with active WebSocket" };
+    }
+    // If no WebSocket but was recently spawned, wait for reconnect
+    if (timeSinceLastSpawn < config.readyWaitMs) {
+      return {
+        action: "wait",
+        reason: `status ready but no WebSocket, last spawn was ${Math.round(timeSinceLastSpawn / 1000)}s ago`,
+      };
+    }
+  }
+
+  // Cooldown: don't spawn if last spawn was within cooldown period
+  // Exception: failed or stopped status bypasses cooldown
+  if (
+    timeSinceLastSpawn < config.cooldownMs &&
+    state.status !== "failed" &&
+    state.status !== "stopped"
+  ) {
+    return {
+      action: "wait",
+      reason: `last spawn was ${Math.round(timeSinceLastSpawn / 1000)}s ago, waiting`,
+    };
+  }
+
+  // Check in-memory flag for same-request protection
+  if (isSpawningInMemory) {
+    return { action: "skip", reason: "spawn already in progress (in-memory flag)" };
+  }
+
+  // All checks passed - spawn a new sandbox
+  return { action: "spawn" };
+}
+
+// ==================== Inactivity Timeout ====================
+
+/**
+ * State for inactivity timeout evaluation.
+ */
+export interface InactivityState {
+  /** When the session last did something (null if never active) */
+  lastActivityMs: EpochMs | null;
+  /** Current sandbox status */
+  status: SandboxStatus;
+  /** Number of connected client WebSockets (the sandbox's own socket is excluded) */
+  connectedClientCount: number;
+  /** Whether a message is currently executing on the sandbox */
+  isProcessing: boolean;
+}
+
+/**
+ * Inactivity timeout configuration.
+ */
+export interface InactivityConfig {
+  /** Time before sandbox stops due to inactivity */
+  timeoutMs: DurationMs;
+  /** Additional time granted when clients are connected */
+  extensionMs: DurationMs;
+  /** Minimum interval between alarm checks */
+  minCheckIntervalMs: DurationMs;
+}
+
+/**
+ * Idle time before a sandbox stops.
+ *
+ * Tuned for a provider that resumes in place: stopping early costs one resume
+ * on the next prompt and loses nothing on disk, so the idle window is short.
+ * A user who steps away mid-conversation is the case this bills for, and they
+ * would rather wait out a resume than pay for an idle VM.
+ */
+export const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** Extra idle time granted while clients are still connected. */
+export const INACTIVITY_EXTENSION_MS = 2 * 60 * 1000;
+
+/** Floor on how often the inactivity alarm re-checks. */
+export const INACTIVITY_MIN_CHECK_INTERVAL_MS = 30 * 1000;
+
+/**
+ * Default inactivity configuration.
+ */
+export const DEFAULT_INACTIVITY_CONFIG: InactivityConfig = {
+  timeoutMs: durationMs(INACTIVITY_TIMEOUT_MS),
+  extensionMs: durationMs(INACTIVITY_EXTENSION_MS),
+  minCheckIntervalMs: durationMs(INACTIVITY_MIN_CHECK_INTERVAL_MS),
+};
+
+/**
+ * Possible inactivity actions.
+ */
+export type InactivityAction =
+  | { action: "timeout"; shouldSnapshot: boolean }
+  | { action: "extend"; extensionMs: DurationMs; shouldWarn: boolean }
+  | { action: "schedule"; nextCheckMs: DurationMs };
+
+/**
+ * Evaluate what action to take for inactivity timeout.
+ *
+ * The 10-minute default timeout balances cost efficiency with user experience:
+ * - Short enough to avoid wasting resources on abandoned sessions
+ * - Long enough for users to read/think between prompts
+ * - Snapshots preserve all state, so resume is instant
+ *
+ * Idle time is bounded at timeoutMs + extensionMs. Past that a sandbox stops
+ * even with clients connected, so an open browser tab cannot keep it alive.
+ *
+ * @param state - Current inactivity state
+ * @param config - Inactivity timeout configuration
+ * @param now - Current timestamp
+ * @returns The action to take
+ *
+ * @example
+ * ```typescript
+ * const decision = evaluateInactivityTimeout(
+ *   { lastActivityMs: tenMinutesAgo, status: "ready", connectedClientCount: 1, isProcessing: false },
+ *   DEFAULT_INACTIVITY_CONFIG,
+ *   nowMs()
+ * );
+ * if (decision.action === "extend") {
+ *   // Warn user and schedule next check
+ *   await scheduleAlarm(addDuration(now, decision.extensionMs));
+ * }
+ * ```
+ */
+export function evaluateInactivityTimeout(
+  state: InactivityState,
+  config: InactivityConfig,
+  now: EpochMs
+): InactivityAction {
+  // Skip for terminal states - they don't need inactivity monitoring
+  if (isDeadSandboxStatus(state.status)) {
+    return { action: "schedule", nextCheckMs: config.minCheckIntervalMs };
+  }
+
+  // No activity recorded yet - schedule a check
+  if (state.lastActivityMs == null) {
+    return { action: "schedule", nextCheckMs: config.minCheckIntervalMs };
+  }
+
+  // Only check inactivity for ready or running sandboxes
+  if (state.status !== "ready" && state.status !== "running") {
+    return { action: "schedule", nextCheckMs: config.minCheckIntervalMs };
+  }
+
+  const inactiveTime = elapsed(state.lastActivityMs, now);
+
+  // Check if inactivity threshold exceeded
+  if (inactiveTime >= config.timeoutMs) {
+    // Silence is not idleness while a message is in flight: a single long tool
+    // call (a test suite, an install) emits nothing that refreshes lastActivity,
+    // because `token` and `tool_result` deliberately don't. Stopping here would
+    // fail a healthy run. A genuinely stuck message is the execution timeout's
+    // job, and once it fails the message this branch releases.
+    if (state.isProcessing) {
+      return { action: "schedule", nextCheckMs: config.minCheckIntervalMs };
+    }
+
+    // If clients are still connected, they may be actively reviewing.
+    // Grant an extension and warn them: bounding by elapsed time rather than
+    // counting extensions keeps this stateless, and keeps a connected client
+    // from holding the sandbox open indefinitely.
+    //
+    // The grant is what's left of the window, not a fresh extensionMs. An alarm
+    // can arrive late, and handing a full extension to a late alarm would push
+    // the deadline out past the bound this branch exists to enforce.
+    const deadline = config.timeoutMs + config.extensionMs;
+    if (state.connectedClientCount > 0 && inactiveTime < deadline) {
+      return {
+        action: "extend",
+        extensionMs: durationMs(deadline - inactiveTime),
+        shouldWarn: true,
+      };
+    }
+
+    // No clients connected, or the extension is spent - timeout and snapshot
+    return { action: "timeout", shouldSnapshot: true };
+  }
+
+  // Not yet timed out - schedule next check at remaining time (minimum interval)
+  const remainingTime = Math.max(config.timeoutMs - inactiveTime, config.minCheckIntervalMs);
+  return { action: "schedule", nextCheckMs: durationMs(remainingTime) };
+}
+
+// ==================== Heartbeat Health ====================
+
+/**
+ * Heartbeat health configuration.
+ */
+export interface HeartbeatConfig {
+  /** Time in ms after which missing heartbeat indicates stale sandbox (default: 90s = 3x 30s interval) */
+  timeoutMs: number;
+}
+
+/**
+ * Default heartbeat configuration.
+ */
+export const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
+  timeoutMs: 90000, // 90 seconds (3x 30s heartbeat interval)
+};
+
+/**
+ * Heartbeat health result.
+ */
+export interface HeartbeatHealth {
+  /** Whether the sandbox is considered stale (missed heartbeats) */
+  isStale: boolean;
+  /** Time since last heartbeat in ms (only set if stale) */
+  ageMs?: number;
+}
+
+/**
+ * Evaluate heartbeat health.
+ *
+ * Sandboxes send heartbeats every 30 seconds. If no heartbeat is received
+ * for 90 seconds (3x interval), the sandbox is considered stale and may
+ * be unresponsive.
+ *
+ * @param lastHeartbeat - Timestamp of last heartbeat (null if never received)
+ * @param config - Heartbeat configuration
+ * @param now - Current timestamp
+ * @returns Health status with isStale flag and optional age
+ *
+ * @example
+ * ```typescript
+ * const health = evaluateHeartbeatHealth(
+ *   lastHeartbeat,
+ *   { timeoutMs: 90000 },
+ *   Date.now()
+ * );
+ * if (health.isStale) {
+ *   await triggerSnapshot("heartbeat_timeout");
+ *   updateStatus("stale");
+ * }
+ * ```
+ */
+export function evaluateHeartbeatHealth(
+  lastHeartbeat: number | null,
+  config: HeartbeatConfig,
+  now: number
+): HeartbeatHealth {
+  // No heartbeat recorded yet - not stale (sandbox may still be starting)
+  if (lastHeartbeat == null) {
+    return { isStale: false };
+  }
+
+  const heartbeatAge = now - lastHeartbeat;
+
+  if (heartbeatAge > config.timeoutMs) {
+    return {
+      isStale: true,
+      ageMs: heartbeatAge,
+    };
+  }
+
+  return { isStale: false };
+}
+
+// ==================== Connecting Timeout ====================
+
+/**
+ * Configuration for the initial-connect watchdog.
+ */
+export interface ConnectingTimeoutConfig {
+  /** Maximum time in ms a sandbox can stay in "connecting" before being failed */
+  timeoutMs: number;
+}
+
+/**
+ * Default connecting timeout: 2 minutes.
+ * Boot sequence (git clone → setup.sh → start.sh → opencode → bridge connect) typically
+ * takes 30–90 seconds. Two minutes provides margin without leaving users waiting too long.
+ */
+export const DEFAULT_CONNECTING_TIMEOUT_CONFIG: ConnectingTimeoutConfig = {
+  timeoutMs: 120_000,
+};
+
+/**
+ * Result of connecting timeout evaluation.
+ */
+export interface ConnectingTimeoutResult {
+  /** Whether the sandbox has exceeded the connecting timeout */
+  isTimedOut: boolean;
+  /** Time elapsed since sandbox was created (ms) */
+  elapsedMs: number;
+}
+
+/**
+ * Evaluate whether a sandbox has been stuck in "connecting" too long.
+ *
+ * After a sandbox is spawned, it must establish a WebSocket connection to the
+ * control plane within the configured timeout. If the bridge never connects
+ * (crash, network failure, etc.), this function detects the timeout so the
+ * alarm handler can fail the sandbox.
+ *
+ * Covers both "connecting" and "spawning": a spawn that is interrupted before
+ * the provider call returns leaves the status at "spawning" (the transition to
+ * "connecting" never happens), so the timeout must apply there too.
+ *
+ * Pure function: no side effects. Safe to call for any status — returns
+ * `isTimedOut: false` for sandboxes that are not spawning/connecting.
+ *
+ * @param status - Current sandbox status
+ * @param createdAt - Timestamp (ms) when the sandbox was spawned
+ * @param config - Connecting timeout configuration
+ * @param now - Current timestamp (ms)
+ * @returns Whether the sandbox has timed out and how long it's been spawning/connecting
+ */
+export function evaluateConnectingTimeout(
+  status: SandboxStatus,
+  createdAt: number,
+  config: ConnectingTimeoutConfig,
+  now: number
+): ConnectingTimeoutResult {
+  if (status !== "connecting" && status !== "spawning") {
+    return { isTimedOut: false, elapsedMs: 0 };
+  }
+
+  const elapsedMs = now - createdAt;
+  return {
+    isTimedOut: elapsedMs >= config.timeoutMs,
+    elapsedMs,
+  };
+}
+
+// ==================== Warm Decision ====================
+
+/**
+ * State for warm sandbox decision.
+ */
+export interface WarmState {
+  /** Whether sandbox WebSocket is connected */
+  hasActiveWebSocket: boolean;
+  /** Current sandbox status */
+  status: SandboxStatus | null;
+  /** Whether spawn is in progress (in-memory flag) */
+  isSpawningInMemory: boolean;
+}
+
+/**
+ * Possible warm actions.
+ */
+export type WarmAction = { action: "spawn" } | { action: "skip"; reason: string };
+
+/**
+ * Evaluate whether to warm (proactively spawn) a sandbox.
+ *
+ * Warming is triggered when a user starts typing, to reduce latency
+ * for their first prompt.
+ *
+ * @param state - Current warm state
+ * @returns The action to take
+ */
+export function evaluateWarmDecision(state: WarmState): WarmAction {
+  if (state.hasActiveWebSocket) {
+    return { action: "skip", reason: "sandbox already connected" };
+  }
+
+  if (state.isSpawningInMemory) {
+    return { action: "skip", reason: "already spawning" };
+  }
+
+  if (state.status === "spawning" || state.status === "connecting") {
+    return { action: "skip", reason: `sandbox status is ${state.status}` };
+  }
+
+  return { action: "spawn" };
+}
+
+// ==================== Execution Timeout ====================
+
+/**
+ * Configuration for execution timeout.
+ */
+export interface ExecutionTimeoutConfig {
+  /** Maximum time a message can stay in 'processing' before being failed (ms). */
+  timeoutMs: number;
+}
+
+/**
+ * Default: 90 minutes — matches the bridge's PROMPT_MAX_DURATION.
+ * The control plane timeout should never preempt the bridge's own timeout for
+ * legitimate long-running prompts. It fires only when the bridge is dead and
+ * can't enforce its own timeout.
+ */
+export const DEFAULT_EXECUTION_TIMEOUT_MS = 90 * 60 * 1000;
+
+/**
+ * Result of execution timeout evaluation.
+ */
+export interface ExecutionTimeoutResult {
+  isTimedOut: boolean;
+  elapsedMs: number;
+}
+
+/**
+ * Evaluate whether a processing message has exceeded the execution timeout.
+ *
+ * Pure function: no side effects.
+ *
+ * @param startedAt - Timestamp (ms) when the message entered 'processing'
+ * @param config - Execution timeout configuration
+ * @param now - Current timestamp (ms)
+ * @returns Whether the message is timed out and how long it's been processing
+ */
+export function evaluateExecutionTimeout(
+  startedAt: number,
+  config: ExecutionTimeoutConfig,
+  now: number
+): ExecutionTimeoutResult {
+  const elapsedMs = now - startedAt;
+  return {
+    isTimedOut: elapsedMs >= config.timeoutMs,
+    elapsedMs,
+  };
+}

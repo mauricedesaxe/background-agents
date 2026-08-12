@@ -1,0 +1,170 @@
+import { describe, expect, it, vi } from "vitest";
+import type { Logger } from "../../logger";
+import type { SessionMessageQueue } from "../message-queue";
+import { createAlarmHandler } from "./handler";
+
+function createHandler() {
+  const repository = {
+    getProcessingMessageWithStartedAt: vi.fn(),
+  };
+  const messageQueue = {
+    failStuckProcessingMessage: vi
+      .fn<SessionMessageQueue["failStuckProcessingMessage"]>()
+      .mockResolvedValue(),
+    failStuckPendingMessage: vi.fn<() => Promise<void>>().mockResolvedValue(),
+    processMessageQueue: vi.fn<() => Promise<void>>().mockResolvedValue(),
+  };
+  const lifecycleManager = {
+    handleAlarm: vi.fn<() => Promise<boolean>>().mockResolvedValue(true),
+  };
+  const statusService = {
+    handleAutoArchiveAlarm: vi.fn<(_now: number) => Promise<void>>().mockResolvedValue(),
+  };
+  const now = vi.fn(() => 2000);
+  const log = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    child: vi.fn(),
+  } as unknown as Logger;
+
+  const handler = createAlarmHandler({
+    repository,
+    messageQueue,
+    lifecycleManager,
+    statusService,
+    executionTimeoutMs: 1000,
+    now,
+    log,
+  });
+
+  return {
+    handler,
+    repository,
+    messageQueue,
+    lifecycleManager,
+    statusService,
+    now,
+    log,
+  };
+}
+
+describe("createAlarmHandler", () => {
+  it("delegates to lifecycle manager when no processing message exists", async () => {
+    const { handler, repository, messageQueue, lifecycleManager, statusService, now } =
+      createHandler();
+    repository.getProcessingMessageWithStartedAt.mockReturnValue(null);
+
+    await handler.handle();
+
+    expect(now).toHaveBeenCalledTimes(1);
+    expect(messageQueue.failStuckProcessingMessage).not.toHaveBeenCalled();
+    expect(statusService.handleAutoArchiveAlarm).toHaveBeenCalledWith(2000);
+    expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
+    expect(messageQueue.processMessageQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fail processing message when execution timeout is not reached", async () => {
+    const { handler, repository, messageQueue, lifecycleManager, log } = createHandler();
+    repository.getProcessingMessageWithStartedAt.mockReturnValue({
+      id: "message-1",
+      started_at: 1500,
+    });
+
+    await handler.handle();
+
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(messageQueue.failStuckProcessingMessage).not.toHaveBeenCalled();
+    expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails the message and stops its sandbox when execution timeout is reached", async () => {
+    const { handler, repository, messageQueue, lifecycleManager, log } = createHandler();
+    repository.getProcessingMessageWithStartedAt.mockReturnValue({
+      id: "message-1",
+      started_at: 500,
+    });
+
+    await handler.handle();
+
+    expect(log.warn).toHaveBeenCalledWith("Execution timeout: message stuck in processing", {
+      event: "execution.timeout",
+      message_id: "message-1",
+      elapsed_ms: 1500,
+      timeout_ms: 1000,
+    });
+    expect(messageQueue.failStuckProcessingMessage).toHaveBeenCalledWith({
+      type: "execution_timeout",
+      elapsedMs: 1500,
+    });
+    expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
+    expect(lifecycleManager.handleAlarm).toHaveBeenCalledWith({ executionTimedOut: true });
+    expect(messageQueue.processMessageQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes after a coincident execution timeout and settled teardown", async () => {
+    const { handler, repository, messageQueue, lifecycleManager } = createHandler();
+    repository.getProcessingMessageWithStartedAt.mockReturnValue({
+      id: "message-1",
+      started_at: 500,
+    });
+    lifecycleManager.handleAlarm.mockResolvedValue(true);
+
+    await handler.handle();
+
+    expect(messageQueue.failStuckProcessingMessage).toHaveBeenCalledTimes(1);
+    expect(lifecycleManager.handleAlarm).toHaveBeenCalledWith({ executionTimedOut: true });
+    expect(messageQueue.processMessageQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps queued work paused when execution-timeout teardown does not settle", async () => {
+    const { handler, repository, messageQueue, lifecycleManager } = createHandler();
+    repository.getProcessingMessageWithStartedAt.mockReturnValue({
+      id: "message-1",
+      started_at: 500,
+    });
+    lifecycleManager.handleAlarm.mockResolvedValue(false);
+
+    await handler.handle();
+
+    expect(messageQueue.processMessageQueue).not.toHaveBeenCalled();
+  });
+
+  it("keeps queued work paused while provider teardown is unreconciled", async () => {
+    const { handler, repository, messageQueue, lifecycleManager } = createHandler();
+    repository.getProcessingMessageWithStartedAt.mockReturnValue(null);
+    lifecycleManager.handleAlarm.mockResolvedValue(false);
+
+    await handler.handle();
+
+    expect(messageQueue.processMessageQueue).not.toHaveBeenCalled();
+  });
+
+  it("always runs the pending-message watchdog before lifecycle handling", async () => {
+    const { handler, repository, messageQueue } = createHandler();
+    repository.getProcessingMessageWithStartedAt.mockReturnValue(null);
+
+    await handler.handle();
+
+    // Self-guarded, so it runs unconditionally; it decides internally whether to act.
+    expect(messageQueue.failStuckPendingMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes queued work after lifecycle handling settles", async () => {
+    const { handler, repository, messageQueue, lifecycleManager } = createHandler();
+    repository.getProcessingMessageWithStartedAt.mockReturnValue(null);
+    const calls: string[] = [];
+    lifecycleManager.handleAlarm.mockImplementation(async () => {
+      calls.push("lifecycle");
+      return true;
+    });
+    messageQueue.processMessageQueue.mockImplementation(async () => {
+      calls.push("queue");
+    });
+
+    await handler.handle();
+
+    expect(calls).toEqual(["lifecycle", "queue"]);
+  });
+});

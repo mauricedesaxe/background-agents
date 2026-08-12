@@ -1,0 +1,140 @@
+import type { Logger } from "../../logger";
+import { SessionInternalPaths, type SessionInternalPath } from "../contracts";
+
+/**
+ * Route handler invoked by SessionDO.fetch dispatch. `log` is the
+ * request-scoped logger (the session logger enriched with trace_id /
+ * request_id correlation from the router); handlers thread it into any
+ * request-serving code that logs.
+ */
+export type SessionInternalRouteHandler = (
+  request: Request,
+  url: URL,
+  log: Logger
+) => Promise<Response> | Response;
+
+export interface SessionInternalRoute {
+  method: "GET" | "POST";
+  path: SessionInternalPath;
+  handler: SessionInternalRouteHandler;
+}
+
+export interface SessionInternalRouteHandlers {
+  init: SessionInternalRouteHandler;
+  state: SessionInternalRouteHandler;
+  prompt: SessionInternalRouteHandler;
+  stop: SessionInternalRouteHandler;
+  sandboxEvent: SessionInternalRouteHandler;
+  createMediaArtifact: SessionInternalRouteHandler;
+  listParticipants: SessionInternalRouteHandler;
+  addParticipant: SessionInternalRouteHandler;
+  listEvents: SessionInternalRouteHandler;
+  listArtifacts: SessionInternalRouteHandler;
+  listMessages: SessionInternalRouteHandler;
+  createPr: SessionInternalRouteHandler;
+  pullRequestArtifactSnapshot: SessionInternalRouteHandler;
+  pullRequestsRefresh: SessionInternalRouteHandler;
+  wsToken: SessionInternalRouteHandler;
+  verifyWsToken: SessionInternalRouteHandler;
+  createBoardArtifact: SessionInternalRouteHandler;
+  updateTitle: SessionInternalRouteHandler;
+  archive: SessionInternalRouteHandler;
+  unarchive: SessionInternalRouteHandler;
+  archiveCascade: SessionInternalRouteHandler;
+  verifySandboxToken: SessionInternalRouteHandler;
+  openaiTokenRefresh: SessionInternalRouteHandler;
+  scmCredentials: SessionInternalRouteHandler;
+  tunnelUrls: SessionInternalRouteHandler;
+  spawnContext: SessionInternalRouteHandler;
+  childSummary: SessionInternalRouteHandler;
+  cancel: SessionInternalRouteHandler;
+  childSessionUpdate: SessionInternalRouteHandler;
+}
+
+/**
+ * Build internal SessionDO HTTP routes from injected handlers.
+ * Keeps route-to-path wiring separate from SessionDO business handlers.
+ */
+export function createSessionInternalRoutes(
+  handlers: SessionInternalRouteHandlers
+): SessionInternalRoute[] {
+  return [
+    { method: "POST", path: SessionInternalPaths.init, handler: handlers.init },
+    { method: "GET", path: SessionInternalPaths.state, handler: handlers.state },
+    { method: "POST", path: SessionInternalPaths.prompt, handler: handlers.prompt },
+    { method: "POST", path: SessionInternalPaths.stop, handler: handlers.stop },
+    { method: "POST", path: SessionInternalPaths.sandboxEvent, handler: handlers.sandboxEvent },
+    {
+      method: "POST",
+      path: SessionInternalPaths.createMediaArtifact,
+      handler: handlers.createMediaArtifact,
+    },
+    {
+      method: "GET",
+      path: SessionInternalPaths.participants,
+      handler: handlers.listParticipants,
+    },
+    {
+      method: "POST",
+      path: SessionInternalPaths.participants,
+      handler: handlers.addParticipant,
+    },
+    { method: "GET", path: SessionInternalPaths.events, handler: handlers.listEvents },
+    { method: "GET", path: SessionInternalPaths.artifacts, handler: handlers.listArtifacts },
+    { method: "GET", path: SessionInternalPaths.messages, handler: handlers.listMessages },
+    { method: "POST", path: SessionInternalPaths.createPr, handler: handlers.createPr },
+    {
+      method: "POST",
+      path: SessionInternalPaths.pullRequestArtifactSnapshot,
+      handler: handlers.pullRequestArtifactSnapshot,
+    },
+    {
+      method: "POST",
+      path: SessionInternalPaths.pullRequestsRefresh,
+      handler: handlers.pullRequestsRefresh,
+    },
+    { method: "POST", path: SessionInternalPaths.wsToken, handler: handlers.wsToken },
+    {
+      method: "POST",
+      path: SessionInternalPaths.verifyWsToken,
+      handler: handlers.verifyWsToken,
+    },
+    {
+      method: "POST",
+      path: SessionInternalPaths.createBoardArtifact,
+      handler: handlers.createBoardArtifact,
+    },
+    { method: "POST", path: SessionInternalPaths.updateTitle, handler: handlers.updateTitle },
+    { method: "POST", path: SessionInternalPaths.archive, handler: handlers.archive },
+    { method: "POST", path: SessionInternalPaths.unarchive, handler: handlers.unarchive },
+    {
+      method: "POST",
+      path: SessionInternalPaths.archiveCascade,
+      handler: handlers.archiveCascade,
+    },
+    {
+      method: "POST",
+      path: SessionInternalPaths.verifySandboxToken,
+      handler: handlers.verifySandboxToken,
+    },
+    {
+      method: "POST",
+      path: SessionInternalPaths.openaiTokenRefresh,
+      handler: handlers.openaiTokenRefresh,
+    },
+    {
+      method: "POST",
+      path: SessionInternalPaths.scmCredentials,
+      handler: handlers.scmCredentials,
+    },
+    { method: "GET", path: SessionInternalPaths.tunnelUrls, handler: handlers.tunnelUrls },
+    { method: "GET", path: SessionInternalPaths.spawnContext, handler: handlers.spawnContext },
+    { method: "GET", path: SessionInternalPaths.childSummary, handler: handlers.childSummary },
+    { method: "POST", path: SessionInternalPaths.cancel, handler: handlers.cancel },
+    {
+      method: "POST",
+      path: SessionInternalPaths.childSessionUpdate,
+      handler: handlers.childSessionUpdate,
+    },
+  ];
+}

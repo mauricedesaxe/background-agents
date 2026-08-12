@@ -1,0 +1,143 @@
+# =============================================================================
+# Web App — Cloudflare Workers via OpenNext (when web_platform = "cloudflare")
+# =============================================================================
+
+# Build the web app with OpenNext for Cloudflare Workers
+resource "null_resource" "web_app_cloudflare_build" {
+  count = var.web_platform == "cloudflare" ? 1 : 0
+
+  triggers = {
+    always_run = timestamp()
+  }
+
+  provisioner "local-exec" {
+    command     = "npm run build -w @open-inspect/shared && npm run build:cloudflare -w @open-inspect/web"
+    working_dir = var.project_root
+
+    environment = {
+      # NEXT_PUBLIC_* vars must be set at build time (inlined into client bundle)
+      NEXT_PUBLIC_WS_URL             = local.ws_url
+      NEXT_PUBLIC_SANDBOX_PROVIDER   = var.sandbox_provider
+      NEXT_PUBLIC_APP_NAME           = var.app_name
+      NEXT_PUBLIC_APP_SHORT_NAME     = var.app_short_name
+      NEXT_PUBLIC_APP_ICON_URL       = var.app_icon_url
+      NEXT_PUBLIC_GOOGLE_ENABLED     = tostring(local.google_enabled)
+      NEXT_PUBLIC_TLDRAW_LICENSE_KEY = var.tldraw_license_key
+    }
+  }
+}
+
+# Upload secrets to the Cloudflare Worker (only re-runs when secrets change).
+# Must run after deploy — wrangler secret put requires the worker to exist.
+resource "null_resource" "web_app_cloudflare_secrets" {
+  count = var.web_platform == "cloudflare" ? 1 : 0
+
+  triggers = {
+    secrets_hash = sha256(join(",", [
+      var.github_client_secret,
+      var.google_client_secret,
+      var.nextauth_secret,
+      var.openai_api_key,
+      random_password.service_auth_secret_web.result,
+    ]))
+  }
+
+  provisioner "local-exec" {
+    command     = "bash scripts/wrangler-secrets.sh"
+    working_dir = var.project_root
+
+    environment = {
+      CLOUDFLARE_API_TOKEN  = var.cloudflare_api_token
+      CLOUDFLARE_ACCOUNT_ID = var.cloudflare_account_id
+      WORKER_NAME           = local.web_worker_name
+      GITHUB_CLIENT_SECRET  = var.github_client_secret
+      GOOGLE_CLIENT_SECRET  = var.google_client_secret
+      NEXTAUTH_SECRET       = var.nextauth_secret
+      SERVICE_AUTH_SECRET   = random_password.service_auth_secret_web.result
+      OPENAI_API_KEY        = var.openai_api_key
+    }
+  }
+
+  depends_on = [null_resource.web_app_cloudflare_deploy]
+}
+
+# Generate a production wrangler config with the correct service binding name.
+# This avoids mutating the checked-in wrangler.toml (which defaults to local dev).
+resource "local_file" "web_app_wrangler_production" {
+  count    = var.web_platform == "cloudflare" ? 1 : 0
+  filename = "${var.project_root}/packages/web/wrangler.production.toml"
+  content  = <<-TOML
+    name = "${local.web_worker_name}"
+    main = ".open-next/worker.js"
+    compatibility_date = "2025-08-15"
+    compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+
+    # The workers.dev route is disabled when a custom domain is attached, so the
+    # app is only reachable on the origin NEXTAUTH_URL points at.
+    workers_dev = ${local.web_custom_domain_enabled ? "false" : "true"}
+
+    [vars]
+    GITHUB_CLIENT_ID = "${var.github_client_id}"
+    GOOGLE_CLIENT_ID = "${var.google_client_id}"
+    NEXTAUTH_URL = "${local.web_app_url}"
+    CONTROL_PLANE_URL = "${local.control_plane_url}"
+    NEXT_PUBLIC_WS_URL = "${local.ws_url}"
+    NEXT_PUBLIC_SANDBOX_PROVIDER = "${var.sandbox_provider}"
+    NEXT_PUBLIC_APP_NAME = "${var.app_name}"
+    NEXT_PUBLIC_APP_SHORT_NAME = "${var.app_short_name}"
+    NEXT_PUBLIC_APP_ICON_URL = "${var.app_icon_url}"
+    NEXT_PUBLIC_GOOGLE_ENABLED = "${tostring(local.google_enabled)}"
+    NEXT_PUBLIC_TLDRAW_LICENSE_KEY = "${var.tldraw_license_key}"
+    ALLOWED_USERS = "${var.allowed_users}"
+    ALLOWED_EMAIL_DOMAINS = "${var.allowed_email_domains}"
+    ALLOWED_EMAILS = "${var.allowed_emails}"
+    ALLOWED_GITHUB_ORGS = "${var.allowed_github_orgs}"
+    UNSAFE_ALLOW_ALL_USERS = "${tostring(var.unsafe_allow_all_users)}"
+
+    [assets]
+    directory = ".open-next/assets"
+    binding = "ASSETS"
+
+    [[services]]
+    binding = "CONTROL_PLANE_WORKER"
+    service = "open-inspect-control-plane-${local.name_suffix}"
+  TOML
+}
+
+# Deploy the OpenNext bundle to Cloudflare Workers
+resource "null_resource" "web_app_cloudflare_deploy" {
+  count = var.web_platform == "cloudflare" ? 1 : 0
+
+  triggers = {
+    always_run = timestamp()
+  }
+
+  provisioner "local-exec" {
+    command     = "npx wrangler deploy --config wrangler.production.toml"
+    working_dir = "${var.project_root}/packages/web"
+
+    environment = {
+      CLOUDFLARE_API_TOKEN  = var.cloudflare_api_token
+      CLOUDFLARE_ACCOUNT_ID = var.cloudflare_account_id
+    }
+  }
+
+  depends_on = [
+    null_resource.web_app_cloudflare_build,
+    module.control_plane_worker,
+    local_file.web_app_wrangler_production,
+  ]
+}
+
+# Attach a custom domain to the web Worker (when configured).
+# Cloudflare provisions and manages the DNS record + edge cert for the hostname.
+resource "cloudflare_workers_custom_domain" "web_app" {
+  count = local.web_custom_domain_enabled ? 1 : 0
+
+  account_id = var.cloudflare_account_id
+  zone_id    = local.web_custom_domain_zone_id
+  hostname   = local.web_custom_domain
+  service    = local.web_worker_name
+
+  depends_on = [null_resource.web_app_cloudflare_deploy]
+}

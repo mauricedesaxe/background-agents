@@ -1,0 +1,163 @@
+variable "account_id" {
+  description = "Cloudflare account ID"
+  type        = string
+}
+
+variable "zone_id" {
+  description = "Cloudflare zone ID (required for routes and custom domains)"
+  type        = string
+  default     = null
+}
+
+variable "worker_name" {
+  description = "Name of the worker"
+  type        = string
+}
+
+variable "worker_subdomain" {
+  description = "Cloudflare account workers.dev subdomain label, e.g. 'myaccount' (without '.workers.dev'). worker_url resolves to <worker_name>.<worker_subdomain>.workers.dev."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$", var.worker_subdomain))
+    error_message = "worker_subdomain must be a single workers.dev subdomain label (e.g. 'myaccount'): lowercase alphanumeric and hyphens only, no dots — do not include '.workers.dev'."
+  }
+}
+
+variable "script_path" {
+  description = "Path to the bundled JavaScript worker script file"
+  type        = string
+}
+
+variable "kv_namespaces" {
+  description = "List of KV namespace bindings"
+  type = list(object({
+    binding_name = string
+    namespace_id = string
+  }))
+  default = []
+}
+
+variable "service_bindings" {
+  description = "List of service bindings for worker-to-worker communication"
+  type = list(object({
+    binding_name = string
+    service_name = string
+  }))
+  default = []
+}
+
+variable "d1_databases" {
+  description = "List of D1 database bindings"
+  type = list(object({
+    binding_name = string
+    database_id  = string
+  }))
+  default = []
+}
+
+variable "r2_buckets" {
+  description = "List of R2 bucket bindings"
+  type = list(object({
+    binding_name = string
+    bucket_name  = string
+  }))
+  default = []
+}
+
+variable "queue_bindings" {
+  description = "List of Queue producer bindings"
+  type = list(object({
+    binding_name = string
+    queue_name   = string
+  }))
+  default = []
+}
+
+variable "plain_text_bindings" {
+  description = "List of plain text environment variable bindings"
+  type = list(object({
+    name  = string
+    value = string
+  }))
+  default = []
+}
+
+variable "secrets" {
+  description = "List of secret bindings"
+  type = list(object({
+    name  = string
+    value = string
+  }))
+  default   = []
+  sensitive = true
+}
+
+variable "durable_objects" {
+  description = "List of Durable Object bindings"
+  type = list(object({
+    binding_name = string
+    class_name   = string
+  }))
+  default = []
+}
+
+variable "enable_durable_object_bindings" {
+  description = "Enable DO bindings. Set false for initial deployment, true after first deployment succeeds."
+  type        = bool
+  default     = true
+}
+
+variable "enable_service_bindings" {
+  description = "Enable service bindings. Set false if target workers don't exist yet."
+  type        = bool
+  default     = true
+}
+
+variable "migration_tag" {
+  description = "Migration tag for Durable Objects (increment when adding new DO classes)"
+  type        = string
+  default     = "v1"
+}
+
+variable "migration_old_tag" {
+  description = "Previous migration tag (for incremental DO migrations). Set when adding new DO classes to an existing worker."
+  type        = string
+  default     = null
+}
+
+variable "new_sqlite_classes" {
+  description = "DO class names that are NEW in this migration step. Only these are declared as new_sqlite_classes in the migration (not all durable_objects). If empty, defaults to all durable_objects class names (for fresh deployments)."
+  type        = list(string)
+  default     = []
+}
+
+variable "cron_triggers" {
+  description = "List of cron expressions for the worker's scheduled() handler"
+  type        = list(string)
+  default     = []
+}
+
+variable "compatibility_date" {
+  description = "Compatibility date for the worker"
+  type        = string
+  default     = "2024-01-01"
+}
+
+variable "compatibility_flags" {
+  description = "Compatibility flags for the worker (e.g., ['nodejs_compat'])"
+  type        = list(string)
+  default     = []
+}
+
+variable "custom_domain" {
+  description = "Custom domain hostname for the worker"
+  type        = string
+  default     = null
+}
+
+variable "route_pattern" {
+  description = "Route pattern for zone-based routing (e.g., 'example.com/*')"
+  type        = string
+  default     = null
+}

@@ -1,0 +1,459 @@
+/**
+ * Daytona sandbox provider — calls the Daytona REST API directly.
+ *
+ * Ports env-var assembly, label construction, tunnel-URL generation, and
+ * code-server password derivation that previously lived in the Python shim.
+ */
+
+import { computeHmacHex, type SandboxSettings } from "@open-inspect/shared";
+import { resolveServicePorts, resolveTunnelPorts } from "./port-resolution";
+import { createLogger } from "../../logger";
+import type { SourceControlProviderName } from "../../source-control";
+import type { DaytonaRestClient, DaytonaCreateSandboxParams } from "../daytona-rest-client";
+import { DaytonaApiError, DaytonaNotFoundError } from "../daytona-rest-client";
+import { buildSessionConfig, scmCloneIdentity } from "../sandbox-env";
+import {
+  SandboxProviderError,
+  type ArchiveConfig,
+  type ArchiveResult,
+  type CreateSandboxConfig,
+  type CreateSandboxResult,
+  type ResumeConfig,
+  type ResumeResult,
+  type SandboxProvider,
+  type SandboxProviderCapabilities,
+  type StopConfig,
+  type StopResult,
+} from "../provider";
+
+const log = createLogger("daytona-provider");
+
+// ---------------------------------------------------------------------------
+// Constants (ported from packages/daytona-infra/src/config.py)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_PREVIEW_EXPIRY_SECONDS = 3900;
+
+/** How many times a state-changing call is retried while Daytona reports 409. */
+const STATE_SETTLE_RETRY_MAX_ATTEMPTS = 8;
+
+/** Gap between those attempts. A transition settles in a few seconds in practice. */
+const STATE_SETTLE_RETRY_DELAY_MS = 1500;
+
+const STATE_OBSERVATION_MAX_ATTEMPTS = 40;
+const STATE_OBSERVATION_POLL_MS = 500;
+
+const delayMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+// ---------------------------------------------------------------------------
+// Provider config
+// ---------------------------------------------------------------------------
+
+export interface DaytonaProviderConfig {
+  scmProvider: SourceControlProviderName;
+  gitlabAccessToken?: string;
+  /** Secret used for HMAC derivation of code-server passwords */
+  codeServerPasswordSecret: string;
+}
+
+// ---------------------------------------------------------------------------
+// Provider
+// ---------------------------------------------------------------------------
+
+export class DaytonaSandboxProvider implements SandboxProvider {
+  readonly name = "daytona";
+
+  readonly capabilities: SandboxProviderCapabilities = {
+    supportsSnapshots: false,
+    supportsRestore: false,
+    supportsPersistentResume: true,
+    supportsExplicitStop: true,
+    supportsArchive: true,
+  };
+
+  constructor(
+    private readonly client: DaytonaRestClient,
+    private readonly providerConfig: DaytonaProviderConfig
+  ) {}
+
+  // -----------------------------------------------------------------------
+  // SandboxProvider interface
+  // -----------------------------------------------------------------------
+
+  async createSandbox(config: CreateSandboxConfig): Promise<CreateSandboxResult> {
+    try {
+      const envVars = await this.buildEnvVars(config);
+      const labels = this.buildLabels(config);
+
+      // Daytona bakes cpu/memory/disk into the snapshot and rejects a create
+      // that also specifies them ("Cannot specify Sandbox resources when using
+      // a snapshot"). Sizing must be set on the snapshot, not here.
+      const params: DaytonaCreateSandboxParams = {
+        name: config.sandboxId,
+        snapshot: this.client.config.baseSnapshot,
+        env: envVars,
+        labels,
+        autoStopInterval: this.client.config.autoStopIntervalMinutes,
+        autoArchiveInterval: this.client.config.autoArchiveIntervalExplicit
+          ? this.client.config.autoArchiveIntervalMinutes
+          : (config.autoArchiveIntervalMinutes ?? this.client.config.autoArchiveIntervalMinutes),
+        public: false,
+      };
+      if (this.client.config.target) {
+        params.target = this.client.config.target;
+      }
+
+      const sandbox = await this.client.createSandbox(params);
+
+      const { codeServerUrl, codeServerPassword, tunnelUrls } = await this.buildTunnelUrls(
+        sandbox.id,
+        config.sandboxId,
+        config.timeoutSeconds,
+        config.codeServerEnabled,
+        config.sandboxSettings
+      );
+
+      return {
+        sandboxId: config.sandboxId,
+        providerObjectId: sandbox.id,
+        status: sandbox.state,
+        createdAt: Date.now(),
+        codeServerUrl,
+        codeServerPassword,
+        tunnelUrls,
+      };
+    } catch (error) {
+      throw this.classifyError("Failed to create Daytona sandbox", error);
+    }
+  }
+
+  async resumeSandbox(config: ResumeConfig): Promise<ResumeResult> {
+    try {
+      let sandbox;
+      try {
+        sandbox = await this.client.getSandbox(config.providerObjectId);
+      } catch (error) {
+        if (error instanceof DaytonaNotFoundError) {
+          return {
+            success: false,
+            error: "Sandbox no longer exists in Daytona",
+            shouldSpawnFresh: true,
+          };
+        }
+        throw error;
+      }
+
+      const state = sandbox.state;
+      if ((state === "error" || state === "build_failed") && sandbox.recoverable) {
+        await this.client.recoverSandbox(config.providerObjectId);
+      } else if (state === "started") {
+        await this.retryAcrossStateSettle(() => this.client.stopSandbox(config.providerObjectId));
+        await this.retryAcrossStateSettle(() => this.client.startSandbox(config.providerObjectId));
+      } else {
+        // Covers stopped, archived, and non-recoverable error states —
+        // Daytona's start endpoint handles the state transition internally.
+        await this.retryAcrossStateSettle(() => this.client.startSandbox(config.providerObjectId));
+      }
+
+      // Tunnel URL generation runs after start so a preview-URL failure
+      // doesn't mask a successful resume.
+      let codeServerUrl: string | undefined;
+      let codeServerPassword: string | undefined;
+      let tunnelUrls: Record<string, string> | undefined;
+      try {
+        const tunnels = await this.buildTunnelUrls(
+          config.providerObjectId,
+          config.sandboxId,
+          config.timeoutSeconds,
+          config.codeServerEnabled,
+          config.sandboxSettings
+        );
+        codeServerUrl = tunnels.codeServerUrl;
+        codeServerPassword = tunnels.codeServerPassword;
+        tunnelUrls = tunnels.tunnelUrls;
+      } catch (tunnelError) {
+        log.warn("daytona.resume_tunnel_urls_failed", {
+          sandbox_id: config.sandboxId,
+          error: tunnelError instanceof Error ? tunnelError.message : String(tunnelError),
+        });
+      }
+
+      return {
+        success: true,
+        providerObjectId: sandbox.id,
+        codeServerUrl,
+        codeServerPassword,
+        tunnelUrls,
+      };
+    } catch (error) {
+      if (error instanceof SandboxProviderError) throw error;
+      throw this.classifyError("Failed to resume Daytona sandbox", error);
+    }
+  }
+
+  async stopSandbox(config: StopConfig): Promise<StopResult> {
+    const requestedAt = Date.now();
+    try {
+      try {
+        const current = await this.client.getSandbox(config.providerObjectId);
+        if (current.state === "stopped" || current.state === "archived") {
+          return { success: true };
+        }
+        if (current.state === "stopping") {
+          await this.waitForStopped(config.providerObjectId);
+          return { success: true };
+        }
+
+        await this.retryAcrossStateSettle(() => this.client.stopSandbox(config.providerObjectId));
+        log.info("daytona.provider_transition", {
+          event: "sandbox.provider_transition",
+          transition: "stop",
+          phase: "accepted",
+          provider_object_id: config.providerObjectId,
+          reason: config.reason,
+          duration_ms: Date.now() - requestedAt,
+        });
+        await this.waitForStopped(config.providerObjectId);
+      } catch (error) {
+        if (error instanceof DaytonaNotFoundError) {
+          return { success: true };
+        }
+        throw error;
+      }
+      return { success: true };
+    } catch (error) {
+      if (error instanceof SandboxProviderError) throw error;
+      if (error instanceof DaytonaApiError) {
+        throw this.classifyError("Failed to stop Daytona sandbox", error);
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      throw this.classifyError(`Failed to stop Daytona sandbox: ${detail}`, error);
+    }
+  }
+
+  private async waitForStopped(providerObjectId: string): Promise<void> {
+    for (let attempt = 1; attempt <= STATE_OBSERVATION_MAX_ATTEMPTS; attempt++) {
+      const sandbox = await this.client.getSandbox(providerObjectId);
+      if (sandbox.state === "stopped" || sandbox.state === "archived") return;
+      if (attempt < STATE_OBSERVATION_MAX_ATTEMPTS) await delayMs(STATE_OBSERVATION_POLL_MS);
+    }
+
+    throw new Error("Daytona accepted the stop but did not report the sandbox as stopped");
+  }
+
+  async archiveSandbox(config: ArchiveConfig): Promise<ArchiveResult> {
+    try {
+      let sandbox;
+      try {
+        sandbox = await this.client.getSandbox(config.providerObjectId);
+      } catch (error) {
+        if (error instanceof DaytonaNotFoundError) {
+          // Already gone — nothing to archive, nothing holding disk.
+          return { success: true };
+        }
+        throw error;
+      }
+
+      // Already archived — no-op so a re-archive doesn't fail.
+      if (sandbox.state === "archived") {
+        return { success: true };
+      }
+
+      // Daytona rejects an archive on a sandbox that isn't stopped, so stop it
+      // first. An already-stopped sandbox skips straight to archive.
+      if (sandbox.state !== "stopped") {
+        await this.retryAcrossStateSettle(() => this.client.stopSandbox(config.providerObjectId));
+      }
+
+      await this.retryAcrossStateSettle(() => this.client.archiveSandbox(config.providerObjectId));
+      return { success: true };
+    } catch (error) {
+      if (error instanceof SandboxProviderError) throw error;
+      throw this.classifyError("Failed to archive Daytona sandbox", error);
+    }
+  }
+
+  /**
+   * Run a state-changing Daytona call, retrying while it reports 409
+   * "Sandbox state change in progress".
+   *
+   * Stop and archive both return before the sandbox reaches its new state, so a
+   * call fired straight after another gets a 409. So does a stop issued while
+   * creation is still settling, which is what a short-lived child session does.
+   * Retrying across that window is what makes a stop actually stop the VM,
+   * rather than throwing into a caller that has already marked the row dead.
+   * Non-409 errors and an exhausted budget propagate to the caller.
+   */
+  private async retryAcrossStateSettle(operation: () => Promise<void>): Promise<void> {
+    for (let attempt = 1; attempt <= STATE_SETTLE_RETRY_MAX_ATTEMPTS; attempt++) {
+      try {
+        await operation();
+        return;
+      } catch (error) {
+        const stateChanging = error instanceof DaytonaApiError && error.status === 409;
+        if (!stateChanging || attempt === STATE_SETTLE_RETRY_MAX_ATTEMPTS) {
+          throw error;
+        }
+        await delayMs(STATE_SETTLE_RETRY_DELAY_MS);
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Env var assembly (ported from service.py _build_env)
+  // -----------------------------------------------------------------------
+
+  private async buildEnvVars(config: CreateSandboxConfig): Promise<Record<string, string>> {
+    // Start with user env vars (repo secrets), then overlay system vars
+    const envVars: Record<string, string> = { ...(config.userEnvVars ?? {}) };
+
+    const sessionConfig = buildSessionConfig(config);
+
+    Object.assign(envVars, {
+      PYTHONUNBUFFERED: "1",
+      SANDBOX_ID: config.sandboxId,
+      CONTROL_PLANE_URL: config.controlPlaneUrl,
+      SANDBOX_AUTH_TOKEN: config.sandboxAuthToken,
+      REPO_OWNER: config.repoOwner ?? "",
+      REPO_NAME: config.repoName ?? "",
+      SESSION_CONFIG: JSON.stringify(sessionConfig),
+    });
+
+    if (config.opencodeSessionId) {
+      envVars.OPENCODE_SESSION_ID = config.opencodeSessionId;
+    }
+
+    if (config.codeServerEnabled) {
+      envVars.CODE_SERVER_PASSWORD = await this.deriveCodeServerPassword(config.sandboxId);
+      envVars.CODE_SERVER_PORT = String(resolveServicePorts(config.sandboxSettings).codeServerPort);
+    }
+
+    if (config.agentSlackNotifyEnabled) {
+      envVars.AGENT_SLACK_NOTIFY_ENABLED = "true";
+    }
+
+    const scmIdentity = scmCloneIdentity(this.providerConfig.scmProvider);
+    envVars.VCS_HOST = scmIdentity.host;
+    envVars.VCS_CLONE_USERNAME = scmIdentity.cloneUsername;
+
+    // Note: no VCS_CLONE_TOKEN / GITHUB_TOKEN / GITHUB_APP_TOKEN. Git
+    // operations in the sandbox authenticate per-request via the system git
+    // credential helper, which hits /sessions/:id/scm-credentials. Embedding
+    // a token in env would silently fail once the token expires (or
+    // immediately, for providers like GitHub Apps with short-lived tokens).
+
+    return envVars;
+  }
+
+  // -----------------------------------------------------------------------
+  // Label assembly (ported from service.py _build_labels)
+  // -----------------------------------------------------------------------
+
+  private buildLabels(config: CreateSandboxConfig): Record<string, string> {
+    return {
+      openinspect_framework: "open-inspect",
+      openinspect_session_id: config.sessionId,
+      openinspect_expected_sandbox_id: config.sandboxId,
+      ...(config.repoOwner && config.repoName
+        ? { openinspect_repo: `${config.repoOwner}/${config.repoName}` }
+        : {}),
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // Tunnel URL generation (ported from service.py _build_tunnel_urls)
+  // -----------------------------------------------------------------------
+
+  private async buildTunnelUrls(
+    daytonaSandboxId: string,
+    logicalSandboxId: string,
+    timeoutSeconds: number | undefined,
+    codeServerEnabled: boolean | undefined,
+    sandboxSettings: SandboxSettings | undefined
+  ): Promise<{
+    codeServerUrl?: string;
+    codeServerPassword?: string;
+    tunnelUrls?: Record<string, string>;
+  }> {
+    const expirySeconds = resolvePreviewExpirySeconds(timeoutSeconds);
+    const { codeServerPort } = resolveServicePorts(sandboxSettings);
+    let tunnelPorts = resolveTunnelPorts(sandboxSettings?.tunnelPorts);
+    let codeServerUrl: string | undefined;
+    let codeServerPassword: string | undefined;
+
+    if (codeServerEnabled) {
+      const preview = await this.client.getSignedPreviewUrl(
+        daytonaSandboxId,
+        codeServerPort,
+        expirySeconds
+      );
+      codeServerUrl = preview.url;
+      codeServerPassword = await this.deriveCodeServerPassword(logicalSandboxId);
+      tunnelPorts = tunnelPorts.filter((p) => p !== codeServerPort);
+    }
+
+    let tunnelUrls: Record<string, string> | undefined;
+    if (tunnelPorts.length > 0) {
+      const entries = await Promise.all(
+        tunnelPorts.map(async (port) => {
+          const preview = await this.client.getSignedPreviewUrl(
+            daytonaSandboxId,
+            port,
+            expirySeconds
+          );
+          return [String(port), preview.url] as const;
+        })
+      );
+      tunnelUrls = Object.fromEntries(entries);
+    }
+
+    return { codeServerUrl, codeServerPassword, tunnelUrls };
+  }
+
+  // -----------------------------------------------------------------------
+  // Code-server password (ported from auth.py derive_code_server_password)
+  // -----------------------------------------------------------------------
+
+  private async deriveCodeServerPassword(sandboxId: string): Promise<string> {
+    const digest = await computeHmacHex(
+      `code-server:${sandboxId}`,
+      this.providerConfig.codeServerPasswordSecret
+    );
+    return digest.slice(0, 32);
+  }
+
+  // -----------------------------------------------------------------------
+  // Error classification
+  // -----------------------------------------------------------------------
+
+  private classifyError(message: string, error: unknown): SandboxProviderError {
+    if (error instanceof DaytonaApiError) {
+      return SandboxProviderError.fromFetchError(
+        `${message}: ${error.message}`,
+        error,
+        error.status
+      );
+    }
+    return SandboxProviderError.fromFetchError(message, error);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers (ported from config.py)
+// ---------------------------------------------------------------------------
+
+function resolvePreviewExpirySeconds(timeoutSeconds: number | undefined): number {
+  if (!timeoutSeconds) return DEFAULT_PREVIEW_EXPIRY_SECONDS;
+  return Math.min(86400, Math.max(900, timeoutSeconds + 300));
+}
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+export function createDaytonaProvider(
+  client: DaytonaRestClient,
+  providerConfig: DaytonaProviderConfig
+): DaytonaSandboxProvider {
+  return new DaytonaSandboxProvider(client, providerConfig);
+}

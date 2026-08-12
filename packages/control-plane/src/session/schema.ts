@@ -1,0 +1,566 @@
+/**
+ * SQLite schema for Session Durable Objects.
+ *
+ * Each session gets its own SQLite database stored in the Durable Object.
+ * This ensures high performance even with hundreds of concurrent sessions.
+ */
+
+// Shared between SCHEMA_SQL (fresh DOs) and migration 31 (existing DOs) so
+// the two paths can never diverge.
+const SESSION_REPOSITORIES_TABLE_SQL = `CREATE TABLE IF NOT EXISTS session_repositories (
+  position INTEGER NOT NULL,
+  repo_owner TEXT NOT NULL,
+  repo_name TEXT NOT NULL,
+  repo_id INTEGER,
+  base_branch TEXT NOT NULL,
+  branch_name TEXT,                                 -- Working branch (set after first push to this repo)
+  base_sha TEXT,
+  current_sha TEXT,
+  PRIMARY KEY (repo_owner, repo_name)
+)`;
+
+export const SCHEMA_SQL = `
+-- Core session state
+CREATE TABLE IF NOT EXISTS session (
+  id TEXT PRIMARY KEY,                              -- Same as DO ID
+  session_name TEXT,                                -- External session name for WebSocket routing
+  title TEXT,                                       -- Session/PR title
+  repo_owner TEXT,                                  -- e.g., "acme-corp"; NULL for no-repo sessions
+  repo_name TEXT,                                   -- e.g., "web-app"; NULL for no-repo sessions
+  repo_id INTEGER,                                  -- GitHub repository ID (stable)
+  base_branch TEXT,                                 -- Base branch for PRs; NULL for no-repo sessions
+  branch_name TEXT,                                 -- Working branch (set after first commit)
+  base_sha TEXT,                                    -- SHA of base branch at session start
+  current_sha TEXT,                                 -- Current HEAD SHA
+  opencode_session_id TEXT,                         -- OpenCode session ID (for 1:1 mapping)
+  model TEXT DEFAULT 'anthropic/claude-haiku-4-5',   -- LLM model to use
+  reasoning_effort TEXT,                            -- Session-level reasoning effort default
+  status TEXT DEFAULT 'created',                    -- 'created', 'active', 'completed', 'failed', 'archived', 'cancelled'
+  parent_session_id TEXT,                           -- Parent session ID (NULL for top-level)
+  spawn_source TEXT NOT NULL DEFAULT 'user',        -- 'user' or 'agent'
+  spawn_depth INTEGER NOT NULL DEFAULT 0,           -- 0 for top-level, parent.depth + 1 for children
+  code_server_enabled INTEGER NOT NULL DEFAULT 0,   -- 0 = disabled, 1 = enabled (opt-in)
+  total_cost REAL NOT NULL DEFAULT 0,              -- Running session cost from step_finish events
+  sandbox_settings TEXT DEFAULT NULL,               -- JSON blob of SandboxSettings (resolved at session creation)
+  environment_id TEXT,                              -- Launch environment provenance; NULL for repo-launched/ad-hoc sessions
+  terminal_at INTEGER,                              -- Stable start of the terminal retention window
+  archive_requested_at INTEGER,                     -- Durable retry intent for provider archival
+  archive_claimed_at INTEGER,                       -- Prevents resume or prompt races during provider archival
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  CHECK (
+    (repo_owner IS NULL) = (repo_name IS NULL)
+    AND (
+      repo_owner IS NOT NULL
+      OR (repo_id IS NULL AND base_branch IS NULL)
+    )
+  )
+);
+
+-- Participants in the session
+CREATE TABLE IF NOT EXISTS participants (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  scm_user_id TEXT,                                 -- SCM numeric ID
+  scm_login TEXT,                                   -- SCM username
+  scm_email TEXT,                                   -- For git commit attribution
+  scm_name TEXT,                                    -- Display name for git commits
+  auth_name TEXT,                                   -- Provider-agnostic display name (e.g. Google/OIDC) for presence
+  role TEXT NOT NULL DEFAULT 'member',              -- 'owner', 'member'
+  -- Token storage (AES-GCM encrypted)
+  scm_access_token_encrypted TEXT,
+  scm_refresh_token_encrypted TEXT,
+  scm_token_expires_at INTEGER,                     -- Unix timestamp
+  -- WebSocket authentication
+  ws_auth_token TEXT,                               -- SHA-256 hash of WebSocket auth token
+  ws_token_created_at INTEGER,                      -- When the token was generated
+  joined_at INTEGER NOT NULL
+);
+
+-- Message queue and history
+CREATE TABLE IF NOT EXISTS messages (
+  id TEXT PRIMARY KEY,
+  author_id TEXT NOT NULL,
+  content TEXT NOT NULL,
+  source TEXT NOT NULL,                             -- 'web', 'slack', 'extension', 'github'
+  model TEXT,                                       -- LLM model for this specific message (per-message override)
+  reasoning_effort TEXT,                            -- Per-message reasoning effort override
+  attachments TEXT,                                 -- JSON array
+  callback_context TEXT,                            -- JSON callback context for Slack follow-up notifications
+  status TEXT DEFAULT 'pending',                    -- 'pending', 'processing', 'completed', 'failed'
+  error_message TEXT,                               -- If status='failed'
+  created_at INTEGER NOT NULL,
+  started_at INTEGER,                               -- When processing began
+  completed_at INTEGER,                             -- When processing finished
+  FOREIGN KEY (author_id) REFERENCES participants(id)
+);
+
+-- Agent event log (tool calls, tokens, errors)
+CREATE TABLE IF NOT EXISTS events (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,                               -- 'tool_call', 'tool_result', 'token', 'error', 'git_sync'
+  data TEXT NOT NULL,                               -- JSON payload
+  message_id TEXT,
+  created_at INTEGER NOT NULL
+);
+
+-- Artifacts (PRs, screenshots, video recordings, preview URLs)
+CREATE TABLE IF NOT EXISTS artifacts (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,                               -- 'pr', 'screenshot', 'video', 'preview', 'branch', 'board'
+  url TEXT,
+  metadata TEXT,                                    -- JSON
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL                       -- last content change (PR lifecycle updates)
+);
+
+-- Sandbox state
+CREATE TABLE IF NOT EXISTS sandbox (
+  id TEXT PRIMARY KEY,
+  modal_sandbox_id TEXT,                            -- Our generated sandbox ID
+  modal_object_id TEXT,                             -- Legacy provider object ID (Modal object ID or Daytona handle)
+  snapshot_id TEXT,
+  snapshot_image_id TEXT,                           -- Modal Image ID for filesystem snapshot restoration
+  auth_token TEXT,                                  -- Token for sandbox to authenticate back to control plane
+  auth_token_hash TEXT,                             -- SHA-256 hash of sandbox auth token (preferred)
+  status TEXT DEFAULT 'pending',                    -- 'pending', 'spawning', 'connecting', 'warming', 'syncing', 'ready', 'running', 'stale', 'snapshotting', 'stopping', 'stopped', 'failed'
+  git_sync_status TEXT DEFAULT 'pending',           -- 'pending', 'in_progress', 'completed', 'failed'
+  last_heartbeat INTEGER,
+  last_activity INTEGER,                            -- Last activity timestamp for inactivity-based snapshot
+  last_spawn_error TEXT,                            -- Last sandbox spawn error (if any)
+  last_spawn_error_at INTEGER,                      -- Timestamp of last spawn error
+  stop_unreconciled_at INTEGER,                     -- Set while a failed provider stop remains unsettled; NULL once reconciled
+  stop_unreconciled_provider_id TEXT,               -- The provider object the failed stop targeted, pinned so a respawn can't redirect the retry
+  spawn_failure_count INTEGER DEFAULT 0,            -- Circuit breaker: consecutive spawn failures
+  last_spawn_failure INTEGER,                       -- Timestamp of last spawn failure
+  code_server_url TEXT,                             -- Code-server tunnel URL (rotates on wake/restore)
+  code_server_password TEXT,                        -- Code-server password (rotates on each wake/restore)
+  tunnel_urls TEXT,                                 -- JSON mapping of port -> tunnel URL for extra ports
+  ttyd_url TEXT,                                    -- ttyd proxy tunnel URL
+  ttyd_token TEXT,                                  -- Encrypted JWT token for ttyd auth
+  created_at INTEGER NOT NULL
+);
+
+-- Member repositories for multi-repo sessions, in position order
+-- (position 0 = primary, mirrored into session.repo_owner/repo_name).
+-- Pre-feature sessions have no rows; readers synthesize a one-entry list
+-- from the session scalar columns. Per-repo git state columns are written
+-- by push handling from PR-5 onward; until then the position-0 row is
+-- overlaid with the session scalar branch/sha columns at read time.
+${SESSION_REPOSITORIES_TABLE_SQL};
+
+-- WebSocket client mapping for hibernation recovery
+CREATE TABLE IF NOT EXISTS ws_client_mapping (
+  ws_id TEXT PRIMARY KEY,
+  participant_id TEXT NOT NULL,
+  client_id TEXT,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (participant_id) REFERENCES participants(id)
+);
+
+-- Indexes for common queries
+CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
+CREATE INDEX IF NOT EXISTS idx_messages_author ON messages(author_id);
+CREATE INDEX IF NOT EXISTS idx_events_message ON events(message_id);
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
+CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at, id);
+CREATE INDEX IF NOT EXISTS idx_participants_user ON participants(user_id);
+`;
+
+import { createLogger } from "../logger";
+import type { SqlStorage } from "./repository";
+
+const schemaLog = createLogger("schema");
+
+/**
+ * A numbered, tracked migration.
+ *
+ * - `string` runs are ALTER TABLE statements processed through runMigration()
+ *   (errors for "duplicate column" / "already exists" are swallowed).
+ * - `function` runs execute directly and must be written idempotently,
+ *   since they may re-run if the process crashes between execution and recording.
+ */
+export interface SchemaMigration {
+  readonly id: number;
+  readonly description: string;
+  readonly run: string | ((sql: SqlStorage) => void);
+}
+
+/** Ids at or above this belong to this fork, so neither side claims the other's. */
+export const FORK_MIGRATION_ID_FLOOR = 9000;
+
+/** Identifiers this fork used before the floor existed. Upstream owns them now. */
+export const RETIRED_LOW_IDS = [35, 36] as const;
+
+/**
+ * Ordered list of all schema migrations.
+ *
+ * To add a new migration:
+ * 1. Add the column/table to SCHEMA_SQL above (so new DOs get the full schema)
+ * 2. Append an entry here at or above FORK_MIGRATION_ID_FLOOR, or at the next
+ *    sequential ID when the change is going upstream
+ * 3. For data transforms, use a function-type `run`
+ * 4. Guard a fork-local change — the runner tracks ids only, and can't see that
+ *    the change already landed under a different one
+ */
+export const MIGRATIONS: readonly SchemaMigration[] = [
+  {
+    id: 1,
+    description: "Add session_name to session",
+    run: `ALTER TABLE session ADD COLUMN session_name TEXT`,
+  },
+  {
+    id: 2,
+    description: "Add repo_id to session",
+    run: `ALTER TABLE session ADD COLUMN repo_id INTEGER`,
+  },
+  {
+    id: 3,
+    description: "Add model to session",
+    run: `ALTER TABLE session ADD COLUMN model TEXT DEFAULT 'anthropic/claude-haiku-4-5'`,
+  },
+  {
+    id: 4,
+    description: "Add model to messages",
+    run: `ALTER TABLE messages ADD COLUMN model TEXT`,
+  },
+  {
+    id: 5,
+    description: "Add ws_auth_token to participants",
+    run: `ALTER TABLE participants ADD COLUMN ws_auth_token TEXT`,
+  },
+  {
+    id: 6,
+    description: "Add ws_token_created_at to participants",
+    run: `ALTER TABLE participants ADD COLUMN ws_token_created_at INTEGER`,
+  },
+  {
+    id: 7,
+    description: "Add refresh_token_encrypted to participants",
+    run: (sql) => {
+      const columns = sql.exec("PRAGMA table_info(participants)").toArray() as Array<{
+        name: string;
+      }>;
+      const names = new Set(columns.map((c) => c.name));
+      // Fresh DOs (post-rename) already have scm_refresh_token_encrypted from SCHEMA_SQL.
+      // Only add the old column name on pre-rename DOs that need migration 20 to rename it.
+      if (
+        !names.has("github_refresh_token_encrypted") &&
+        !names.has("scm_refresh_token_encrypted")
+      ) {
+        sql.exec("ALTER TABLE participants ADD COLUMN scm_refresh_token_encrypted TEXT");
+      }
+    },
+  },
+  {
+    id: 8,
+    description: "Add snapshot_image_id to sandbox",
+    run: `ALTER TABLE sandbox ADD COLUMN snapshot_image_id TEXT`,
+  },
+  {
+    id: 9,
+    description: "Add last_activity to sandbox",
+    run: `ALTER TABLE sandbox ADD COLUMN last_activity INTEGER`,
+  },
+  {
+    id: 10,
+    description: "Add last_spawn_error to sandbox",
+    run: `ALTER TABLE sandbox ADD COLUMN last_spawn_error TEXT`,
+  },
+  {
+    id: 11,
+    description: "Add last_spawn_error_at to sandbox",
+    run: `ALTER TABLE sandbox ADD COLUMN last_spawn_error_at INTEGER`,
+  },
+  {
+    id: 12,
+    description: "Add modal_object_id to sandbox",
+    run: `ALTER TABLE sandbox ADD COLUMN modal_object_id TEXT`,
+  },
+  {
+    id: 13,
+    description: "Create ws_client_mapping table",
+    run: (sql) => {
+      sql.exec(`
+        CREATE TABLE IF NOT EXISTS ws_client_mapping (
+          ws_id TEXT PRIMARY KEY,
+          participant_id TEXT NOT NULL,
+          client_id TEXT,
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY (participant_id) REFERENCES participants(id)
+        )
+      `);
+    },
+  },
+  {
+    id: 14,
+    description: "Add spawn_failure_count to sandbox",
+    run: `ALTER TABLE sandbox ADD COLUMN spawn_failure_count INTEGER DEFAULT 0`,
+  },
+  {
+    id: 15,
+    description: "Add last_spawn_failure to sandbox",
+    run: `ALTER TABLE sandbox ADD COLUMN last_spawn_failure INTEGER`,
+  },
+  {
+    id: 16,
+    description: "Add callback_context to messages",
+    run: `ALTER TABLE messages ADD COLUMN callback_context TEXT`,
+  },
+  {
+    id: 17,
+    description: "Add reasoning_effort to session",
+    run: `ALTER TABLE session ADD COLUMN reasoning_effort TEXT`,
+  },
+  {
+    id: 18,
+    description: "Add reasoning_effort to messages",
+    run: `ALTER TABLE messages ADD COLUMN reasoning_effort TEXT`,
+  },
+  {
+    id: 19,
+    description: "Add auth_token_hash to sandbox",
+    run: `ALTER TABLE sandbox ADD COLUMN auth_token_hash TEXT`,
+  },
+  {
+    id: 20,
+    description: "Rename github_* columns to scm_* in participants",
+    run: (sql) => {
+      const columns = sql.exec("PRAGMA table_info(participants)").toArray() as Array<{
+        name: string;
+      }>;
+      const columnNames = new Set(columns.map((c) => c.name));
+
+      const renames: [string, string][] = [
+        ["github_user_id", "scm_user_id"],
+        ["github_login", "scm_login"],
+        ["github_email", "scm_email"],
+        ["github_name", "scm_name"],
+        ["github_access_token_encrypted", "scm_access_token_encrypted"],
+        ["github_refresh_token_encrypted", "scm_refresh_token_encrypted"],
+        ["github_token_expires_at", "scm_token_expires_at"],
+      ];
+      for (const [oldCol, newCol] of renames) {
+        if (columnNames.has(oldCol) && !columnNames.has(newCol)) {
+          sql.exec(`ALTER TABLE participants RENAME COLUMN ${oldCol} TO ${newCol}`);
+        }
+      }
+    },
+  },
+  {
+    id: 21,
+    description: "Add scm_provider to participants",
+    run: `ALTER TABLE participants ADD COLUMN scm_provider TEXT NOT NULL DEFAULT 'github'`,
+  },
+  {
+    id: 22,
+    description: "Add scm_provider to session",
+    run: `ALTER TABLE session ADD COLUMN scm_provider TEXT NOT NULL DEFAULT 'github'`,
+  },
+  {
+    id: 23,
+    description: "Drop scm_provider from session and participants (now deployment-level)",
+    run: (sql) => {
+      for (const table of ["session", "participants"] as const) {
+        const columns = sql.exec(`PRAGMA table_info(${table})`).toArray() as Array<{
+          name: string;
+        }>;
+        if (columns.some((c) => c.name === "scm_provider")) {
+          sql.exec(`ALTER TABLE ${table} DROP COLUMN scm_provider`);
+        }
+      }
+    },
+  },
+  {
+    id: 24,
+    description: "Rename repo_default_branch to base_branch in session",
+    run: (sql) => {
+      const columns = sql.exec("PRAGMA table_info(session)").toArray() as Array<{
+        name: string;
+      }>;
+      const columnNames = new Set(columns.map((c) => c.name));
+      if (columnNames.has("repo_default_branch") && !columnNames.has("base_branch")) {
+        sql.exec(`ALTER TABLE session RENAME COLUMN repo_default_branch TO base_branch`);
+      }
+    },
+  },
+  {
+    id: 25,
+    description: "Add parent session tracking",
+    run: `
+      ALTER TABLE session ADD COLUMN parent_session_id TEXT;
+      ALTER TABLE session ADD COLUMN spawn_source TEXT NOT NULL DEFAULT 'user';
+      ALTER TABLE session ADD COLUMN spawn_depth INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
+  {
+    id: 26,
+    description: "Add code-server fields to sandbox",
+    // Two ALTER TABLE statements — partial failure is safe because runMigration()
+    // handles "column already exists" errors, so re-running is idempotent.
+    run: `
+      ALTER TABLE sandbox ADD COLUMN code_server_url TEXT;
+      ALTER TABLE sandbox ADD COLUMN code_server_password TEXT;
+    `,
+  },
+  {
+    id: 27,
+    description: "Add code_server_enabled to session",
+    run: `ALTER TABLE session ADD COLUMN code_server_enabled INTEGER NOT NULL DEFAULT 0`,
+  },
+  {
+    id: 28,
+    description: "Add sandbox_settings to session and tunnel_urls to sandbox",
+    run: (sql) => {
+      runMigration(sql, `ALTER TABLE session ADD COLUMN sandbox_settings TEXT DEFAULT NULL`);
+      runMigration(sql, `ALTER TABLE sandbox ADD COLUMN tunnel_urls TEXT`);
+    },
+  },
+  {
+    id: 29,
+    description: "Add ttyd_url and ttyd_token to sandbox",
+    run: (sql) => {
+      runMigration(sql, `ALTER TABLE sandbox ADD COLUMN ttyd_url TEXT`);
+      runMigration(sql, `ALTER TABLE sandbox ADD COLUMN ttyd_token TEXT`);
+    },
+  },
+  {
+    id: 30,
+    description: "Add total_cost to session",
+    run: `ALTER TABLE session ADD COLUMN total_cost REAL NOT NULL DEFAULT 0`,
+  },
+  {
+    id: 31,
+    description: "Add session_repositories table for multi-repo sessions",
+    run: SESSION_REPOSITORIES_TABLE_SQL,
+  },
+  {
+    id: 32,
+    description: "Add environment_id to session (launch environment provenance)",
+    run: `ALTER TABLE session ADD COLUMN environment_id TEXT`,
+  },
+  {
+    id: 33,
+    description: "Add auth_name to participants (provider-agnostic presence display name)",
+    run: `ALTER TABLE participants ADD COLUMN auth_name TEXT`,
+  },
+  {
+    id: 34,
+    description: "Add updated_at to artifacts (PR lifecycle tracking)",
+    // SQLite cannot ADD COLUMN with NOT NULL and no default, so migrated DOs
+    // get a nullable column plus a backfill; fresh DOs get NOT NULL from
+    // SCHEMA_SQL and createArtifact always writes it.
+    run: (sql) => {
+      runMigration(sql, `ALTER TABLE artifacts ADD COLUMN updated_at INTEGER`);
+      sql.exec(`UPDATE artifacts SET updated_at = created_at WHERE updated_at IS NULL`);
+    },
+  },
+  {
+    id: 9001,
+    description: "Add stop-unreconciled tracking to sandbox",
+    run: (sql) => {
+      const columns = sql.exec("PRAGMA table_info(sandbox)").toArray() as Array<{ name: string }>;
+      const names = new Set(columns.map((c) => c.name));
+
+      if (!names.has("stop_unreconciled_at")) {
+        runMigration(sql, `ALTER TABLE sandbox ADD COLUMN stop_unreconciled_at INTEGER`);
+      }
+      if (!names.has("stop_unreconciled_provider_id")) {
+        runMigration(sql, `ALTER TABLE sandbox ADD COLUMN stop_unreconciled_provider_id TEXT`);
+      }
+    },
+  },
+  {
+    id: 9002,
+    description: "Add durable session archive tracking",
+    run: (sql) => {
+      const columns = sql.exec("PRAGMA table_info(session)").toArray() as Array<{ name: string }>;
+      const names = new Set(columns.map((column) => column.name));
+
+      if (!names.has("terminal_at")) {
+        runMigration(sql, `ALTER TABLE session ADD COLUMN terminal_at INTEGER`);
+      }
+      if (!names.has("archive_requested_at")) {
+        runMigration(sql, `ALTER TABLE session ADD COLUMN archive_requested_at INTEGER`);
+      }
+      if (!names.has("archive_claimed_at")) {
+        runMigration(sql, `ALTER TABLE session ADD COLUMN archive_claimed_at INTEGER`);
+      }
+    },
+  },
+];
+
+/**
+ * Run a migration statement, only ignoring "column already exists" errors.
+ * Rethrows any other errors to surface real problems.
+ */
+function runMigration(sql: SqlStorage, statement: string): void {
+  try {
+    sql.exec(statement);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // SQLite error messages for duplicate columns
+    if (msg.includes("duplicate column") || msg.includes("already exists")) {
+      return; // Expected for idempotent migrations
+    }
+    schemaLog.error("Migration failed", { statement, error: msg });
+    throw e;
+  }
+}
+
+/**
+ * Apply pending migrations, tracking which have already run via _schema_migrations.
+ */
+export function applyMigrations(sql: SqlStorage): void {
+  sql.exec(
+    `CREATE TABLE IF NOT EXISTS _schema_migrations (id INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)`
+  );
+
+  // Before the read below, so upstream's versions apply on this wake rather
+  // than the next one.
+  releaseRetiredIdentifiers(sql);
+
+  const rows = sql.exec(`SELECT id FROM _schema_migrations`).toArray() as Array<{ id: number }>;
+  const applied = new Set(rows.map((r) => r.id));
+
+  for (const migration of MIGRATIONS) {
+    if (applied.has(migration.id)) continue;
+
+    if (typeof migration.run === "string") {
+      runMigration(sql, migration.run);
+    } else {
+      migration.run(sql);
+    }
+
+    sql.exec(
+      `INSERT OR IGNORE INTO _schema_migrations (id, applied_at) VALUES (?, ?)`,
+      migration.id,
+      Date.now()
+    );
+  }
+}
+
+/**
+ * Without this, a store that ran 35 and 36 keeps reporting them as applied and
+ * upstream's migrations at those identifiers never run.
+ *
+ * Keyed on what MIGRATIONS claims rather than on a marker row, because a
+ * rollback to code that still defines 35 and 36 re-inserts rows
+ * indistinguishable from upstream's; every roll-forward has to clear them
+ * again. Adding upstream's versions turns this off.
+ */
+function releaseRetiredIdentifiers(sql: SqlStorage): void {
+  const unclaimed = RETIRED_LOW_IDS.filter((id) => !MIGRATIONS.some((m) => m.id === id));
+
+  for (const id of unclaimed) {
+    sql.exec(`DELETE FROM _schema_migrations WHERE id = ?`, id);
+  }
+}
+
+/**
+ * Initialize schema on a SQLite storage instance.
+ */
+export function initSchema(sql: SqlStorage): void {
+  sql.exec(SCHEMA_SQL);
+  applyMigrations(sql);
+}

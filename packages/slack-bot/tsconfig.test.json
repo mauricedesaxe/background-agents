@@ -1,0 +1,12 @@
+{
+  // Test-only typecheck pass, mirroring packages/control-plane. The binding
+  // parity test reads the Terraform and the Env interface off disk, which needs
+  // node:fs and import.meta.url. Those stay off the production type surface in
+  // tsconfig.json so worker code can't reach for a Node API by accident.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules"]
+}

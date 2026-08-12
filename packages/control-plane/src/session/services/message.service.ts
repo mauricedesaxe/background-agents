@@ -1,0 +1,140 @@
+import type { ArtifactRow, MessageRow } from "../types";
+import type { ArtifactResponse, ListEventsResponse } from "../../types";
+import type { SessionRepository } from "../repository";
+import type { SessionMessageQueue } from "../message-queue";
+import { SessionEventStream, type SessionEventListRequest } from "../event-stream";
+
+export interface EnqueuePromptRequest {
+  messageId?: string;
+  content: string;
+  authorId: string;
+  source: string;
+  model?: string;
+  reasoningEffort?: string;
+  attachments?: Array<{ type: string; name: string; url?: string }>;
+  callbackContext?: Record<string, unknown>;
+
+  // Identity enrichment (from router D1 lookup at prompt time)
+  authorDisplayName?: string;
+  authorEmail?: string;
+  authorLogin?: string;
+
+  // SCM token enrichment (from cross-provider identity resolution)
+  scmUserId?: string;
+  scmAccessTokenEncrypted?: string;
+  scmRefreshTokenEncrypted?: string;
+  scmTokenExpiresAt?: number;
+}
+
+export class PromptIdConflictError extends Error {
+  constructor() {
+    super("Message ID belongs to another prompt");
+    this.name = "PromptIdConflictError";
+  }
+}
+
+export class PromptEnqueueRejectedError extends Error {
+  constructor() {
+    super("Session no longer accepts prompts");
+    this.name = "PromptEnqueueRejectedError";
+  }
+}
+
+export type ListEventsRequest = SessionEventListRequest;
+
+export interface ListMessagesRequest {
+  cursor: string | null;
+  limit: number;
+  status: string | null;
+}
+
+interface MessageServiceDeps {
+  repository: SessionRepository;
+  messageQueue: SessionMessageQueue;
+  stopExecution: () => Promise<void>;
+  parseArtifactMetadata: (
+    artifact: Pick<ArtifactRow, "id" | "metadata">
+  ) => Record<string, unknown> | null;
+}
+
+export class MessageService {
+  private readonly eventStream: SessionEventStream;
+
+  constructor(private readonly deps: MessageServiceDeps) {
+    this.eventStream = new SessionEventStream(deps.repository);
+  }
+
+  enqueuePrompt(request: EnqueuePromptRequest): Promise<{ messageId: string; status: "queued" }> {
+    return this.deps.messageQueue.enqueuePromptFromApi(request);
+  }
+
+  async stop(): Promise<{ status: "stopping" }> {
+    await this.deps.stopExecution();
+    return { status: "stopping" };
+  }
+
+  listEvents(request: ListEventsRequest): ListEventsResponse {
+    return this.eventStream.listEvents(request);
+  }
+
+  listArtifacts(): {
+    artifacts: Array<{
+      id: string;
+      type: ArtifactRow["type"];
+      url: string | null;
+      metadata: Record<string, unknown> | null;
+      createdAt: number;
+      updatedAt: number;
+    }>;
+  } {
+    const artifacts = this.deps.repository.listArtifacts();
+    return {
+      artifacts: artifacts.map((artifact) => ({
+        id: artifact.id,
+        type: artifact.type,
+        url: artifact.url,
+        metadata: this.deps.parseArtifactMetadata(artifact),
+        createdAt: artifact.created_at,
+        updatedAt: artifact.updated_at,
+      })),
+    };
+  }
+
+  getArtifact(artifactId: string): { artifact: ArtifactResponse | null } {
+    const artifact = this.deps.repository.getArtifactById(artifactId);
+    if (!artifact) {
+      return { artifact: null };
+    }
+
+    return {
+      artifact: {
+        id: artifact.id,
+        type: artifact.type,
+        url: artifact.url,
+        metadata: this.deps.parseArtifactMetadata(artifact),
+        createdAt: artifact.created_at,
+        updatedAt: artifact.updated_at,
+      },
+    };
+  }
+
+  listMessages(request: ListMessagesRequest): {
+    messages: MessageRow[];
+    cursor: string | undefined;
+    hasMore: boolean;
+  } {
+    const messages = this.deps.repository.listMessages({
+      cursor: request.cursor,
+      limit: request.limit,
+      status: request.status,
+    });
+    const hasMore = messages.length > request.limit;
+    if (hasMore) messages.pop();
+
+    return {
+      messages,
+      cursor: messages.length > 0 ? messages[messages.length - 1].created_at.toString() : undefined,
+      hasMore,
+    };
+  }
+}

@@ -1,0 +1,380 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  generateAppJwt,
+  generateInstallationToken,
+  postReaction,
+  postIssueComment,
+  fetchPullRequest,
+  checkSenderPermission,
+} from "../src/github-auth";
+
+/** Generate a PKCS#8 PEM RSA key pair for testing. */
+async function generateTestKeyPair(): Promise<{ privateKeyPem: string }> {
+  const keyPair = await crypto.subtle.generateKey(
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-256",
+    },
+    true,
+    ["sign", "verify"]
+  );
+
+  const exported = await crypto.subtle.exportKey("pkcs8", keyPair.privateKey);
+  const base64 = btoa(String.fromCharCode(...new Uint8Array(exported)));
+  const lines = base64.match(/.{1,64}/g)!.join("\n");
+  return { privateKeyPem: `-----BEGIN PRIVATE KEY-----\n${lines}\n-----END PRIVATE KEY-----` };
+}
+
+describe("generateAppJwt", () => {
+  it("produces a valid 3-part JWT", async () => {
+    const { privateKeyPem } = await generateTestKeyPair();
+    const jwt = await generateAppJwt("12345", privateKeyPem);
+
+    const parts = jwt.split(".");
+    expect(parts).toHaveLength(3);
+
+    // Decode header
+    const header = JSON.parse(atob(parts[0].replace(/-/g, "+").replace(/_/g, "/")));
+    expect(header).toEqual({ alg: "RS256", typ: "JWT" });
+
+    // Decode payload
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
+    expect(payload.iss).toBe("12345");
+    expect(payload.iat).toBeTypeOf("number");
+    expect(payload.exp).toBeTypeOf("number");
+    expect(payload.exp - payload.iat).toBe(660); // 600 + 60 clock skew
+  });
+
+  it("JWT claims have correct time ranges", async () => {
+    const { privateKeyPem } = await generateTestKeyPair();
+    const now = Math.floor(Date.now() / 1000);
+    const jwt = await generateAppJwt("99", privateKeyPem);
+
+    const payload = JSON.parse(atob(jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    expect(payload.iat).toBeGreaterThanOrEqual(now - 62);
+    expect(payload.iat).toBeLessThanOrEqual(now - 58);
+    expect(payload.exp).toBeGreaterThanOrEqual(now + 598);
+    expect(payload.exp).toBeLessThanOrEqual(now + 602);
+  });
+});
+
+describe("GitHub issue and pull request API", () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    globalThis.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("posts a visible issue comment", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(new Response("", { status: 201 }));
+
+    await expect(
+      postIssueComment("token", "acme", "widgets", 42, "Open Inspect could not start")
+    ).resolves.toBe(true);
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/acme/widgets/issues/42/comments",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ body: "Open Inspect could not start" }),
+      })
+    );
+  });
+
+  it("parses the PR branch and context", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          title: "Fix cache",
+          body: "Fixes stale reads",
+          user: { login: "alice" },
+          head: { ref: "fix/cache", sha: "abc123", repo: { full_name: "acme/widgets" } },
+          base: { ref: "main", repo: { full_name: "acme/widgets" } },
+        }),
+        { status: 200 }
+      )
+    );
+
+    await expect(fetchPullRequest("token", "acme", "widgets", 42)).resolves.toEqual({
+      title: "Fix cache",
+      body: "Fixes stale reads",
+      author: "alice",
+      head: "fix/cache",
+      headSha: "abc123",
+      headRepository: "acme/widgets",
+      base: "main",
+      baseRepository: "acme/widgets",
+      isCrossRepository: false,
+    });
+  });
+
+  it("identifies a fork PR without dropping its head repository or SHA", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          title: "Fix cache",
+          body: null,
+          user: { login: "contributor" },
+          head: {
+            ref: "main",
+            sha: "fork-sha",
+            repo: { full_name: "contributor/widgets" },
+          },
+          base: { ref: "main", repo: { full_name: "acme/widgets" } },
+        }),
+        { status: 200 }
+      )
+    );
+
+    await expect(fetchPullRequest("token", "acme", "widgets", 42)).resolves.toMatchObject({
+      head: "main",
+      headSha: "fork-sha",
+      headRepository: "contributor/widgets",
+      baseRepository: "acme/widgets",
+      isCrossRepository: true,
+    });
+  });
+});
+
+describe("postReaction", () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    globalThis.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("calls fetch with correct parameters", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(new Response("", { status: 201 }));
+
+    const url = "https://api.github.com/repos/acme/widgets/issues/42/reactions";
+    await postReaction("test-token", url, "eyes");
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(url, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer test-token",
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "Open-Inspect",
+      },
+      body: JSON.stringify({ content: "eyes" }),
+    });
+  });
+
+  it("returns true on success (201)", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(new Response("", { status: 201 }));
+    const result = await postReaction("tok", "https://api.github.com/test", "eyes");
+    expect(result).toBe(true);
+  });
+
+  it("returns true on 200", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(new Response("", { status: 200 }));
+    const result = await postReaction("tok", "https://api.github.com/test", "eyes");
+    expect(result).toBe(true);
+  });
+
+  it("returns false on 403", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(new Response("Forbidden", { status: 403 }));
+    const result = await postReaction("tok", "https://api.github.com/test", "eyes");
+    expect(result).toBe(false);
+  });
+
+  it("returns false on network error", async () => {
+    vi.mocked(globalThis.fetch).mockRejectedValue(new Error("network error"));
+    const result = await postReaction("tok", "https://api.github.com/test", "eyes");
+    expect(result).toBe(false);
+  });
+
+  it("uses the configured User-Agent when one is provided", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(new Response("", { status: 201 }));
+    await postReaction("tok", "https://api.github.com/test", "eyes", "Acme Bot");
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/test",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "User-Agent": "Acme Bot" }),
+      })
+    );
+  });
+
+  it("defaults the User-Agent to Open-Inspect when omitted", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(new Response("", { status: 201 }));
+    await postReaction("tok", "https://api.github.com/test", "eyes");
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/test",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "User-Agent": "Open-Inspect" }),
+      })
+    );
+  });
+});
+
+describe("generateInstallationToken", () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    globalThis.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("returns the token from a valid GitHub response", async () => {
+    const { privateKeyPem } = await generateTestKeyPair();
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ token: "installation-token" }), { status: 201 })
+    );
+
+    await expect(
+      generateInstallationToken({
+        appId: "12345",
+        privateKey: privateKeyPem,
+        installationId: "67890",
+      })
+    ).resolves.toBe("installation-token");
+  });
+
+  it("rejects a malformed GitHub token response", async () => {
+    const { privateKeyPem } = await generateTestKeyPair();
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ id: "not-a-token" }), { status: 201 })
+    );
+
+    await expect(
+      generateInstallationToken({
+        appId: "12345",
+        privateKey: privateKeyPem,
+        installationId: "67890",
+      })
+    ).rejects.toThrow("Failed to get installation token: invalid response");
+  });
+
+  it("rejects an invalid JSON GitHub token response", async () => {
+    const { privateKeyPem } = await generateTestKeyPair();
+    vi.mocked(globalThis.fetch).mockResolvedValue(new Response("not json", { status: 201 }));
+
+    await expect(
+      generateInstallationToken({
+        appId: "12345",
+        privateKey: privateKeyPem,
+        installationId: "67890",
+      })
+    ).rejects.toThrow("Failed to get installation token: invalid response");
+  });
+});
+
+describe("checkSenderPermission", () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    globalThis.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("returns hasPermission true for write permission", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ permission: "write" }), { status: 200 })
+    );
+    const result = await checkSenderPermission("tok", "acme", "widgets", "alice");
+    expect(result).toEqual({ hasPermission: true });
+  });
+
+  it("returns hasPermission true for admin permission", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ permission: "admin" }), { status: 200 })
+    );
+    const result = await checkSenderPermission("tok", "acme", "widgets", "alice");
+    expect(result).toEqual({ hasPermission: true });
+  });
+
+  it("returns hasPermission true for maintain permission", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ permission: "maintain" }), { status: 200 })
+    );
+    const result = await checkSenderPermission("tok", "acme", "widgets", "alice");
+    expect(result).toEqual({ hasPermission: true });
+  });
+
+  it("returns hasPermission false for read permission", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ permission: "read" }), { status: 200 })
+    );
+    const result = await checkSenderPermission("tok", "acme", "widgets", "alice");
+    expect(result).toEqual({ hasPermission: false });
+  });
+
+  it("returns hasPermission false for none permission", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ permission: "none" }), { status: 200 })
+    );
+    const result = await checkSenderPermission("tok", "acme", "widgets", "alice");
+    expect(result).toEqual({ hasPermission: false });
+  });
+
+  it("returns error flag on malformed permission response", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ user: { login: "alice" } }), { status: 200 })
+    );
+    const result = await checkSenderPermission("tok", "acme", "widgets", "alice");
+    expect(result).toEqual({ hasPermission: false, error: true });
+  });
+
+  it("returns error flag on API error (404)", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(new Response("Not Found", { status: 404 }));
+    const result = await checkSenderPermission("tok", "acme", "widgets", "alice");
+    expect(result).toEqual({ hasPermission: false, error: true });
+  });
+
+  it("returns error flag on network error", async () => {
+    vi.mocked(globalThis.fetch).mockRejectedValue(new Error("network error"));
+    const result = await checkSenderPermission("tok", "acme", "widgets", "alice");
+    expect(result).toEqual({ hasPermission: false, error: true });
+  });
+
+  it("calls correct GitHub API URL with encoded segments", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ permission: "write" }), { status: 200 })
+    );
+    await checkSenderPermission("test-token", "acme", "widgets", "alice");
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/acme/widgets/collaborators/alice/permission",
+      {
+        headers: {
+          Authorization: "Bearer test-token",
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          "User-Agent": "Open-Inspect",
+        },
+      }
+    );
+  });
+
+  it("uses the configured User-Agent when one is provided", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ permission: "write" }), { status: 200 })
+    );
+    await checkSenderPermission("tok", "acme", "widgets", "alice", "Acme Bot");
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        headers: expect.objectContaining({ "User-Agent": "Acme Bot" }),
+      })
+    );
+  });
+});
