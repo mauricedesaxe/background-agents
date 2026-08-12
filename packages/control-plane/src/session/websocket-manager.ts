@@ -50,7 +50,7 @@ export interface SessionWebSocketManager {
    */
   getSandboxSocket(): WebSocket | null;
   hasSandboxSocket(): boolean;
-  markSandboxCloseInitiated(ws: WebSocket, reason: string): void;
+  closeSandboxSocket(code: number, reason: string): boolean;
   getSandboxCloseInitiator(ws: WebSocket): string | null;
 
   isCurrentSandboxSocket(ws: WebSocket): boolean;
@@ -205,9 +205,17 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
     );
   }
 
-  markSandboxCloseInitiated(ws: WebSocket, reason: string): void {
+  closeSandboxSocket(code: number, reason: string): boolean {
+    const ws = Array.from(this.ctx.getWebSockets()).find(
+      (candidate) =>
+        this.classify(candidate).kind === "sandbox" && candidate.readyState === WebSocket.OPEN
+    );
+    if (!ws) return false;
     const attachment = this.readSandboxAttachment(ws);
     ws.serializeAttachment({ ...attachment, controlPlaneCloseReason: reason });
+    this.close(ws, code, reason);
+    this.clearSandboxSocketIfMatch(ws);
+    return true;
   }
 
   getSandboxCloseInitiator(ws: WebSocket): string | null {

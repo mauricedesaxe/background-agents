@@ -120,8 +120,7 @@ function buildQueue() {
   const wsManager = {
     getSandboxSocket: vi.fn(() => null as WebSocket | null),
     send: vi.fn(() => true),
-    close: vi.fn(),
-    markSandboxCloseInitiated: vi.fn(),
+    closeSandboxSocket: vi.fn(() => true),
     clearSandboxSocketIfMatch: vi.fn(() => true),
   };
 
@@ -701,7 +700,10 @@ describe("SessionMessageQueue", () => {
     );
     expect(h.sessionStatus.recordCompletedOutput).toHaveBeenCalledWith("msg-9", expect.any(Number));
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
-    expect(h.wsManager.close).toHaveBeenCalledWith(sandboxWs, 1012, "Stop confirmation timed out");
+    expect(h.wsManager.closeSandboxSocket).toHaveBeenCalledWith(
+      1012,
+      "Stop confirmation timed out"
+    );
     expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
     vi.useRealTimers();
   });
