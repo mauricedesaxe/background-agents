@@ -31,6 +31,14 @@ export function isDeadSandboxStatus(status: SandboxStatus): boolean {
   return DEAD_SANDBOX_STATUSES.has(status);
 }
 
+export type AbnormalCloseTrack = "bridge_first" | "control_plane_teardown";
+
+export function classifyAbnormalCloseTrack(status: SandboxStatus | null): AbnormalCloseTrack {
+  return status === "stopping" || (status !== null && isDeadSandboxStatus(status))
+    ? "control_plane_teardown"
+    : "bridge_first";
+}
+
 // ==================== Circuit Breaker ====================
 
 /**

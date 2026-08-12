@@ -87,7 +87,9 @@ export class DaytonaNotFoundError extends Error {
 export class DaytonaApiError extends Error {
   constructor(
     message: string,
-    public readonly status: number
+    public readonly status: number,
+    public readonly retryAfter: string | null = null,
+    public readonly requestId: string | null = null
   ) {
     super(message);
     this.name = "DaytonaApiError";
@@ -192,6 +194,7 @@ export class DaytonaRestClient {
     body?: unknown
   ): Promise<T> {
     const url = `${this.baseUrl}${path}`;
+    const requestedAt = Date.now();
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -214,7 +217,26 @@ export class DaytonaRestClient {
 
       if (!response.ok) {
         const text = await response.text();
-        throw new DaytonaApiError(text || response.statusText, response.status);
+        const retryAfter = response.headers.get("retry-after");
+        const requestId = response.headers.get("x-request-id");
+        log.error("daytona.api_error", {
+          event: "daytona.api_error",
+          http_method: method,
+          http_path: path,
+          http_status: response.status,
+          duration_ms: Date.now() - requestedAt,
+          retry_after: retryAfter,
+          provider_request_id: requestId,
+          rate_limit_limit: response.headers.get("x-ratelimit-limit"),
+          rate_limit_remaining: response.headers.get("x-ratelimit-remaining"),
+          rate_limit_reset: response.headers.get("x-ratelimit-reset"),
+        });
+        throw new DaytonaApiError(
+          text || response.statusText,
+          response.status,
+          retryAfter,
+          requestId
+        );
       }
 
       // Some endpoints (start, stop, recover) may return empty 200/204
