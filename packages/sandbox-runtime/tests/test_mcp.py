@@ -44,6 +44,17 @@ class TestResolveMcpServers:
         assert result[0]["name"] == "playwright"
         assert result[1]["name"] == "remote"
 
+    def test_pins_playwright_to_the_image_version(self):
+        servers = [
+            {"name": "playwright", "type": "local", "command": ["npx", "-y", "@playwright/mcp"]}
+        ]
+        with patch.dict(os.environ, {"PLAYWRIGHT_MCP_VERSION": "0.0.79"}):
+            sup = _make_supervisor({"mcp_servers": servers})
+            result = sup._resolve_mcp_servers()
+
+        assert result[0]["command"] == ["npx", "-y", "@playwright/mcp@0.0.79"]
+        assert servers[0]["command"] == ["npx", "-y", "@playwright/mcp"]
+
 
 # ─── _install_mcp_packages ──────────────────────────────────────────────────
 

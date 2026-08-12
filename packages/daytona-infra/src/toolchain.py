@@ -22,7 +22,7 @@ from daytona import CreateSnapshotParams, Daytona, Image, Resources
 OPENCODE_VERSION = "1.14.41"
 CODE_SERVER_VERSION = "4.109.5"
 AGENT_BROWSER_VERSION = "0.21.2"
-PLAYWRIGHT_MCP_VERSION = "0.0.79"  # deployment MCP config must run this same version; its bundled Playwright revision keys the browser cache
+PLAYWRIGHT_MCP_VERSION = "0.0.79"
 # Railway CLI — provides the `railway` binary the railway MCP (`railway mcp`)
 # needs. stdio MCPs run a local binary, so it must live in the image.
 RAILWAY_CLI_VERSION = "5.26.0"
@@ -119,6 +119,7 @@ def build_base_image(repo_root: Path) -> Image:
                 "PATH": "/root/.bun/bin:/usr/local/bin:/usr/bin:/bin",
                 "PYTHONPATH": "/app",
                 "NODE_PATH": "/usr/lib/node_modules",
+                "PLAYWRIGHT_MCP_VERSION": PLAYWRIGHT_MCP_VERSION,
                 "SANDBOX_VERSION": SANDBOX_VERSION,
             }
         )
