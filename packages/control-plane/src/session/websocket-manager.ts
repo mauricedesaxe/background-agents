@@ -49,6 +49,9 @@ export interface SessionWebSocketManager {
    * Validates sandbox ID against the repository during hibernation recovery.
    */
   getSandboxSocket(): WebSocket | null;
+  hasSandboxSocket(): boolean;
+  markSandboxCloseInitiated(ws: WebSocket, reason: string): void;
+  getSandboxCloseInitiator(ws: WebSocket): string | null;
 
   isCurrentSandboxSocket(ws: WebSocket): boolean;
 
@@ -194,6 +197,33 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
     }
 
     return null;
+  }
+
+  hasSandboxSocket(): boolean {
+    return Array.from(this.ctx.getWebSockets()).some(
+      (ws) => this.classify(ws).kind === "sandbox" && ws.readyState === WebSocket.OPEN
+    );
+  }
+
+  markSandboxCloseInitiated(ws: WebSocket, reason: string): void {
+    const attachment = this.readSandboxAttachment(ws);
+    ws.serializeAttachment({ ...attachment, controlPlaneCloseReason: reason });
+  }
+
+  getSandboxCloseInitiator(ws: WebSocket): string | null {
+    return this.readSandboxAttachment(ws).controlPlaneCloseReason ?? null;
+  }
+
+  private readSandboxAttachment(ws: WebSocket): {
+    activeSandboxConnection?: boolean;
+    controlPlaneCloseReason?: string;
+  } {
+    return (
+      (ws.deserializeAttachment() as {
+        activeSandboxConnection?: boolean;
+        controlPlaneCloseReason?: string;
+      } | null) ?? {}
+    );
   }
 
   isCurrentSandboxSocket(ws: WebSocket): boolean {

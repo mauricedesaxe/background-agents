@@ -266,6 +266,7 @@ function createMockWebSocketManager(
   return {
     sendCalls,
     getSandboxWebSocket: vi.fn(() => (hasSandboxWs ? ({} as WebSocket) : null)),
+    hasSandboxWebSocket: vi.fn(() => hasSandboxWs),
     closeSandboxWebSocket: vi.fn(),
     sendToSandbox: vi.fn((message: object) => {
       sendCalls.push(message);
@@ -1077,8 +1078,10 @@ describe("SandboxLifecycleManager", () => {
       });
       const storage = createMockStorage(createMockSession(), sandbox);
 
-      const { manager, broadcaster, wsManager } = buildManager({
+      const wsManager = createMockWebSocketManager(true);
+      const { manager, broadcaster } = buildManager({
         storage,
+        wsManager,
       });
 
       await manager.handleAlarm();
@@ -1099,7 +1102,7 @@ describe("SandboxLifecycleManager", () => {
           sandbox_created_at: sandbox.created_at,
           last_heartbeat_at: sandbox.last_heartbeat,
           last_activity_at: sandbox.last_activity,
-          has_sandbox_websocket: false,
+          has_sandbox_websocket: true,
           has_processing_message: false,
           connected_client_count: 0,
         })

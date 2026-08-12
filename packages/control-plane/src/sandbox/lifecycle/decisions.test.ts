@@ -6,7 +6,6 @@
 
 import { describe, it, expect } from "vitest";
 import {
-  classifyAbnormalCloseTrack,
   evaluateCircuitBreaker,
   evaluateSpawnDecision,
   evaluateInactivityTimeout,
@@ -35,22 +34,6 @@ import {
   type ExecutionTimeoutConfig,
 } from "./decisions";
 import { addDuration, durationMs, elapsed, epochMs, nowMs } from "../../time";
-
-describe("classifyAbnormalCloseTrack", () => {
-  it.each(["stopping", "stopped", "stale", "failed"] as const)(
-    "classifies %s as a control-plane teardown",
-    (status) => {
-      expect(classifyAbnormalCloseTrack(status)).toBe("control_plane_teardown");
-    }
-  );
-
-  it.each([null, "spawning", "connecting", "ready"] as const)(
-    "classifies %s as a bridge-first disconnect",
-    (status) => {
-      expect(classifyAbnormalCloseTrack(status)).toBe("bridge_first");
-    }
-  );
-});
 
 // ==================== Circuit Breaker Tests ====================
 

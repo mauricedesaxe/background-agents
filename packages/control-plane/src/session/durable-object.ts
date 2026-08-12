@@ -45,10 +45,7 @@ import { McpServerStore } from "../db/mcp-servers";
 import { IntegrationSettingsStore, resolveSlackSettings } from "../db/integration-settings";
 import { SessionIndexStore } from "../db/session-index";
 import { SessionUsageStore } from "../db/session-usage-store";
-import {
-  classifyAbnormalCloseTrack,
-  DEFAULT_EXECUTION_TIMEOUT_MS,
-} from "../sandbox/lifecycle/decisions";
+import { DEFAULT_EXECUTION_TIMEOUT_MS } from "../sandbox/lifecycle/decisions";
 import {
   createSourceControlProviderFromEnv,
   resolveScmProviderFromEnv,
@@ -779,9 +776,11 @@ export class SessionDO extends DurableObject<Env> {
     // WebSocket manager adapter — thin delegation to wsManager
     const wsManager: WebSocketManager = {
       getSandboxWebSocket: () => this.wsManager.getSandboxSocket(),
+      hasSandboxWebSocket: () => this.wsManager.hasSandboxSocket(),
       closeSandboxWebSocket: (code, reason) => {
         const ws = this.wsManager.getSandboxSocket();
         if (ws) {
+          this.wsManager.markSandboxCloseInitiated(ws, reason);
           this.wsManager.close(ws, code, reason);
           this.wsManager.clearSandboxSocket();
         }
@@ -1155,7 +1154,15 @@ export class SessionDO extends DurableObject<Env> {
             event: "sandbox.abnormal_close",
             code,
             reason,
-            disconnect_track: classifyAbnormalCloseTrack(sandbox?.status ?? null),
+            disconnect_track:
+              this.wsManager.getSandboxCloseInitiator(ws) !== null ||
+              sandbox?.status === "stopping" ||
+              sandbox?.status === "stopped" ||
+              sandbox?.status === "stale" ||
+              sandbox?.status === "failed"
+                ? "control_plane_teardown"
+                : "bridge_first",
+            control_plane_close_reason: this.wsManager.getSandboxCloseInitiator(ws),
             sandbox_status: sandbox?.status ?? null,
             sandbox_created_at: sandbox?.created_at ?? null,
             last_heartbeat_at: sandbox?.last_heartbeat ?? null,
@@ -1194,6 +1201,9 @@ export class SessionDO extends DurableObject<Env> {
   async webSocketError(ws: WebSocket, error: Error): Promise<void> {
     this.ensureInitialized();
     this.log.error("WebSocket error", { error });
+    if (this.wsManager.classify(ws).kind === "sandbox") {
+      this.wsManager.markSandboxCloseInitiated(ws, "Internal error");
+    }
     ws.close(1011, "Internal error");
   }
 

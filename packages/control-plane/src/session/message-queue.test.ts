@@ -121,6 +121,7 @@ function buildQueue() {
     getSandboxSocket: vi.fn(() => null as WebSocket | null),
     send: vi.fn(() => true),
     close: vi.fn(),
+    markSandboxCloseInitiated: vi.fn(),
     clearSandboxSocketIfMatch: vi.fn(() => true),
   };
 
