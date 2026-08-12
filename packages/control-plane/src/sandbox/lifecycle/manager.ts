@@ -158,6 +158,8 @@ export interface WebSocketManager {
   getSandboxWebSocket(): WebSocket | null;
   /** Report raw socket presence without adopting, closing, or filtering by lifecycle status. */
   hasSandboxWebSocket(): boolean;
+  /** Record teardown provenance before provider calls can close the socket. */
+  markSandboxTeardown(reason: string): void;
   /** Close the sandbox WebSocket */
   closeSandboxWebSocket(code: number, reason: string): void;
   /** Send a message to the sandbox */
@@ -1674,6 +1676,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         timeout_ms: this.config.connectingTimeout.timeoutMs,
         ...alarmState,
       });
+      this.wsManager.markSandboxTeardown("Connecting timeout");
       await this.callbacks.onSandboxTerminating?.("connecting_timeout");
       this.storage.updateSandboxStatus("failed");
       this.clearSandboxAccessState();
@@ -1710,6 +1713,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         threshold_ms: this.config.heartbeat.timeoutMs,
         ...alarmState,
       });
+      this.wsManager.markSandboxTeardown("Heartbeat stale");
       // Fail any stuck processing message before terminating
       await this.callbacks.onSandboxTerminating?.("heartbeat_stale");
       this.storage.updateSandboxStatus("stale");
@@ -1760,6 +1764,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
           timeout_ms: this.config.inactivity.timeoutMs,
           ...alarmState,
         });
+        this.wsManager.markSandboxTeardown("Inactivity timeout");
         if (this.usesProviderManagedStop() && providerObjectId) {
           const settled = await this.joinInactivityStop(providerObjectId);
           return settled ? "teardown_settled" : "teardown_unsettled";

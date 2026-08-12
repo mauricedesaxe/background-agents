@@ -777,6 +777,9 @@ export class SessionDO extends DurableObject<Env> {
     const wsManager: WebSocketManager = {
       getSandboxWebSocket: () => this.wsManager.getSandboxSocket(),
       hasSandboxWebSocket: () => this.wsManager.hasSandboxSocket(),
+      markSandboxTeardown: (reason) => {
+        this.wsManager.markSandboxSocketClose(reason);
+      },
       closeSandboxWebSocket: (code, reason) => {
         this.wsManager.closeSandboxSocket(code, reason);
       },
@@ -1202,6 +1205,7 @@ export class SessionDO extends DurableObject<Env> {
       disconnect_track: "socket_error",
     });
     if (this.wsManager.classify(ws).kind === "sandbox") {
+      this.wsManager.markSandboxSocketCloseIfMatch(ws, "Internal error", "socket_error");
       this.wsManager.closeSandboxSocketIfMatch(ws, 1011, "Internal error", "socket_error");
     } else {
       ws.close(1011, "Internal error");

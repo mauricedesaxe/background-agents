@@ -50,6 +50,15 @@ export interface SessionWebSocketManager {
    */
   getSandboxSocket(): WebSocket | null;
   hasSandboxSocket(): boolean;
+  markSandboxSocketClose(
+    reason: string,
+    track?: "control_plane_teardown" | "socket_error"
+  ): boolean;
+  markSandboxSocketCloseIfMatch(
+    ws: WebSocket,
+    reason: string,
+    track?: "control_plane_teardown" | "socket_error"
+  ): boolean;
   closeSandboxSocket(code: number, reason: string): boolean;
   closeSandboxSocketIfMatch(
     ws: WebSocket,
@@ -218,19 +227,37 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
     return this.closeSandboxSocketIfMatch(ws, code, reason);
   }
 
-  closeSandboxSocketIfMatch(
-    ws: WebSocket,
-    code: number,
+  markSandboxSocketClose(
     reason: string,
     track: "control_plane_teardown" | "socket_error" = "control_plane_teardown"
   ): boolean {
-    if (ws.readyState !== WebSocket.OPEN || !this.isCurrentSandboxSocket(ws)) return false;
+    const ws = this.getRawActiveSandboxSocket();
+    return ws ? this.markSandboxSocketCloseIfMatch(ws, reason, track) : false;
+  }
+
+  markSandboxSocketCloseIfMatch(
+    ws: WebSocket,
+    reason: string,
+    track: "control_plane_teardown" | "socket_error" = "control_plane_teardown"
+  ): boolean {
+    if (!this.isCurrentSandboxSocket(ws)) return false;
     const attachment = this.readSandboxAttachment(ws);
     ws.serializeAttachment({
       ...attachment,
       controlPlaneCloseReason: reason,
       controlPlaneCloseTrack: track,
     });
+    return true;
+  }
+
+  closeSandboxSocketIfMatch(
+    ws: WebSocket,
+    code: number,
+    reason: string,
+    track: "control_plane_teardown" | "socket_error" = "control_plane_teardown"
+  ): boolean {
+    if (!this.markSandboxSocketCloseIfMatch(ws, reason, track)) return false;
+    if (ws.readyState !== WebSocket.OPEN) return false;
     this.close(ws, code, reason);
     this.clearSandboxSocketIfMatch(ws);
     return true;
