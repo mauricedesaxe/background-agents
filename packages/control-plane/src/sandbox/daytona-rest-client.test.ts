@@ -258,8 +258,7 @@ describe("DaytonaRestClient", () => {
 
       await expect(client.startSandbox("sb-1")).rejects.toMatchObject({
         status: 429,
-        retryAfter: "17",
-        requestId: "daytona-request-123",
+        message: "Daytona API request failed with HTTP 429",
       });
 
       const records = errorSpy.mock.calls.map(
@@ -279,6 +278,23 @@ describe("DaytonaRestClient", () => {
         })
       );
       expect(JSON.stringify(records)).not.toContain("account quota details");
+    });
+
+    it("records a retried state transition below error level", async () => {
+      const infoSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const client = new DaytonaRestClient(defaultConfig);
+      fetchSpy.mockResolvedValue(new Response("state change in progress", { status: 409 }));
+
+      await expect(client.stopSandbox("sb-1")).rejects.toMatchObject({ status: 409 });
+
+      const infoRecords = infoSpy.mock.calls.map(
+        ([line]) => JSON.parse(String(line)) as Record<string, unknown>
+      );
+      expect(infoRecords).toContainEqual(
+        expect.objectContaining({ event: "daytona.api_error", http_status: 409 })
+      );
+      expect(errorSpy).not.toHaveBeenCalled();
     });
 
     it("throws DaytonaApiError on 401", async () => {

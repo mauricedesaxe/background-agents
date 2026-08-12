@@ -156,6 +156,8 @@ export interface SandboxBroadcaster {
 export interface WebSocketManager {
   /** Get the sandbox WebSocket (with hibernation recovery) */
   getSandboxWebSocket(): WebSocket | null;
+  /** Report raw socket presence without adopting, closing, or filtering by lifecycle status. */
+  hasSandboxWebSocket(): boolean;
   /** Close the sandbox WebSocket */
   closeSandboxWebSocket(code: number, reason: string): void;
   /** Send a message to the sandbox */
@@ -1608,7 +1610,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       sandbox_created_at: sandbox.created_at,
       last_heartbeat_at: sandbox.last_heartbeat,
       last_activity_at: sandbox.last_activity,
-      has_sandbox_websocket: this.wsManager.getSandboxWebSocket() !== null,
+      has_sandbox_websocket: this.wsManager.hasSandboxWebSocket(),
       has_processing_message: this.storage.hasProcessingMessage(),
       connected_client_count: this.getConnectedClientCount(),
     };
@@ -1752,9 +1754,19 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
 
     switch (inactivityDecision.action) {
       case "timeout": {
+        const inactivityDeadlineAt =
+          sandbox.last_activity == null
+            ? null
+            : sandbox.last_activity +
+              this.config.inactivity.timeoutMs +
+              (alarmState.connected_client_count > 0 ? this.config.inactivity.extensionMs : 0);
         this.log.info("Inactivity timeout", {
           event: "sandbox.timeout",
           alarm_reason: "inactivity_timeout",
+          inactivity_extension_ms: this.config.inactivity.extensionMs,
+          alarm_deadline_at: inactivityDeadlineAt,
+          alarm_late_by_ms:
+            inactivityDeadlineAt == null ? null : Math.max(0, now - inactivityDeadlineAt),
           last_activity: sandbox.last_activity,
           timeout_ms: this.config.inactivity.timeoutMs,
           ...alarmState,

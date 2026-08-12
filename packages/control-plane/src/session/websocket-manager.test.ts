@@ -205,6 +205,26 @@ function createManager() {
 // ---------------------------------------------------------------------------
 
 describe("SessionWebSocketManagerImpl", () => {
+  it("reports sandbox socket presence without filtering or closing it", () => {
+    const { manager, sockets, mockRepo } = createManager();
+    const ws = createFakeWebSocket();
+    sockets.set(ws, ["sandbox"]);
+    mockRepo.setSandbox({ ...createSandboxRow("sb-1"), status: "connecting" });
+
+    expect(manager.hasSandboxSocket()).toBe(true);
+    expect(ws.close).not.toHaveBeenCalled();
+  });
+
+  it("preserves control-plane close provenance in the socket attachment", () => {
+    const { manager, sockets } = createManager();
+    const ws = createFakeWebSocket();
+    sockets.set(ws, ["sandbox"]);
+
+    manager.markSandboxCloseInitiated(ws, "Stop confirmation timed out");
+
+    expect(manager.getSandboxCloseInitiator(ws)).toBe("Stop confirmation timed out");
+  });
+
   describe("classify", () => {
     it("classifies sandbox socket with sandbox ID", () => {
       const { manager, sockets } = createManager();

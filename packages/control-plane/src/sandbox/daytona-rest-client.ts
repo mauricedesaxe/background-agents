@@ -87,9 +87,7 @@ export class DaytonaNotFoundError extends Error {
 export class DaytonaApiError extends Error {
   constructor(
     message: string,
-    public readonly status: number,
-    public readonly retryAfter: string | null = null,
-    public readonly requestId: string | null = null
+    public readonly status: number
   ) {
     super(message);
     this.name = "DaytonaApiError";
@@ -216,10 +214,10 @@ export class DaytonaRestClient {
       }
 
       if (!response.ok) {
-        const text = await response.text();
         const retryAfter = response.headers.get("retry-after");
         const requestId = response.headers.get("x-request-id");
-        log.error("daytona.api_error", {
+        const logApiError = response.status === 409 ? log.info.bind(log) : log.error.bind(log);
+        logApiError("daytona.api_error", {
           event: "daytona.api_error",
           http_method: method,
           http_path: path,
@@ -232,10 +230,8 @@ export class DaytonaRestClient {
           rate_limit_reset: response.headers.get("x-ratelimit-reset"),
         });
         throw new DaytonaApiError(
-          text || response.statusText,
-          response.status,
-          retryAfter,
-          requestId
+          `Daytona API request failed with HTTP ${response.status}`,
+          response.status
         );
       }
 
