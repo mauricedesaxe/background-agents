@@ -48,6 +48,49 @@ function getHandler(method: string, path: string) {
 }
 
 describe("session runtime proxy routes", () => {
+  it("forwards supervisor diagnostics to the session runtime", async () => {
+    const requests: Request[] = [];
+    const fetch = vi.fn(async (request: Request) => {
+      requests.push(request);
+      return new Response(null, { status: 204 });
+    });
+    const { handler, match } = getHandler("POST", "/sessions/session-1/supervisor-heartbeat");
+    const body = { sandboxId: "sandbox-1", sequence: 1 };
+
+    const response = await handler(
+      new Request("https://test.local/sessions/session-1/supervisor-heartbeat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      createEnv(fetch),
+      match,
+      createCtx()
+    );
+
+    expect(response.status).toBe(204);
+    expect(new URL(requests[0].url).pathname).toBe(SessionInternalPaths.supervisorHeartbeat);
+    await expect(requests[0].json()).resolves.toEqual(body);
+  });
+
+  it("rejects oversized supervisor diagnostics before runtime forwarding", async () => {
+    const fetch = vi.fn(async () => new Response(null, { status: 204 }));
+    const { handler, match } = getHandler("POST", "/sessions/session-1/supervisor-heartbeat");
+
+    const response = await handler(
+      new Request("https://test.local/sessions/session-1/supervisor-heartbeat", {
+        method: "POST",
+        body: JSON.stringify({ payload: "x".repeat(5000) }),
+      }),
+      createEnv(fetch),
+      match,
+      createCtx()
+    );
+
+    expect(response.status).toBe(413);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("forwards event query strings through the session runtime dependency", async () => {
     const requests: Request[] = [];
     const fetch = vi.fn(async (request: Request) => {

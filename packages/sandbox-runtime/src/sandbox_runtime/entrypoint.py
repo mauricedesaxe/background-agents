@@ -12,6 +12,7 @@ Runs as PID 1 inside the sandbox. Responsibilities:
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -36,6 +37,7 @@ from .constants import (
     TUNNEL_ENV_FILE_PATH,
     TUNNEL_ENV_SANDBOX_ID_KEY,
 )
+from .diagnostics import read_cgroup_memory_diagnostics
 from .log_config import configure_logging, get_logger
 from .repo_config import RepoConfigError, RepoEntry, dump_repo_manifest, parse_repositories
 from .repo_image_callback import RepoImageBuildCallback
@@ -121,6 +123,8 @@ class SandboxSupervisor:
     CLONE_DEPTH_COMMITS = 100
     SIDECAR_TIMEOUT_SECONDS = 5
     MCP_PACKAGE_INSTALL_TIMEOUT_SECONDS = 180
+    SUPERVISOR_HEARTBEAT_INTERVAL_SECONDS = 30.0
+    SUPERVISOR_HEARTBEAT_TIMEOUT_SECONDS = 5.0
 
     # OOM-killer bias (Linux oom_score_adj, range -1000..1000; lower = less
     # likely to be killed). Under memory pressure from a build/test workload we
@@ -145,6 +149,9 @@ class SandboxSupervisor:
         self.git_sync_complete = asyncio.Event()
         self.opencode_ready = asyncio.Event()
         self.boot_mode = "unknown"
+        self.boot_phase = "initializing"
+        self.supervisor_heartbeat_task: asyncio.Task[None] | None = None
+        self.supervisor_heartbeat_sequence = 0
 
         # Configuration from environment (set by Modal/SandboxManager)
         self.sandbox_id = os.environ.get("SANDBOX_ID", "unknown")
@@ -186,6 +193,72 @@ class SandboxSupervisor:
             sandbox_id=self.sandbox_id,
             session_id=session_id,
         )
+
+    @staticmethod
+    def _process_diagnostic(
+        process: asyncio.subprocess.Process | None,
+    ) -> dict[str, int | bool | None]:
+        return {
+            "pid": process.pid if process else None,
+            "running": process is not None and process.returncode is None,
+            "exitCode": process.returncode if process else None,
+        }
+
+    async def _send_supervisor_heartbeat(self) -> None:
+        session_id = self.session_config.get("session_id", "")
+        if not self.control_plane_url or not session_id or not self.sandbox_token:
+            return
+
+        memory = read_cgroup_memory_diagnostics()
+        self.supervisor_heartbeat_sequence += 1
+        payload = {
+            "sandboxId": self.sandbox_id,
+            "observedAt": int(time.time() * 1000),
+            "sequence": self.supervisor_heartbeat_sequence,
+            "bootMode": self.boot_mode,
+            "bootPhase": self.boot_phase,
+            "processes": {
+                "supervisor": {
+                    "pid": os.getpid(),
+                    "running": True,
+                    "exitCode": None,
+                },
+                "opencode": self._process_diagnostic(self.opencode_process),
+                "bridge": self._process_diagnostic(self.bridge_process),
+            },
+            "cgroup": {
+                "memoryCurrentBytes": memory.memory_current_bytes,
+                "memoryMaxBytes": memory.memory_max_bytes,
+                "oomCount": memory.oom_count,
+                "oomKillCount": memory.oom_kill_count,
+            },
+        }
+        url = f"{self.control_plane_url}/sessions/{session_id}/supervisor-heartbeat"
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.SUPERVISOR_HEARTBEAT_TIMEOUT_SECONDS
+            ) as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {self.sandbox_token}"},
+                    json=payload,
+                )
+            if response.status_code >= 400:
+                self.log.warn(
+                    "supervisor.heartbeat_rejected",
+                    http_status=response.status_code,
+                )
+        except Exception as error:
+            self.log.warn("supervisor.heartbeat_failed", error_type=type(error).__qualname__)
+
+    async def _supervisor_heartbeat_loop(self) -> None:
+        while not self.shutdown_event.is_set():
+            await self._send_supervisor_heartbeat()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self.shutdown_event.wait(),
+                    timeout=self.SUPERVISOR_HEARTBEAT_INTERVAL_SECONDS,
+                )
 
     @property
     def base_branch(self) -> str:
@@ -1937,6 +2010,8 @@ class SandboxSupervisor:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self._handle_signal(s)))
 
+        self.supervisor_heartbeat_task = asyncio.create_task(self._supervisor_heartbeat_loop())
+
         git_sync_success = False
         head_sha = ""
         repository_shas: list[dict[str, str]] = []
@@ -1957,6 +2032,7 @@ class SandboxSupervisor:
             if self.repositories:
                 await self._ensure_credential_helper_configured()
 
+            self.boot_phase = "syncing"
             failed_repos = await self.sync_repositories()
             git_sync_success = not failed_repos
             if failed_repos:
@@ -2000,6 +2076,7 @@ class SandboxSupervisor:
             # and continue.
             setup_success: bool | None = None
             if self.repositories and self.boot_mode in ("fresh", "build"):
+                self.boot_phase = "setup"
                 setup_success = True
                 for repo in self.repositories:
                     if await self.run_setup_script(repo):
@@ -2025,6 +2102,7 @@ class SandboxSupervisor:
             # start.sh see fresh data.
             start_success: bool | None = None
             if self.repositories and self.boot_mode != "build":
+                self.boot_phase = "starting_hooks"
                 await self._wait_for_tunnel_env_file(expected_tunnel_ports)
                 start_success = True
                 for index, repo in enumerate(self.repositories):
@@ -2077,6 +2155,7 @@ class SandboxSupervisor:
                 ("code_server", self.start_code_server),
                 ("ttyd", self.start_ttyd),
             ):
+                self.boot_phase = "starting_sidecars"
                 try:
                     await starter()
                 except Exception as e:
@@ -2094,10 +2173,12 @@ class SandboxSupervisor:
                         self.log.warn("ttyd_proxy.start_failed", exc=e)
 
             # Phase 4: Start OpenCode server (in repo directory)
+            self.boot_phase = "starting_opencode"
             await self.start_opencode()
             opencode_ready = True
 
             # Phase 5: Start bridge (after OpenCode is ready)
+            self.boot_phase = "starting_bridge"
             await self.start_bridge()
 
             # Emit sandbox.startup wide event
@@ -2118,6 +2199,7 @@ class SandboxSupervisor:
             )
 
             # Phase 6: Monitor processes
+            self.boot_phase = "monitoring"
             await self.monitor_processes()
 
         except Exception as e:
@@ -2136,7 +2218,13 @@ class SandboxSupervisor:
 
     async def shutdown(self) -> None:
         """Graceful shutdown of all processes."""
+        self.boot_phase = "shutting_down"
         self.log.info("supervisor.shutdown_start")
+
+        if self.supervisor_heartbeat_task:
+            self.supervisor_heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.supervisor_heartbeat_task
 
         # Terminate bridge first
         if self.bridge_process and self.bridge_process.returncode is None:

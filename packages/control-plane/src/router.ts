@@ -84,6 +84,7 @@ const SANDBOX_ONLY_ROUTES: PrincipalRouteGrant[] = [
   { method: "POST", pattern: /^\/sessions\/[^/]+\/pr$/ },
   { method: "POST", pattern: /^\/sessions\/[^/]+\/openai-token-refresh$/ },
   { method: "POST", pattern: /^\/sessions\/[^/]+\/scm-credentials$/ },
+  { method: "POST", pattern: /^\/sessions\/[^/]+\/supervisor-heartbeat$/ },
   { method: "GET", pattern: /^\/sessions\/[^/]+\/tunnel-urls$/ },
   { method: "POST", pattern: /^\/sessions\/[^/]+\/media$/ },
   { method: "POST", pattern: /^\/sessions\/[^/]+\/children$/ },
@@ -230,6 +231,7 @@ function isScmAgnosticRoute(path: string): boolean {
     // auth providers are agnostic; an unimplemented SCM (e.g. gitlab) still 501s.
     /^\/provider-identities\/(github|slack|linear|google)\/[^/]+$/.test(path) ||
     /^\/sessions\/[^/]+\/tunnel-urls$/.test(path) ||
+    /^\/sessions\/[^/]+\/supervisor-heartbeat$/.test(path) ||
     /^\/sessions\/[^/]+\/children(\/[^/]+(\/cancel)?)?$/.test(path) ||
     /^\/sessions\/[^/]+\/checkpoint$/.test(path) ||
     // Boards are unrelated to the SCM provider.

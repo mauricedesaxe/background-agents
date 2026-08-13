@@ -18,6 +18,8 @@ import {
   type ArchiveResult,
   type CreateSandboxConfig,
   type CreateSandboxResult,
+  type ProbeSandboxConfig,
+  type ProbeSandboxResult,
   type ResumeConfig,
   type ResumeResult,
   type SandboxProvider,
@@ -228,6 +230,25 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       }
       const detail = error instanceof Error ? error.message : String(error);
       throw this.classifyError(`Failed to stop Daytona sandbox: ${detail}`, error);
+    }
+  }
+
+  async probeSandboxState(config: ProbeSandboxConfig): Promise<ProbeSandboxResult> {
+    try {
+      const sandbox = await this.client.getSandbox(config.providerObjectId);
+      return {
+        outcome: "present",
+        state: sandbox.state,
+        recoverable: sandbox.recoverable ?? null,
+      };
+    } catch (error) {
+      if (error instanceof DaytonaNotFoundError) return { outcome: "missing" };
+      const classified = this.classifyError("Failed to probe Daytona sandbox", error);
+      return {
+        outcome: "unavailable",
+        errorType: classified.errorType,
+        error: classified.message,
+      };
     }
   }
 

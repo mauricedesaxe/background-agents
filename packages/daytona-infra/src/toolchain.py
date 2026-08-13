@@ -38,7 +38,7 @@ JJ_SHA256 = "59e5588583ac82b623239929368c65b90735931c0f26b5a16c1f04d5bb97643d"
 # the Jujutsu binary. tldraw-cli is now removed — diagrams are authored as JSON
 # records and posted to the interactive board endpoint (see the whiteboard
 # skill), so nothing renders tldraw in the sandbox.
-SANDBOX_VERSION = "daytona-v20-playwright-chromium"  # warm @playwright/mcp chromium into the browser cache
+SANDBOX_VERSION = "daytona-v21-supervisor-heartbeat"
 
 # Resources baked into the base snapshot. Daytona applies these to every sandbox
 # created from it and rejects overriding them at create time.

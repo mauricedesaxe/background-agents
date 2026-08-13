@@ -48,6 +48,7 @@ function createHandler() {
   // repeating it at every invocation.
   const handler = {
     ...sandboxHandler,
+    supervisorHeartbeat: (request: Request) => sandboxHandler.supervisorHeartbeat(request, log),
     verifySandboxToken: (request: Request) => sandboxHandler.verifySandboxToken(request, log),
     openaiTokenRefresh: () => sandboxHandler.openaiTokenRefresh(log),
     scmCredentials: () => sandboxHandler.scmCredentials(log),
@@ -72,6 +73,83 @@ function createHandler() {
 }
 
 describe("createSandboxHandler", () => {
+  it("logs bounded supervisor diagnostics without adding timeline activity", async () => {
+    const { handler, getSandbox, log, processSandboxEvent, broadcast } = createHandler();
+    getSandbox.mockReturnValue({ modal_sandbox_id: "sandbox-1" } as SandboxRow);
+    const body = {
+      sandboxId: "sandbox-1",
+      observedAt: 1234,
+      sequence: 2,
+      bootMode: "fresh",
+      bootPhase: "monitoring",
+      processes: {
+        supervisor: { pid: 1, running: true, exitCode: null },
+        opencode: { pid: 10, running: true, exitCode: null },
+        bridge: { pid: 11, running: false, exitCode: -9 },
+      },
+      cgroup: {
+        memoryCurrentBytes: 1024,
+        memoryMaxBytes: 4096,
+        oomCount: 1,
+        oomKillCount: 1,
+      },
+    };
+
+    const response = await handler.supervisorHeartbeat(
+      new Request("http://internal/internal/supervisor-heartbeat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      })
+    );
+
+    expect(response.status).toBe(204);
+    expect(log.info).toHaveBeenCalledWith(
+      "Supervisor heartbeat",
+      expect.objectContaining({
+        event: "sandbox.supervisor_heartbeat",
+        bridge_running: false,
+        bridge_exit_code: -9,
+        oom_kill_count: 1,
+      })
+    );
+    expect(processSandboxEvent).not.toHaveBeenCalled();
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  it("rejects supervisor diagnostics for a replaced sandbox", async () => {
+    const { handler, getSandbox, log } = createHandler();
+    getSandbox.mockReturnValue({ modal_sandbox_id: "sandbox-2" } as SandboxRow);
+
+    const response = await handler.supervisorHeartbeat(
+      new Request("http://internal/internal/supervisor-heartbeat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sandboxId: "sandbox-1",
+          observedAt: 1234,
+          sequence: 1,
+          bootMode: "fresh",
+          bootPhase: "monitoring",
+          processes: {
+            supervisor: { pid: 1, running: true, exitCode: null },
+            opencode: { pid: null, running: false, exitCode: null },
+            bridge: { pid: null, running: false, exitCode: null },
+          },
+          cgroup: {
+            memoryCurrentBytes: null,
+            memoryMaxBytes: null,
+            oomCount: null,
+            oomKillCount: null,
+          },
+        }),
+      })
+    );
+
+    expect(response.status).toBe(409);
+    expect(log.info).not.toHaveBeenCalled();
+  });
+
   it("processes sandbox event and returns ok response", async () => {
     const { handler, processSandboxEvent } = createHandler();
     const event = {

@@ -329,6 +329,17 @@ export interface ArchiveResult {
  */
 export type SandboxErrorType = "transient" | "permanent";
 
+export interface ProbeSandboxConfig {
+  providerObjectId: string;
+  sessionId: string;
+  reason: "bridge_abnormal_close";
+}
+
+export type ProbeSandboxResult =
+  | { outcome: "present"; state: string; recoverable: boolean | null }
+  | { outcome: "missing" }
+  | { outcome: "unavailable"; errorType: SandboxErrorType; error: string };
+
 /**
  * Custom error class for sandbox provider operations.
  *
@@ -473,6 +484,9 @@ export interface SandboxProvider {
    * Only available if `capabilities.supportsExplicitStop` is true.
    */
   stopSandbox?(config: StopConfig): Promise<StopResult>;
+
+  /** Read provider state without changing lifecycle state. */
+  probeSandboxState?(config: ProbeSandboxConfig): Promise<ProbeSandboxResult>;
 
   /**
    * Archive a stopped sandbox to free its disk while keeping it restorable.
