@@ -31,6 +31,8 @@ import {
   type CreateSandboxResult,
   type RestoreConfig,
   type RestoreResult,
+  type ProbeSandboxConfig,
+  type ProbeSandboxResult,
   type ResumeConfig,
   type ResumeResult,
   type SessionRepositoryInfo,
@@ -302,6 +304,7 @@ function createMockProvider(
     takeSnapshot: (config: SnapshotConfig) => Promise<SnapshotResult>;
     stopSandbox: (config: StopConfig) => Promise<StopResult>;
     archiveSandbox: (config: ArchiveConfig) => Promise<ArchiveResult>;
+    probeSandboxState: (config: ProbeSandboxConfig) => Promise<ProbeSandboxResult>;
     capabilities: Partial<SandboxProvider["capabilities"]>;
   }> = {}
 ): SandboxProvider {
@@ -341,6 +344,9 @@ function createMockProvider(
   }
   if (overrides.archiveSandbox) {
     provider.archiveSandbox = overrides.archiveSandbox;
+  }
+  if (overrides.probeSandboxState) {
+    provider.probeSandboxState = overrides.probeSandboxState;
   }
   return provider;
 }
@@ -424,6 +430,42 @@ function buildManager(options: ManagerHarnessOptions = {}) {
 // ==================== Tests ====================
 
 describe("SandboxLifecycleManager", () => {
+  describe("probeProviderAfterBridgeAbnormalClose", () => {
+    it("reads provider state without changing lifecycle state", async () => {
+      const probeSandboxState = vi.fn(
+        async (): Promise<ProbeSandboxResult> => ({
+          outcome: "present",
+          state: "started",
+          recoverable: false,
+        })
+      );
+      const provider = createMockProvider({ probeSandboxState });
+      const storage = createMockStorage();
+      const { manager, broadcaster } = buildManager({ provider, storage });
+
+      await manager.probeProviderAfterBridgeAbnormalClose();
+
+      expect(probeSandboxState).toHaveBeenCalledWith({
+        providerObjectId: "modal-obj-123",
+        sessionId: "",
+        reason: "bridge_abnormal_close",
+      });
+      expect(storage.calls).toEqual(["getSandbox", "getSandbox"]);
+      expect(broadcaster.messages).toEqual([]);
+    });
+
+    it("contains unexpected probe failures", async () => {
+      const provider = createMockProvider({
+        probeSandboxState: vi.fn(async () => {
+          throw new Error("provider unavailable");
+        }),
+      });
+      const { manager } = buildManager({ provider });
+
+      await expect(manager.probeProviderAfterBridgeAbnormalClose()).resolves.toBeUndefined();
+    });
+  });
+
   describe("spawnSandbox", () => {
     it("spawns when all conditions pass", async () => {
       const sandbox = createMockSandbox({ status: "pending", created_at: Date.now() - 60000 });
@@ -1078,7 +1120,6 @@ describe("SandboxLifecycleManager", () => {
         last_heartbeat: now - 100000, // 100 seconds ago, past 90s timeout
       });
       const storage = createMockStorage(createMockSession(), sandbox);
-
       const wsManager = createMockWebSocketManager(true);
       const { manager, broadcaster } = buildManager({
         storage,

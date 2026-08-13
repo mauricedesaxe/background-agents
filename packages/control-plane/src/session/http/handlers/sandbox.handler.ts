@@ -1,4 +1,5 @@
 import type { Logger } from "../../../logger";
+import { z } from "zod";
 import {
   createBoardArtifactRequestSchema,
   createMediaArtifactRequestSchema,
@@ -25,6 +26,39 @@ interface AddParticipantRequest {
   role?: string;
 }
 
+const processDiagnosticSchema = z
+  .object({
+    pid: z.number().int().positive().nullable(),
+    running: z.boolean(),
+    exitCode: z.number().int().nullable(),
+  })
+  .strict();
+
+const supervisorHeartbeatSchema = z
+  .object({
+    sandboxId: z.string().min(1).max(200),
+    observedAt: z.number().int().nonnegative(),
+    sequence: z.number().int().nonnegative(),
+    bootMode: z.string().min(1).max(40),
+    bootPhase: z.string().min(1).max(40),
+    processes: z
+      .object({
+        supervisor: processDiagnosticSchema,
+        opencode: processDiagnosticSchema,
+        bridge: processDiagnosticSchema,
+      })
+      .strict(),
+    cgroup: z
+      .object({
+        memoryCurrentBytes: z.number().int().nonnegative().nullable(),
+        memoryMaxBytes: z.number().int().positive().nullable(),
+        oomCount: z.number().int().nonnegative().nullable(),
+        oomKillCount: z.number().int().nonnegative().nullable(),
+      })
+      .strict(),
+  })
+  .strict();
+
 export interface SandboxHandlerDeps {
   repository: Pick<
     SessionRepository,
@@ -44,6 +78,7 @@ export interface SandboxHandlerDeps {
 
 export interface SandboxHandler {
   sandboxEvent: (request: Request) => Promise<Response>;
+  supervisorHeartbeat: (request: Request, log: Logger) => Promise<Response>;
   createMediaArtifact: (request: Request) => Promise<Response>;
   createBoardArtifact: (request: Request) => Promise<Response>;
   addParticipant: (request: Request) => Promise<Response>;
@@ -72,6 +107,48 @@ export function createSandboxHandler(deps: SandboxHandlerDeps): SandboxHandler {
       const event: SandboxEvent = result.data;
       await deps.processSandboxEvent(event);
       return Response.json({ status: "ok" });
+    },
+
+    async supervisorHeartbeat(request: Request, log: Logger): Promise<Response> {
+      let raw: unknown;
+      try {
+        raw = await request.json();
+      } catch {
+        return Response.json({ error: "Invalid request body" }, { status: 400 });
+      }
+
+      const parsed = supervisorHeartbeatSchema.safeParse(raw);
+      if (!parsed.success) {
+        return Response.json({ error: "Invalid supervisor heartbeat" }, { status: 400 });
+      }
+
+      const sandbox = deps.getSandbox();
+      if (!sandbox) return Response.json({ error: "No sandbox" }, { status: 404 });
+      if (parsed.data.sandboxId !== sandbox.modal_sandbox_id) {
+        return Response.json({ error: "Sandbox ID mismatch" }, { status: 409 });
+      }
+
+      log.info("Supervisor heartbeat", {
+        event: "sandbox.supervisor_heartbeat",
+        sandbox_id: parsed.data.sandboxId,
+        observed_at: parsed.data.observedAt,
+        sequence: parsed.data.sequence,
+        boot_mode: parsed.data.bootMode,
+        boot_phase: parsed.data.bootPhase,
+        supervisor_pid: parsed.data.processes.supervisor.pid,
+        supervisor_running: parsed.data.processes.supervisor.running,
+        opencode_pid: parsed.data.processes.opencode.pid,
+        opencode_running: parsed.data.processes.opencode.running,
+        opencode_exit_code: parsed.data.processes.opencode.exitCode,
+        bridge_pid: parsed.data.processes.bridge.pid,
+        bridge_running: parsed.data.processes.bridge.running,
+        bridge_exit_code: parsed.data.processes.bridge.exitCode,
+        memory_current_bytes: parsed.data.cgroup.memoryCurrentBytes,
+        memory_max_bytes: parsed.data.cgroup.memoryMaxBytes,
+        oom_count: parsed.data.cgroup.oomCount,
+        oom_kill_count: parsed.data.cgroup.oomKillCount,
+      });
+      return new Response(null, { status: 204 });
     },
 
     async createMediaArtifact(request: Request): Promise<Response> {

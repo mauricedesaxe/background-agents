@@ -470,6 +470,48 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
     }
   }
 
+  async probeProviderAfterBridgeAbnormalClose(): Promise<void> {
+    const sandbox = this.storage.getSandbox();
+    const providerObjectId = sandbox?.modal_object_id;
+    if (!sandbox || !providerObjectId || !this.provider.probeSandboxState) return;
+
+    const requestedAt = Date.now();
+    let result;
+    try {
+      result = await this.provider.probeSandboxState({
+        providerObjectId,
+        sessionId: this.config.sessionId ?? "",
+        reason: "bridge_abnormal_close",
+      });
+    } catch (error) {
+      this.log.warn("Provider state probe failed", {
+        event: "sandbox.provider_probe",
+        trigger: "bridge_abnormal_close",
+        provider_object_id: providerObjectId,
+        provider_outcome: "unavailable",
+        provider_error: error instanceof Error ? error.message : String(error),
+        duration_ms: Date.now() - requestedAt,
+      });
+      return;
+    }
+    const current = this.storage.getSandbox();
+    const superseded = current?.modal_object_id !== providerObjectId;
+
+    this.log.info("Provider state after bridge disconnect", {
+      event: "sandbox.provider_probe",
+      trigger: "bridge_abnormal_close",
+      provider_object_id: providerObjectId,
+      provider_outcome: result.outcome,
+      provider_state: result.outcome === "present" ? result.state : null,
+      provider_recoverable: result.outcome === "present" ? result.recoverable : null,
+      provider_error_type: result.outcome === "unavailable" ? result.errorType : null,
+      provider_error: result.outcome === "unavailable" ? result.error : null,
+      sandbox_status: current?.status ?? null,
+      superseded,
+      duration_ms: Date.now() - requestedAt,
+    });
+  }
+
   private sessionAllowsSandboxResume(): boolean {
     const session = this.storage.getSession();
     return (

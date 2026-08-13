@@ -227,6 +227,8 @@ export class SessionDO extends DurableObject<Env> {
     prompt: (request, _url, log) => this.messagesHandler.enqueuePrompt(request, log),
     stop: () => this.messagesHandler.stop(),
     sandboxEvent: (request) => this.sandboxHandler.sandboxEvent(request),
+    supervisorHeartbeat: (request, _url, log) =>
+      this.sandboxHandler.supervisorHeartbeat(request, log),
     createMediaArtifact: (request) => this.sandboxHandler.createMediaArtifact(request),
     listParticipants: () => this.participantsHandler.listParticipants(),
     addParticipant: (request) => this.sandboxHandler.addParticipant(request),
@@ -1148,19 +1150,20 @@ export class SessionDO extends DurableObject<Env> {
           // Schedule a heartbeat check to detect truly dead sandboxes.
           const sandbox = this.getSandbox();
           const processingMessage = this.repository.getProcessingMessage();
+          const disconnectTrack =
+            this.wsManager.getSandboxCloseTrack(ws) ??
+            (this.wsManager.getSandboxCloseInitiator(ws) !== null ||
+            sandbox?.status === "stopping" ||
+            sandbox?.status === "stopped" ||
+            sandbox?.status === "stale" ||
+            sandbox?.status === "failed"
+              ? "control_plane_teardown"
+              : "bridge_first");
           this.log.warn("Sandbox WebSocket abnormal close", {
             event: "sandbox.abnormal_close",
             code,
             reason,
-            disconnect_track:
-              this.wsManager.getSandboxCloseTrack(ws) ??
-              (this.wsManager.getSandboxCloseInitiator(ws) !== null ||
-              sandbox?.status === "stopping" ||
-              sandbox?.status === "stopped" ||
-              sandbox?.status === "stale" ||
-              sandbox?.status === "failed"
-                ? "control_plane_teardown"
-                : "bridge_first"),
+            disconnect_track: disconnectTrack,
             control_plane_close_reason: this.wsManager.getSandboxCloseInitiator(ws),
             sandbox_status: sandbox?.status ?? null,
             sandbox_created_at: sandbox?.created_at ?? null,
@@ -1170,6 +1173,9 @@ export class SessionDO extends DurableObject<Env> {
             last_activity_at: sandbox?.last_activity ?? null,
             processing_message_id: processingMessage?.id ?? null,
           });
+          if (disconnectTrack === "bridge_first") {
+            this.ctx.waitUntil(this.lifecycleManager.probeProviderAfterBridgeAbnormalClose());
+          }
           await this.lifecycleManager.scheduleDisconnectCheck();
         }
       } else {

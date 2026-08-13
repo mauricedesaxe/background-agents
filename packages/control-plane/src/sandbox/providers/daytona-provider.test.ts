@@ -110,6 +110,48 @@ const baseArchiveConfig: ArchiveConfig = {
 // ==================== Tests ====================
 
 describe("DaytonaSandboxProvider", () => {
+  describe("probeSandboxState", () => {
+    it("returns the current provider state from one read", async () => {
+      const getSandbox = vi.fn(async () => ({
+        id: "daytona-sandbox-id",
+        state: "started",
+        recoverable: false,
+      }));
+      const provider = new DaytonaSandboxProvider(
+        createMockClient({ getSandbox }),
+        defaultProviderConfig
+      );
+
+      const result = await provider.probeSandboxState({
+        providerObjectId: "daytona-sandbox-id",
+        sessionId: "session-123",
+        reason: "bridge_abnormal_close",
+      });
+
+      expect(result).toEqual({ outcome: "present", state: "started", recoverable: false });
+      expect(getSandbox).toHaveBeenCalledTimes(1);
+    });
+
+    it("reports a missing sandbox without changing state", async () => {
+      const provider = new DaytonaSandboxProvider(
+        createMockClient({
+          getSandbox: vi.fn(async () => {
+            throw new DaytonaNotFoundError("missing");
+          }),
+        }),
+        defaultProviderConfig
+      );
+
+      await expect(
+        provider.probeSandboxState({
+          providerObjectId: "missing",
+          sessionId: "session-123",
+          reason: "bridge_abnormal_close",
+        })
+      ).resolves.toEqual({ outcome: "missing" });
+    });
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });

@@ -13,6 +13,8 @@ type SimpleProxyRouteConfig = {
   notFoundMessage?: string;
 };
 
+const MAX_SUPERVISOR_HEARTBEAT_BODY_BYTES = 4096;
+
 function getSessionId(match: RegExpMatchArray): string | Response {
   const sessionId = match.groups?.id;
   return sessionId ? sessionId : error("Session ID required");
@@ -59,6 +61,43 @@ async function handleAddParticipant(
   if (body instanceof Response) return body;
 
   return ctx.sessionRuntime.fetch(sessionId, SessionInternalPaths.participants, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+async function handleSupervisorHeartbeat(
+  request: Request,
+  _env: Env,
+  match: RegExpMatchArray,
+  ctx: SessionRouteContext
+): Promise<Response> {
+  const sessionId = getSessionId(match);
+  if (sessionId instanceof Response) return sessionId;
+
+  const contentLength = Number.parseInt(request.headers.get("content-length") ?? "", 10);
+  if (Number.isFinite(contentLength) && contentLength > MAX_SUPERVISOR_HEARTBEAT_BODY_BYTES) {
+    return error("Supervisor heartbeat body too large", 413);
+  }
+
+  let bodyText: string;
+  try {
+    bodyText = await request.text();
+  } catch {
+    return error("Invalid JSON body", 400);
+  }
+  if (new TextEncoder().encode(bodyText).byteLength > MAX_SUPERVISOR_HEARTBEAT_BODY_BYTES) {
+    return error("Supervisor heartbeat body too large", 413);
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(bodyText) as unknown;
+  } catch {
+    return error("Invalid JSON body", 400);
+  }
+
+  return ctx.sessionRuntime.fetch(sessionId, SessionInternalPaths.supervisorHeartbeat, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -200,6 +239,11 @@ export const sessionRuntimeProxyRoutes: Route[] = [
     method: "POST",
     pattern: parsePattern("/sessions/:id/participants"),
     handler: handleAddParticipant,
+  }),
+  sessionRoute({
+    method: "POST",
+    pattern: parsePattern("/sessions/:id/supervisor-heartbeat"),
+    handler: handleSupervisorHeartbeat,
   }),
   simpleProxyRoute({
     method: "GET",
