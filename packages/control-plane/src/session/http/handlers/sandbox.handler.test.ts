@@ -84,12 +84,14 @@ describe("createSandboxHandler", () => {
       bootPhase: "monitoring",
       processes: {
         supervisor: { pid: 1, running: true, exitCode: null },
-        opencode: { pid: 10, running: true, exitCode: null },
-        bridge: { pid: 11, running: false, exitCode: -9 },
+        opencode: { pid: 10, running: true, exitCode: null, treeRssBytes: 2048 },
+        bridge: { pid: 11, running: false, exitCode: -9, treeRssBytes: null },
       },
       cgroup: {
         memoryCurrentBytes: 1024,
         memoryMaxBytes: 4096,
+        highCount: 2,
+        maxCount: 3,
         oomCount: 1,
         oomKillCount: 1,
       },
@@ -110,6 +112,10 @@ describe("createSandboxHandler", () => {
         event: "sandbox.supervisor_heartbeat",
         bridge_running: false,
         bridge_exit_code: -9,
+        opencode_tree_rss_bytes: 2048,
+        bridge_tree_rss_bytes: null,
+        memory_high_count: 2,
+        memory_max_count: 3,
         oom_kill_count: 1,
       })
     );

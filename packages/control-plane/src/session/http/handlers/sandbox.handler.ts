@@ -31,6 +31,7 @@ const processDiagnosticSchema = z
     pid: z.number().int().positive().nullable(),
     running: z.boolean(),
     exitCode: z.number().int().nullable(),
+    treeRssBytes: z.number().int().nonnegative().nullable().optional(),
   })
   .strict();
 
@@ -52,6 +53,8 @@ const supervisorHeartbeatSchema = z
       .object({
         memoryCurrentBytes: z.number().int().nonnegative().nullable(),
         memoryMaxBytes: z.number().int().positive().nullable(),
+        highCount: z.number().int().nonnegative().nullable().optional(),
+        maxCount: z.number().int().nonnegative().nullable().optional(),
         oomCount: z.number().int().nonnegative().nullable(),
         oomKillCount: z.number().int().nonnegative().nullable(),
       })
@@ -140,11 +143,15 @@ export function createSandboxHandler(deps: SandboxHandlerDeps): SandboxHandler {
         opencode_pid: parsed.data.processes.opencode.pid,
         opencode_running: parsed.data.processes.opencode.running,
         opencode_exit_code: parsed.data.processes.opencode.exitCode,
+        opencode_tree_rss_bytes: parsed.data.processes.opencode.treeRssBytes,
         bridge_pid: parsed.data.processes.bridge.pid,
         bridge_running: parsed.data.processes.bridge.running,
         bridge_exit_code: parsed.data.processes.bridge.exitCode,
+        bridge_tree_rss_bytes: parsed.data.processes.bridge.treeRssBytes,
         memory_current_bytes: parsed.data.cgroup.memoryCurrentBytes,
         memory_max_bytes: parsed.data.cgroup.memoryMaxBytes,
+        memory_high_count: parsed.data.cgroup.highCount,
+        memory_max_count: parsed.data.cgroup.maxCount,
         oom_count: parsed.data.cgroup.oomCount,
         oom_kill_count: parsed.data.cgroup.oomKillCount,
       });
