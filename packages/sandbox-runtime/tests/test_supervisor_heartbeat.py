@@ -32,10 +32,16 @@ async def test_sends_allowlisted_process_and_cgroup_diagnostics() -> None:
     with (
         patch("sandbox_runtime.entrypoint.httpx.AsyncClient", return_value=client),
         patch("sandbox_runtime.entrypoint.read_cgroup_memory_diagnostics") as read_memory,
+        patch(
+            "sandbox_runtime.entrypoint.read_process_tree_rss_bytes",
+            side_effect=lambda pid: 2048 if pid else None,
+        ),
     ):
         read_memory.return_value = MagicMock(
             memory_current_bytes=1024,
             memory_max_bytes=4096,
+            high_count=2,
+            max_count=3,
             oom_count=1,
             oom_kill_count=1,
         )
@@ -48,7 +54,11 @@ async def test_sends_allowlisted_process_and_cgroup_diagnostics() -> None:
         "pid": 11,
         "running": False,
         "exitCode": -9,
+        "treeRssBytes": None,
     }
+    assert kwargs["json"]["processes"]["opencode"]["treeRssBytes"] == 2048
+    assert kwargs["json"]["cgroup"]["highCount"] == 2
+    assert kwargs["json"]["cgroup"]["maxCount"] == 3
     assert kwargs["json"]["cgroup"]["oomKillCount"] == 1
     assert "env" not in kwargs["json"]
     assert "command" not in kwargs["json"]

@@ -37,7 +37,7 @@ from .constants import (
     TUNNEL_ENV_FILE_PATH,
     TUNNEL_ENV_SANDBOX_ID_KEY,
 )
-from .diagnostics import read_cgroup_memory_diagnostics
+from .diagnostics import read_cgroup_memory_diagnostics, read_process_tree_rss_bytes
 from .log_config import configure_logging, get_logger
 from .repo_config import RepoConfigError, RepoEntry, dump_repo_manifest, parse_repositories
 from .repo_image_callback import RepoImageBuildCallback
@@ -198,10 +198,12 @@ class SandboxSupervisor:
     def _process_diagnostic(
         process: asyncio.subprocess.Process | None,
     ) -> dict[str, int | bool | None]:
+        is_running = process is not None and process.returncode is None
         return {
             "pid": process.pid if process else None,
-            "running": process is not None and process.returncode is None,
+            "running": is_running,
             "exitCode": process.returncode if process else None,
+            "treeRssBytes": read_process_tree_rss_bytes(process.pid if is_running else None),
         }
 
     async def _send_supervisor_heartbeat(self) -> None:
@@ -229,6 +231,8 @@ class SandboxSupervisor:
             "cgroup": {
                 "memoryCurrentBytes": memory.memory_current_bytes,
                 "memoryMaxBytes": memory.memory_max_bytes,
+                "highCount": memory.high_count,
+                "maxCount": memory.max_count,
                 "oomCount": memory.oom_count,
                 "oomKillCount": memory.oom_kill_count,
             },
