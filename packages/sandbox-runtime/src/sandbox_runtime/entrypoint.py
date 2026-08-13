@@ -1136,7 +1136,38 @@ class SandboxSupervisor:
 
     def _resolve_mcp_servers(self) -> list[dict]:
         """Resolve MCP servers from session config."""
-        return self.session_config.get("mcp_servers") or []
+        servers = self.session_config.get("mcp_servers") or []
+        playwright_version = os.environ.get("PLAYWRIGHT_MCP_VERSION")
+        if not playwright_version:
+            return servers
+
+        resolved = []
+        for server in servers:
+            command = server.get("command")
+            if isinstance(command, list) and command and command[0] == "npx":
+                package_index = next(
+                    (
+                        index + 1
+                        for index, part in enumerate(command[:-1])
+                        if part in ("-p", "--package")
+                    ),
+                    None,
+                )
+                if package_index is None:
+                    package_index = next(
+                        (
+                            index
+                            for index, part in enumerate(command[1:], start=1)
+                            if isinstance(part, str) and not part.startswith("-")
+                        ),
+                        None,
+                    )
+                if package_index is not None and command[package_index] == "@playwright/mcp":
+                    command = [*command]
+                    command[package_index] = f"@playwright/mcp@{playwright_version}"
+                server = {**server, "command": command}
+            resolved.append(server)
+        return resolved
 
     # Validates npm package names before passing to `npm install -g`.
     # Accepts: "package", "@scope/package", "package@1.0.0", "@scope/package@1.0.0"
