@@ -58,6 +58,10 @@ const OPENROUTER_MODELS = [
   "openrouter/x-ai/grok-4.3",
   "openrouter/x-ai/grok-4.5",
   "openrouter/deepseek/deepseek-v4-flash-0731",
+  "openrouter/deepseek/deepseek-v4-pro",
+  "openrouter/z-ai/glm-5.2",
+  "openrouter/moonshotai/kimi-k3",
+  "openrouter/minimax/minimax-m3",
 ] as const;
 
 describe("model utilities", () => {
