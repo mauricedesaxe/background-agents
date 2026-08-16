@@ -31,8 +31,8 @@ not apply is marked `none`; a stale one is marked `recompute`.
   candidate), `upstream-owned` (upstream now owns the behaviour; we keep only a regression guard),
   or `config` (moved to a verified configuration value).
 - **Provenance.** The fork commit(s) and issue(s) that introduced it.
-- **Upstream link.** The upstream issue/PR, if one reports or fixes the same thing. `none` means
-  upstream has no such signal and the divergence will never arrive as a conflict.
+- **Upstream link.** The upstream issue/PR, if one reports or fixes the same thing. `none` means no
+  known upstream signal today; what to do when upstream later moves is the removal condition's job.
 - **Acceptance ownership.** The test that proves the retained behaviour exists. On a sync, this test
   is the gate: if a port needs it edited to go green, the port dropped a behaviour.
 - **Removal condition.** The concrete event that lets us delete this entry, stated so it is
@@ -84,7 +84,7 @@ ships nothing on Daytona until `SANDBOX_VERSION` moves too and an apply rebuilds
 ### 2. Daytona is the provider we actually run
 
 **Status:** retained · **Provenance:** fork `53a6950` (pin provider identity for stop retries),
-`d3fdd62` (serialize stop settlement before resume), plus the snapshot-sizing work · **Upstream
+`d3fdd62` (serialize stop settlement before resume), `c797d0e3` (snapshot sizing) · **Upstream
 link:** none · **Acceptance ownership:** Daytona integration tests · **Removal condition:** none —
 the provider under load carries this by definition · **Last-verified upstream SHA:** `b63d0175`.
 
@@ -174,8 +174,8 @@ that cost.
 
 **Status:** retained-candidate, sized by the
 [#291 measurement](https://github.com/mauricedesaxe/background-agents/issues/291) · **Provenance:**
-fork (bridge reattach work) · **Upstream link:** none for the retained core — upstream now owns
-several inner pieces natively · **Acceptance ownership:**
+fork `4da3fec3` (reattach OpenCode session on resume) · **Upstream link:** none for the retained
+core — upstream now owns several inner pieces natively · **Acceptance ownership:**
 `packages/sandbox-runtime/tests/test_bridge_session_reattach.py`,
 `packages/control-plane/test/integration/websocket-sandbox.test.ts` · **Removal condition:** reduce
 this entry to the genuinely-retained core below once upstream's split modules (`prompt_stream.py`,
