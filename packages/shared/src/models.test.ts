@@ -51,7 +51,7 @@ const ZEN_MODELS = [
 ] as const;
 
 const DEEPSEEK_MODELS = ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"] as const;
-const ZAI_CODING_PLAN_MODELS = ["zai-coding-plan/glm-5.2"] as const;
+const ZAI_CODING_PLAN_MODELS = ["zai-coding-plan/glm-5.2", "zai-coding-plan/glm-5.3"] as const;
 const OPENROUTER_MODELS = [
   "openrouter/google/gemini-3.1-flash-lite",
   "openrouter/google/gemini-3.1-pro-preview",
