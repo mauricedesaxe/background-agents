@@ -191,7 +191,18 @@ export const MODEL_CATALOG = [
   {
     category: "Z.AI Coding Plan",
     enabledByDefault: false,
-    models: [{ id: "zai-coding-plan/glm-5.2", name: "GLM 5.2", description: "Z.AI Coding Plan" }],
+    models: [
+      {
+        id: "zai-coding-plan/glm-5.2",
+        name: "GLM 5.2",
+        description: "Z.AI Coding Plan. Text-only",
+      },
+      {
+        id: "zai-coding-plan/glm-5.3",
+        name: "GLM 5.3",
+        description: "Z.AI Coding Plan. Text-only",
+      },
+    ],
   },
   {
     category: "DeepSeek",
