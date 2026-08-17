@@ -168,62 +168,70 @@ async function handleWebhook(
   };
 
   const start = Date.now();
-  let result: HandlerResult;
+  let dispatchFailure: { error: unknown } | null = null;
 
   try {
-    result = await dispatchHandler(env, log, event, p, payload, traceId);
+    const result = await dispatchHandler(env, log, event, p, payload, traceId);
+    const wideEvent: Record<string, unknown> = {
+      ...wideEventBase,
+      outcome: result.outcome,
+      duration_ms: Date.now() - start,
+    };
+    if (result.outcome === "skipped") {
+      wideEvent.skip_reason = result.skip_reason;
+    } else {
+      wideEvent.session_id = result.session_id;
+      wideEvent.message_id = result.message_id;
+      wideEvent.handler_action = result.handler_action;
+    }
+    log.info("webhook.handled", wideEvent);
   } catch (err) {
+    dispatchFailure = { error: err };
     log.info("webhook.handled", {
       ...wideEventBase,
       outcome: "error",
       duration_ms: Date.now() - start,
       error: err instanceof Error ? err : new Error(String(err)),
     });
-    throw err;
   }
 
-  const wideEvent: Record<string, unknown> = {
-    ...wideEventBase,
-    outcome: result.outcome,
-    duration_ms: Date.now() - start,
-  };
-  if (result.outcome === "skipped") {
-    wideEvent.skip_reason = result.skip_reason;
-  } else {
-    wideEvent.session_id = result.session_id;
-    wideEvent.message_id = result.message_id;
-    wideEvent.handler_action = result.handler_action;
-  }
-  log.info("webhook.handled", wideEvent);
+  const normalizationPayload = actionResult.success ? actionResult.data : {};
+  await forwardNormalizedEvent(env, log, event, normalizationPayload, traceId, deliveryId);
 
-  // Forward normalized event to control-plane for automation triggering.
-  // Use the passthrough parse so nested lifecycle fields are not stripped by
-  // the summary schema used for logging and bot dispatch.
-  if (event) {
-    const normalizationPayload = actionResult.success ? actionResult.data : {};
-    const normalizedEvent = normalizeGitHubEvent(event, normalizationPayload);
-    if (normalizedEvent !== null) {
-      try {
-        const url = "https://internal/internal/github-event";
-        const body = JSON.stringify(normalizedEvent);
-        const response = await signedControlPlaneFetch(env, { method: "POST", url, body, traceId });
-        if (!response.ok) {
-          log.warn("webhook.github_event_forward_failed", {
-            trace_id: traceId,
-            delivery_id: deliveryId,
-            event_type: event,
-            status: response.status,
-          });
-        }
-      } catch (err) {
-        log.warn("webhook.github_event_forward_error", {
-          trace_id: traceId,
-          delivery_id: deliveryId,
-          event_type: event,
-          error: err instanceof Error ? err : new Error(String(err)),
-        });
-      }
+  if (dispatchFailure !== null) throw dispatchFailure.error;
+}
+
+async function forwardNormalizedEvent(
+  env: Env,
+  log: Logger,
+  event: string | undefined,
+  normalizationPayload: Record<string, unknown>,
+  traceId: string,
+  deliveryId: string | undefined
+): Promise<void> {
+  if (!event) return;
+  const normalizedEvent = normalizeGitHubEvent(event, normalizationPayload);
+  if (normalizedEvent === null) return;
+
+  try {
+    const url = "https://internal/internal/github-event";
+    const body = JSON.stringify(normalizedEvent);
+    const response = await signedControlPlaneFetch(env, { method: "POST", url, body, traceId });
+    if (!response.ok) {
+      log.warn("webhook.github_event_forward_failed", {
+        trace_id: traceId,
+        delivery_id: deliveryId,
+        event_type: event,
+        status: response.status,
+      });
     }
+  } catch (err) {
+    log.warn("webhook.github_event_forward_error", {
+      trace_id: traceId,
+      delivery_id: deliveryId,
+      event_type: event,
+      error: err instanceof Error ? err : new Error(String(err)),
+    });
   }
 }
 
