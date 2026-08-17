@@ -462,7 +462,7 @@ export async function getThreadMessages(
   channelId: string,
   threadTs: string,
   oldest?: string
-): Promise<SlackEnvelope<{ messages: SlackThreadMessage[] }>> {
+): Promise<SlackEnvelope<{ messages: SlackThreadMessage[]; truncated: boolean }>> {
   const messages: SlackThreadMessage[] = [];
   let cursor: string | undefined;
   // Bound the loop defensively: 200/page × 25 pages caps at 5k messages.
@@ -485,9 +485,9 @@ export async function getThreadMessages(
 
     messages.push(...res.messages);
     cursor = res.response_metadata?.next_cursor || undefined;
-    if (!cursor) break;
+    if (!cursor) return { ok: true, messages, truncated: false };
   }
-  return { ok: true, messages };
+  return { ok: true, messages, truncated: true };
 }
 
 /**

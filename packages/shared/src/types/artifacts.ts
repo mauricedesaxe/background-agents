@@ -1,6 +1,13 @@
 import { z } from "zod";
 
-export const artifactTypeSchema = z.enum(["pr", "screenshot", "video", "preview", "branch"]);
+export const artifactTypeSchema = z.enum([
+  "pr",
+  "screenshot",
+  "video",
+  "preview",
+  "branch",
+  "board",
+]);
 export type ArtifactType = z.infer<typeof artifactTypeSchema>;
 
 // Artifact created by session
@@ -81,8 +88,8 @@ export interface ManualPullRequestArtifactMetadata {
 export interface ScreenshotArtifactMetadata {
   /** R2 object key */
   objectKey: string;
-  /** MIME type: image/png, image/jpeg, image/webp */
-  mimeType: "image/png" | "image/jpeg" | "image/webp";
+  /** MIME type: image/png, image/jpeg, image/webp, image/svg+xml */
+  mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/svg+xml";
   /** File size in bytes */
   sizeBytes: number;
   /** Viewport dimensions at capture time */
@@ -131,6 +138,11 @@ export interface VideoArtifactMetadata {
   endUrl?: string;
 }
 
+export interface BoardArtifactMetadata {
+  boardId: string;
+  title: string;
+}
+
 // Pull request info
 export interface PullRequest {
   number: number;
@@ -177,6 +189,9 @@ export interface MediaArtifactInfo {
   sizeBytes?: number;
   caption?: string;
 }
+
+/** The id is a URL path segment; the media route parses this exact shape. */
+export const mediaArtifactIdSchema = z.string().min(1).regex(/^[A-Za-z0-9-]+$/);
 
 export interface AgentResponse {
   textContent: string;

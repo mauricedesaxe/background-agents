@@ -237,6 +237,61 @@ export const MODEL_CATALOG = [
       { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", description: "Most capable" },
     ],
   },
+  {
+    category: "OpenRouter",
+    enabledByDefault: false,
+    models: [
+      {
+        id: "openrouter/google/gemini-3.1-flash-lite",
+        name: "Gemini 3.1 Flash Lite",
+        description: "Google, fast and cheap. Multimodal",
+        reasoning: {
+          efforts: ["none", "low", "medium", "high", "xhigh"],
+          default: "high",
+        },
+      },
+      {
+        id: "openrouter/google/gemini-3.1-pro-preview",
+        name: "Gemini 3.1 Pro",
+        description: "Google, most capable. Multimodal",
+        reasoning: {
+          efforts: ["none", "low", "medium", "high", "xhigh"],
+          default: "high",
+        },
+      },
+      {
+        id: "openrouter/x-ai/grok-4.3",
+        name: "Grok 4.3",
+        description: "xAI, balanced. Multimodal",
+      },
+      {
+        id: "openrouter/x-ai/grok-4.5",
+        name: "Grok 4.5",
+        description: "xAI, most capable. Multimodal",
+      },
+      {
+        id: "openrouter/deepseek/deepseek-v4-flash-0731",
+        name: "DeepSeek V4 Flash 0731",
+        description: "DeepSeek, fast and cheap agentic coding. Text-only",
+      },
+      {
+        id: "openrouter/deepseek/deepseek-v4-pro",
+        name: "DeepSeek V4 Pro",
+        description: "DeepSeek, most capable. Text-only",
+      },
+      { id: "openrouter/z-ai/glm-5.2", name: "GLM 5.2", description: "Z.ai. Text-only" },
+      {
+        id: "openrouter/moonshotai/kimi-k3",
+        name: "Kimi K3",
+        description: "Moonshot AI. Multimodal",
+      },
+      {
+        id: "openrouter/minimax/minimax-m3",
+        name: "MiniMax M3",
+        description: "MiniMax. Multimodal",
+      },
+    ],
+  },
 ] as const satisfies readonly ModelCatalogGroup[];
 
 export type ValidModel = (typeof MODEL_CATALOG)[number]["models"][number]["id"];
