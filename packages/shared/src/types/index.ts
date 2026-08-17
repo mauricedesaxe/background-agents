@@ -172,7 +172,14 @@ export type {
   ListAutomationsResponse,
   AutomationInvocation,
   ListAutomationInvocationsResponse,
+  CreateScheduledTaskRequest,
+  ScheduledTaskState,
+  ScheduledTask,
+  ListScheduledTasksResponse,
 } from "./automations";
+
+export type { SpawnSource, ParticipantRole, SessionStatus, SandboxStatus } from "./sessions";
+export type { ChildSessionDetail } from "./session-api";
 
 export type {
   ImageBuildStatus,
