@@ -18,6 +18,7 @@ export default tseslint.config(
       "**/.venv/**",
       "**/venv/**",
       "opencode-reference/**",
+      ".opencode/**",
       "**/*.d.ts",
       // Bundled/generated files
       "packages/modal-infra/**/*.js",

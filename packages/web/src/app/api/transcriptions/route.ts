@@ -59,6 +59,7 @@ export async function POST(request: NextRequest) {
     openAiBody.set("model", TRANSCRIPTION_MODEL);
     openAiBody.set("prompt", VOCABULARY_PROMPT);
 
+    // eslint-disable-next-line no-restricted-globals -- direct OpenAI transcription call
     const response = await fetch(OPENAI_TRANSCRIPTIONS_URL, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}` },

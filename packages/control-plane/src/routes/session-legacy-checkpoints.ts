@@ -1,4 +1,5 @@
-import { readBodyCapped, sha256Hex } from "@open-inspect/shared";
+import { readBodyCapped } from "@open-inspect/shared";
+import { sha256Hex } from "@open-inspect/shared/service-auth";
 import { error, json, parsePattern, type Route, SCM_AGNOSTIC_SANDBOX_ROUTE } from "./shared";
 
 const LEGACY_CHECKPOINT_MAX_BYTES = 50 * 1024 * 1024;
