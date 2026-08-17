@@ -40,6 +40,9 @@ import { environmentRoutes } from "./routes/environments";
 import { environmentSecretsRoutes } from "./routes/environment-secrets";
 import { imageBuildRoutes } from "./routes/image-builds";
 import { automationRoutes } from "./routes/automations";
+import { boardRoutes } from "./routes/board";
+import { scheduledTaskRoutes } from "./routes/scheduled-tasks";
+import { sessionLegacyCheckpointRoutes } from "./routes/session-legacy-checkpoints";
 import { mcpServerRoutes } from "./routes/mcp-servers";
 import { analyticsRoutes } from "./routes/analytics";
 import { skillRoutes } from "./routes/skills";
@@ -314,7 +317,12 @@ export const routes: Route[] = [
   // Automations
   ...automationRoutes,
 
-  // MCP servers
+  ...scheduledTaskRoutes,
+
+  ...boardRoutes,
+
+  ...sessionLegacyCheckpointRoutes,
+
   ...mcpServerRoutes,
 
   // Analytics

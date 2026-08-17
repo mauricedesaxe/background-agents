@@ -17,10 +17,20 @@ import { MAX_UNFINISHED_PROMPTS } from "@open-inspect/shared/types/prompts";
 import type { ClientInfo } from "../types";
 import type { SourceControlProviderName } from "../source-control";
 import type { SandboxLifecycle } from "../sandbox/lifecycle/manager";
-import type { ParticipantRow, PromptGitIdentity, SandboxCommand, SessionRow } from "./types";
+import type { ParticipantRow, PromptGitIdentity, SandboxCommand, SandboxRow, SessionRow } from "./types";
 import type { SessionCoreRepository } from "./session-core-repository";
 import type { ParticipantRepository } from "./participant-repository";
 import { STOP_CONFIRMATION_TIMEOUT_MS, type MessageRepository } from "./message-repository";
+
+export const PENDING_SANDBOX_CONNECT_TIMEOUT_MS = 5 * 60 * 1000;
+
+const PENDING_SANDBOX_CONNECT_DEADLINE_KEY = "pendingSandboxConnectDeadline";
+const PENDING_CONNECT_TIMEOUT_ERROR = "Sandbox failed to start (timed out waiting to connect)";
+
+interface PendingSandboxConnectDeadline {
+  messageId: string;
+  deadlineAtMs: number;
+}
 import {
   AttachmentClaimConflictError,
   type SessionAttachmentRepository,
@@ -161,7 +171,9 @@ export class SessionMessageQueue {
     private readonly sessionIndex: SessionIndexStore | null,
     private readonly scmProvider: SourceControlProviderName,
     private readonly alarmScheduler: AlarmScheduler,
-    private readonly executionTimeoutMs: number
+    private readonly executionTimeoutMs: number,
+    private readonly deadlineStorage: DurableObjectStorage,
+    private readonly getSandboxRow: () => SandboxRow | null
   ) {}
 
   async handlePromptMessage(
@@ -317,6 +329,8 @@ export class SessionMessageQueue {
         reason: "no_sandbox",
       });
       this.messenger.broadcast({ type: "sandbox_spawning" });
+      const deadlineAtMs = await this.getPendingConnectDeadlineMs(message.id, now);
+      await this.alarmScheduler.scheduleAlarm(deadlineAtMs);
       // Spawn in the background: a snapshot restore can take tens of seconds,
       // and awaiting it here holds the prompt HTTP response open past bot
       // callers' request timeouts. The message is already persisted as
@@ -387,6 +401,7 @@ export class SessionMessageQueue {
       this.log.debug("processMessageQueue: prompt claim lost", { message_id: message.id });
       return;
     }
+    await this.clearPendingConnectDeadline(message.id);
 
     const sent = this.wsManager.send(sandboxWs, command);
 
@@ -506,6 +521,89 @@ export class SessionMessageQueue {
    * to the sandbox or call processMessageQueue(). This avoids races where a new
    * prompt could be dispatched to a sandbox being shut down.
    */
+  private async getPendingConnectDeadlineMs(messageId: string, now: number): Promise<number> {
+    const stored = await this.deadlineStorage.get<PendingSandboxConnectDeadline>(
+      PENDING_SANDBOX_CONNECT_DEADLINE_KEY
+    );
+    if (stored?.messageId === messageId) return stored.deadlineAtMs;
+
+    const deadlineAtMs = now + PENDING_SANDBOX_CONNECT_TIMEOUT_MS;
+    await this.deadlineStorage.put(PENDING_SANDBOX_CONNECT_DEADLINE_KEY, {
+      messageId,
+      deadlineAtMs,
+    } satisfies PendingSandboxConnectDeadline);
+    return deadlineAtMs;
+  }
+
+  private async clearPendingConnectDeadline(messageId: string): Promise<void> {
+    try {
+      const stored = await this.deadlineStorage.get<PendingSandboxConnectDeadline>(
+        PENDING_SANDBOX_CONNECT_DEADLINE_KEY
+      );
+      if (stored?.messageId === messageId) {
+        await this.deadlineStorage.delete(PENDING_SANDBOX_CONNECT_DEADLINE_KEY);
+      }
+    } catch (error) {
+      this.log.warn("Failed to clear pending sandbox connection deadline", {
+        event: "prompt.pending_deadline_cleanup_failed",
+        message_id: messageId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  async failStuckPendingMessage(): Promise<boolean> {
+    if (this.wsManager.getSandboxSocket()) return false;
+    if (this.messageRepository.getProcessingMessage()) return false;
+
+    const pending = this.messageRepository.getNextPendingMessage();
+    if (!pending) return false;
+
+    const now = Date.now();
+    const storedDeadline = await this.deadlineStorage.get<PendingSandboxConnectDeadline>(
+      PENDING_SANDBOX_CONNECT_DEADLINE_KEY
+    );
+    if (storedDeadline?.messageId !== pending.id) return false;
+    const deadlineAtMs = storedDeadline.deadlineAtMs;
+    if (now < deadlineAtMs) {
+      await this.alarmScheduler.scheduleAlarm(deadlineAtMs);
+      return false;
+    }
+
+    const sandbox = this.getSandboxRow();
+    const spawnError =
+      sandbox?.last_spawn_error && (sandbox.last_spawn_error_at ?? 0) >= pending.created_at
+        ? sandbox.last_spawn_error
+        : undefined;
+    const timeoutError = spawnError ?? PENDING_CONNECT_TIMEOUT_ERROR;
+    const syntheticEvent: Extract<SandboxEvent, { type: "execution_complete" }> = {
+      type: "execution_complete",
+      messageId: pending.id,
+      success: false,
+      error: timeoutError,
+      sandboxId: "",
+      timestamp: now / 1000,
+    };
+
+    this.messageRepository.recordMessageCompletion(syntheticEvent, now, "pending");
+    await this.clearPendingConnectDeadline(pending.id);
+
+    this.log.warn("prompt.pending_timeout", {
+      event: "prompt.pending_timeout",
+      message_id: pending.id,
+      waited_ms: now - pending.created_at,
+    });
+
+    this.messenger.broadcast({ type: "sandbox_event", event: syntheticEvent });
+    this.messenger.broadcast({ type: "processing_status", isProcessing: false });
+    this.broadcastPromptQueue();
+    this.backgroundJobs.submit(
+      this.callbackService.notifyComplete(pending.id, false, timeoutError).catch(() => undefined)
+    );
+    await this.sessionStatus.reconcileAfterExecution(false);
+    return true;
+  }
+
   async failStuckProcessingMessage(): Promise<void> {
     const now = Date.now();
     const processingMessage = this.messageRepository.getProcessingMessageWithCreatedAt();

@@ -8,11 +8,13 @@
     "bindings": [
       { "name": "SESSION", "class_name": "SessionDO" },
       { "name": "SCHEDULER", "class_name": "SchedulerDO" },
+      { "name": "BOARD_ROOM", "class_name": "BoardRoom" },
     ],
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["SessionDO"] },
     { "tag": "v2", "new_sqlite_classes": ["SchedulerDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["BoardRoom"] },
   ],
   "d1_databases": [
     {

@@ -441,6 +441,21 @@ export async function openSandboxWs(
   return { ws: response.webSocket ?? null, response };
 }
 
+export function sendSandboxReady(
+  ws: WebSocket,
+  sandboxId: string,
+  opencodeSessionId: string | null = null
+): void {
+  ws.send(
+    JSON.stringify({
+      type: "ready",
+      sandboxId,
+      opencodeSessionId,
+      timestamp: Date.now() / 1000,
+    })
+  );
+}
+
 /**
  * Seed a sandbox with auth_token and modal_sandbox_id so sandbox auth can
  * pass, in the given lifecycle status (default: the "ready" steady state).

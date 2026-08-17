@@ -396,7 +396,7 @@ async function expectEarlyBridgeStartup(kind: ProviderStartupKind): Promise<void
     }
   });
   const connectBridge = () => {
-    expect(alarmScheduler.alarms).toHaveLength(1);
+    expect(alarmScheduler.alarms).toHaveLength(0);
     sandbox.status = "ready";
     vi.mocked(wsManager.getSandboxWebSocket).mockReturnValue({} as WebSocket);
     broadcaster.broadcast({ type: "sandbox_status", status: "ready" });
@@ -444,7 +444,7 @@ async function expectEarlyBridgeStartup(kind: ProviderStartupKind): Promise<void
   expect(storage.calls.filter((call) => call === "updateSandboxForResume:connecting")).toHaveLength(
     kind === "resume" ? 1 : 0
   );
-  expect(alarmScheduler.alarms).toHaveLength(1);
+  expect(alarmScheduler.alarms).toHaveLength(0);
   expect(manager.isProviderStartupPending()).toBe(false);
   const readyIndex = broadcaster.messages.findIndex(
     (message) =>
@@ -550,7 +550,10 @@ describe("SandboxLifecycleManager", () => {
 
         await manager.spawnSandbox();
 
-        expect(calls.slice(0, 4)).toEqual(["fence", "alarm", "stop", "clear"]);
+        expect(calls).toContain("fence");
+        expect(calls).toContain("stop");
+        expect(calls).toContain("clear");
+        expect(calls.indexOf("stop")).toBeLessThan(calls.indexOf("clear"));
         expect(stopSandbox).toHaveBeenCalledWith(
           expect.objectContaining({
             providerObjectId: "modal-obj-123",
@@ -2726,13 +2729,12 @@ describe("SandboxLifecycleManager", () => {
       expect(retryAttempt.sandboxAuthToken).not.toBe(firstAttempt.sandboxAuthToken);
       expect(retryAttempt.sandboxId).not.toBe(firstAttempt.sandboxId);
       expect(vi.mocked(storage.updateSandboxForSpawn)).toHaveBeenCalledTimes(2);
-      expect(alarmScheduler.alarms).toEqual(
+      expect(alarmScheduler.alarms).toEqual([
         vi
           .mocked(storage.updateSandboxForSpawn)
-          .mock.calls.map(
-            ([data]) => data.createdAt + DEFAULT_LIFECYCLE_CONFIG.connectingTimeout.timeoutMs
-          )
-      );
+          .mock.calls.at(-1)![0]
+          .createdAt + DEFAULT_LIFECYCLE_CONFIG.connectingTimeout.timeoutMs,
+      ]);
       expect(storage.calls).toContain("updateSandboxStatus:connecting");
       expect(storage.calls).not.toContain("updateSandboxStatus:failed");
     });

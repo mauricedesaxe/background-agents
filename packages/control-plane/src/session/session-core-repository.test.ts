@@ -204,8 +204,10 @@ describe("SessionCoreRepository", () => {
       repo.updateSessionStatus("sess-1", "active", 3000);
 
       expect(mock.calls.length).toBe(1);
-      expect(mock.calls[0].query).toContain("UPDATE session SET status");
-      expect(mock.calls[0].params).toEqual(["active", 3000, "sess-1"]);
+      expect(mock.calls[0].query).toContain("UPDATE session");
+      expect(mock.calls[0].query).toContain("terminal_at");
+      expect(mock.calls[0].params.slice(0, 2)).toEqual(["active", 3000]);
+      expect(mock.calls[0].params.at(-1)).toBe("sess-1");
     });
   });
 

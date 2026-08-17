@@ -24,6 +24,7 @@ export const SessionInternalPaths = {
   pullRequestArtifactSnapshot: "/internal/pull-request-artifact-snapshot",
   pullRequestsRefresh: "/internal/pull-requests-refresh",
   wsToken: "/internal/ws-token",
+  verifyWsToken: "/internal/verify-ws-token",
   archive: "/internal/archive",
   archiveCascade: "/internal/archive-cascade",
   unarchive: "/internal/unarchive",

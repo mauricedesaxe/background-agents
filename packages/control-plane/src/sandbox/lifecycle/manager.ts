@@ -1564,6 +1564,12 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       this.storage.updateSandboxStatus("connecting");
       this.broadcaster.broadcast({ type: "sandbox_status", status: "connecting" });
     }
+    const sandbox = this.storage.getSandbox();
+    if (sandbox) {
+      await this.alarmScheduler.scheduleAlarm(
+        sandbox.created_at + this.config.connectingTimeout.timeoutMs
+      );
+    }
   }
 
   private async enterProviderStartup(
@@ -1573,8 +1579,6 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
   ): Promise<void> {
     persist();
     this.broadcaster.broadcast({ type: "sandbox_status", status });
-    // The bridge replaces this with its inactivity alarm when it connects.
-    await this.alarmScheduler.scheduleAlarm(createdAt + this.config.connectingTimeout.timeoutMs);
   }
 
   /**

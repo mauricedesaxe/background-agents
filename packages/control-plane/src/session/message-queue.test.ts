@@ -216,7 +216,13 @@ function buildQueue() {
     null,
     "github",
     createEarliestAlarmScheduler({ getAlarm, setAlarm }),
-    EXECUTION_TIMEOUT_MS
+    EXECUTION_TIMEOUT_MS,
+    {
+      get: vi.fn(async () => undefined),
+      put: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as DurableObjectStorage,
+    () => null
   );
 
   return {
@@ -916,14 +922,13 @@ describe("SessionMessageQueue", () => {
       expect(deadline).toBeLessThanOrEqual(Date.now() + EXECUTION_TIMEOUT_MS);
     });
 
-    it("does not schedule when the prompt is deferred for sandbox spawn", async () => {
+    it("arms the pending-connect deadline when the prompt is deferred for sandbox spawn", async () => {
       const h = buildQueue();
       h.repository.getNextPendingMessage.mockReturnValue(createMessage());
 
       await h.queue.processMessageQueue();
 
-      expect(h.getAlarm).not.toHaveBeenCalled();
-      expect(h.setAlarm).not.toHaveBeenCalled();
+      expect(h.setAlarm).toHaveBeenCalledTimes(1);
     });
   });
 

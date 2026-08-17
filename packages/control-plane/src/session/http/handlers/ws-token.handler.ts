@@ -25,10 +25,12 @@ export interface WsTokenHandlerDeps {
   generateId: (bytes?: number) => string;
   hashToken: (token: string) => Promise<string>;
   now: () => number;
+  wsTokenTtlMs: number;
 }
 
 export interface WsTokenHandler {
   generateWsToken: (request: Request, log: Logger) => Promise<Response>;
+  verifyWsToken: (request: Request) => Promise<Response>;
 }
 
 export function createWsTokenHandler(deps: WsTokenHandlerDeps): WsTokenHandler {
@@ -115,6 +117,35 @@ export function createWsTokenHandler(deps: WsTokenHandlerDeps): WsTokenHandler {
         token: plainToken,
         participantId: participant.id,
       });
+    },
+
+    async verifyWsToken(request: Request): Promise<Response> {
+      let raw: unknown;
+      try {
+        raw = await request.json();
+      } catch {
+        return Response.json({ error: "Invalid request body" }, { status: 400 });
+      }
+
+      const token = (raw as { token?: unknown })?.token;
+      if (typeof token !== "string" || !token) {
+        return Response.json({ error: "Token required" }, { status: 401 });
+      }
+
+      const tokenHash = await deps.hashToken(token);
+      const participant = deps.repository.getParticipantByWsTokenHash(tokenHash);
+      if (!participant) {
+        return Response.json({ error: "Invalid token" }, { status: 401 });
+      }
+
+      if (
+        participant.ws_token_created_at === null ||
+        deps.now() - participant.ws_token_created_at > deps.wsTokenTtlMs
+      ) {
+        return Response.json({ error: "Token expired" }, { status: 401 });
+      }
+
+      return Response.json({ participantId: participant.id });
     },
   };
 }

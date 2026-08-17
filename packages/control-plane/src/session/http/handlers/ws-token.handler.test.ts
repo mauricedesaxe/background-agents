@@ -51,6 +51,7 @@ function createHandler() {
     generateId,
     hashToken,
     now,
+    wsTokenTtlMs: 24 * 60 * 60 * 1000,
   });
 
   // Bind the request-scoped log so call sites exercise the threading without

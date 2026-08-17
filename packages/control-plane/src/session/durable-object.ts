@@ -264,6 +264,7 @@ export class SessionDO extends DurableObject<Env> {
       this.pullRequestHandler.pullRequestArtifactSnapshot(request, url),
     pullRequestsRefresh: () => this.pullRequestHandler.refreshPullRequests(),
     wsToken: (request, _url, log) => this.wsTokenHandler.generateWsToken(request, log),
+    verifyWsToken: (request) => this.wsTokenHandler.verifyWsToken(request),
     updateTitle: (request) => this.sessionLifecycleHandler.updateTitle(request),
     archive: (request) => this.sessionLifecycleHandler.archive(request),
     archiveCascade: () => this.sessionLifecycleHandler.archiveCascade(),
@@ -535,7 +536,9 @@ export class SessionDO extends DurableObject<Env> {
         this.db ? new SessionIndexStore(this.db) : null,
         resolveScmProviderFromEnv(this.env.SCM_PROVIDER),
         this.alarmScheduler,
-        this.executionTimeoutMs
+        this.executionTimeoutMs,
+        this.ctx.storage,
+        () => this.sandboxRepository.getSandbox()
       );
     }
 
@@ -665,6 +668,7 @@ export class SessionDO extends DurableObject<Env> {
         generateId: (bytes) => generateId(bytes),
         hashToken: (token) => hashToken(token),
         now: () => Date.now(),
+        wsTokenTtlMs: WS_TOKEN_TTL_MS,
       });
     }
 

@@ -303,7 +303,10 @@ export class SessionStatusService {
       await this.sessionIndex.restoreArchivedSession(sessionId, updatedAt);
       return;
     }
-    await this.sessionIndex.updateStatus(sessionId, status, updatedAt);
+    const projected = await this.sessionIndex.updateStatus(sessionId, status, updatedAt);
+    if (projected && status === "active") {
+      await this.sessionIndex.finalizeChildAdmission(sessionId);
+    }
   }
 
   /**

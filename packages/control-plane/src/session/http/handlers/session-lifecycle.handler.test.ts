@@ -115,10 +115,14 @@ function createHandler() {
   const transition = vi.fn<(status: SessionRow["status"]) => Promise<boolean>>();
   const repairIndexStatus = vi.fn<() => Promise<void>>();
   const settleFromMessageState = vi.fn<() => Promise<SessionRow["status"]>>();
+  const archive = vi.fn<() => Promise<"archived" | "in_progress" | "failed">>();
+  const unarchive = vi.fn<() => Promise<boolean>>();
   const statusService = {
     transition,
     repairIndexStatus,
     settleFromMessageState,
+    archive,
+    unarchive,
   } as unknown as SessionStatusService;
   const applySessionTitleUpdate = vi.fn((title: string) => ({ ok: true as const, title }));
   const cancelSession = vi.fn();
@@ -173,6 +177,8 @@ function createHandler() {
     getPublicSessionId,
     getParticipantByUserId,
     transition,
+    archive,
+    unarchive,
     repairIndexStatus,
     settleFromMessageState,
     applySessionTitleUpdate,
@@ -846,10 +852,10 @@ describe("createSessionLifecycleHandler", () => {
   });
 
   it("archives successfully for participant", async () => {
-    const { handler, getSession, getParticipantByUserId, transition } = createHandler();
+    const { handler, getSession, getParticipantByUserId, archive } = createHandler();
     getSession.mockReturnValue(createSession());
     getParticipantByUserId.mockReturnValue(createParticipant());
-    transition.mockResolvedValue(true);
+    archive.mockResolvedValue("archived");
 
     const response = await handler.archive(
       new Request("http://internal/internal/archive", {
@@ -861,7 +867,7 @@ describe("createSessionLifecycleHandler", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: "archived" });
-    expect(transition).toHaveBeenCalledWith("archived");
+    expect(archive).toHaveBeenCalledWith("session_archived");
   });
 
   it("archives a draft that was never prompted", async () => {
@@ -1000,10 +1006,10 @@ describe("createSessionLifecycleHandler", () => {
   });
 
   it("unarchives successfully for participant", async () => {
-    const { handler, getSession, getParticipantByUserId, transition } = createHandler();
+    const { handler, getSession, getParticipantByUserId, unarchive } = createHandler();
     getSession.mockReturnValue(createSession({ status: "archived" }));
     getParticipantByUserId.mockReturnValue(createParticipant());
-    transition.mockResolvedValue(true);
+    unarchive.mockResolvedValue(true);
 
     const response = await handler.unarchive(
       new Request("http://internal/internal/unarchive", {
@@ -1015,13 +1021,14 @@ describe("createSessionLifecycleHandler", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: "active" });
-    expect(transition).toHaveBeenCalledWith("active");
+    expect(unarchive).toHaveBeenCalled();
   });
 
-  it("returns 409 when unarchiving a session that is not archived", async () => {
-    const { handler, getSession, getParticipantByUserId, transition } = createHandler();
-    getSession.mockReturnValue(createSession({ status: "cancelled" }));
+  it("returns 409 when an archive is still in progress during unarchive", async () => {
+    const { handler, getSession, getParticipantByUserId, unarchive } = createHandler();
+    getSession.mockReturnValue(createSession({ status: "archived" }));
     getParticipantByUserId.mockReturnValue(createParticipant());
+    unarchive.mockResolvedValue(false);
 
     const response = await handler.unarchive(
       new Request("http://internal/internal/unarchive", {
@@ -1031,7 +1038,6 @@ describe("createSessionLifecycleHandler", () => {
     );
 
     expect(response.status).toBe(409);
-    expect(transition).not.toHaveBeenCalled();
   });
 
   it("returns 409 when cancelling terminal session", async () => {
