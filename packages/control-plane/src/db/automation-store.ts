@@ -350,6 +350,126 @@ export class AutomationStore {
       .first<AutomationRow>();
   }
 
+  async insertOnceIfFuture(
+    row: AutomationRow,
+    repositories: AutomationRepositoryInsert[],
+    environmentIds: string[]
+  ): Promise<boolean> {
+    const automation = this.db
+      .prepare(
+        `INSERT INTO automations
+         (id, name, instructions,
+          trigger_type, schedule_cron, schedule_tz, model, reasoning_effort, enabled, next_run_at,
+          consecutive_failures, created_by, user_id, created_at, updated_at, deleted_at,
+          event_type, trigger_config, trigger_auth_data)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE ? > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)`
+      )
+      .bind(
+        row.id,
+        row.name,
+        row.instructions,
+        row.trigger_type,
+        row.schedule_cron,
+        row.schedule_tz,
+        row.model,
+        row.reasoning_effort,
+        row.enabled,
+        row.next_run_at,
+        row.consecutive_failures,
+        row.created_by,
+        row.user_id,
+        row.created_at,
+        row.updated_at,
+        row.deleted_at,
+        row.event_type,
+        row.trigger_config,
+        row.trigger_auth_data,
+        row.next_run_at
+      );
+    const repositoryStatements = repositories.map((repository, position) =>
+      this.db
+        .prepare(
+          `INSERT INTO automation_repositories
+           (automation_id, position, repo_owner, repo_name, repo_id, base_branch, created_at, updated_at)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?
+           WHERE EXISTS (SELECT 1 FROM automations WHERE id = ?)`
+        )
+        .bind(
+          row.id,
+          position,
+          repository.repo_owner,
+          repository.repo_name,
+          repository.repo_id,
+          repository.base_branch,
+          row.created_at,
+          row.updated_at,
+          row.id
+        )
+    );
+    const environmentStatements = environmentIds.map((environmentId) =>
+      this.db
+        .prepare(
+          `INSERT INTO automation_environments
+           (automation_id, environment_id, created_at, updated_at)
+           SELECT ?, ?, ?, ?
+           WHERE EXISTS (SELECT 1 FROM automations WHERE id = ?)`
+        )
+        .bind(row.id, environmentId, row.created_at, row.updated_at, row.id)
+    );
+    const results = await this.db.batch([
+      automation,
+      ...repositoryStatements,
+      ...environmentStatements,
+    ]);
+    return (results[0]?.meta?.changes ?? 0) > 0;
+  }
+
+  async getByIdForOwner(id: string, userId: string): Promise<AutomationRow | null> {
+    return this.db
+      .prepare("SELECT * FROM automations WHERE id = ? AND user_id = ? AND deleted_at IS NULL")
+      .bind(id, userId)
+      .first<AutomationRow>();
+  }
+
+  async listOnceForOwner(userId: string): Promise<AutomationRow[]> {
+    const result = await this.db
+      .prepare(
+        `SELECT * FROM automations
+         WHERE user_id = ? AND trigger_type = 'once' AND deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM sessions
+             WHERE sessions.automation_id = automations.id AND sessions.status = 'archived'
+           )
+         ORDER BY created_at DESC`
+      )
+      .bind(userId)
+      .all<AutomationRow>();
+    return result.results ?? [];
+  }
+
+  async cancelOnce(id: string, userId: string): Promise<boolean> {
+    const now = Date.now();
+    const result = await this.db
+      .prepare(
+        `UPDATE automations
+         SET enabled = 0, next_run_at = NULL, updated_at = ?
+         WHERE id = ? AND user_id = ? AND trigger_type = 'once'
+           AND enabled = 1 AND deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM automation_invocations WHERE automation_id = automations.id
+           )`
+      )
+      .bind(now, id, userId)
+      .run();
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
+  async getLatestInvocation(automationId: string): Promise<AutomationInvocation | null> {
+    const result = await this.listInvocations(automationId, { limit: 1, offset: 0 });
+    return result.invocations[0] ?? null;
+  }
+
   async list(options: {
     limit: number;
     cursor?: AutomationListCursor | null;
@@ -357,7 +477,7 @@ export class AutomationStore {
     repoOwner?: string;
     repoName?: string;
   }): Promise<AutomationListResult> {
-    const conditions: string[] = ["deleted_at IS NULL"];
+    const conditions: string[] = ["deleted_at IS NULL", "trigger_type <> 'once'"];
     const params: unknown[] = [];
 
     if (options.nameSearch) {
