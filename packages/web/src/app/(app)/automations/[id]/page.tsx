@@ -223,6 +223,7 @@ export default function AutomationDetailPage({ params }: { params: Promise<{ id:
                         github_event: "GitHub Event",
                         linear_event: "Linear Event",
                         slack_event: "Slack Message",
+                        once: "One-shot prompt",
                       }[automation.triggerType] || automation.triggerType}
                   {automation.eventType && (
                     <span className="text-muted-foreground ml-1">({automation.eventType})</span>

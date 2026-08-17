@@ -13,6 +13,7 @@ export const automationTriggerTypeSchema = z.enum([
   "sentry",
   "webhook",
   "slack_event",
+  "once",
 ]);
 
 export type AutomationTriggerType = z.infer<typeof automationTriggerTypeSchema>;

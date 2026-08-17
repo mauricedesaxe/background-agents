@@ -90,7 +90,7 @@ describe("IssueDetails response schema", () => {
   it("normalizes nullable response collections", () => {
     const result = linearIssueDetailsResponseSchema.parse({ data: { issue } });
 
-    expect(result.data.issue?.labels).toEqual([{ id: "label-1", name: "bug" }]);
-    expect(result.data.issue?.comments).toEqual([{ body: "please fix", user: null }]);
+    expect(result.data?.issue?.labels).toEqual([{ id: "label-1", name: "bug" }]);
+    expect(result.data?.issue?.comments).toEqual([{ body: "please fix", user: null }]);
   });
 });

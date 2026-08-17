@@ -401,6 +401,7 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
               github_event: "GitHub Event",
               linear_event: "Linear Event",
               slack_event: "Slack Message",
+              once: "One-shot prompt",
             }[triggerType] || triggerType}
             <span className="text-xs ml-2">(cannot be changed)</span>
           </div>

@@ -202,6 +202,20 @@ export const linearUserResponseSchema = z.object({
 
 // ─── Webhook Payload Types ──────────────────────────────────────────────────
 
+const linearMutationSuccessSchema = z.object({ success: z.boolean() });
+
+export const linearAgentActivityResponseSchema = z.object({
+  data: z.object({ agentActivityCreate: linearMutationSuccessSchema }),
+});
+
+export const linearAgentSessionUpdateResponseSchema = z.object({
+  data: z.object({ agentSessionUpdate: linearMutationSuccessSchema }),
+});
+
+export const linearCommentCreateResponseSchema = z.object({
+  data: z.object({ commentCreate: linearMutationSuccessSchema }),
+});
+
 export interface AgentSessionWebhookIssue {
   id: string;
   identifier: string;

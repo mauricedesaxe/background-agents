@@ -1,15 +1,11 @@
 import type { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("next-auth", () => ({
-  getServerSession: vi.fn(),
+vi.mock("@/lib/server-auth-session", () => ({
+  getServerAuthSession: vi.fn(),
 }));
 
-vi.mock("@/lib/auth", () => ({
-  authOptions: {},
-}));
-
-import { getServerSession } from "next-auth";
+import { getServerAuthSession } from "@/lib/server-auth-session";
 import { POST } from "./route";
 
 const originalOpenAiApiKey = process.env.OPENAI_API_KEY;
@@ -44,7 +40,7 @@ describe("transcriptions API route", () => {
   });
 
   it("rejects unauthenticated transcription requests", async () => {
-    vi.mocked(getServerSession).mockResolvedValue(null);
+    vi.mocked(getServerAuthSession).mockResolvedValue(null);
 
     const response = await POST(transcriptionRequest());
 
@@ -53,7 +49,7 @@ describe("transcriptions API route", () => {
   });
 
   it("transcribes a browser recording without submitting a prompt", async () => {
-    vi.mocked(getServerSession).mockResolvedValue({ user: { id: "user-1" } } as never);
+    vi.mocked(getServerAuthSession).mockResolvedValue({ user: { id: "user-1" } } as never);
     vi.mocked(fetch).mockResolvedValue(Response.json({ text: "Run npm test in packages/web." }));
 
     const response = await POST(transcriptionRequest());
@@ -168,7 +164,7 @@ describe("transcriptions API route", () => {
   ])(
     "returns a safe, actionable message for $name",
     async ({ providerStatus, providerBody, expectedStatus, expectedBody }) => {
-      vi.mocked(getServerSession).mockResolvedValue({ user: { id: "user-1" } } as never);
+      vi.mocked(getServerAuthSession).mockResolvedValue({ user: { id: "user-1" } } as never);
       vi.mocked(fetch).mockResolvedValue(Response.json(providerBody, { status: providerStatus }));
 
       const response = await POST(transcriptionRequest());

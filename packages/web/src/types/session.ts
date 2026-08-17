@@ -9,7 +9,7 @@ import type { SandboxEvent as SharedSandboxEvent } from "@open-inspect/shared/ty
 
 export interface Artifact {
   id: string;
-  type: "pr" | "screenshot" | "video" | "preview" | "branch";
+  type: "pr" | "screenshot" | "video" | "preview" | "branch" | "board";
   url: string | null;
   metadata?: (Partial<ScreenshotArtifactMetadata> | Partial<VideoArtifactMetadata>) & {
     prNumber?: number;
@@ -21,6 +21,8 @@ export interface Artifact {
     provider?: string;
     filename?: string;
     previewStatus?: "active" | "outdated" | "stopped";
+    boardId?: string;
+    title?: string;
     // Repo a PR/branch artifact belongs to in a multi-repo session. Absent on
     // artifacts written before multi-repo support → they belong to the primary.
     repoOwner?: string;
