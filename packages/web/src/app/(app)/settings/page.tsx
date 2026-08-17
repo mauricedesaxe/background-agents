@@ -16,8 +16,7 @@ import { ImagesSettings } from "@/components/settings/images-settings";
 import { McpServersSettings } from "@/components/settings/mcp-servers-settings";
 import { AppearanceSettings } from "@/components/settings/appearance-settings";
 import { SkillsSettings } from "@/components/settings/skills-settings";
-import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
-import { SidebarIcon, BackIcon } from "@/components/ui/icons";
+import { BackIcon } from "@/components/ui/icons";
 import { useIsMobile } from "@/hooks/use-media-query";
 import { supportsRepoImages } from "@/lib/sandbox-provider";
 
@@ -56,7 +55,7 @@ function isValidCategory(tab: string | null): tab is SettingsCategory {
 }
 
 function SettingsPageContent() {
-  const { isOpen, toggle } = useSidebarContext();
+  const { isOpen } = useSidebarContext();
   const searchParams = useSearchParams();
   const tabParam = searchParams.get("tab");
   const repoImagesEnabled = supportsRepoImages();
@@ -111,15 +110,7 @@ function SettingsPageContent() {
           <>
             <header className="border-b border-border-muted flex-shrink-0">
               <div className="px-4 py-3">
-                <button
-                  type="button"
-                  onClick={toggle}
-                  className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition"
-                  title={`Open sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
-                  aria-label={`Open sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
-                >
-                  <SidebarIcon className="w-4 h-4" />
-                </button>
+                <CollapsedSidebarControls />
               </div>
             </header>
             <div className="flex-1 overflow-y-auto">
@@ -134,15 +125,7 @@ function SettingsPageContent() {
           <>
             <header className="border-b border-border-muted flex-shrink-0">
               <div className="px-4 py-3 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={toggle}
-                  className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition"
-                  title={`Open sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
-                  aria-label={`Open sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
-                >
-                  <SidebarIcon className="w-4 h-4" />
-                </button>
+                <CollapsedSidebarControls />
                 <button
                   type="button"
                   onClick={() => setMobileView("list")}
