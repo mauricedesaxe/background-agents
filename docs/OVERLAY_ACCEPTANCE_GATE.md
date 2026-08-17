@@ -12,6 +12,12 @@ is produced automatically but a person decides it is sufficient), and **human ru
 execute the step, because it reaches production and no automation does). Each section names its
 class up front.
 
+The full-autonomy posture in [SYNC_METHOD.md](SYNC_METHOD.md) reclassifies the two human classes for
+the upstream-sync workflow. "Human run" and "human judgment" steps become automated: the step's
+evidence is produced and scored against its threshold unattended, and a step that fails or cannot be
+resolved deterministically moves the run to `manual-intervention` and pages a human. The blocking
+class (sections 1-3) is unchanged, and ordinary non-sync PRs keep the human classes as written.
+
 The evidence below is the same evidence #273 had to fake with "existing CI passes". #273 documented
 this gap: it ran a probe against CI as a stand-in because no gate existed to name what was actually
 required. This document closes that gap so #267, #269, and #273 can cite it instead of improvising.
@@ -147,9 +153,10 @@ renumbers an id a deployed store could already carry, and is waived in writing o
 provably brand-new this release. A written reason is required where rollback is impossible. The
 control-plane integration job that hosts them must be green.
 
-**Who.** Human judgment. The matrix is produced by running the tests, but a person has to confirm
-the rows chosen cover the real deployed histories (which migrations are live in production now),
-because the automated suite alone cannot know that.
+**Who.** Automated under full autonomy. The deployed migration set is derived from the previous
+release's `MIGRATIONS` array and the D1 migration files, so the rows are chosen against that, not
+against a person's memory. A row set that cannot be derived deterministically moves the run to
+`manual-intervention`.
 
 ## 5. Terraform and Worker binding checks
 
@@ -180,12 +187,13 @@ each package the overlay touches. When secrets are not configured the plan is sk
 must state that the bindings were reviewed by hand instead; that is a human run that blocks the PR
 until it is done.
 
-**Who.** Validate is automated. The plan review and the binding parity confirmation are human
-judgment; the no-secrets fallback (hand review of bindings) is a human run.
+**Who.** Automated under full autonomy. Validate, the plan, and the binding parity guard run and are
+scored unattended. When secrets are unconfigured the plan is skipped and the run moves to
+`manual-intervention` instead of a hand review.
 
 ## 6. Daytona image rebuilds
 
-**Class: human run (before promotion), human judgment (after).**
+**Class: automated, page on failure (full autonomy).**
 
 **What.** A runtime-bearing overlay must prove it builds and runs on the provider this deployment
 actually runs, Daytona, before it is promoted. This is not the same as a green CI suite, because a
@@ -211,12 +219,13 @@ harness pin:**
 rebuild is evidenced by a log or a state artifact that names the rebuilt snapshot, not by a green CI
 run.
 
-**Who.** Human run for booting and resuming the sandbox against a staging or test environment. Human
-judgment on whether the rebuild evidence is sufficient.
+**Who.** Automated. A fresh sandbox is provisioned and resumed against the rebuilt snapshot by the
+promotion worker; the evidence is the named snapshot plus the boot/resume result. A boot or resume
+failure moves the run to `manual-intervention`.
 
 ## 7. Runtime and production probes
 
-**Class: human run.**
+**Class: automated, page on failure (full autonomy).**
 
 **What.** The promotion is exercised where it runs before the promotion is declared done. This is
 the human-judgment evidence that deterministic tests cannot reach: a live round trip through the
@@ -230,9 +239,9 @@ the WebSocket send (#7). A probe must exercise a real prompt that triggers compa
 long-running turn through those seams, because their failure mode is the stream dropping or the
 recovered response never reaching the user, which no unit test reproduces.
 
-**How.** A person runs the probe against the deployed production surface, not staging: create a
-session, send a prompt that runs long enough to exercise the retained seams, and confirm the
-transcript and streamed events arrive intact. Where a bot package is in the overlay, send a real
+**How.** The promotion worker runs the probe against the deployed production surface, not staging:
+create a session, send a prompt that runs long enough to exercise the retained seams, and confirm
+the transcript and streamed events arrive intact. Where a bot package is in the overlay, send a real
 webhook and confirm the forward fires (the #12 behavior pinned by
 `packages/github-bot/test/webhook-forward.test.ts`). A staging environment cannot stand in, because
 the seams the probe exists to catch (binding-parity 503s, the event pump, the webhook forward) are
@@ -242,11 +251,11 @@ production-configuration-dependent and behave differently under the deployed con
 the transcript and events intact, and any bot forwarding fires. A skipped probe is a block; the
 probe is not satisfiable by saying "the tests passed" or by a staging run.
 
-**Who.** Human run. This is the gate between "merged" and "declared promoted".
+**Who.** Automated. A probe failure moves the run to `manual-intervention`.
 
 ## 8. Production-bearing verification
 
-**Class: human judgment.**
+**Class: automated, page on failure (full autonomy).**
 
 **What.** After merge to `main`, the promotion is confirmed to have actually reached production, not
 merely to have been merged. This exists because deploys are unattended and can silently not run.
@@ -269,13 +278,15 @@ workflow runs at all, leaving a change on `main` that looks deployed with nothin
 **Threshold.** A workflow run exists for the merge and reached success; the applied plan shows no
 unexpected creates; the deployed surface responds to the section 7 probe.
 
-**Who.** Human judgment. The automation produces the run and the plan; a person confirms they mean
-promotion happened.
+**Who.** Automated. The workflow run, plan, and probe response are checked by the promotion worker;
+a missing run or unexpected create moves the run to `manual-intervention`.
 
 ## The promotion checklist
 
-Work this top to bottom. Any red in sections 1, 2, or 3 blocks automatically. From section 4 down, a
-human is required and conversation on the PR is the record of the decision.
+Work this top to bottom. Under the full-autonomy posture in [SYNC_METHOD.md](SYNC_METHOD.md), every
+section is automated: any failure or unresolvable ambiguity in any section moves the run to
+`manual-intervention` and pages a human. Ordinary non-sync PRs keep the human classes as written
+above.
 
 1. [ ] Section 1 deterministic CI: all `ci.yml` jobs green on the head commit.
 2. [ ] Section 2 retained behavior: no fork test taken wholesale, no fork test edited without a
@@ -284,10 +295,11 @@ human is required and conversation on the PR is the record of the decision.
 4. [ ] Section 4 migrations: one upgrade row, one rollback row; a collision row for any migration
        that adopts, reuses, or renumbers an id a deployed store could already carry, waived in
        writing only for an id provably brand-new this release; a written reason where rollback is
-       impossible; host integration suite green, and a person confirms the rows cover the deployed
-       histories.
-5. [ ] Section 5 Terraform: validate green, plan reviewed (or bindings hand-checked when secrets are
-       unconfigured), binding parity guard extended and passing for every touched package.
+       impossible; host integration suite green, and the rows derived from the previous release's
+       migration set.
+5. [ ] Section 5 Terraform: validate green, plan reviewed (or the run moves to `manual-intervention`
+       when secrets are unconfigured), binding parity guard extended and passing for every touched
+       package.
 6. [ ] Section 6 Daytona: `SANDBOX_VERSION` bumped with any harness pin; a real sandbox booted and
        resumed from the rebuilt image in a staging environment, evidenced by the named snapshot.
 7. [ ] Section 7 probes: a live round trip ran end to end against the deployed production surface
@@ -295,8 +307,8 @@ human is required and conversation on the PR is the record of the decision.
 8. [ ] Section 8 production: a workflow run exists for the merge and succeeded; the applied plan
        shows no unexpected creates; the deployed surface responds to the section 7 probe.
 
-When every box is checked, the promotion is complete and can be declared. A box left unchecked is an
-open item that blocks the declaration, not a note to revisit.
+When every box is checked, the promotion is complete and is declared automatically. A box left
+unchecked moves the run to `manual-intervention`; it is not a note to revisit.
 
 ## How this gate itself is kept honest
 
