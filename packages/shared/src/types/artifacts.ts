@@ -191,7 +191,10 @@ export interface MediaArtifactInfo {
 }
 
 /** The id is a URL path segment; the media route parses this exact shape. */
-export const mediaArtifactIdSchema = z.string().min(1).regex(/^[A-Za-z0-9-]+$/);
+export const mediaArtifactIdSchema = z
+  .string()
+  .min(1)
+  .regex(/^[A-Za-z0-9-]+$/);
 
 export interface AgentResponse {
   textContent: string;

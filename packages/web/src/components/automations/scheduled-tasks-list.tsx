@@ -38,7 +38,9 @@ export function ScheduledTasksList() {
   const cancel = async (id: string) => {
     setCancelError(null);
     try {
-      const response = await browserApiFetch(`/api/scheduled-tasks/${id}/cancel`, { method: "POST" });
+      const response = await browserApiFetch(`/api/scheduled-tasks/${id}/cancel`, {
+        method: "POST",
+      });
       if (!response.ok && response.status !== 409) {
         throw new Error("Scheduled prompt could not be cancelled");
       }
