@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { epochMs, type EpochMs } from "../time";
 
 const inspectionTokenPayloadSchema = z.object({
   scope: z.literal("board:inspect"),
@@ -10,7 +9,7 @@ const inspectionTokenPayloadSchema = z.object({
 
 type InspectionTokenPayload = z.infer<typeof inspectionTokenPayloadSchema>;
 type BoardInspectionTokenPayload = Omit<InspectionTokenPayload, "expiresAtMs"> & {
-  expiresAtMs: EpochMs;
+  expiresAtMs: number;
 };
 export const BOARD_INSPECTION_TOKEN_PREFIX = "bi1.";
 
@@ -30,7 +29,7 @@ export async function mintBoardInspectionToken(
 export async function verifyBoardInspectionToken(
   token: string,
   secret: string,
-  expected: { sessionId: string; boardId: string; nowMs: EpochMs }
+  expected: { sessionId: string; boardId: string; nowMs: number }
 ): Promise<{ ok: true } | { ok: false; error: BoardInspectionTokenError }> {
   if (!token.startsWith(BOARD_INSPECTION_TOKEN_PREFIX)) return { ok: false, error: "invalid" };
   const [encodedPayload, encodedSignature, extra] = token
@@ -52,7 +51,7 @@ export async function verifyBoardInspectionToken(
       JSON.parse(new TextDecoder().decode(decodeBase64Url(encodedPayload)))
     );
     if (!payload.success) return { ok: false, error: "invalid" };
-    const expiresAtMs = epochMs(payload.data.expiresAtMs);
+    const expiresAtMs = payload.data.expiresAtMs;
     if (expiresAtMs < expected.nowMs) return { ok: false, error: "expired" };
     if (
       payload.data.sessionId !== expected.sessionId ||

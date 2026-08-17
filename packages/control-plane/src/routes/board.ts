@@ -14,16 +14,22 @@ import { BoardInternalPaths, buildBoardInternalUrl } from "../board/contracts";
 import { mintBoardInspectionToken } from "../board/inspection-token";
 import { SessionInternalPaths } from "../session/contracts";
 import { createSessionRuntimeClient } from "../session/runtime-client";
-import { addDuration, durationMs, nowMs } from "../time";
 import type { Env } from "../types";
-import { error, json, parsePattern, type RequestContext, type Route } from "./shared";
+import {
+  error,
+  json,
+  parsePattern,
+  type RequestContext,
+  type Route,
+  SCM_AGNOSTIC_SANDBOX_ROUTE,
+} from "./shared";
 
 const logger = createLogger("board-routes");
 
 /** Board title cap — a label, not a document. */
 const BOARD_TITLE_MAX_LENGTH = 200;
 const DEFAULT_BOARD_TITLE = "Whiteboard";
-const BOARD_INSPECTION_TOKEN_TTL_MS = durationMs(2 * 60 * 1000);
+const BOARD_INSPECTION_TOKEN_TTL_MS = 2 * 60 * 1000;
 
 interface ArtifactSummary {
   type: string;
@@ -189,7 +195,7 @@ async function handleInspectBoard(
   if (!hasBoardArtifact(artifacts, boardId)) return error("Board not found", 404);
 
   const token = await mintBoardInspectionToken(
-    { sessionId, boardId, expiresAtMs: addDuration(nowMs(), BOARD_INSPECTION_TOKEN_TTL_MS) },
+    { sessionId, boardId, expiresAtMs: Date.now() + BOARD_INSPECTION_TOKEN_TTL_MS },
     env.TOKEN_ENCRYPTION_KEY
   );
   return json({ url: buildBoardInspectionUrl(env.WEB_APP_URL, sessionId, boardId, token) });
@@ -200,20 +206,24 @@ export const boardRoutes: Route[] = [
     method: "POST",
     pattern: parsePattern("/sessions/:id/board"),
     handler: handleCreateBoard,
+    ...SCM_AGNOSTIC_SANDBOX_ROUTE,
   },
   {
     method: "POST",
     pattern: parsePattern("/sessions/:id/board/:boardId/mutate"),
     handler: handleMutateBoard,
+    ...SCM_AGNOSTIC_SANDBOX_ROUTE,
   },
   {
     method: "GET",
     pattern: parsePattern("/sessions/:id/board/:boardId/snapshot"),
     handler: handleBoardSnapshot,
+    ...SCM_AGNOSTIC_SANDBOX_ROUTE,
   },
   {
     method: "POST",
     pattern: parsePattern("/sessions/:id/board/:boardId/inspect"),
     handler: handleInspectBoard,
+    ...SCM_AGNOSTIC_SANDBOX_ROUTE,
   },
 ];

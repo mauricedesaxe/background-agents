@@ -8,6 +8,7 @@ import type { ImageBuildFinalizationJob } from "./image-builds/finalization-job"
 export interface Env {
   // Durable Objects
   SESSION: DurableObjectNamespace;
+  BOARD_ROOM: DurableObjectNamespace;
 
   // KV Namespaces
   REPOS_CACHE: KVNamespace; // Short-lived cache for /repos listing

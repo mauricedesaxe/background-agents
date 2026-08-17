@@ -2,8 +2,10 @@ import type { Logger } from "../../../logger";
 import {
   createMediaArtifactRequestSchema,
   type CreateMediaArtifactRequest,
+  createBoardArtifactRequestSchema,
+  type CreateBoardArtifactRequest,
 } from "@open-inspect/shared/types/session-api";
-import type { SessionArtifact } from "@open-inspect/shared/types/artifacts";
+import type { BoardArtifactMetadata, SessionArtifact } from "@open-inspect/shared/types/artifacts";
 import { sandboxEventSchema, type SandboxEvent } from "@open-inspect/shared/types/sandbox-events";
 import type { ParticipantRole } from "@open-inspect/shared/types/sessions";
 import { isDeadSandboxStatus } from "../../../sandbox/lifecycle/decisions";
@@ -57,6 +59,7 @@ export interface SandboxHandlerDeps {
 export interface SandboxHandler {
   sandboxEvent: (request: Request) => Promise<Response>;
   createMediaArtifact: (request: Request) => Promise<Response>;
+  createBoardArtifact: (request: Request) => Promise<Response>;
   addParticipant: (request: Request) => Promise<Response>;
   verifySandboxToken: (request: Request, log: Logger) => Promise<Response>;
   openaiTokenRefresh: (log: Logger) => Promise<Response>;
@@ -155,6 +158,47 @@ export function createSandboxHandler(deps: SandboxHandlerDeps): SandboxHandler {
 
       deps.messenger.broadcast({ type: "artifact_created", artifact });
       deps.messenger.broadcast({ type: "sandbox_event", event });
+
+      return Response.json({ status: "ok", artifactId: artifact.id });
+    },
+
+    async createBoardArtifact(request: Request): Promise<Response> {
+      let raw: unknown;
+      try {
+        raw = await request.json();
+      } catch {
+        return Response.json({ error: "Invalid request body" }, { status: 400 });
+      }
+
+      const result = createBoardArtifactRequestSchema.safeParse(raw);
+      if (!result.success) {
+        return Response.json(
+          { error: "artifactId, boardId and title are required" },
+          { status: 400 }
+        );
+      }
+      const body: CreateBoardArtifactRequest = result.data;
+
+      const now = deps.now();
+      const metadata: BoardArtifactMetadata = { boardId: body.boardId, title: body.title };
+      const artifact: SessionArtifact = {
+        id: body.artifactId,
+        type: "board",
+        url: null,
+        metadata: metadata as unknown as Record<string, unknown>,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      deps.artifactRepository.createArtifact({
+        id: artifact.id,
+        type: artifact.type,
+        url: artifact.url,
+        metadata: JSON.stringify(metadata),
+        createdAt: now,
+      });
+
+      deps.messenger.broadcast({ type: "artifact_created", artifact });
 
       return Response.json({ status: "ok", artifactId: artifact.id });
     },
