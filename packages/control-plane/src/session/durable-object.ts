@@ -266,6 +266,7 @@ export class SessionDO extends DurableObject<Env> {
     wsToken: (request, _url, log) => this.wsTokenHandler.generateWsToken(request, log),
     updateTitle: (request) => this.sessionLifecycleHandler.updateTitle(request),
     archive: (request) => this.sessionLifecycleHandler.archive(request),
+    archiveCascade: () => this.sessionLifecycleHandler.archiveCascade(),
     unarchive: (request) => this.sessionLifecycleHandler.unarchive(request),
     expireDraft: () => this.sessionLifecycleHandler.expireDraft(),
     verifySandboxToken: (request, _url, log) =>
@@ -871,7 +872,9 @@ export class SessionDO extends DurableObject<Env> {
         this.artifactRepository,
         this.messenger,
         this.db ? new SessionIndexStore(this.db) : null,
-        this.env.SESSION ?? null
+        this.env.SESSION ?? null,
+        (reason) => this.lifecycleManager.archiveSandbox(reason, { throwOnFailure: true }),
+        (deadlineAt) => this.alarmScheduler.scheduleAlarm(deadlineAt)
       );
     }
 
@@ -1253,6 +1256,7 @@ export class SessionDO extends DurableObject<Env> {
    */
   async alarm(): Promise<void> {
     await this.server.onScheduledDeadline();
+    await this.statusService.handleAutoArchiveAlarm(Date.now());
   }
 
   /**

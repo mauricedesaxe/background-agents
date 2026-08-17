@@ -135,11 +135,64 @@ export class SessionCoreRepository {
 
   updateSessionStatus(sessionId: string, status: SessionStatus, updatedAt: number): void {
     this.sql.exec(
-      `UPDATE session SET status = ?, updated_at = ? WHERE id = ?`,
+      `UPDATE session
+       SET status = ?,
+           updated_at = ?,
+           terminal_at = CASE
+             WHEN ? IN ('completed', 'failed', 'cancelled') THEN COALESCE(terminal_at, ?)
+             ELSE NULL
+           END,
+            archive_requested_at = CASE
+              WHEN ? IN ('active', 'archived') THEN NULL ELSE archive_requested_at
+            END,
+            archive_claimed_at = CASE
+              WHEN ? IN ('active', 'archived') THEN NULL ELSE archive_claimed_at
+            END
+       WHERE id = ?`,
       status,
       updatedAt,
+      status,
+      updatedAt,
+      status,
+      status,
       sessionId
     );
+  }
+
+  claimSessionArchive(sessionId: string, claimedAt: number): boolean {
+    const result = this.sql.exec(
+      `UPDATE session
+       SET archive_claimed_at = ?,
+           archive_requested_at = COALESCE(archive_requested_at, ?)
+       WHERE id = ? AND archive_claimed_at IS NULL`,
+      claimedAt,
+      claimedAt,
+      sessionId
+    );
+    result.toArray();
+    return (result.rowsWritten ?? 0) > 0;
+  }
+
+  clearSessionArchiveClaim(sessionId: string, keepRetryRequest: boolean): void {
+    this.sql.exec(
+      `UPDATE session
+       SET archive_claimed_at = NULL,
+           archive_requested_at = CASE WHEN ? THEN archive_requested_at ELSE NULL END
+       WHERE id = ?`,
+      keepRetryRequest ? 1 : 0,
+      sessionId
+    );
+  }
+
+  extendTerminalActivity(sessionId: string, now: number): boolean {
+    const result = this.sql.exec(
+      `UPDATE session SET terminal_at = ? WHERE id = ? AND terminal_at IS NOT NULL AND ? > terminal_at`,
+      now,
+      sessionId,
+      now
+    );
+    result.toArray();
+    return (result.rowsWritten ?? 0) > 0;
   }
 
   addSessionCost(cost: number, updatedAt: number): void {

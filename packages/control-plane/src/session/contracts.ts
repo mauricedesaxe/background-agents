@@ -25,6 +25,7 @@ export const SessionInternalPaths = {
   pullRequestsRefresh: "/internal/pull-requests-refresh",
   wsToken: "/internal/ws-token",
   archive: "/internal/archive",
+  archiveCascade: "/internal/archive-cascade",
   unarchive: "/internal/unarchive",
   expireDraft: "/internal/expire-draft",
   verifySandboxToken: "/internal/verify-sandbox-token",

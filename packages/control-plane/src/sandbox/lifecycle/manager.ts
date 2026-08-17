@@ -324,6 +324,27 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
    * - Restore from snapshot if available and sandbox is stopped/stale/failed
    * - Fresh spawn if all conditions pass
    */
+  async archiveSandbox(reason: string, options: { throwOnFailure?: boolean } = {}): Promise<void> {
+    if (this.provider.capabilities.supportsArchive !== true || !this.provider.archiveSandbox) {
+      return;
+    }
+    const sandbox = this.storage.getSandbox();
+    const providerObjectId = sandbox?.modal_object_id ?? undefined;
+    if (!sandbox || !providerObjectId) {
+      return;
+    }
+
+    try {
+      await this.provider.archiveSandbox(providerObjectId);
+    } catch (error) {
+      this.log.error("Provider archive failed", {
+        reason,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (options.throwOnFailure) throw error;
+    }
+  }
+
   async spawnSandbox(): Promise<void> {
     const sandboxState = this.storage.getSandboxWithCircuitBreaker();
     const now = Date.now();

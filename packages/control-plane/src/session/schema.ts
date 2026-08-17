@@ -65,6 +65,9 @@ CREATE TABLE IF NOT EXISTS session (
   total_cost REAL NOT NULL DEFAULT 0,              -- Running session cost from step_finish events
   sandbox_settings TEXT DEFAULT NULL,               -- JSON blob of SandboxSettings (resolved at session creation)
   environment_id TEXT,                              -- Launch environment provenance; NULL for repo-launched/ad-hoc sessions
+  terminal_at INTEGER,                              -- Set when the session reaches a terminal status; extended by activity (see session-activity.ts)
+  archive_requested_at INTEGER,                     -- Set when archive is requested; NULL once reconciled
+  archive_claimed_at INTEGER,                       -- Set when archive reconciliation starts
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   CHECK (
@@ -158,6 +161,8 @@ CREATE TABLE IF NOT EXISTS sandbox (
   last_activity INTEGER,                            -- Last activity timestamp for inactivity-based snapshot
   last_spawn_error TEXT,                            -- Last sandbox spawn error (if any)
   last_spawn_error_at INTEGER,                      -- Timestamp of last spawn error
+  stop_unreconciled_at INTEGER,                     -- Set while a failed provider stop remains unsettled; NULL once reconciled
+  stop_unreconciled_provider_id TEXT,               -- The provider object the failed stop targeted, pinned so a respawn can't redirect the retry
   spawn_failure_count INTEGER DEFAULT 0,            -- Circuit breaker: consecutive spawn failures
   last_spawn_failure INTEGER,                       -- Timestamp of last spawn failure
   code_server_url TEXT,                             -- Code-server tunnel URL (rotates on wake/restore)
@@ -235,6 +240,10 @@ export interface SchemaMigration {
  * 2. Append an entry here with the next sequential ID
  * 3. For data transforms, use a function-type `run`
  */
+export const FORK_MIGRATION_ID_FLOOR = 9000;
+
+export const RETIRED_LOW_IDS = [35, 36] as const;
+
 export const MIGRATIONS: readonly SchemaMigration[] = [
   {
     id: 1,
@@ -560,6 +569,39 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
         ON messages(status) WHERE status = 'processing'`);
     },
   },
+  {
+    id: 9001,
+    description: "Add stop-unreconciled tracking to sandbox",
+    run: (sql) => {
+      const columns = sql.exec("PRAGMA table_info(sandbox)").toArray() as Array<{ name: string }>;
+      const names = new Set(columns.map((c) => c.name));
+
+      if (!names.has("stop_unreconciled_at")) {
+        runMigration(sql, `ALTER TABLE sandbox ADD COLUMN stop_unreconciled_at INTEGER`);
+      }
+      if (!names.has("stop_unreconciled_provider_id")) {
+        runMigration(sql, `ALTER TABLE sandbox ADD COLUMN stop_unreconciled_provider_id TEXT`);
+      }
+    },
+  },
+  {
+    id: 9002,
+    description: "Add durable session archive tracking",
+    run: (sql) => {
+      const columns = sql.exec("PRAGMA table_info(session)").toArray() as Array<{ name: string }>;
+      const names = new Set(columns.map((column) => column.name));
+
+      if (!names.has("terminal_at")) {
+        runMigration(sql, `ALTER TABLE session ADD COLUMN terminal_at INTEGER`);
+      }
+      if (!names.has("archive_requested_at")) {
+        runMigration(sql, `ALTER TABLE session ADD COLUMN archive_requested_at INTEGER`);
+      }
+      if (!names.has("archive_claimed_at")) {
+        runMigration(sql, `ALTER TABLE session ADD COLUMN archive_claimed_at INTEGER`);
+      }
+    },
+  },
 ];
 
 /**
@@ -583,10 +625,18 @@ function runMigration(sql: SqlStorage, statement: string): void {
 /**
  * Apply pending migrations, tracking which have already run via _schema_migrations.
  */
+function releaseRetiredIdentifiers(sql: SqlStorage): void {
+  for (const id of RETIRED_LOW_IDS) {
+    sql.exec(`DELETE FROM _schema_migrations WHERE id = ?`, id);
+  }
+}
+
 export function applyMigrations(sql: SqlStorage): void {
   sql.exec(
     `CREATE TABLE IF NOT EXISTS _schema_migrations (id INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)`
   );
+
+  releaseRetiredIdentifiers(sql);
 
   const rows = sql.exec(`SELECT id FROM _schema_migrations`).toArray() as Array<{ id: number }>;
   const applied = new Set(rows.map((r) => r.id));

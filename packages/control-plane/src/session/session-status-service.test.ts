@@ -95,7 +95,9 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
     artifactRepository,
     messenger,
     sessionIndex as unknown as SessionIndexStore | null,
-    parentSessions as unknown as DurableObjectNamespace
+    parentSessions as unknown as DurableObjectNamespace,
+    vi.fn().mockResolvedValue(undefined),
+    vi.fn().mockResolvedValue(undefined)
   );
 
   return {

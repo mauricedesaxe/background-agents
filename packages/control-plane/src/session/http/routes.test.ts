@@ -30,6 +30,7 @@ describe("createSessionInternalRoutes", () => {
       wsToken: noopHandler(),
       updateTitle: noopHandler(),
       archive: noopHandler(),
+      archiveCascade: noopHandler(),
       unarchive: noopHandler(),
       expireDraft: noopHandler(),
       verifySandboxToken: noopHandler(),

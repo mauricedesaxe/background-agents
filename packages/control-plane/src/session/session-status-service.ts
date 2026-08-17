@@ -18,9 +18,16 @@ import type { MessageRepository } from "./message-repository";
 import type { ArtifactRepository } from "./artifact-repository";
 import type { SessionMessenger } from "./messenger";
 import type { BackgroundJobDispatcher } from "../platform-ports";
+import { getSessionAutoArchiveDelayMs } from "./auto-archive-policy";
+import { SandboxProviderError } from "../sandbox/provider";
 
 /** Statuses that indicate a session is finished — metrics are synced to D1 on these transitions. */
 const TERMINAL_STATUSES: SessionStatus[] = ["completed", "failed", "cancelled"];
+const CHILD_ARCHIVE_ATTEMPTS = 3;
+const ARCHIVE_RETRY_DELAY_MS = 5 * 60 * 1000;
+
+export type ArchiveAttemptResult = "archived" | "in_progress" | "failed";
+type ArchiveRetryPolicy = "none" | "preserve-request" | "recheck-retention";
 
 export class SessionStatusService {
   constructor(
@@ -31,7 +38,9 @@ export class SessionStatusService {
     private readonly artifactRepository: ArtifactRepository,
     private readonly messenger: SessionMessenger,
     private readonly sessionIndex: SessionIndexStore | null,
-    private readonly parentSessions: DurableObjectNamespace | null
+    private readonly parentSessions: DurableObjectNamespace | null,
+    private readonly archiveSandbox: (reason: string) => Promise<void>,
+    private readonly scheduleAlarmNoLaterThan: (deadlineAt: number) => Promise<void>
   ) {}
 
   /**
@@ -41,29 +50,260 @@ export class SessionStatusService {
    * refreshed in the same-status case).
    */
   async transition(status: SessionStatus): Promise<boolean> {
+    if (status === "active" && this.isArchiveInProgress()) return false;
+    return this.applyTransition(status, false);
+  }
+
+  async unarchive(): Promise<boolean> {
+    if (this.isArchiveInProgress()) return false;
+    return this.applyTransition("active", true);
+  }
+
+  isArchiveInProgress(): boolean {
+    return this.repository.getSession()?.archive_claimed_at != null;
+  }
+
+  async archive(
+    reason: string,
+    options: {
+      retryOnFailure?: boolean;
+      beforeProviderArchive?: () => Promise<void>;
+    } = {}
+  ): Promise<ArchiveAttemptResult> {
+    const retryPolicy: ArchiveRetryPolicy = options.retryOnFailure ? "preserve-request" : "none";
+    return this.archiveWithRetryPolicy(reason, retryPolicy, options.beforeProviderArchive);
+  }
+
+  private async archiveWithRetryPolicy(
+    reason: string,
+    retryPolicy: ArchiveRetryPolicy,
+    beforeProviderArchive?: () => Promise<void>
+  ): Promise<ArchiveAttemptResult> {
+    const session = this.repository.getSession();
+    if (!session) return "failed";
+
+    const claimedAt = Date.now();
+    if (!this.repository.claimSessionArchive(session.id, claimedAt)) {
+      return "in_progress";
+    }
+
+    try {
+      await this.scheduleAlarmNoLaterThan(claimedAt + ARCHIVE_RETRY_DELAY_MS);
+      await beforeProviderArchive?.();
+      await this.archiveSandbox(reason);
+      await this.transition("archived");
+      return "archived";
+    } catch (error) {
+      const shouldRetry =
+        retryPolicy !== "none" &&
+        !(error instanceof SandboxProviderError && error.errorType === "permanent");
+      const keepRetryRequest = shouldRetry && retryPolicy === "preserve-request";
+      this.repository.clearSessionArchiveClaim(session.id, keepRetryRequest);
+      this.log.error("session_archive.failed", {
+        session_id: this.getPublicSessionId(session),
+        reason,
+        error,
+      });
+      if (shouldRetry) {
+        await this.scheduleAlarmNoLaterThan(claimedAt + ARCHIVE_RETRY_DELAY_MS);
+      }
+      return "failed";
+    }
+  }
+
+  private async applyTransition(
+    status: SessionStatus,
+    restoreArchivedSession: boolean
+  ): Promise<boolean> {
     const session = this.repository.getSession();
     if (!session) return false;
 
     const publicSessionId = this.getPublicSessionId(session);
     if (session.status === status) {
-      await this.syncSessionIndexStatusAndAdmission(
+      await this.syncSessionIndexStatus(
         publicSessionId,
         status,
-        session.updated_at
+        session.updated_at,
+        restoreArchivedSession
       ).catch((error) =>
         this.logSessionIndexStatusSyncError(publicSessionId, status, session.updated_at, error)
       );
+      if (status === "archived") {
+        await this.archiveDescendantIndexRows(publicSessionId, session.updated_at);
+        this.cascadeArchiveToChildren(publicSessionId);
+      }
       if (TERMINAL_STATUSES.includes(status)) {
         this.syncSessionMetrics(publicSessionId);
+        await this.scheduleAutoArchive(
+          session.spawn_source,
+          session.terminal_at ?? session.updated_at
+        );
       }
       return false;
     }
 
     const updatedAt = Math.max(Date.now(), session.updated_at + 1);
     this.repository.updateSessionStatus(session.id, status, updatedAt);
-    await this.projectTransition(session, publicSessionId, status, updatedAt);
+    await this.syncSessionIndexStatus(
+      publicSessionId,
+      status,
+      updatedAt,
+      restoreArchivedSession
+    ).catch((error) =>
+      this.logSessionIndexStatusSyncError(publicSessionId, status, updatedAt, error)
+    );
+
+    if (status === "archived") {
+      await this.archiveDescendantIndexRows(publicSessionId, updatedAt);
+    }
+
+    this.messenger.broadcast({ type: "session_status", status });
+
+    if (TERMINAL_STATUSES.includes(status)) {
+      this.syncSessionMetrics(publicSessionId);
+      await this.scheduleAutoArchive(session.spawn_source, updatedAt);
+    }
+
+    this.notifyParentOfStatusChange(session, publicSessionId, status);
+
+    if (status === "archived") {
+      this.cascadeArchiveToChildren(publicSessionId);
+    }
 
     return true;
+  }
+
+  private cascadeArchiveToChildren(parentSessionId: string): void {
+    if (!this.sessionIndex || !this.parentSessions) return;
+
+    const sessionBinding = this.parentSessions;
+
+    this.backgroundJobs.submit(
+      this.sessionIndex
+        .listByParent(parentSessionId)
+        .then((children) =>
+          Promise.all(
+            children.map((child) => {
+              const childDoId = sessionBinding.idFromName(child.id);
+              return this.archiveChildWithRetry(sessionBinding.get(childDoId)).catch((error) => {
+                this.log.error("cascade_archive.child_failed", {
+                  parent_id: parentSessionId,
+                  child_id: child.id,
+                  error,
+                });
+                return this.scheduleAlarmNoLaterThan(Date.now() + ARCHIVE_RETRY_DELAY_MS);
+              });
+            })
+          )
+        )
+        .then(() => undefined)
+        .catch((error) => {
+          this.log.error("cascade_archive.failed", {
+            parent_id: parentSessionId,
+            error,
+          });
+        })
+    );
+  }
+
+  private async archiveDescendantIndexRows(
+    parentSessionId: string,
+    updatedAt: number
+  ): Promise<void> {
+    if (!this.sessionIndex) return;
+
+    await this.sessionIndex.archiveDescendants(parentSessionId, updatedAt).catch((error) => {
+      this.log.error("cascade_archive.index_failed", {
+        parent_id: parentSessionId,
+        error,
+      });
+    });
+  }
+
+  private async archiveChildWithRetry(child: DurableObjectStub): Promise<void> {
+    for (let attempt = 1; attempt <= CHILD_ARCHIVE_ATTEMPTS; attempt += 1) {
+      try {
+        const response = await child.fetch(
+          new Request(buildSessionInternalUrl(SessionInternalPaths.archiveCascade), {
+            method: "POST",
+          })
+        );
+        if (response.ok) return;
+        if (attempt === CHILD_ARCHIVE_ATTEMPTS) {
+          throw new Error(`Child archive returned HTTP ${response.status}`);
+        }
+      } catch (error) {
+        if (attempt === CHILD_ARCHIVE_ATTEMPTS) throw error;
+      }
+    }
+  }
+
+  recordTerminalActivity(now: number): void {
+    const session = this.repository.getSession();
+    if (!session) return;
+    this.repository.extendTerminalActivity(session.id, now);
+  }
+
+  async handleAutoArchiveAlarm(now: number): Promise<void> {
+    const session = this.repository.getSession();
+    if (!session) return;
+
+    if (session.status === "archived") {
+      this.cascadeArchiveToChildren(this.getPublicSessionId(session));
+      return;
+    }
+
+    if (session.archive_requested_at != null) {
+      if (!TERMINAL_STATUSES.includes(session.status)) {
+        this.repository.clearSessionArchiveClaim(session.id, false);
+        return;
+      }
+      if (
+        session.archive_claimed_at != null &&
+        now < session.archive_claimed_at + ARCHIVE_RETRY_DELAY_MS
+      ) {
+        await this.scheduleAlarmNoLaterThan(session.archive_claimed_at + ARCHIVE_RETRY_DELAY_MS);
+        return;
+      }
+      if (session.archive_claimed_at != null) {
+        this.repository.clearSessionArchiveClaim(session.id, true);
+      }
+      await this.archive("session_archive_retried", { retryOnFailure: true });
+      return;
+    }
+
+    if (!TERMINAL_STATUSES.includes(session.status)) return;
+
+    const terminalAt = session.terminal_at ?? session.updated_at;
+    const deadlineAt = terminalAt + getSessionAutoArchiveDelayMs(session.spawn_source);
+    if (now < deadlineAt) {
+      await this.scheduleAlarmNoLaterThan(deadlineAt);
+      return;
+    }
+
+    await this.archiveWithRetryPolicy("session_auto_archived", "recheck-retention");
+  }
+
+  private async scheduleAutoArchive(
+    spawnSource: SessionRow["spawn_source"],
+    terminalAt: number
+  ): Promise<void> {
+    const deadlineAt = terminalAt + getSessionAutoArchiveDelayMs(spawnSource);
+    await this.scheduleAlarmNoLaterThan(deadlineAt);
+  }
+
+  private async syncSessionIndexStatus(
+    sessionId: string,
+    status: SessionStatus,
+    updatedAt: number,
+    restoreArchivedSession: boolean
+  ): Promise<void> {
+    if (!this.sessionIndex) return;
+    if (restoreArchivedSession) {
+      await this.sessionIndex.restoreArchivedSession(sessionId, updatedAt);
+      return;
+    }
+    await this.sessionIndex.updateStatus(sessionId, status, updatedAt);
   }
 
   /**
@@ -129,6 +369,9 @@ export class SessionStatusService {
 
     if (TERMINAL_STATUSES.includes(status)) {
       this.syncSessionMetrics(publicSessionId);
+      this.backgroundJobs.submit(
+        this.scheduleAutoArchive(session.spawn_source, updatedAt).catch(() => undefined)
+      );
     }
 
     // Notify parent session (if this is a child) so its UI can refresh

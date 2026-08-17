@@ -60,6 +60,8 @@ export interface SandboxProviderCapabilities {
   supportsPersistentResume?: boolean;
   /** Whether the provider can stop a sandbox explicitly via API */
   supportsExplicitStop?: boolean;
+  /** Whether the provider can archive a stopped sandbox to free its storage */
+  supportsArchive?: boolean;
 }
 
 /**
@@ -488,6 +490,9 @@ export interface SandboxProvider {
    * Only available if `capabilities.supportsPersistentResume` is true.
    */
   resumeSandbox?(config: ResumeConfig): Promise<ResumeResult>;
+
+  /** Archive a stopped sandbox, releasing its storage. Requires supportsArchive. */
+  archiveSandbox?(providerObjectId: string): Promise<void>;
 
   /**
    * Take a filesystem snapshot of the sandbox.

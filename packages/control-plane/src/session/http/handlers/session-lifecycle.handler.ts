@@ -67,6 +67,7 @@ export interface SessionLifecycleHandler {
   getState: () => Response;
   updateTitle: (request: Request) => Promise<Response>;
   archive: (request: Request) => Promise<Response>;
+  archiveCascade: () => Promise<Response>;
   unarchive: (request: Request) => Promise<Response>;
   expireDraft: () => Promise<Response>;
   cancel: () => Promise<Response>;
@@ -427,7 +428,29 @@ export function createSessionLifecycleHandler(
         );
       }
 
-      await deps.statusService.transition("archived");
+      const result = await deps.statusService.archive("session_archived");
+      if (result === "in_progress") {
+        return Response.json({ error: "Session archive is already in progress" }, { status: 409 });
+      }
+      if (result === "failed") {
+        return Response.json({ error: "Sandbox archive must be retried" }, { status: 503 });
+      }
+
+      return Response.json({ status: "archived" });
+    },
+
+    async archiveCascade(): Promise<Response> {
+      const session = deps.getSession();
+      if (!session) {
+        return Response.json({ status: "archived" });
+      }
+
+      const result = await deps.statusService.archive("session_archived", {
+        retryOnFailure: true,
+      });
+      if (result !== "archived") {
+        return Response.json({ status: "archive_pending" }, { status: 202 });
+      }
 
       return Response.json({ status: "archived" });
     },
@@ -513,11 +536,9 @@ export function createSessionLifecycleHandler(
         );
       }
 
-      if (session.status !== "archived") {
-        return Response.json({ error: "Session is not archived" }, { status: 409 });
+      if (!(await deps.statusService.unarchive())) {
+        return Response.json({ error: "Session archive is in progress" }, { status: 409 });
       }
-
-      await deps.statusService.transition("active");
 
       return Response.json({ status: "active" });
     },

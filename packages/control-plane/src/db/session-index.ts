@@ -668,6 +668,49 @@ export class SessionIndexStore {
     return (result.meta?.changes ?? 0) > 0;
   }
 
+  async archiveDescendants(parentSessionId: string, updatedAt: number): Promise<void> {
+    await this.db
+      .prepare(
+        `WITH RECURSIVE subtree(id, path) AS (
+           SELECT id, '/' || hex(CAST(id AS BLOB)) || '/'
+           FROM sessions WHERE id = ?
+           UNION ALL
+           SELECT sessions.id, subtree.path || hex(CAST(sessions.id AS BLOB)) || '/'
+           FROM sessions
+           JOIN subtree ON sessions.parent_session_id = subtree.id
+           WHERE instr(
+             subtree.path,
+             '/' || hex(CAST(sessions.id AS BLOB)) || '/'
+           ) = 0
+         )
+         UPDATE sessions
+         SET spawn_closed = 1,
+             status = CASE
+               WHEN id = ? THEN status
+               ELSE 'archived'
+             END,
+             updated_at = CASE
+               WHEN id = ? THEN updated_at
+               ELSE MAX(updated_at + 1, ?)
+             END
+         WHERE id IN (SELECT id FROM subtree)`
+      )
+      .bind(parentSessionId, parentSessionId, parentSessionId, updatedAt)
+      .run();
+  }
+
+  async restoreArchivedSession(id: string, updatedAt: number): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE sessions
+         SET status = 'active', spawn_closed = 0, updated_at = ?
+         WHERE id = ? AND updated_at <= ?`
+      )
+      .bind(updatedAt, id, updatedAt)
+      .run();
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
   async updateMetrics(
     id: string,
     metrics: {
