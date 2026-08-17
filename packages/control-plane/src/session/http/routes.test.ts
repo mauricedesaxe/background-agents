@@ -17,6 +17,7 @@ describe("createSessionInternalRoutes", () => {
       stop: noopHandler(),
       sandboxEvent: noopHandler(),
       createMediaArtifact: noopHandler(),
+      createBoardArtifact: noopHandler(),
       recordAttachment: noopHandler(),
       listParticipants: noopHandler(),
       addParticipant: noopHandler(),

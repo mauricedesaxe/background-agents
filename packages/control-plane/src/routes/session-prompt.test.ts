@@ -24,13 +24,7 @@ function getHandler(method: string, path: string) {
 function createCtx(principalOverride?: Principal): RequestContext {
   const principal: Principal = principalOverride ?? {
     kind: "user",
-    user: {
-      provider: "github",
-      providerUserId: "42",
-      canonicalUserId: "user-1",
-      participantUserId: "user-1",
-    },
-    tokenId: "token-1",
+    userId: "user-1",
   };
   return {
     trace_id: "trace-1",
@@ -43,7 +37,7 @@ function createCtx(principalOverride?: Principal): RequestContext {
       time: async <T>(_name: string, fn: () => Promise<T>) => fn(),
       summarize: () => ({}),
     },
-  };
+  } as unknown as RequestContext;
 }
 
 async function postPrompt(body: unknown, principal?: Principal): Promise<Response> {
