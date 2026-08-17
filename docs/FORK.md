@@ -29,7 +29,10 @@ not apply is marked `none`; a stale one is marked `recompute`.
 
 - **Status.** One of `retained` (keep as-is), `retained-candidate` (kept but a named removal
   candidate), `upstream-owned` (upstream now owns the behaviour; we keep only a regression guard),
-  or `config` (moved to a verified configuration value).
+  `config` (moved to a verified configuration value), or `drop-at-reconstruction` (decided dropped;
+  the whole-upstream reconstruction must not re-apply it, and it is removed at cutover). A
+  `retained` entry may also carry **non-negotiable**: a sync that cannot re-apply it stops and
+  escalates rather than dropping it.
 - **Provenance.** The fork commit(s) and issue(s) that introduced it.
 - **Upstream link.** The upstream issue/PR, if one reports or fixes the same thing. `none` means no
   known upstream signal today; what to do when upstream later moves is the removal condition's job.
@@ -46,6 +49,16 @@ belongs in the sync-method work
 [#267](https://github.com/mauricedesaxe/background-agents/issues/267), not here. Keep FORK.md to
 what a sync must not silently drop; the runbook is how a sync moves a range, and it already has a
 long decision handoff in #267's comments. Do not let the runbook's machinery bloat this file.
+
+## The maintenance budget
+
+Each retained seam is priced against a sync-range budget, so a seam that costs more to keep than the
+thing it keeps is redecided rather than kept by inertia. The budget is 10% of the sync range per
+seam. Two consecutive merged syncs that overrun the same seam trigger a redecision with one of three
+outcomes: **configure** (turn the seam into a configuration value), **re-home** (move it somewhere a
+sync does not touch), or **drop** (mark it `drop-at-reconstruction` and stop re-applying it).
+Daytona seams carry a **keep** exemption: they are the provider this deployment runs, so their
+budget is the cost of running the provider, and they are not dropped by this rule.
 
 ## The permanent divergences
 
@@ -83,21 +96,22 @@ ships nothing on Daytona until `SANDBOX_VERSION` moves too and an apply rebuilds
 
 ### 2. Daytona is the provider we actually run
 
-**Status:** retained · **Provenance:** fork `53a6950` (pin provider identity for stop retries),
-`d3fdd62` (serialize stop settlement before resume), `c797d0e3` (snapshot sizing) · **Upstream
-link:** none · **Acceptance ownership:** Daytona integration tests · **Removal condition:** none —
-the provider under load carries this by definition · **Last-verified upstream SHA:** `b63d0175`.
+**Status:** retained · non-negotiable · **Provenance:** fork `53a6950` (pin provider identity for
+stop retries), `d3fdd62` (serialize stop settlement before resume), `c797d0e3` (snapshot sizing) ·
+**Upstream link:** none · **Acceptance ownership:** Daytona integration tests · **Removal
+condition:** none — the provider under load carries this by definition · **Last-verified upstream
+SHA:** `b63d0175`.
 
 Upstream ships several providers and we retain all of them; the ones we do not run diverge only
 through the shared harness install. Daytona is the one under load here, so it carries fork-local
 work: sizing applied to the snapshot rather than the create call, 8 GiB memory and 8 GiB disk per
-sandbox, a readable OOM cause, a 24-hour auto-archive default instead of 7 days, and a stop that
-retries across the provider's state-change settle. The control plane remains `stopping` until
-Daytona reports the provider sandbox as stopped, so a prompt joins that transition instead of racing
-it with a second stop. Failed-stop reconciliation pins the original provider ID so a retry cannot
-stop a replacement sandbox. A restarted Daytona supervisor recognizes the persisted OpenCode session
-as a resume, preserving local work and skipping setup hooks instead of resetting the branch to its
-remote tip.
+sandbox, a readable OOM cause, a 12-hour (user) / 1-hour (automation) auto-archive default instead
+of 7 days, and a stop that retries across the provider's state-change settle. The control plane
+remains `stopping` until Daytona reports the provider sandbox as stopped, so a prompt joins that
+transition instead of racing it with a second stop. Failed-stop reconciliation pins the original
+provider ID so a retry cannot stop a replacement sandbox. A restarted Daytona supervisor recognizes
+the persisted OpenCode session as a resume, preserving local work and skipping setup hooks instead
+of resetting the branch to its remote tip.
 
 **Why.** Each of these was a production incident, not a preference. The 7-day auto-archive plus a
 300 GiB account disk cap produced a recurring "timed out waiting to connect" outage. The 1 GiB
@@ -112,10 +126,10 @@ nothing.
 
 ### 3. The idle window is 7 minutes, not 15
 
-**Status:** retained · **Provenance:** fork (idle-window change) · **Upstream link:** none ·
-**Acceptance ownership:** control-plane inactivity tests · **Removal condition:** none while the
-cost of an idle Daytona sandbox stays — the short window is priced into the provider economics ·
-**Last-verified upstream SHA:** `b63d0175`.
+**Status:** retained · non-negotiable · **Provenance:** fork (idle-window change) · **Upstream
+link:** none · **Acceptance ownership:** control-plane inactivity tests · **Removal condition:**
+none while the cost of an idle Daytona sandbox stays — the short window is priced into the provider
+economics · **Last-verified upstream SHA:** `b63d0175`.
 
 `INACTIVITY_TIMEOUT_MS` and `INACTIVITY_EXTENSION_MS` in
 `packages/control-plane/src/sandbox/lifecycle/decisions.ts` sum to 7 minutes where upstream's
@@ -128,12 +142,13 @@ idle sandboxes.
 
 ### 4. Sandboxes can be archived
 
-**Status:** retained · **Provenance:** fork (archive cascade; unified later with the
-last-active-overlay work `fc5eea9`, `3361bd8`; activity-aware retry `77459fe`) · **Upstream link:**
-none · **Acceptance ownership:** `packages/control-plane/test/integration/archive-cascade.test.ts`
-and the auto-archive cases in `packages/control-plane/src/session/session-status-service.test.ts` ·
-**Removal condition:** adopt upstream only if it gains an equivalent archive primitive at the same
-semantics; until then keep · **Last-verified upstream SHA:** `b63d0175`.
+**Status:** retained · non-negotiable · **Provenance:** fork (archive cascade; unified later with
+the last-active-overlay work `fc5eea9`, `3361bd8`; activity-aware retry `c08fa2b`) · **Upstream
+link:** none · **Acceptance ownership:**
+`packages/control-plane/test/integration/archive-cascade.test.ts` and the auto-archive cases in
+`packages/control-plane/src/session/session-status-service.test.ts` · **Removal condition:** adopt
+upstream only if it gains an equivalent archive primitive at the same semantics; until then keep ·
+**Last-verified upstream SHA:** `b63d0175`.
 
 `supportsArchive`, `ArchiveConfig`, and `ArchiveResult` in
 `packages/control-plane/src/sandbox/provider.ts` have no upstream counterpart at all. Archiving a
@@ -191,8 +206,9 @@ object before acknowledging that terminal result. Daytona stop, archive, supervi
 bridge restart retain the same provider object and disk, so its workspace and native OpenCode
 conversation remain available while that object exists. The bridge keeps its SSE stream attached
 after OpenCode emits the first typed `ContextOverflowError`, allowing OpenCode's native compaction
-and replay to finish. Repeated or unrelated errors remain terminal. Automatic overflow recovery
-persists and renders only its message-scoped `context_compacted` completion. Manual compaction
+and replay to finish. Repeated or unrelated errors remain terminal. The `context_compacted` event is
+upstream-native now — upstream forwards and renders it — so the retained piece here is the deferral
+above plus the message-scoped rendering of the automatic-recovery completion. Manual compaction
 persists its start and terminal outcome as timeline events: starts and completions render neutrally,
 while failures render destructively. The session UI exposes manual compaction only while idle. Its
 dedicated protocol command subscribes to OpenCode events before calling
@@ -206,7 +222,7 @@ transcript. The native endpoint behavior and later message lineage were
 The
 [#291 probe](https://github.com/mauricedesaxe/background-agents/issues/291#issuecomment-5224806472)
 is the sizes for this entry. Upstream `b28cfa7` decomposed `bridge.py` into four modules the fork
-does not have, so the fork's 2654-line bridge is largely an inline transcription of code upstream
+does not have, so the fork's 2658-line bridge is largely an inline transcription of code upstream
 now owns natively. Of the 1470-line gap, roughly 600 LOC is genuinely retained across five seams,
 roughly 600 is upstream-native-now (droppable by adopting upstream's split modules), and the rest is
 refactor noise. The genuinely-retained seams, and their removal conditions:
@@ -219,7 +235,7 @@ refactor noise. The genuinely-retained seams, and their removal conditions:
 - **Event-pump + OOM cgroup reader** (~130 LOC): the fork's `EventPump` is a pump task with
   eviction; upstream's `BufferedEventForwarder` buffers inline, not a pump. Keep (this is entry #7).
 - **jj-aware PR helper** (~150 LOC): the jj core; see entry #8.
-- **Provider-retry / usage-limit surfacing** (~40 LOC): the seams in entries #24 and #25.
+- **Provider-retry / usage-limit surfacing** (~40 LOC): the seams in entry #25.
 
 Mixed-version deploys retain a narrow compatibility sink for old bridges. Legacy checkpoint uploads
 are checksummed and discarded, checkpoint lifecycle events are acknowledged without persistence or
@@ -293,9 +309,10 @@ board.
 
 ### 10. Epoch and duration values are branded in control-plane
 
-**Status:** retained · **Provenance:** fork (`5c3e6c5` brands service nonce expiry) · **Upstream
-link:** none · **Acceptance ownership:** typecheck · **Removal condition:** none — a compile-time
-guard worth keeping · **Last-verified upstream SHA:** `b63d0175`.
+**Status:** drop-at-reconstruction · **Provenance:** fork (`5c3e6c5` brands service nonce expiry) ·
+**Upstream link:** none · **Acceptance ownership:** typecheck · **Removal condition:** dropped by
+#264; the reconstruction takes upstream's unbranded values · **Last-verified upstream SHA:**
+`b63d0175`.
 
 `packages/control-plane/src/time.ts` brands `EpochMs` and `DurationMs`, and time subtraction goes
 through `elapsed()` so the result stays a `DurationMs` all the way to its comparison.
@@ -307,8 +324,8 @@ always true, which is a bug that reads correctly.
 ### 11. OpenRouter models are in the catalog
 
 **Status:** retained-candidate · **Provenance:** fork `339aca6` (add DeepSeek V4 Flash 0731),
-`9d42d02` (remove unsupported DeepSeek reasoning variants), and the retained-inventory amendment
-below · **Upstream link:** none — upstream has no OpenRouter entries · **Acceptance ownership:**
+`85f92b3` (hide unsupported DeepSeek reasoning variants), and the retained-inventory amendment below
+· **Upstream link:** none — upstream has no OpenRouter entries · **Acceptance ownership:**
 `packages/shared/src/models.test.ts` · **Removal condition:** if OpenRouter/DeepSeek stops being
 used; live now · **Last-verified upstream SHA:** `b63d0175`.
 
@@ -345,10 +362,11 @@ line, never its _placement_.
 
 ### 13. A fork-local `content-ideas` automation template
 
-**Status:** retained · **Provenance:** fork (web automation template) · **Upstream link:** none —
-upstream should not receive it · **Acceptance ownership:** none — nothing enforces it, so the three
-rot paths below are watch items, not gates · **Removal condition:** none while it is used; the rot
-paths below are the thing to check at each sync · **Last-verified upstream SHA:** `b63d0175`.
+**Status:** drop-at-reconstruction · **Provenance:** fork (web automation template) · **Upstream
+link:** none — upstream should not receive it · **Acceptance ownership:** none — nothing enforces
+it, so the three rot paths below are watch items, not gates · **Removal condition:** dropped by
+#264; the reconstruction deletes the template rather than re-applying it · **Last-verified upstream
+SHA:** `b63d0175`.
 
 `packages/web/src/lib/automation-templates.ts` carries a `content-ideas` template that upstream does
 not have and should not receive. It surveys a week of merged pull requests and closed issues and
@@ -370,13 +388,14 @@ template was judged not worth the taxonomy change.
 
 ### 14. `SessionStatusService` names its DO namespace `sessions`, not `parentSessions`
 
-**Status:** retained (name only) · **Provenance:** fork · **Upstream link:** none · **Acceptance
-ownership:** typecheck + the archive-cascade test · **Removal condition:** the rename is a name;
-re-site it to upstream's if a future sync needs the namespace for something else — expect a conflict
-· **Last-verified upstream SHA:** `b63d0175`.
+**Status:** drop-at-reconstruction · **Provenance:** fork · **Upstream link:** none · **Acceptance
+ownership:** typecheck + the archive-cascade test · **Removal condition:** dropped by #264; the
+reconstruction takes upstream's `parentSessions` name · **Last-verified upstream SHA:** `b63d0175`.
 
-The sixth constructor parameter of `packages/control-plane/src/session/session-status-service.ts` is
-`sessions` here and `parentSessions` upstream. Same binding, same position, different name.
+The Durable Object namespace binding in
+`packages/control-plane/src/session/session-status-service.ts` is `sessions` here and
+`parentSessions` upstream. The constructors have since diverged: upstream's has grown to eight
+parameters and ours to seven, so the binding no longer sits at the same position.
 
 **Why.** Upstream reaches through that namespace for exactly one thing, notifying the parent of a
 child update, so `parentSessions` describes every use it has. Our archive cascade also reaches
@@ -384,7 +403,9 @@ _children_ through it: `cascadeArchiveToChildren()` resolves each child DO from 
 parameter called `parentSessions` holding the stub of a child reads as a bug at the call site.
 
 Expect a conflict on the next sync. Upstream edits this constructor whenever it adds a dependency,
-and the rename touches the same lines. Take upstream's _parameter list_ and keep our _name_.
+and the rename touches the same lines. Since the rename is dropped, the reconstruction takes
+upstream's parameter list and name; the archive-cascade call sites (entry #4) adapt to whichever
+name lands.
 
 ### 15. Follow-up prompts remain usable while a session runs
 
@@ -508,11 +529,11 @@ desktop and mobile actions.
 
 ### 22. Daily upstream exchange scans have a durable commit ledger
 
-**Status:** retained · **Provenance:** fork `22b00e7` (daily upstream exchange automations) and the
-control-plane `UpstreamExchangeStore` · **Upstream link:** none — report-only by design ·
-**Acceptance ownership:** control-plane `UpstreamExchangeStore` tests · **Removal condition:** once
-a whole-upstream sync replaces the need for read-only per-commit classification (#267) ·
-**Last-verified upstream SHA:** `b63d0175`.
+**Status:** drop-at-reconstruction · **Provenance:** fork `22b00e7` (daily upstream exchange
+automations) and the control-plane `UpstreamExchangeStore` · **Upstream link:** none — report-only
+by design · **Acceptance ownership:** control-plane `UpstreamExchangeStore` tests · **Removal
+condition:** dropped by #264; the whole-upstream sync (#267) replaces the read-only per-commit
+classification · **Last-verified upstream SHA:** `b63d0175`.
 
 `terraform/d1/migrations/9007_upstream_exchange_ledger.sql`, the control-plane
 `UpstreamExchangeStore`, and the sandbox's `upstream-exchange` tool persist one immutable
@@ -552,7 +573,7 @@ either side.
 ### 24. Finished child results are delivered to the parent agent
 
 **Status:** retained · **Provenance:** fork `707f756` (deliver finished child results), `3361bd8`
-(edge-trigger child delivery), and `1a7aeda` (request the final response through the supported
+(edge-trigger child delivery), and `7f1606e` (request the final response through the supported
 summary contract), issues [#285](https://github.com/mauricedesaxe/background-agents/issues/285) and
 [#289](https://github.com/mauricedesaxe/background-agents/issues/289) · **Upstream link:** none ·
 **Acceptance ownership:** `packages/control-plane/src/session/child-result-prompt.test.ts`, the
@@ -577,7 +598,7 @@ self-driving.
 
 **Status:** retained · **Provenance:** fork `e7bbf0d` (stop retrying a provider usage limit),
 `647303c` (surface a provider retry), `bfac2fc` (fail a prompt that stops making progress), and
-`074e988` (exclude retry statuses from progress), issues
+`4e9376c` (exclude retry statuses from progress), issues
 [#278](https://github.com/mauricedesaxe/background-agents/issues/278) and
 [#279](https://github.com/mauricedesaxe/background-agents/issues/279) · **Upstream link:** none —
 upstream's retry is silently infinite · **Acceptance ownership:** the provider-failure and
@@ -624,6 +645,35 @@ directory is resolved as a module rather than expanded, so the glob in the new
 
 **Why.** A test that never runs is not a test. This closes the acceptance gap for the bridge and
 plugin seams on this record that are written in `*.test.mjs`.
+
+### 27. The fork-local auth surface is dropped at reconstruction for upstream's Better Auth
+
+**Status:** drop-at-reconstruction · **Provenance:** fork (provider-verified token exchange, web
+session tokens, subject verification, callback signing) · **Upstream link:** upstream now ships
+Better Auth (`packages/control-plane/src/auth/service/request-authenticator.ts`,
+`packages/control-plane/src/auth/user/better-auth.ts`, D1 migrations `0048`/`0049`) · **Acceptance
+ownership:** `packages/control-plane/src/auth/web-session-tokens.test.ts`,
+`packages/control-plane/src/auth/subject-verification.test.ts` · **Removal condition:** adopt
+upstream's Better Auth whole at the reconstruction, after the cutover gate below proves the sandbox
+and bot callers authenticate through upstream's path · **Last-verified upstream SHA:** `f61ee53`.
+
+Five files in `packages/control-plane/src/auth/` have no upstream counterpart: `token-exchange.ts`,
+`web-session-tokens.ts`, `subject-verification.ts`, `callback-signing.ts`, and `index.ts`. Together
+they are the login and token surface this fork built before upstream had one of its own: a
+provider-verified exchange that mints browser web-session tokens (`oi_at_`) with rotating refresh
+tokens (`oi_rt_`), subject verification against the provider, and key selection for CP→bot callback
+signatures. Upstream has since shipped Better Auth for its own login and session surface.
+
+**Why.** This is the largest divergence that FORK.md did not list. The posture above resolves
+anything unlisted toward "take upstream's version", so a wholesale sync would replace the production
+login system with Better Auth without anyone noticing, and the tests that pin it would vanish
+without going red. Recording it as `drop-at-reconstruction` makes the decision explicit and the
+removal deliberate rather than accidental.
+
+**The cutover gate.** Before the reconstruction drops these files, a probe must confirm the sandbox
+(Bearer sandbox tokens) and the bots (service signatures) authenticate against upstream's path. If
+either still depends on a fork-local token feature, that one piece is promoted to its own retained
+entry rather than dropped at the cutover.
 
 ## Where we match upstream against our own docs
 
@@ -721,20 +771,22 @@ own, because they are claimed again.
 
 ## Divergence by package
 
-The shape matters when sequencing a sync. Ordered by how much diverges, heaviest first:
+The shape matters when sequencing a sync. Ordered by how much diverges, heaviest first. The
+`Diverged files` counts are `git diff --name-only "$(git merge-base HEAD upstream/main)"..HEAD`,
+measured at upstream `f61ee53`:
 
-| Package              | What diverges                                                                         |
-| -------------------- | ------------------------------------------------------------------------------------- |
-| `control-plane`      | Nearly all of our behaviour. By far the heaviest package.                             |
-| `sandbox-runtime`    | Bridge recovery/reattachment, provider-failure surfacing, harness install, whiteboard |
-| `web`                | Board UI, compaction status, sidebar, settings, automations                           |
-| `shared`             | Models, artifacts, compaction event, Slack `truncated`                                |
-| `github-bot`         | Review prompt sources `lazar-review`; forward decoupling                              |
-| `daytona-infra`      | Toolchain: jj, sandbox version                                                        |
-| `modal-infra`        | The harness install call in the image build, nothing else                             |
-| `opencomputer-infra` | The harness install call in the image build, nothing else                             |
-| `slack-bot`          | Page-cap warning, and a Terraform binding parity guard                                |
-| `linear-bot`         | GraphQL response validation; fork-local start transitions                             |
+| Package              | Diverged files | What diverges                                                                         |
+| -------------------- | -------------- | ------------------------------------------------------------------------------------- |
+| `control-plane`      | 259            | Nearly all of our behaviour. By far the heaviest package.                             |
+| `web`                | 193            | Board UI, session tree, compaction status, settings, scheduling, voice, automations   |
+| `slack-bot`          | 50             | Page-cap warning, binding parity guard, completion delivery, exchange reports         |
+| `sandbox-runtime`    | 43             | Bridge recovery/reattachment, provider-failure surfacing, harness install, whiteboard |
+| `shared`             | 34             | Models, artifacts, compaction event, Slack `truncated`                                |
+| `linear-bot`         | 30             | GraphQL response validation; fork-local start transitions                             |
+| `github-bot`         | 18             | Review prompt sources `lazar-review`; forward decoupling                              |
+| `modal-infra`        | 9              | The harness install call in the image build, nothing else                             |
+| `opencomputer-infra` | 1              | The harness install call in the image build, nothing else                             |
+| `daytona-infra`      | 1              | Toolchain: jj, sandbox version                                                        |
 
 Recompute the counts rather than remembering them, since any commit changes them:
 
