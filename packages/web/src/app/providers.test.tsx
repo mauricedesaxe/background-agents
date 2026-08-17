@@ -1,0 +1,50 @@
+import { describe, expect, it } from "vitest";
+import { isValidElement, type ReactElement, type ReactNode } from "react";
+import { SessionProvider } from "next-auth/react";
+
+import { WebSessionGate } from "@/components/web-session-gate";
+import { Providers } from "./providers";
+
+function findByType(node: ReactNode, type: unknown): ReactElement | undefined {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findByType(child, type);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (!isValidElement(node)) return undefined;
+  if (node.type === type) return node;
+  return findByType((node.props as { children?: ReactNode }).children, type);
+}
+
+describe("Providers", () => {
+  it("keeps the SessionProvider focus refetch disabled", () => {
+    // A focus refetch would make /api/auth/session a second session-cookie
+    // writer racing the oi-refresh rotation write; the rotation machinery
+    // depends on oi-refresh being the only focus/interval-triggered writer.
+    const sessionProvider = findByType(
+      Providers({ children: null, session: null }),
+      SessionProvider
+    );
+    expect(sessionProvider).toBeDefined();
+    expect(
+      (sessionProvider as ReactElement<{ refetchOnWindowFocus?: boolean }>).props
+    ).toMatchObject({ refetchOnWindowFocus: false });
+  });
+
+  it("places application children behind the web-session gate", () => {
+    const child = <div>Protected application</div>;
+    const gate = findByType(Providers({ children: child, session: null }), WebSessionGate);
+
+    expect(gate).toBeDefined();
+    expect((gate as ReactElement<{ children?: ReactNode }>).props.children).toBe(child);
+  });
+
+  it("hydrates NextAuth without a client session-cookie rewrite", () => {
+    const session = { user: { name: "Ada" }, expires: "2099-01-01T00:00:00.000Z" };
+    const sessionProvider = findByType(Providers({ children: null, session }), SessionProvider);
+
+    expect((sessionProvider as ReactElement<{ session?: unknown }>).props.session).toBe(session);
+  });
+});
