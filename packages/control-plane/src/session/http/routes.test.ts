@@ -62,6 +62,7 @@ describe("createSessionInternalRoutes", () => {
         `POST ${SessionInternalPaths.stop}`,
         `POST ${SessionInternalPaths.sandboxEvent}`,
         `POST ${SessionInternalPaths.createMediaArtifact}`,
+        `POST ${SessionInternalPaths.createBoardArtifact}`,
         `POST ${SessionInternalPaths.attachments}`,
         `GET ${SessionInternalPaths.participants}`,
         `POST ${SessionInternalPaths.participants}`,
