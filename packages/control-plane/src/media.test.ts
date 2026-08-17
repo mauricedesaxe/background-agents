@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   buildMediaObjectKey,
+  buildSessionAttachmentObjectKey,
+  detectSessionAttachmentFileType,
   detectScreenshotFileType,
   detectVideoFileType,
+  isSupportedSessionAttachmentMimeType,
+  SESSION_ATTACHMENT_MAX_REQUEST_BYTES,
+  sessionAttachmentRequestExceedsLimit,
   isSupportedScreenshotMimeType,
   isSupportedVideoMimeType,
   parseDimensions,
@@ -29,14 +34,7 @@ describe("media helpers", () => {
     expect(isSupportedScreenshotMimeType("image/png")).toBe(true);
     expect(isSupportedScreenshotMimeType("image/jpeg")).toBe(true);
     expect(isSupportedScreenshotMimeType("image/webp")).toBe(true);
-    expect(isSupportedScreenshotMimeType("image/svg+xml")).toBe(true);
     expect(isSupportedScreenshotMimeType("image/gif")).toBe(false);
-  });
-
-  it("builds an svg object key with a .svg extension", () => {
-    expect(buildMediaObjectKey("session-1", "artifact-1", "svg")).toBe(
-      "sessions/session-1/media/artifact-1.svg"
-    );
   });
 
   it("accepts only supported video mime types", () => {
@@ -49,6 +47,73 @@ describe("media helpers", () => {
       mimeType: "video/mp4",
       extension: "mp4",
     });
+  });
+
+  it("builds session attachment object keys", () => {
+    expect(buildSessionAttachmentObjectKey("session-1", "attachment-1")).toBe(
+      "sessions/session-1/attachments/attachment-1"
+    );
+  });
+
+  it("accepts only image session attachment mime types", () => {
+    for (const mimeType of ["image/png", "image/jpeg", "image/webp", "image/gif"]) {
+      expect(isSupportedSessionAttachmentMimeType(mimeType)).toBe(true);
+    }
+    expect(isSupportedSessionAttachmentMimeType("video/mp4")).toBe(false);
+    expect(isSupportedSessionAttachmentMimeType("video/quicktime")).toBe(false);
+    expect(isSupportedSessionAttachmentMimeType("video/webm")).toBe(false);
+    expect(isSupportedSessionAttachmentMimeType("application/pdf")).toBe(false);
+    expect(isSupportedSessionAttachmentMimeType("image/svg+xml")).toBe(false);
+  });
+
+  it("rejects oversized session attachment requests before multipart buffering", () => {
+    expect(
+      sessionAttachmentRequestExceedsLimit(
+        new Request("https://example.test", {
+          headers: { "Content-Length": String(SESSION_ATTACHMENT_MAX_REQUEST_BYTES + 1) },
+        })
+      )
+    ).toBe(true);
+    expect(
+      sessionAttachmentRequestExceedsLimit(
+        new Request("https://example.test", {
+          headers: { "Content-Length": String(SESSION_ATTACHMENT_MAX_REQUEST_BYTES) },
+        })
+      )
+    ).toBe(false);
+  });
+
+  it("detects session attachment images including gif", () => {
+    const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
+    expect(detectSessionAttachmentFileType(png)).toEqual({
+      mimeType: "image/png",
+      extension: "png",
+    });
+
+    const gif89 = Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01]);
+    expect(detectSessionAttachmentFileType(gif89)).toEqual({
+      mimeType: "image/gif",
+      extension: "gif",
+    });
+
+    const gif87 = Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x37, 0x61, 0x01]);
+    expect(detectSessionAttachmentFileType(gif87)?.mimeType).toBe("image/gif");
+  });
+
+  it("rejects video session attachments", () => {
+    expect(detectSessionAttachmentFileType(MP4_SIGNATURE)).toBeNull();
+    const mov = Uint8Array.from([
+      0x00, 0x00, 0x00, 0x14, 0x66, 0x74, 0x79, 0x70, 0x71, 0x74, 0x20, 0x20,
+    ]);
+    expect(detectSessionAttachmentFileType(mov)).toBeNull();
+
+    const webm = Uint8Array.from([0x1a, 0x45, 0xdf, 0xa3, 0x01]);
+    expect(detectSessionAttachmentFileType(webm)).toBeNull();
+  });
+
+  it("rejects unsupported session attachment bytes", () => {
+    expect(detectSessionAttachmentFileType(Uint8Array.from([0x25, 0x50, 0x44, 0x46]))).toBeNull();
+    expect(detectSessionAttachmentFileType(new Uint8Array(0))).toBeNull();
   });
 
   it("parses required video metadata", () => {
@@ -156,43 +221,6 @@ describe("media helpers", () => {
       expect(detectScreenshotFileType(bytes)).toEqual(expected);
     }
   );
-
-  it.each([
-    ["bare svg root", "<svg xmlns='http://www.w3.org/2000/svg'></svg>"],
-    [
-      "xml prolog then svg",
-      "<?xml version='1.0' encoding='UTF-8'?>\n<svg xmlns='http://www.w3.org/2000/svg'/>",
-    ],
-    ["leading whitespace", "\n\t  <svg></svg>"],
-    ["self-closing root", "<svg/>"],
-    ["uppercase tag", "<SVG></SVG>"],
-  ])("detects text-based SVG (%s)", (_label, markup) => {
-    const bytes = new TextEncoder().encode(markup);
-    expect(detectScreenshotFileType(bytes)).toEqual({
-      mimeType: "image/svg+xml",
-      extension: "svg",
-    });
-  });
-
-  it("detects SVG when the payload carries a UTF-8 BOM", () => {
-    const body = new TextEncoder().encode("<svg></svg>");
-    const withBom = Uint8Array.from([0xef, 0xbb, 0xbf, ...body]);
-    expect(detectScreenshotFileType(withBom)).toEqual({
-      mimeType: "image/svg+xml",
-      extension: "svg",
-    });
-  });
-
-  it("does not misdetect binary data containing the <svg byte sequence as SVG", () => {
-    // "<svg" bytes embedded in an otherwise-binary payload (contains a NUL byte).
-    const binary = Uint8Array.from([0x00, 0x01, 0x3c, 0x73, 0x76, 0x67, 0x00, 0x02]);
-    expect(detectScreenshotFileType(binary)).toBeNull();
-  });
-
-  it("does not treat plain text without an svg root as a screenshot", () => {
-    const bytes = new TextEncoder().encode("<html><body>not a diagram</body></html>");
-    expect(detectScreenshotFileType(bytes)).toBeNull();
-  });
 
   it("parses optional booleans with whitespace and casing", () => {
     expect(parseOptionalBoolean(" TRUE ")).toBe(true);

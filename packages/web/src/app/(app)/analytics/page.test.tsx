@@ -9,7 +9,7 @@ import type {
   AnalyticsBreakdownResponse,
   AnalyticsSummaryResponse,
   AnalyticsTimeseriesResponse,
-} from "@open-inspect/shared";
+} from "@open-inspect/shared/types/analytics";
 import AnalyticsPage from "./page";
 
 expect.extend(matchers);
@@ -24,7 +24,6 @@ vi.mock("@/hooks/use-analytics", () => ({
 }));
 
 vi.mock("@/components/sidebar-layout", () => ({
-  CollapsedSidebarControls: () => <div data-testid="collapsed-sidebar-controls" />,
   useSidebarContext: mockUseSidebarContext,
 }));
 
@@ -131,9 +130,9 @@ const userBreakdown: AnalyticsBreakdownResponse = {
   ],
 };
 
-function renderPage(isSidebarOpen = true) {
+function renderPage() {
   mockUseSidebarContext.mockReturnValue({
-    isOpen: isSidebarOpen,
+    isOpen: true,
     toggle: vi.fn(),
   });
 
@@ -155,12 +154,6 @@ function getUserRows() {
 }
 
 describe("AnalyticsPage", () => {
-  it("keeps collapsed sidebar actions reachable in the desktop header", () => {
-    renderPage(false);
-
-    expect(screen.getByTestId("collapsed-sidebar-controls")).toBeInTheDocument();
-  });
-
   it("refetches analytics when the selected range changes", async () => {
     const user = userEvent.setup();
 

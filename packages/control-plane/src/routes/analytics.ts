@@ -3,14 +3,22 @@ import {
   ANALYTICS_DAYS,
   type AnalyticsBreakdownBy,
   type AnalyticsDays,
-} from "@open-inspect/shared";
+} from "@open-inspect/shared/types/analytics";
 import { type AnalyticsFilters, AnalyticsStore, HUMAN_SPAWN_SOURCES } from "../db/analytics-store";
 import {
   type PullRequestAnalyticsFilters,
   PullRequestAnalyticsStore,
 } from "../db/pull-request-analytics-store";
 import type { Env } from "../types";
-import { type RequestContext, type Route, error, json, parsePattern } from "./shared";
+import {
+  type RequestContext,
+  type Route,
+  SCM_AGNOSTIC_USER_OR_SERVICE_ROUTE,
+  defineRoutes,
+  error,
+  json,
+  parsePattern,
+} from "./shared";
 
 function parseDaysParam(value: string | null): AnalyticsDays | null {
   if (value === null) return 30;
@@ -112,7 +120,7 @@ async function handlePullRequests(
   return json(await store.get(getPullRequestFilters(days)));
 }
 
-export const analyticsRoutes: Route[] = [
+export const analyticsRoutes: Route[] = defineRoutes(SCM_AGNOSTIC_USER_OR_SERVICE_ROUTE, [
   {
     method: "GET",
     pattern: parsePattern("/analytics/summary"),
@@ -133,4 +141,4 @@ export const analyticsRoutes: Route[] = [
     pattern: parsePattern("/analytics/pull-requests"),
     handler: handlePullRequests,
   },
-];
+]);

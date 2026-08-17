@@ -1,18 +1,14 @@
 import type { Env } from "../types";
 import type { RequestContext } from "../routes/shared";
-import type { RepositoryRef, SpawnSource, SandboxSettings } from "@open-inspect/shared";
+import type { SpawnSource } from "@open-inspect/shared/types/sessions";
+import type { RepositoryRef } from "@open-inspect/shared/types/repositories";
+import type { SandboxSettings } from "@open-inspect/shared/types/integrations";
 import { SessionIndexStore } from "../db/session-index";
 import { buildSessionInternalUrl, SessionInternalPaths } from "./contracts";
 import { createLogger } from "../logger";
+import type { SessionSkillManifestInput } from "./skill-resolution";
 
 const logger = createLogger("session-init");
-
-export class SessionInitializationRejectedError extends Error {
-  constructor(readonly status: number) {
-    super(`Failed to initialize session DO: ${status}`);
-    this.name = "SessionInitializationRejectedError";
-  }
-}
 
 function hasBranchContext(value: string | null | undefined): boolean {
   return typeof value === "string" && value.trim().length > 0;
@@ -49,6 +45,7 @@ export interface SessionInitInput {
   model: string;
   reasoningEffort: string | null;
   codeServerEnabled?: boolean;
+  vncEnabled?: boolean;
   sandboxSettings?: SandboxSettings;
 
   // Identity
@@ -72,6 +69,8 @@ export interface SessionInitInput {
   spawnDepth?: number;
   automationId?: string | null;
   automationRunId?: string | null;
+  managedSkillsManifest?: SessionSkillManifestInput;
+  managedSkillsSourceSessionId?: string;
 }
 
 /**
@@ -85,8 +84,7 @@ export interface SessionInitInput {
 export async function initializeSession(
   env: Env,
   input: SessionInitInput,
-  ctx: RequestContext,
-  options: { replayable?: boolean } = {}
+  ctx: RequestContext
 ): Promise<{ sessionId: string; status: string }> {
   const hasRepoOwner = input.repoOwner !== null;
   const hasRepoName = input.repoName !== null;
@@ -153,6 +151,8 @@ export async function initializeSession(
     userId: input.platformUserId,
     createdAt: now,
     updatedAt: now,
+    skillManifest: input.managedSkillsManifest,
+    skillManifestSourceSessionId: input.managedSkillsSourceSessionId,
   });
 
   // Step 2: DO init
@@ -165,8 +165,6 @@ export async function initializeSession(
   headers.set("x-trace-id", ctx.trace_id);
   headers.set("x-request-id", ctx.request_id);
 
-  // A transport failure may happen after the DO commits. Leave the D1 row
-  // replayable so the caller can retry the same stable session ID.
   let initResponse: Response;
   try {
     initResponse = await stub.fetch(
@@ -186,6 +184,7 @@ export async function initializeSession(
           model: input.model,
           reasoningEffort: input.reasoningEffort,
           userId: input.participantUserId,
+          canonicalUserId: input.platformUserId,
           scmLogin: input.scmLogin,
           scmName: input.scmName,
           scmEmail: input.scmEmail,
@@ -194,6 +193,7 @@ export async function initializeSession(
           scmTokenExpiresAt: input.scmTokenExpiresAt,
           scmUserId: input.scmUserId,
           codeServerEnabled: input.codeServerEnabled,
+          vncEnabled: input.vncEnabled,
           sandboxSettings: input.sandboxSettings,
           parentSessionId: input.parentSessionId,
           spawnSource: input.spawnSource,
@@ -201,14 +201,13 @@ export async function initializeSession(
         }),
       })
     );
-  } catch (error) {
-    if (!options.replayable) await markSessionFailed(sessionStore, input.sessionId, ctx.trace_id);
-    throw error;
+  } catch (transportError) {
+    await markSessionFailed(sessionStore, input.sessionId, ctx.trace_id);
+    throw transportError;
   }
 
   if (!initResponse.ok) {
-    const ambiguous = options.replayable && initResponse.status >= 500;
-    if (!ambiguous) await markSessionFailed(sessionStore, input.sessionId, ctx.trace_id);
+    await markSessionFailed(sessionStore, input.sessionId, ctx.trace_id);
     const errorText = await initResponse.text().catch(() => "unknown");
     logger.error("DO init failed", {
       session_id: input.sessionId,
@@ -216,8 +215,7 @@ export async function initializeSession(
       error: errorText,
       trace_id: ctx.trace_id,
     });
-    if (ambiguous) throw new Error(`Session initialization returned ${initResponse.status}`);
-    throw new SessionInitializationRejectedError(initResponse.status);
+    throw new Error(`Failed to initialize session DO: ${initResponse.status}`);
   }
 
   return { sessionId: input.sessionId, status: "created" };

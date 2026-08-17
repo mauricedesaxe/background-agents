@@ -3,20 +3,17 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import type { ServerMessage, SessionArtifact, SessionState } from "@open-inspect/shared";
+import type { SessionArtifact } from "@open-inspect/shared/types/artifacts";
+import type {
+  ServerMessage,
+  SessionSnapshot,
+  SessionState,
+} from "@open-inspect/shared/types/server-messages";
 import type * as SwrModule from "swr";
 import { isUnarchivedSessionListKey } from "@/lib/session-list";
 import { useSessionSocket } from "./use-session-socket";
 
 type SubscribedMessage = Extract<ServerMessage, { type: "subscribed" }>;
-
-const queuedPrompt = {
-  messageId: "client-id",
-  position: 2,
-  content: "Run the tests next",
-  timestamp: 2,
-  author: { participantId: "participant-1", name: "Test User" },
-};
 
 const { mutateMock } = vi.hoisted(() => ({
   mutateMock: vi.fn(),
@@ -62,7 +59,7 @@ class FakeWebSocket {
     this.onopen?.(new Event("open"));
   }
 
-  receive(message: ServerMessage) {
+  receive(message: unknown) {
     this.onmessage?.({
       data: JSON.stringify(message),
     } as MessageEvent);
@@ -88,43 +85,34 @@ function createSessionState(overrides: Partial<SessionState> = {}): SessionState
 function createSubscribedMessage(artifacts: SessionArtifact[] = []): SubscribedMessage {
   return {
     type: "subscribed",
-    sessionId: "session-1",
-    state: createSessionState(),
+    session: createSessionState(),
     artifacts,
     participantId: "participant-1",
     participant: {
       participantId: "participant-1",
       name: "Test User",
     },
-    replay: {
+    timeline: {
       events: [],
       hasMore: false,
       cursor: null,
     },
     spawnError: null,
+    promptQueue: [],
   };
 }
 
-async function openSubscribedHook(state: Partial<SessionState> = {}) {
-  const hook = renderHook(() => useSessionSocket("session-1"));
-  await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
-  const socket = FakeWebSocket.instances[0];
-  act(() => {
-    socket.open();
-    const subscribed = createSubscribedMessage();
-    subscribed.state = createSessionState(state);
-    socket.receive(subscribed);
-  });
-  await waitFor(() => expect(hook.result.current.replaying).toBe(false));
-  return { ...hook, socket };
+function createSnapshot(): SessionSnapshot {
+  return {
+    session: createSessionState(),
+    artifacts: [],
+    timeline: { events: [], hasMore: false, cursor: null },
+    spawnError: null,
+    promptQueue: [],
+  };
 }
 
-function sendSandboxAccessMessages(socket: FakeWebSocket, sandboxId: string) {
-  socket.receive({
-    type: "code_server_info",
-    url: `https://code.example/${sandboxId}`,
-    password: "secret",
-  });
+function sendSandboxDashboard(socket: FakeWebSocket, sandboxId: string) {
   socket.receive({
     type: "sandbox_dashboard_url",
     url: `https://provider.example/${sandboxId}`,
@@ -148,400 +136,327 @@ describe("useSessionSocket", () => {
   });
 
   afterEach(() => {
-    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
-  it("keeps another tab's accepted compaction active when its own request is rejected", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
-    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+  it("keeps sendPrompt pending until the server acknowledges the queued prompt", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
+
+    await waitFor(() => {
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+
     const socket = FakeWebSocket.instances[0];
-    act(() => socket.open());
-    act(() => socket.receive(createSubscribedMessage()));
-    vi.mocked(globalThis.crypto.randomUUID).mockReturnValue("compact-request-2");
-
-    act(() => result.current.compactContext("openai/gpt-5.6-sol"));
-    expect(result.current.isCompacting).toBe(true);
-
     act(() => {
-      socket.receive({
-        type: "compaction_status",
-        requestId: "compact-request-1",
-        state: "in_progress",
-      });
-      socket.receive({
-        type: "error",
-        code: "SESSION_BUSY",
-        message: "Context can only be compacted while the session is idle",
-        requestId: "compact-request-2",
-        activeRequestId: "compact-request-1",
+      socket.open();
+      socket.receive(createSubscribedMessage());
+    });
+
+    let acknowledgement!: ReturnType<typeof result.current.sendPrompt>;
+    act(() => {
+      acknowledgement = result.current.sendPrompt("Review this", "model-1", "high");
+    });
+
+    await waitFor(() => {
+      expect(socket.sentMessages).toContainEqual({
+        type: "prompt",
+        clientRequestId: "client-id",
+        content: "Review this",
+        model: "model-1",
+        reasoningEffort: "high",
       });
     });
 
-    expect(result.current.isCompacting).toBe(true);
-    expect(result.current.isProcessing).toBe(false);
-  });
-
-  it("reverts an optimistic prompt when another tab starts compaction", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
-    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
-    const socket = FakeWebSocket.instances[0];
-    act(() => socket.open());
-    act(() => socket.receive(createSubscribedMessage()));
-
-    let delivery: ReturnType<typeof result.current.sendPrompt>;
-    act(() => {
-      delivery = result.current.sendPrompt("Race compaction");
-    });
-    expect(result.current.isProcessing).toBe(true);
-
-    act(() => {
-      socket.receive({
-        type: "compaction_status",
-        requestId: "compact-request-1",
-        state: "in_progress",
-      });
-      socket.receive({
-        type: "error",
-        code: "COMPACTION_IN_PROGRESS",
-        message: "Wait for context compaction to finish before sending a prompt",
-        activeRequestId: "compact-request-1",
-      });
-    });
-
-    expect(result.current.isProcessing).toBe(false);
-    expect(result.current.isCompacting).toBe(true);
-    await expect(delivery!).resolves.toEqual({
-      ok: false,
-      error: "Wait for context compaction to finish before sending a prompt",
-    });
-  });
-
-  it("accepts a follow-up while processing and resolves after server acknowledgement", async () => {
-    const { result, socket } = await openSubscribedHook({ isProcessing: true });
-
-    let delivery: ReturnType<typeof result.current.sendPrompt>;
-    act(() => {
-      delivery = result.current.sendPrompt("Run the tests next", "anthropic/claude-sonnet-4-6");
-    });
-
-    expect(socket.sentMessages).toContainEqual({
-      type: "prompt",
-      requestId: "client-id",
-      content: "Run the tests next",
-      model: "anthropic/claude-sonnet-4-6",
-    });
-
-    act(() => {
-      socket.receive({ type: "prompt_queued", messageId: "client-id", position: 2 });
-    });
-    expect(result.current.promptQueue).toEqual([
-      expect.objectContaining({
-        messageId: "client-id",
-        position: 2,
-        content: "Run the tests next",
-      }),
-    ]);
-
-    act(() => {
-      socket.receive({
-        type: "prompt_queue",
-        prompts: [queuedPrompt],
-      });
-    });
-
-    await expect(delivery!).resolves.toEqual({ ok: true });
-    expect(result.current.promptQueue).toEqual([queuedPrompt]);
-  });
-
-  it("accepts a server-generated prompt ID from an older control plane", async () => {
-    const { result, socket } = await openSubscribedHook({ isProcessing: true });
-    const delivery = result.current.sendPrompt("Run the tests next");
-
-    act(() => {
-      socket.receive({ type: "prompt_queued", messageId: "server-id", position: 2 });
-    });
-
-    await expect(delivery).resolves.toEqual({ ok: true });
-    expect(result.current.promptQueue).toEqual([
-      expect.objectContaining({
-        messageId: "server-id",
-        content: "Run the tests next",
-        position: 2,
-      }),
-    ]);
-  });
-
-  it("restores queued prompt state from subscription", async () => {
-    const { result, socket } = await openSubscribedHook({ isProcessing: true });
-    const subscribed = createSubscribedMessage();
-    subscribed.promptQueue = [queuedPrompt];
-
-    act(() => socket.receive(subscribed));
-
-    expect(result.current.promptQueue).toEqual([queuedPrompt]);
-  });
-
-  it("restores the sandbox failure reason from subscription", async () => {
-    const { result, socket } = await openSubscribedHook();
-    const subscribed = createSubscribedMessage();
-    subscribed.state = createSessionState({ sandboxStatus: "failed" });
-    subscribed.spawnError = "Total disk limit exceeded";
-
-    act(() => socket.receive(subscribed));
-
-    expect(result.current.sandboxError).toBe("Total disk limit exceeded");
-  });
-
-  it("confirms a pending delivery from the queue snapshot after reconnect", async () => {
-    const { result, socket } = await openSubscribedHook({ isProcessing: true });
-    const delivery = result.current.sendPrompt("Run the tests next");
-
-    act(() => socket.close());
-    act(() => result.current.reconnect());
-    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
-    const reconnected = FakeWebSocket.instances[1];
-    const subscribed = createSubscribedMessage();
-    subscribed.promptQueue = [queuedPrompt];
-    act(() => {
-      reconnected.open();
-      reconnected.receive(subscribed);
-    });
-
-    await expect(delivery).resolves.toEqual({ ok: true });
-  });
-
-  it("confirms a pending delivery from replay after it starts before reconnect", async () => {
-    const { result, socket } = await openSubscribedHook({ isProcessing: true });
-    const delivery = result.current.sendPrompt("Run the tests next");
-
-    act(() => socket.close());
-    act(() => result.current.reconnect());
-    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
-    const reconnected = FakeWebSocket.instances[1];
-    const subscribed = createSubscribedMessage();
-    subscribed.replay = {
-      events: [
-        {
-          type: "user_message",
-          messageId: "client-id",
-          content: "Run the tests next",
-          timestamp: 1_700_000_000,
-        },
-      ],
-      hasMore: false,
-      cursor: null,
-    };
-    act(() => {
-      reconnected.open();
-      reconnected.receive(subscribed);
-    });
-
-    await expect(delivery).resolves.toEqual({ ok: true });
-  });
-
-  it("confirms a pending delivery from the active prompt after reconnect", async () => {
-    const { result, socket } = await openSubscribedHook({ isProcessing: true });
-    const delivery = result.current.sendPrompt("Run the tests next");
-
-    act(() => socket.close());
-    act(() => result.current.reconnect());
-    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
-    const reconnected = FakeWebSocket.instances[1];
-    const subscribed = createSubscribedMessage();
-    subscribed.activePrompt = { ...queuedPrompt, position: 1 };
-    act(() => {
-      reconnected.open();
-      reconnected.receive(subscribed);
-    });
-
-    await expect(delivery).resolves.toEqual({ ok: true });
-    expect(result.current.events).toContainEqual(
-      expect.objectContaining({ type: "user_message", messageId: "client-id" })
-    );
-  });
-
-  it("does not reject prompt delivery for an unrelated server error", async () => {
-    const { result, socket } = await openSubscribedHook({ isProcessing: true });
-    const delivery = result.current.sendPrompt("Run the tests next");
     let settled = false;
-    void delivery.then(() => {
+    void acknowledgement.then(() => {
       settled = true;
     });
-
-    act(() => {
-      socket.receive({ type: "error", code: "HISTORY_FAILED", message: "History failed" });
-    });
-    await act(async () => Promise.resolve());
+    await Promise.resolve();
     expect(settled).toBe(false);
 
     act(() => {
-      socket.receive({ type: "prompt_queued", messageId: "client-id", position: 2 });
-    });
-    await expect(delivery).resolves.toEqual({ ok: true });
-  });
-
-  it("does not queue a duplicate acknowledgement for completed work", async () => {
-    const { result, socket } = await openSubscribedHook({ isProcessing: true });
-    const delivery = result.current.sendPrompt("Run the tests next");
-
-    act(() => {
-      socket.receive({ type: "prompt_queued", messageId: "client-id", status: "completed" });
-    });
-
-    await expect(delivery).resolves.toEqual({ ok: true });
-    expect(result.current.promptQueue).toEqual([]);
-  });
-
-  it("rolls back optimistic processing when admission is rejected", async () => {
-    const { result, socket } = await openSubscribedHook();
-    let delivery: ReturnType<typeof result.current.sendPrompt>;
-    act(() => {
-      delivery = result.current.sendPrompt("Run the tests next");
-    });
-    expect(result.current.isProcessing).toBe(true);
-
-    act(() => {
       socket.receive({
-        type: "prompt_rejected",
-        requestId: "client-id",
-        message: "Wait for context compaction to finish before sending a prompt",
+        type: "prompt_queued",
+        clientRequestId: "client-id",
+        messageId: "message-1",
+        position: 1,
+      } as ServerMessage);
+    });
+    await expect(acknowledgement).resolves.toEqual({
+      ok: true,
+      clientRequestId: "client-id",
+      messageId: "message-1",
+      position: 1,
+    });
+  });
+
+  it("keeps cancelPrompt pending until the matching server acknowledgement", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const socket = FakeWebSocket.instances[0];
+    act(() => {
+      socket.open();
+      socket.receive(createSubscribedMessage());
+    });
+
+    let cancellation!: ReturnType<typeof result.current.cancelPrompt>;
+    act(() => {
+      cancellation = result.current.cancelPrompt("message-1");
+    });
+    await waitFor(() => {
+      expect(socket.sentMessages).toContainEqual({
+        type: "cancel_prompt",
+        messageId: "message-1",
+        clientRequestId: "client-id",
       });
     });
 
-    await expect(delivery!).resolves.toEqual({
-      ok: false,
-      error: "Wait for context compaction to finish before sending a prompt",
+    let settled = false;
+    void cancellation.then(() => (settled = true));
+    act(() => {
+      socket.receive({
+        type: "prompt_cancelled",
+        clientRequestId: "another-request",
+        messageId: "message-1",
+      } as ServerMessage);
+      socket.receive({
+        type: "prompt_cancelled",
+        clientRequestId: "client-id",
+        messageId: "another-message",
+      } as ServerMessage);
     });
-    expect(result.current.isProcessing).toBe(false);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    act(() => {
+      socket.receive({
+        type: "prompt_cancelled",
+        clientRequestId: "client-id",
+        messageId: "message-1",
+      } as ServerMessage);
+    });
+    await expect(cancellation).resolves.toEqual({ ok: true, messageId: "message-1" });
   });
 
-  it("preserves authoritative processing when a different run starts before rejection", async () => {
-    const { result, socket } = await openSubscribedHook();
-    let delivery: ReturnType<typeof result.current.sendPrompt>;
+  it("returns a correlated cancellation race error without treating it as success", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const socket = FakeWebSocket.instances[0];
     act(() => {
-      delivery = result.current.sendPrompt("Run the tests next");
+      socket.open();
+      socket.receive(createSubscribedMessage());
     });
 
+    const cancellation = result.current.cancelPrompt("message-1");
+    await waitFor(() => expect(socket.sentMessages).toHaveLength(2));
     act(() => {
-      socket.receive({ type: "processing_status", isProcessing: true });
       socket.receive({
-        type: "prompt_rejected",
-        requestId: "client-id",
-        message: "Request ID belongs to another prompt",
+        type: "error",
+        code: "PROMPT_NOT_CANCELLABLE",
+        message: "This prompt is no longer pending and cannot be removed",
+        clientRequestId: "client-id",
+      } as ServerMessage);
+    });
+
+    await expect(cancellation).resolves.toEqual({
+      ok: false,
+      reason: "rejected",
+      message: "This prompt is no longer pending and cannot be removed",
+    });
+  });
+
+  it("sends correlated prompts without feature negotiation", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const socket = FakeWebSocket.instances[0];
+
+    act(() => {
+      socket.open();
+      socket.receive(createSubscribedMessage());
+    });
+
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    void result.current.sendPrompt("Correlate this");
+    await waitFor(() => {
+      expect(socket.sentMessages).toContainEqual({
+        type: "prompt",
+        clientRequestId: "client-id",
+        content: "Correlate this",
       });
     });
-
-    await expect(delivery!).resolves.toEqual({
-      ok: false,
-      error: "Request ID belongs to another prompt",
-    });
-    expect(result.current.isProcessing).toBe(true);
   });
 
-  it("rolls back optimistic processing when admission times out", async () => {
-    const { result } = await openSubscribedHook();
-    vi.useFakeTimers();
-    let delivery: ReturnType<typeof result.current.sendPrompt>;
+  it("ignores unrelated acknowledgements and errors while a correlated prompt is pending", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const socket = FakeWebSocket.instances[0];
     act(() => {
-      delivery = result.current.sendPrompt("Run the tests next");
-    });
-    expect(result.current.isProcessing).toBe(true);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(10_000);
+      socket.open();
+      socket.receive(createSubscribedMessage());
     });
 
-    await expect(delivery!).resolves.toEqual({
+    const acknowledgement = result.current.sendPrompt("Review this");
+    act(() => {
+      socket.receive({ type: "error", code: "other", message: "Unrelated failure" });
+      socket.receive({
+        type: "prompt_queued",
+        clientRequestId: "another-client-id",
+        messageId: "message-other",
+        position: 1,
+      } as ServerMessage);
+    });
+    let settled = false;
+    void acknowledgement.then(() => (settled = true));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    act(() => {
+      socket.receive({
+        type: "error",
+        code: "PROMPT_QUEUE_FULL",
+        message: "The prompt queue is full",
+        clientRequestId: "client-id",
+      } as ServerMessage);
+    });
+    await expect(acknowledgement).resolves.toEqual({
       ok: false,
-      error: "The server did not confirm the message. Retry is safe.",
+      reason: "rejected",
+      message: "The prompt queue is full",
     });
-    expect(result.current.isProcessing).toBe(false);
   });
 
-  it("reuses the request ID when an accepted prompt loses its acknowledgement", async () => {
-    const { result, socket } = await openSubscribedHook({ isProcessing: true });
-    vi.useFakeTimers();
-    const firstDelivery = result.current.sendPrompt("Run the tests next");
+  it("immediately rejects a correlated invalid prompt with the server message", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const socket = FakeWebSocket.instances[0];
+    act(() => {
+      socket.open();
+      socket.receive(createSubscribedMessage());
+    });
+
+    const acknowledgement = result.current.sendPrompt("x".repeat(65_537));
+    await waitFor(() => expect(socket.sentMessages).toHaveLength(2));
 
     act(() => {
-      socket.receive({ type: "prompt_queue", prompts: [queuedPrompt] });
+      socket.receive({
+        type: "error",
+        code: "INVALID_PROMPT",
+        message: "Prompt exceeds the server limit",
+        clientRequestId: "client-id",
+      } as ServerMessage);
+    });
+
+    await expect(acknowledgement).resolves.toEqual({
+      ok: false,
+      reason: "rejected",
+      message: "Prompt exceeds the server limit",
+    });
+  });
+
+  it("waits for subscription and reports when a prompt cannot be sent", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
+
+    await waitFor(() => {
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+
+    await expect(result.current.sendPrompt("Too early")).resolves.toEqual({
+      ok: false,
+      reason: "disconnected",
+    });
+
+    const socket = FakeWebSocket.instances[0];
+    act(() => {
+      socket.open();
+    });
+    const acknowledgement = result.current.sendPrompt("Wait for subscription");
+
+    act(() => {
+      socket.receive(createSubscribedMessage());
+    });
+    await waitFor(() => {
+      expect(socket.sentMessages).toContainEqual(
+        expect.objectContaining({
+          type: "prompt",
+          content: "Wait for subscription",
+        })
+      );
+    });
+
+    act(() => {
       socket.close();
     });
-    await vi.advanceTimersByTimeAsync(10_000);
-    await expect(firstDelivery).resolves.toEqual({
-      ok: false,
-      error: "The server did not confirm the message. Retry is safe.",
-    });
-    expect(result.current.isProcessing).toBe(true);
+    await expect(acknowledgement).resolves.toEqual({ ok: false, reason: "disconnected" });
+  });
 
-    vi.useRealTimers();
+  it("reuses the caller's request identity when retrying after a reconnect", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const firstSocket = FakeWebSocket.instances[0];
+    act(() => {
+      firstSocket.open();
+      firstSocket.receive(createSubscribedMessage());
+    });
+
+    const firstAttempt = result.current.sendPrompt(
+      "Review this",
+      "model-1",
+      "high",
+      [{ name: "shot.png", attachmentId: "attachment-1" }],
+      "stable-request-id"
+    );
+    await waitFor(() => expect(firstSocket.sentMessages).toHaveLength(2));
+    act(() => firstSocket.close());
+    await expect(firstAttempt).resolves.toEqual({ ok: false, reason: "disconnected" });
+
     act(() => result.current.reconnect());
     await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
-    const reconnected = FakeWebSocket.instances[1];
+    const retrySocket = FakeWebSocket.instances[1];
     act(() => {
-      reconnected.open();
-      reconnected.receive(createSubscribedMessage());
+      retrySocket.open();
+      retrySocket.receive(createSubscribedMessage());
     });
-    await waitFor(() => expect(result.current.connected).toBe(true));
+    const retry = result.current.sendPrompt(
+      "Review this",
+      "model-1",
+      "high",
+      [{ name: "shot.png", attachmentId: "attachment-1" }],
+      "stable-request-id"
+    );
 
-    const retry = result.current.sendPrompt("Run the tests next");
-    const firstPrompt = socket.sentMessages.find((message) => message.type === "prompt");
-    const retriedPrompt = reconnected.sentMessages.find((message) => message.type === "prompt");
-    expect(retriedPrompt?.requestId).toBe(firstPrompt?.requestId);
+    await waitFor(() => {
+      const prompts = [...firstSocket.sentMessages, ...retrySocket.sentMessages].filter(
+        (message) => message.type === "prompt"
+      );
+      expect(prompts).toHaveLength(2);
+      expect(prompts.map((message) => message.clientRequestId)).toEqual([
+        "stable-request-id",
+        "stable-request-id",
+      ]);
+      expect(prompts.map((message) => message.attachments)).toEqual([
+        [{ name: "shot.png", attachmentId: "attachment-1" }],
+        [{ name: "shot.png", attachmentId: "attachment-1" }],
+      ]);
+    });
 
     act(() => {
-      reconnected.receive({ type: "prompt_queued", messageId: "client-id", position: 2 });
-    });
-    await expect(retry).resolves.toEqual({ ok: true });
-  });
-
-  it("reuses the request ID when acknowledgement arrives after the timeout", async () => {
-    const { result, socket } = await openSubscribedHook({ isProcessing: true });
-    vi.useFakeTimers();
-    const firstDelivery = result.current.sendPrompt("Run the tests next");
-
-    await vi.advanceTimersByTimeAsync(10_000);
-    await expect(firstDelivery).resolves.toEqual({
-      ok: false,
-      error: "The server did not confirm the message. Retry is safe.",
-    });
-    act(() => {
-      socket.receive({
+      retrySocket.receive({
         type: "prompt_queued",
-        messageId: "client-id",
-        position: 2,
-        status: "pending",
-      });
+        clientRequestId: "stable-request-id",
+        messageId: "message-1",
+        position: 1,
+      } as ServerMessage);
     });
-
-    const retry = result.current.sendPrompt("Run the tests next");
-    const prompts = socket.sentMessages.filter((message) => message.type === "prompt");
-    expect(prompts).toHaveLength(2);
-    expect(prompts[1].requestId).toBe(prompts[0].requestId);
-
-    act(() => {
-      socket.receive({
-        type: "prompt_queued",
-        messageId: "client-id",
-        position: 2,
-        status: "pending",
-      });
-    });
-    await expect(retry).resolves.toEqual({ ok: true });
-  });
-
-  it("rejects delivery while disconnected so the draft can be retried", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
-
-    await expect(result.current.sendPrompt("Keep this draft")).resolves.toEqual({
-      ok: false,
-      error: "Not connected. Reconnect and try again.",
+    await expect(retry).resolves.toEqual({
+      ok: true,
+      clientRequestId: "stable-request-id",
+      messageId: "message-1",
+      position: 1,
     });
   });
 
   it("hydrates artifacts from the subscribed payload", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);
@@ -590,7 +505,7 @@ describe("useSessionSocket", () => {
   });
 
   it("hydrates screenshot metadata from subscribed artifacts", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);
@@ -646,57 +561,8 @@ describe("useSessionSocket", () => {
     });
   });
 
-  it("hydrates SVG screenshot metadata from subscribed artifacts", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
-
-    await waitFor(() => {
-      expect(FakeWebSocket.instances).toHaveLength(1);
-    });
-
-    const socket = FakeWebSocket.instances[0];
-    act(() => {
-      socket.open();
-    });
-
-    act(() => {
-      socket.receive(
-        createSubscribedMessage([
-          {
-            id: "artifact-svg-1",
-            type: "screenshot",
-            url: "sessions/session-1/media/artifact-svg-1.svg",
-            metadata: {
-              objectKey: "sessions/session-1/media/artifact-svg-1.svg",
-              mimeType: "image/svg+xml",
-              sizeBytes: 256,
-              caption: "Request flow diagram",
-            },
-            createdAt: 4321,
-          },
-        ])
-      );
-    });
-
-    await waitFor(() => {
-      expect(result.current.artifacts).toEqual([
-        {
-          id: "artifact-svg-1",
-          type: "screenshot",
-          url: "sessions/session-1/media/artifact-svg-1.svg",
-          metadata: expect.objectContaining({
-            objectKey: "sessions/session-1/media/artifact-svg-1.svg",
-            mimeType: "image/svg+xml",
-            sizeBytes: 256,
-            caption: "Request flow diagram",
-          }),
-          createdAt: 4321,
-        },
-      ]);
-    });
-  });
-
   it("revalidates the sidebar session list on title updates", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);
@@ -717,7 +583,7 @@ describe("useSessionSocket", () => {
   });
 
   it("hydrates replayed assistant text before completion when storage ordering is tied", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);
@@ -725,21 +591,29 @@ describe("useSessionSocket", () => {
 
     const socket = FakeWebSocket.instances[0];
     const subscribed = createSubscribedMessage();
-    subscribed.replay = {
+    subscribed.timeline = {
       events: [
         {
-          type: "execution_complete",
-          messageId: "msg-1",
-          success: true,
-          sandboxId: "sb-1",
-          timestamp: 2,
+          eventId: "event-1",
+          timelineSequence: 1,
+          event: {
+            type: "token",
+            content: "Final response",
+            messageId: "msg-1",
+            sandboxId: "sb-1",
+            timestamp: 1,
+          },
         },
         {
-          type: "token",
-          content: "Final response",
-          messageId: "msg-1",
-          sandboxId: "sb-1",
-          timestamp: 1,
+          eventId: "event-2",
+          timelineSequence: 2,
+          event: {
+            type: "execution_complete",
+            messageId: "msg-1",
+            success: true,
+            sandboxId: "sb-1",
+            timestamp: 2,
+          },
         },
       ],
       hasMore: false,
@@ -768,7 +642,7 @@ describe("useSessionSocket", () => {
   });
 
   it("hydrates video metadata from subscribed artifacts", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);
@@ -833,7 +707,7 @@ describe("useSessionSocket", () => {
   });
 
   it("drops wrong-type metadata fields during narrowing", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);
@@ -882,7 +756,7 @@ describe("useSessionSocket", () => {
   });
 
   it("replaces stale artifacts with the subscribed snapshot", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);
@@ -918,7 +792,7 @@ describe("useSessionSocket", () => {
   });
 
   it("updates sessionState.branchName from session_branch without mutating the sidebar cache", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);
@@ -929,6 +803,7 @@ describe("useSessionSocket", () => {
       socket.open();
       socket.receive(createSubscribedMessage());
     });
+    mutateMock.mockClear();
 
     act(() => {
       socket.receive({ type: "session_branch", branchName: "feature/live-update" });
@@ -941,7 +816,7 @@ describe("useSessionSocket", () => {
   });
 
   it("routes a repo-scoped session_branch to the matching member, mirroring the scalar only for the primary", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);
@@ -978,7 +853,7 @@ describe("useSessionSocket", () => {
 
     act(() => {
       socket.open();
-      socket.receive({ ...createSubscribedMessage(), state: multiRepoState });
+      socket.receive({ ...createSubscribedMessage(), session: multiRepoState });
     });
 
     // Secondary push: update the member, leave the scalar (primary) branch alone.
@@ -1020,7 +895,7 @@ describe("useSessionSocket", () => {
   });
 
   it("ignores an unscoped session_branch for a multi-repo session", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);
@@ -1057,7 +932,7 @@ describe("useSessionSocket", () => {
 
     act(() => {
       socket.open();
-      socket.receive({ ...createSubscribedMessage(), state: multiRepoState });
+      socket.receive({ ...createSubscribedMessage(), session: multiRepoState });
     });
 
     // An identity-less update on a multi-repo session is anomalous — it must not
@@ -1077,7 +952,7 @@ describe("useSessionSocket", () => {
   });
 
   it("updates sessionState.sandboxDashboardUrl from sandbox_dashboard_url", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);
@@ -1104,7 +979,7 @@ describe("useSessionSocket", () => {
   });
 
   it("clears credentials on spawn and terminal statuses without dropping diagnostic links early", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);
@@ -1114,14 +989,13 @@ describe("useSessionSocket", () => {
     act(() => {
       socket.open();
       socket.receive(createSubscribedMessage());
-      sendSandboxAccessMessages(socket, "old-sandbox");
+      sendSandboxDashboard(socket, "old-sandbox");
     });
 
     await waitFor(() => {
       expect(result.current.sessionState?.sandboxDashboardUrl).toBe(
         "https://provider.example/old-sandbox"
       );
-      expect(result.current.sessionState?.codeServerUrl).toBe("https://code.example/old-sandbox");
     });
 
     act(() => {
@@ -1133,7 +1007,6 @@ describe("useSessionSocket", () => {
       expect(result.current.sessionState?.sandboxDashboardUrl).toBe(
         "https://provider.example/old-sandbox"
       );
-      expect(result.current.sessionState?.codeServerUrl).toBeUndefined();
     });
 
     act(() => {
@@ -1143,11 +1016,10 @@ describe("useSessionSocket", () => {
     await waitFor(() => {
       expect(result.current.sessionState?.sandboxStatus).toBe("spawning");
       expect(result.current.sessionState?.sandboxDashboardUrl).toBeUndefined();
-      expect(result.current.sessionState?.codeServerUrl).toBeUndefined();
     });
 
     act(() => {
-      sendSandboxAccessMessages(socket, "new-sandbox");
+      sendSandboxDashboard(socket, "new-sandbox");
       socket.receive({ type: "sandbox_status", status: "failed" });
     });
 
@@ -1156,12 +1028,11 @@ describe("useSessionSocket", () => {
       expect(result.current.sessionState?.sandboxDashboardUrl).toBe(
         "https://provider.example/new-sandbox"
       );
-      expect(result.current.sessionState?.codeServerUrl).toBeUndefined();
     });
   });
 
   it("clears dashboard URL only for replacement starts, not sandbox errors", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);
@@ -1171,14 +1042,13 @@ describe("useSessionSocket", () => {
     act(() => {
       socket.open();
       socket.receive(createSubscribedMessage());
-      sendSandboxAccessMessages(socket, "old-sandbox");
+      sendSandboxDashboard(socket, "old-sandbox");
     });
 
     await waitFor(() => {
       expect(result.current.sessionState?.sandboxDashboardUrl).toBe(
         "https://provider.example/old-sandbox"
       );
-      expect(result.current.sessionState?.codeServerUrl).toBe("https://code.example/old-sandbox");
     });
 
     act(() => {
@@ -1188,18 +1058,16 @@ describe("useSessionSocket", () => {
     await waitFor(() => {
       expect(result.current.sessionState?.sandboxStatus).toBe("spawning");
       expect(result.current.sessionState?.sandboxDashboardUrl).toBeUndefined();
-      expect(result.current.sessionState?.codeServerUrl).toBeUndefined();
     });
 
     act(() => {
-      sendSandboxAccessMessages(socket, "new-sandbox");
+      sendSandboxDashboard(socket, "new-sandbox");
     });
 
     await waitFor(() => {
       expect(result.current.sessionState?.sandboxDashboardUrl).toBe(
         "https://provider.example/new-sandbox"
       );
-      expect(result.current.sessionState?.codeServerUrl).toBe("https://code.example/new-sandbox");
     });
 
     act(() => {
@@ -1208,7 +1076,6 @@ describe("useSessionSocket", () => {
 
     await waitFor(() => {
       expect(result.current.sessionState?.sandboxStatus).toBe("failed");
-      expect(result.current.sandboxError).toBe("spawn failed");
       expect(result.current.sessionState?.sandboxDashboardUrl).toBe(
         "https://provider.example/new-sandbox"
       );
@@ -1217,7 +1084,7 @@ describe("useSessionSocket", () => {
   });
 
   it("prepends new artifacts and replaces duplicates by id", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);
@@ -1303,7 +1170,7 @@ describe("useSessionSocket", () => {
   });
 
   it("applies artifact_updated in place and revalidates the session list", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);
@@ -1367,7 +1234,7 @@ describe("useSessionSocket", () => {
   });
 
   it("does not revalidate the session list for non-PR artifacts", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);
@@ -1402,7 +1269,7 @@ describe("useSessionSocket", () => {
   });
 
   it("derives prState from tracked lifecycle metadata over the legacy state key", async () => {
-    const { result } = renderHook(() => useSessionSocket("session-1"));
+    const { result } = renderHook(() => useSessionSocket("session-1", createSnapshot()));
 
     await waitFor(() => {
       expect(FakeWebSocket.instances).toHaveLength(1);

@@ -1,5 +1,5 @@
 import type { Logger } from "../../../logger";
-import type { SessionRepository } from "../../repository";
+import type { ParticipantRepository } from "../../participant-repository";
 import type { ParticipantRow } from "../../types";
 import { z } from "zod";
 
@@ -7,10 +7,10 @@ const nullableOptionalString = z.string().nullable().optional();
 
 const generateWsTokenRequestSchema = z.object({
   userId: z.string().optional(),
+  canonicalUserId: nullableOptionalString,
   scmUserId: nullableOptionalString,
   scmLogin: nullableOptionalString,
   scmName: nullableOptionalString,
-  authName: nullableOptionalString,
   scmEmail: nullableOptionalString,
   scmTokenEncrypted: nullableOptionalString,
   scmRefreshTokenEncrypted: nullableOptionalString,
@@ -20,22 +20,15 @@ const generateWsTokenRequestSchema = z.object({
 type GenerateWsTokenRequest = z.infer<typeof generateWsTokenRequestSchema>;
 
 export interface WsTokenHandlerDeps {
-  repository: Pick<
-    SessionRepository,
-    "createParticipant" | "updateParticipantCoalesce" | "updateParticipantWsToken"
-  >;
+  repository: ParticipantRepository;
   getParticipantByUserId: (userId: string) => ParticipantRow | null;
-  getParticipantByWsTokenHash: (tokenHash: string) => ParticipantRow | null;
   generateId: (bytes?: number) => string;
   hashToken: (token: string) => Promise<string>;
-  /** ws-token lifetime; a token older than this is rejected. */
-  wsTokenTtlMs: number;
   now: () => number;
 }
 
 export interface WsTokenHandler {
   generateWsToken: (request: Request, log: Logger) => Promise<Response>;
-  verifyWsToken: (request: Request) => Promise<Response>;
 }
 
 export function createWsTokenHandler(deps: WsTokenHandlerDeps): WsTokenHandler {
@@ -82,10 +75,10 @@ export function createWsTokenHandler(deps: WsTokenHandlerDeps): WsTokenHandler {
           (participant.scm_refresh_token_encrypted == null || shouldUpdateTokens);
 
         deps.repository.updateParticipantCoalesce(participant.id, {
+          ...(body.canonicalUserId ? { canonicalUserId: body.canonicalUserId } : {}),
           scmUserId: body.scmUserId ?? null,
           scmLogin: body.scmLogin ?? null,
           scmName: body.scmName ?? null,
-          authName: body.authName ?? null,
           scmEmail: body.scmEmail ?? null,
           scmAccessTokenEncrypted: shouldUpdateTokens ? (body.scmTokenEncrypted ?? null) : null,
           scmRefreshTokenEncrypted: shouldUpdateRefreshToken
@@ -98,10 +91,10 @@ export function createWsTokenHandler(deps: WsTokenHandlerDeps): WsTokenHandler {
         deps.repository.createParticipant({
           id,
           userId: body.userId,
+          ...(body.canonicalUserId ? { canonicalUserId: body.canonicalUserId } : {}),
           scmUserId: body.scmUserId ?? null,
           scmLogin: body.scmLogin ?? null,
           scmName: body.scmName ?? null,
-          authName: body.authName ?? null,
           scmEmail: body.scmEmail ?? null,
           scmAccessTokenEncrypted: body.scmTokenEncrypted ?? null,
           scmRefreshTokenEncrypted: body.scmRefreshTokenEncrypted ?? null,
@@ -122,35 +115,6 @@ export function createWsTokenHandler(deps: WsTokenHandlerDeps): WsTokenHandler {
         token: plainToken,
         participantId: participant.id,
       });
-    },
-
-    async verifyWsToken(request: Request): Promise<Response> {
-      let raw: unknown;
-      try {
-        raw = await request.json();
-      } catch {
-        return Response.json({ error: "Invalid request body" }, { status: 400 });
-      }
-
-      const token = (raw as { token?: unknown })?.token;
-      if (typeof token !== "string" || !token) {
-        return Response.json({ error: "Token required" }, { status: 401 });
-      }
-
-      const tokenHash = await deps.hashToken(token);
-      const participant = deps.getParticipantByWsTokenHash(tokenHash);
-      if (!participant) {
-        return Response.json({ error: "Invalid token" }, { status: 401 });
-      }
-
-      if (
-        participant.ws_token_created_at === null ||
-        deps.now() - participant.ws_token_created_at > deps.wsTokenTtlMs
-      ) {
-        return Response.json({ error: "Token expired" }, { status: 401 });
-      }
-
-      return Response.json({ participantId: participant.id });
     },
   };
 }

@@ -4,7 +4,6 @@ import {
   extractAgentResponse,
   toArtifactType,
   toEventArtifactInfo,
-  toEventMediaArtifactInfo,
   type ControlPlaneFetcher,
 } from "./extractor";
 
@@ -17,23 +16,6 @@ describe("completion artifact type narrowing", () => {
     expect(toEventArtifactInfo({ artifactType: "video", url: "sessions/s1/media/a1.mp4" })).toBe(
       null
     );
-  });
-
-  it("drops a media artifact whose id the media route would reject", () => {
-    // `image_1` passes a non-empty check but fails the route's path-segment
-    // pattern, so publishing it would surface a permanently unfetchable artifact.
-    expect(toEventMediaArtifactInfo({ artifactType: "screenshot", artifactId: "image_1" })).toBe(
-      null
-    );
-    expect(
-      toEventMediaArtifactInfo({ artifactType: "screenshot", artifactId: "img/../secret" })
-    ).toBe(null);
-  });
-
-  it("keeps a media artifact whose id matches the media route's pattern", () => {
-    expect(
-      toEventMediaArtifactInfo({ artifactType: "screenshot", artifactId: "image-1" })
-    ).toMatchObject({ id: "image-1", type: "screenshot" });
   });
 });
 
@@ -211,16 +193,14 @@ describe("buildAgentResponseFromEvents", () => {
   });
 
   it("omits invalid media sizes from extracted metadata", () => {
-    // The id is indexed rather than interpolated from the size: a size like 1.5
-    // would put a dot in the id, which is not a valid artifact id.
-    for (const [index, sizeBytes] of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1].entries()) {
+    for (const sizeBytes of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
       const response = buildAgentResponseFromEvents([
         {
           id: `artifact:${sizeBytes}`,
           type: "artifact",
           data: {
             artifactType: "screenshot",
-            artifactId: `image-${index}`,
+            artifactId: `image-${sizeBytes}`,
             url: "sessions/s1/media/image.png",
             metadata: { sizeBytes },
           },
@@ -287,6 +267,28 @@ describe("buildAgentResponseFromEvents", () => {
 });
 
 describe("extractAgentResponse", () => {
+  it("returns a failed response when the events response is malformed", async () => {
+    const fetcher: ControlPlaneFetcher = {
+      async fetch() {
+        return Response.json({ events: [{ id: "event-1", type: "token" }], hasMore: false });
+      },
+    };
+
+    await expect(
+      extractAgentResponse(
+        { fetcher, auth: { service: "slack-bot", secret: "test-secret" } },
+        "session-1",
+        "msg-1"
+      )
+    ).resolves.toEqual({
+      textContent: "",
+      toolCalls: [],
+      artifacts: [],
+      mediaArtifacts: [],
+      success: false,
+    });
+  });
+
   it("filters fetched session artifacts to the message event window", async () => {
     const fetcher: ControlPlaneFetcher = {
       async fetch(input) {
@@ -352,5 +354,37 @@ describe("extractAgentResponse", () => {
         metadata: { head: "current" },
       },
     ]);
+  });
+
+  it("ignores a malformed artifacts response", async () => {
+    const fetcher: ControlPlaneFetcher = {
+      async fetch(input) {
+        const url = String(input);
+        if (url.includes("/events")) {
+          return Response.json({
+            events: [
+              {
+                id: "complete:msg-1",
+                type: "execution_complete",
+                data: { success: true },
+                messageId: "msg-1",
+                createdAt: 200,
+              },
+            ],
+            hasMore: false,
+          });
+        }
+
+        return Response.json({ artifacts: [{ id: "artifact-1", type: "branch" }] });
+      },
+    };
+
+    const response = await extractAgentResponse(
+      { fetcher, auth: { service: "slack-bot", secret: "test-secret" } },
+      "session-1",
+      "msg-1"
+    );
+
+    expect(response).toMatchObject({ success: true, artifacts: [] });
   });
 });

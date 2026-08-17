@@ -1,18 +1,21 @@
-import type { SessionArtifact } from "@open-inspect/shared";
+import type { SessionArtifact } from "@open-inspect/shared/types/artifacts";
 import { generateId } from "../auth/crypto";
 import type { Logger } from "../logger";
 import type { GitPushSpec } from "../source-control";
-import type { SandboxEvent } from "../types";
-import type { SessionUsageStore } from "../db/session-usage-store";
-import { shouldPersistToolCallEvent } from "./event-persistence";
+import type { SandboxEvent } from "@open-inspect/shared/types/sandbox-events";
 import { assertArtifactType } from "./artifacts";
-import type { SessionRepository } from "./repository";
+import type { SessionCoreRepository } from "./session-core-repository";
+import type { SandboxRepository } from "./sandbox-repository";
+import type { MessageRepository } from "./message-repository";
+import type { ArtifactRepository } from "./artifact-repository";
+import type { EventRepository } from "./event-repository";
 import type { CallbackNotificationService } from "./callback-notification-service";
+import type { SessionDiffService } from "./diffs/service";
 import type { SessionMessenger } from "./messenger";
 import type { SessionStatusService } from "./session-status-service";
 import type { SessionWebSocketManager } from "./websocket-manager";
 import type { SessionTitleUpdateOptions, SessionTitleUpdateResult } from "./title";
-import { isSessionActivitySandboxEvent } from "./session-activity";
+import type { BackgroundJobDispatcher } from "../platform-ports";
 
 type PushResolver = { resolve: () => void; reject: (err: Error) => void };
 type SandboxEventWithAck = SandboxEvent & { ackId?: string };
@@ -20,44 +23,56 @@ type PushTerminalEvent = Extract<SandboxEvent, { type: "push_complete" | "push_e
 
 /** How long a pending push waits for its terminal event before rejecting. */
 const PUSH_TIMEOUT_MS = 360_000;
-const MAX_EVENT_CLOCK_SKEW_MS = 5 * 60 * 1000;
-const UNIX_SECONDS_UPPER_BOUND = 10_000_000_000;
+
+/** Event types that require delivery acknowledgement. */
+const CRITICAL_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "execution_complete",
+  "error",
+  "snapshot_ready",
+  "push_complete",
+  "push_error",
+]);
 
 export class SessionSandboxEventProcessor {
   private pendingPushResolvers = new Map<string, PushResolver>();
 
   constructor(
-    private readonly ctx: DurableObjectState,
+    private readonly backgroundJobs: BackgroundJobDispatcher,
     // The DO swaps its logger for a request-scoped child during fetch();
     // a getter keeps this singleton reading the current logger instead of
     // capturing one by value at construction time.
     private readonly getLog: () => Logger,
-    private readonly repository: SessionRepository,
-    private readonly usageStore: SessionUsageStore,
+    private readonly repository: SessionCoreRepository,
+    private readonly sandboxRepository: SandboxRepository,
+    private readonly messageRepository: MessageRepository,
+    private readonly eventRepository: EventRepository,
+    private readonly artifactRepository: ArtifactRepository,
     private readonly callbackService: CallbackNotificationService,
     private readonly wsManager: SessionWebSocketManager,
     private readonly messenger: SessionMessenger,
+    private readonly diffService: SessionDiffService,
     private readonly applySessionTitleUpdate: (
       title: string,
       options?: SessionTitleUpdateOptions
     ) => SessionTitleUpdateResult,
     private readonly triggerSnapshot: (reason: string) => Promise<void>,
+    private readonly projectTerminalMessage: (
+      messageId: string,
+      messageCreatedAt: number,
+      completedAt: number
+    ) => Promise<void>,
     private readonly statusService: SessionStatusService,
     private readonly updateLastActivity: (timestamp: number) => void,
     private readonly scheduleInactivityCheck: () => Promise<void>,
-    private readonly processMessageQueue: () => Promise<void>
+    private readonly processMessageQueue: () => Promise<void>,
+    private readonly broadcastPromptQueue: () => void
   ) {}
 
   private get log(): Logger {
     return this.getLog();
   }
 
-  private recordActivity(now: number): void {
-    this.updateLastActivity(now);
-    this.statusService.recordTerminalActivity(now);
-  }
-
-  async processSandboxEvent(event: SandboxEventWithAck, acknowledge = true): Promise<void> {
+  async processSandboxEvent(event: SandboxEventWithAck): Promise<void> {
     if (event.type === "heartbeat" || event.type === "token") {
       this.log.debug("Sandbox event", { event_type: event.type });
     } else if (event.type !== "execution_complete") {
@@ -68,13 +83,8 @@ export class SessionSandboxEventProcessor {
     // Extract ackId from the raw event (attached by bridge for critical events)
     const ackId = event.ackId;
 
-    if (ackId && this.repository.hasEvent(ackId)) {
-      if (acknowledge) this.sendAck(ackId);
-      return;
-    }
-
     if (event.type === "heartbeat") {
-      this.repository.updateSandboxHeartbeat(now);
+      this.sandboxRepository.updateSandboxHeartbeat(now);
       return;
     }
 
@@ -83,15 +93,17 @@ export class SessionSandboxEventProcessor {
       return;
     }
 
-    if (isSessionActivitySandboxEvent(event.type)) {
-      this.recordActivity(now);
+    if (event.type === "ready") {
+      this.diffService.pinBaselines(event);
     }
 
     const eventMessageId = "messageId" in event ? event.messageId : null;
-    const processingMessage = this.repository.getProcessingMessage();
+    const processingMessage = this.messageRepository.getProcessingMessage();
     const messageId = eventMessageId ?? processingMessage?.id ?? null;
 
     if (event.type === "artifact") {
+      this.updateLastActivity(now);
+
       const artifactType = assertArtifactType(event.artifactType);
       const artifactId =
         typeof event.artifactId === "string" && event.artifactId.length > 0
@@ -112,14 +124,14 @@ export class SessionSandboxEventProcessor {
         updatedAt: now,
       };
 
-      this.repository.createArtifact({
+      this.artifactRepository.createArtifact({
         id: artifact.id,
         type: artifact.type,
         url: artifact.url,
         metadata: artifact.metadata ? JSON.stringify(artifact.metadata) : null,
         createdAt: now,
       });
-      this.repository.createEvent({
+      this.eventRepository.createEvent({
         id: generateId(),
         type: event.type,
         data: JSON.stringify(augmentedEvent),
@@ -134,46 +146,48 @@ export class SessionSandboxEventProcessor {
 
     if (event.type === "token") {
       if (messageId) {
-        this.repository.upsertTokenEvent(messageId, event, now);
+        this.eventRepository.upsertTokenEvent(messageId, event, now);
       }
       this.messenger.broadcast({ type: "sandbox_event", event });
       return;
     }
 
-    if (event.type === "step_start" || event.type === "step_finish") {
-      if (event.type === "step_finish") {
-        const session = this.repository.getSession();
-        if (!session) throw new Error("Cannot record usage without a session");
+    if (event.type === "context_compacted") {
+      const eventId = generateId();
+      this.eventRepository.createContextCompactionEvent({
+        id: eventId,
+        type: event.type,
+        data: JSON.stringify(event),
+        messageId: event.messageId,
+        createdAt: now,
+      });
+      this.messenger.broadcast({ type: "sandbox_event", event });
+      return;
+    }
 
-        const usage = normalizeUsage(event.tokens);
-        const totals = await this.usageStore.record({
-          sessionId: session.session_name ?? session.id,
-          eventId: event.stepId ?? `${event.messageId}:${event.timestamp}`,
-          observedAt: eventTimestampMs(event.timestamp, now),
-          costEstimate: finiteNonNegative(event.cost),
-          ...usage,
-        });
-        this.repository.setSessionCost(totals.totalCost, now);
-        this.sendAck(ackId);
+    if (event.type === "step_start" || event.type === "step_finish") {
+      this.updateLastActivity(now);
+      if (
+        event.type === "step_finish" &&
+        typeof event.cost === "number" &&
+        Number.isFinite(event.cost) &&
+        event.cost > 0
+      ) {
+        this.repository.addSessionCost(event.cost, now);
       }
       this.messenger.broadcast({ type: "sandbox_event", event });
       return;
     }
 
     if (event.type === "tool_call") {
-      if (shouldPersistToolCallEvent(event.status)) {
-        this.repository.createEvent({
-          id: generateId(),
-          type: event.type,
-          data: JSON.stringify(event),
-          messageId,
-          createdAt: now,
-        });
+      this.updateLastActivity(now);
+      if (messageId) {
+        this.eventRepository.upsertToolCallEvent(messageId, event, now);
       }
       this.messenger.broadcast({ type: "sandbox_event", event });
 
       if (messageId) {
-        this.ctx.waitUntil(
+        this.backgroundJobs.submit(
           this.callbackService.notifyToolCall(messageId, event).catch((error) => {
             this.log.error("callback.tool_call.background_error", {
               message_id: messageId,
@@ -186,7 +200,7 @@ export class SessionSandboxEventProcessor {
     }
 
     if (event.type === "tool_result") {
-      this.repository.createEvent({
+      this.eventRepository.createEvent({
         id: generateId(),
         type: event.type,
         data: JSON.stringify(event),
@@ -198,65 +212,68 @@ export class SessionSandboxEventProcessor {
     }
 
     if (event.type === "execution_complete") {
-      const completionMessageId = messageId;
-      if (messageId) {
-        this.repository.upsertExecutionCompleteEvent(messageId, event, now);
-      }
-
-      const isStillProcessing =
-        completionMessageId != null && processingMessage?.id === completionMessageId;
-
-      if (isStillProcessing) {
-        const status = event.success ? "completed" : "failed";
-        this.repository.updateMessageCompletion(completionMessageId, status, now);
-        await this.statusService.recordCompletedOutput(completionMessageId, now);
-
-        const timestamps = this.repository.getMessageTimestamps(completionMessageId);
-        const totalDurationMs = timestamps ? now - timestamps.created_at : undefined;
+      const completion =
+        processingMessage?.id === event.messageId
+          ? this.messageRepository.recordMessageCompletion(event, now, "processing")
+          : null;
+      if (completion) {
+        await this.projectTerminalMessage(
+          completion.messageId,
+          completion.messageCreatedAt,
+          completion.completedAt
+        );
+        const totalDurationMs = now - completion.messageCreatedAt;
         const processingDurationMs =
-          timestamps?.started_at != null ? now - timestamps.started_at : undefined;
+          completion.messageStartedAt != null ? now - completion.messageStartedAt : undefined;
         const queueDurationMs =
-          timestamps?.started_at != null
-            ? timestamps.started_at - timestamps.created_at
+          completion.messageStartedAt != null
+            ? completion.messageStartedAt - completion.messageCreatedAt
             : undefined;
-
         this.log.info("prompt.complete", {
           event: "prompt.complete",
-          message_id: completionMessageId,
+          message_id: event.messageId,
           outcome: event.success ? "success" : "failure",
-          message_status: status,
+          message_status: completion.status,
           total_duration_ms: totalDurationMs,
           processing_duration_ms: processingDurationMs,
           queue_duration_ms: queueDurationMs,
         });
-
         this.messenger.broadcast({ type: "sandbox_event", event });
         this.messenger.broadcast({
           type: "processing_status",
-          isProcessing: this.repository.getProcessingMessage() !== null,
+          isProcessing: this.messageRepository.getProcessingMessage() !== null,
         });
-        this.ctx.waitUntil(
-          this.callbackService.notifyComplete(completionMessageId, event.success, event.error)
+        this.broadcastPromptQueue();
+        this.backgroundJobs.submit(
+          this.callbackService.notifyComplete(event.messageId, event.success, event.error)
         );
-
         await this.statusService.reconcileAfterExecution(event.success);
       } else {
+        this.messageRepository.clearMessageAwaitingStopConfirmation(event.messageId);
         this.log.info("prompt.complete", {
           event: "prompt.complete",
-          message_id: completionMessageId,
+          message_id: event.messageId,
           outcome: "already_stopped",
         });
       }
 
-      this.ctx.waitUntil(this.triggerSnapshot("execution_complete"));
+      this.backgroundJobs.submit(
+        this.triggerSnapshot("execution_complete").catch((error) => {
+          this.log.error("snapshot.trigger.background_error", {
+            reason: "execution_complete",
+            error,
+          });
+        })
+      );
+      this.updateLastActivity(now);
       await this.scheduleInactivityCheck();
       await this.processMessageQueue();
       this.sendAck(ackId);
       return;
     }
 
-    this.repository.createEvent({
-      id: ackId ?? generateId(),
+    this.eventRepository.createEvent({
+      id: generateId(),
       type: event.type,
       data: JSON.stringify(event),
       messageId,
@@ -264,7 +281,7 @@ export class SessionSandboxEventProcessor {
     });
 
     if (event.type === "git_sync") {
-      this.repository.updateSandboxGitSyncStatus(event.status);
+      this.sandboxRepository.updateSandboxGitSyncStatus(event.status);
 
       if (event.sha) {
         this.repository.updateSessionCurrentSha(event.sha);
@@ -277,7 +294,7 @@ export class SessionSandboxEventProcessor {
 
     this.messenger.broadcast({ type: "sandbox_event", event });
 
-    if (acknowledge && ackId) {
+    if (CRITICAL_EVENT_TYPES.has(event.type)) {
       this.sendAck(ackId);
     }
   }
@@ -404,53 +421,4 @@ export class SessionSandboxEventProcessor {
   private pushResolverKey(repoOwner: string, repoName: string, branchName: string): string {
     return `${repoOwner.toLowerCase()}/${repoName.toLowerCase()}::${branchName.trim().toLowerCase()}`;
   }
-}
-
-function normalizeUsage(tokens: Extract<SandboxEvent, { type: "step_finish" }>["tokens"]): {
-  totalTokens: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-} {
-  if (typeof tokens === "number") {
-    return {
-      totalTokens: tokenCount(tokens),
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-    };
-  }
-
-  const inputTokens = tokenCount(tokens?.input);
-  const outputTokens = tokenCount(tokens?.output);
-  const cacheReadTokens = tokenCount(tokens?.cache?.read);
-  const cacheWriteTokens = tokenCount(tokens?.cache?.write);
-  return {
-    totalTokens: tokenCount(tokens?.total) || inputTokens + outputTokens,
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheWriteTokens,
-  };
-}
-
-function tokenCount(value: number | undefined): number {
-  return Number.isFinite(value) && (value ?? -1) >= 0 ? Math.floor(value ?? 0) : 0;
-}
-
-function finiteNonNegative(value: number | undefined): number {
-  return Number.isFinite(value) && (value ?? -1) >= 0 ? (value ?? 0) : 0;
-}
-
-function eventTimestampMs(timestamp: number, receivedAt: number): number {
-  if (!Number.isFinite(timestamp) || timestamp <= 0) return receivedAt;
-  const timestampMs = Math.round(
-    timestamp < UNIX_SECONDS_UPPER_BOUND ? timestamp * 1000 : timestamp
-  );
-  if (!Number.isSafeInteger(timestampMs) || timestampMs > receivedAt + MAX_EVENT_CLOCK_SKEW_MS) {
-    return receivedAt;
-  }
-  return timestampMs;
 }

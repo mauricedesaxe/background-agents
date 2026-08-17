@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { CollapsedSidebarControls, useSidebarContext } from "@/components/sidebar-layout";
 import { SettingsNav, type SettingsCategory } from "@/components/settings/settings-nav";
@@ -11,10 +11,13 @@ import { DataControlsSettings } from "@/components/settings/data-controls-settin
 import { KeyboardShortcutsSettings } from "@/components/settings/keyboard-shortcuts-settings";
 import { IntegrationsSettings } from "@/components/settings/integrations-settings";
 import { SandboxSettingsPage } from "@/components/settings/sandbox-settings";
+import { ScmSettingsPage } from "@/components/settings/scm-settings";
 import { ImagesSettings } from "@/components/settings/images-settings";
 import { McpServersSettings } from "@/components/settings/mcp-servers-settings";
 import { AppearanceSettings } from "@/components/settings/appearance-settings";
-import { BackIcon } from "@/components/ui/icons";
+import { SkillsSettings } from "@/components/settings/skills-settings";
+import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
+import { SidebarIcon, BackIcon } from "@/components/ui/icons";
 import { useIsMobile } from "@/hooks/use-media-query";
 import { supportsRepoImages } from "@/lib/sandbox-provider";
 
@@ -27,7 +30,9 @@ const CATEGORY_LABELS: Record<SettingsCategory, string> = {
   "keyboard-shortcuts": "Keyboard",
   "data-controls": "Data Controls",
   sandbox: "Sandbox",
+  scm: "SCM Settings",
   integrations: "Integrations",
+  skills: "Skills",
   "mcp-servers": "MCP Servers",
 };
 
@@ -40,7 +45,9 @@ const VALID_CATEGORIES = new Set<string>([
   "keyboard-shortcuts",
   "data-controls",
   "sandbox",
+  "scm",
   "integrations",
+  "skills",
   "mcp-servers",
 ]);
 
@@ -48,8 +55,8 @@ function isValidCategory(tab: string | null): tab is SettingsCategory {
   return tab !== null && VALID_CATEGORIES.has(tab);
 }
 
-export default function SettingsPage() {
-  const { isOpen } = useSidebarContext();
+function SettingsPageContent() {
+  const { isOpen, toggle } = useSidebarContext();
   const searchParams = useSearchParams();
   const tabParam = searchParams.get("tab");
   const repoImagesEnabled = supportsRepoImages();
@@ -90,7 +97,9 @@ export default function SettingsPage() {
       {activeCategory === "keyboard-shortcuts" && <KeyboardShortcutsSettings />}
       {activeCategory === "data-controls" && <DataControlsSettings />}
       {activeCategory === "sandbox" && <SandboxSettingsPage />}
+      {activeCategory === "scm" && <ScmSettingsPage />}
       {activeCategory === "integrations" && <IntegrationsSettings />}
+      {activeCategory === "skills" && <SkillsSettings />}
       {activeCategory === "mcp-servers" && <McpServersSettings />}
     </>
   );
@@ -102,7 +111,15 @@ export default function SettingsPage() {
           <>
             <header className="border-b border-border-muted flex-shrink-0">
               <div className="px-4 py-3">
-                <CollapsedSidebarControls />
+                <button
+                  type="button"
+                  onClick={toggle}
+                  className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition"
+                  title={`Open sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
+                  aria-label={`Open sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
+                >
+                  <SidebarIcon className="w-4 h-4" />
+                </button>
               </div>
             </header>
             <div className="flex-1 overflow-y-auto">
@@ -117,7 +134,15 @@ export default function SettingsPage() {
           <>
             <header className="border-b border-border-muted flex-shrink-0">
               <div className="px-4 py-3 flex items-center gap-2">
-                <CollapsedSidebarControls />
+                <button
+                  type="button"
+                  onClick={toggle}
+                  className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition"
+                  title={`Open sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
+                  aria-label={`Open sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
+                >
+                  <SidebarIcon className="w-4 h-4" />
+                </button>
                 <button
                   type="button"
                   onClick={() => setMobileView("list")}
@@ -157,5 +182,13 @@ export default function SettingsPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function SettingsPage() {
+  return (
+    <Suspense fallback={null}>
+      <SettingsPageContent />
+    </Suspense>
   );
 }

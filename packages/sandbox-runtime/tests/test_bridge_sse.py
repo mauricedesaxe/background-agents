@@ -11,15 +11,25 @@ ensuring:
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
-from sandbox_runtime.bridge import AgentBridge, OpenCodeIdentifier, SSEConnectionError
-from tests.conftest import MockResponse
+from sandbox_runtime.bridge import AgentBridge
+from sandbox_runtime.opencode_client import SSEConnectionError
+from sandbox_runtime.opencode_identifier import OpenCodeIdentifier
+from sandbox_runtime.prompt_stream import (
+    OpenCodePromptStream,
+    _PromptState,
+)
+from tests.conftest import MockResponse, oc_message_id, wire_opencode_transport
+
+MOCK_HTTP_TIMEOUT_SECONDS = 30.0
+PROMPT_TIMEOUT_TEST_BUDGET_SECONDS = 0.8
 
 
 class MockSSEResponse:
@@ -42,6 +52,15 @@ class MockSSEResponse:
         pass
 
 
+class DroppingMockSSEResponse(MockSSEResponse):
+    """SSE response that drops after yielding the configured events."""
+
+    async def aiter_text(self) -> AsyncIterator[str]:
+        async for event in super().aiter_text():
+            yield event
+        raise httpx.RemoteProtocolError("peer closed connection without complete body")
+
+
 class MockHttpClient:
     """Mock HTTP client that supports both regular requests and SSE streaming."""
 
@@ -52,7 +71,12 @@ class MockHttpClient:
         self._post_call_count = 0
         self._get_call_count = 0
 
-    async def post(self, url: str, json: dict | None = None, timeout: float = 30.0) -> Any:
+    async def post(
+        self,
+        url: str,
+        json: dict | None = None,
+        timeout: float = MOCK_HTTP_TIMEOUT_SECONDS,
+    ) -> Any:
         self._post_call_count += 1
         if self.post_responses:
             return self.post_responses.pop(0)
@@ -75,6 +99,37 @@ def create_sse_event(event_type: str, properties: dict) -> str:
     return f"data: {json.dumps(data)}\n\n"
 
 
+def created_after_prompt_start_ms() -> int:
+    """A message creation time comfortably after the boundary `_PromptState`
+    records when the stream starts, for post-compaction fixtures whose parentID
+    no longer matches the prompt's user message."""
+    return int(time.time() * 1000) + 60_000
+
+
+def make_prompt_state(
+    message_id: str,
+    opencode_message_id: str,
+    *,
+    cumulative_text: dict[str, str] | None = None,
+    compaction_occurred: bool = False,
+    start_time: float = 0.0,
+) -> _PromptState:
+    """Per-prompt state as stream_prompt would build it, for direct
+    reconciliation calls. `start_time` is the boundary the compaction fallback
+    orders message creation times against."""
+    state = _PromptState(
+        opencode_session_id="oc-session-123",
+        message_id=message_id,
+        opencode_message_id=opencode_message_id,
+        start_time=start_time,
+    )
+    if cumulative_text is not None:
+        state.cumulative_text = cumulative_text
+    if compaction_occurred:
+        state.attribution.mark_compacted()
+    return state
+
+
 @pytest.fixture
 def bridge() -> AgentBridge:
     """Create a bridge instance for testing."""
@@ -85,7 +140,7 @@ def bridge() -> AgentBridge:
         auth_token="test-token",
     )
     bridge.opencode_session_id = "oc-session-123"
-    bridge.http_client = MockHttpClient()
+    wire_opencode_transport(bridge, MockHttpClient())
     return bridge
 
 
@@ -101,7 +156,7 @@ def opencode_message_id(monkeypatch) -> str:
 
 
 class TestSSEParser:
-    """Tests for _parse_sse_stream method."""
+    """Tests for OpenCodeClient SSE frame decoding."""
 
     @pytest.mark.asyncio
     async def test_parse_single_event(self, bridge: AgentBridge):
@@ -110,7 +165,7 @@ class TestSSEParser:
         response = MockSSEResponse(events_text)
 
         events = []
-        async for event in bridge._parse_sse_stream(response):
+        async for event in bridge.opencode_client._decoded_events(response):
             events.append(event)
 
         assert len(events) == 1
@@ -138,7 +193,7 @@ class TestSSEParser:
         response = MockSSEResponse(events_text)
 
         events = []
-        async for event in bridge._parse_sse_stream(response):
+        async for event in bridge.opencode_client._decoded_events(response):
             events.append(event)
 
         assert len(events) == 3
@@ -156,7 +211,7 @@ class TestSSEParser:
         response = MockSSEResponse(events_text)
 
         events = []
-        async for event in bridge._parse_sse_stream(response):
+        async for event in bridge.opencode_client._decoded_events(response):
             events.append(event)
 
         assert len(events) == 2
@@ -166,6 +221,63 @@ class TestSSEParser:
 
 class TestSSEStreaming:
     """Tests for _stream_opencode_response_sse method."""
+
+    @pytest.mark.asyncio
+    async def test_transport_drop_preserves_final_output(
+        self, bridge: AgentBridge, opencode_message_id: str
+    ):
+        """A mid-stream transport drop should fetch final text before failing cleanly."""
+        http_client = bridge.http_client
+        http_client.sse_events = [
+            create_sse_event("server.connected", {}),
+            create_sse_event(
+                "message.updated",
+                {
+                    "info": {
+                        "id": "oc-msg-1",
+                        "role": "assistant",
+                        "sessionID": "oc-session-123",
+                        "parentID": opencode_message_id,
+                    }
+                },
+            ),
+            create_sse_event(
+                "message.part.updated",
+                {
+                    "part": {
+                        "type": "text",
+                        "id": "part-1",
+                        "sessionID": "oc-session-123",
+                        "messageID": "oc-msg-1",
+                        "text": "Partial",
+                    }
+                },
+            ),
+        ]
+        http_client.stream = lambda *args, **kwargs: DroppingMockSSEResponse(http_client.sse_events)
+        http_client.get_responses = [
+            MockResponse(
+                200,
+                [
+                    {
+                        "info": {
+                            "id": "oc-msg-1",
+                            "role": "assistant",
+                            "parentID": opencode_message_id,
+                        },
+                        "parts": [{"id": "part-1", "type": "text", "text": "Partial response"}],
+                    }
+                ],
+            )
+        ]
+
+        events = []
+        with pytest.raises(SSEConnectionError, match="OpenCode event stream disconnected"):
+            async for event in bridge._stream_opencode_response_sse("cp-msg-1", "Test prompt"):
+                events.append(event)
+
+        token_events = [event for event in events if event["type"] == "token"]
+        assert token_events[-1]["content"] == "Partial response"
 
     @pytest.mark.asyncio
     async def test_text_streaming_with_delta(self, bridge: AgentBridge, opencode_message_id: str):
@@ -697,86 +809,6 @@ class TestSSEStreaming:
         assert [event for event in events if event["type"] == "session_title"] == []
 
     @pytest.mark.asyncio
-    async def test_forwards_a_provider_retry_with_its_reason(
-        self, bridge: AgentBridge, opencode_message_id: str
-    ):
-        """Should surface OpenCode's retry status so a rate-limited session says why it is idle."""
-        http_client = bridge.http_client
-        http_client.sse_events = [
-            create_sse_event("server.connected", {}),
-            create_sse_event(
-                "session.status",
-                {
-                    "sessionID": "oc-session-123",
-                    "status": {
-                        "type": "retry",
-                        "attempt": 3,
-                        "message": "Usage limit reached. It will reset in 45 hours",
-                        "next": 1786006100468,
-                        "action": {
-                            "reason": "account_rate_limit",
-                            "provider": "zai-coding-plan",
-                            "title": "Limit reached",
-                            "message": "Usage limit reached",
-                            "label": "open settings",
-                        },
-                    },
-                },
-            ),
-            create_sse_event(
-                "message.updated",
-                {
-                    "info": {
-                        "id": "oc-msg-1",
-                        "role": "assistant",
-                        "sessionID": "oc-session-123",
-                        "parentID": opencode_message_id,
-                    }
-                },
-            ),
-            create_sse_event("session.idle", {"sessionID": "oc-session-123"}),
-        ]
-
-        events = []
-        async for event in bridge._stream_opencode_response_sse("cp-msg-1", "Test prompt"):
-            events.append(event)
-
-        assert {
-            "type": "provider_retry",
-            "attempt": 3,
-            "message": "Usage limit reached. It will reset in 45 hours",
-            "nextAttemptAtMs": 1786006100468,
-            "providerName": "zai-coding-plan",
-        } in events
-
-    @pytest.mark.asyncio
-    async def test_ignores_a_provider_retry_for_another_session(self, bridge: AgentBridge):
-        """A sibling session's retry is not this session's news."""
-        http_client = bridge.http_client
-        http_client.sse_events = [
-            create_sse_event("server.connected", {}),
-            create_sse_event(
-                "session.status",
-                {
-                    "sessionID": "oc-session-other",
-                    "status": {
-                        "type": "retry",
-                        "attempt": 1,
-                        "message": "Rate limited",
-                        "next": 1786006100468,
-                    },
-                },
-            ),
-            create_sse_event("session.idle", {"sessionID": "oc-session-123"}),
-        ]
-
-        events = []
-        async for event in bridge._stream_opencode_response_sse("cp-msg-1", "Test prompt"):
-            events.append(event)
-
-        assert [event for event in events if event["type"] == "provider_retry"] == []
-
-    @pytest.mark.asyncio
     async def test_handles_session_error(self, bridge: AgentBridge):
         """Should emit error event on session.error."""
         http_client = bridge.http_client
@@ -861,6 +893,7 @@ class TestSSEStreaming:
                 "messageId": "cp-msg-1",
                 "content": "Test prompt",
                 "model": "anthropic/claude-haiku-4-5",
+                "author": {"gitIdentity": {"mode": "agent-only"}},
             }
         )
 
@@ -872,68 +905,6 @@ class TestSSEStreaming:
         assert complete["error"] == "OpenCode completed without emitting assistant output."
 
 
-class TestHandlePromptStreaming:
-    """Tests for how _handle_prompt pumps stream events to the control plane."""
-
-    @pytest.mark.asyncio
-    async def test_streams_events_in_order_when_the_send_is_slow(self, bridge: AgentBridge):
-        """A slow WebSocket send must not reorder events or stall the stream."""
-        bridge._configure_git_identity = AsyncMock()
-
-        async def burst(*_args: Any, **_kwargs: Any) -> AsyncIterator[dict[str, Any]]:
-            for i in range(5):
-                yield {"type": "token", "content": f"t{i}", "messageId": "cp-msg-1"}
-            yield {"type": "tool_call", "messageId": "cp-msg-1"}
-
-        bridge._stream_opencode_response_sse = burst
-
-        sent: list[dict[str, Any]] = []
-
-        async def slow_send(event: dict[str, Any]) -> None:
-            await asyncio.sleep(0)
-            sent.append(event)
-
-        bridge._send_event = slow_send
-
-        await bridge._handle_prompt({"messageId": "cp-msg-1", "content": "x"})
-
-        assert [e.get("content", e["type"]) for e in sent] == [
-            "t0",
-            "t1",
-            "t2",
-            "t3",
-            "t4",
-            "tool_call",
-            "execution_complete",
-        ]
-        assert sent[-1]["type"] == "execution_complete"
-        assert sent[-1]["success"] is True
-
-    @pytest.mark.asyncio
-    async def test_delivers_buffered_output_before_a_failure_completion(self, bridge: AgentBridge):
-        """A mid-stream failure still flushes salvaged output before execution_complete."""
-        bridge._configure_git_identity = AsyncMock()
-
-        async def burst_then_raise(*_args: Any, **_kwargs: Any) -> AsyncIterator[dict[str, Any]]:
-            yield {"type": "token", "content": "partial", "messageId": "cp-msg-1"}
-            raise SSEConnectionError("stream dropped")
-
-        bridge._stream_opencode_response_sse = burst_then_raise
-
-        sent: list[dict[str, Any]] = []
-
-        async def send(event: dict[str, Any]) -> None:
-            sent.append(event)
-
-        bridge._send_event = send
-
-        await bridge._handle_prompt({"messageId": "cp-msg-1", "content": "x"})
-
-        assert sent[0]["content"] == "partial"
-        assert sent[-1]["type"] == "execution_complete"
-        assert sent[-1]["success"] is False
-
-
 class TestFetchFinalMessageState:
     """Tests for _fetch_final_message_state method.
 
@@ -941,7 +912,7 @@ class TestFetchFinalMessageState:
     whose parentID matches the opencode_message_id (the OpenCode-compatible
     ascending ID we generated for the user message).
 
-    The method takes two message IDs:
+    The method reads both message IDs off the per-prompt state:
     - message_id: Control plane ID (used in events sent back)
     - opencode_message_id: OpenCode ascending ID (used for parentID correlation)
     """
@@ -956,7 +927,7 @@ class TestFetchFinalMessageState:
             auth_token="test-token",
         )
         bridge.opencode_session_id = "oc-session-123"
-        bridge.http_client = AsyncMock()
+        wire_opencode_transport(bridge, AsyncMock())
         return bridge
 
     @pytest.mark.asyncio
@@ -983,9 +954,8 @@ class TestFetchFinalMessageState:
 
         events = []
         # Pass both control plane ID and OpenCode ID
-        async for event in bridge._fetch_final_message_state(
-            "cp-msg-2", "msg_0002bbbbbb", cumulative_text
-        ):
+        state = make_prompt_state("cp-msg-2", "msg_0002bbbbbb", cumulative_text=cumulative_text)
+        async for event in bridge._ensure_prompt_stream()._fetch_final_message_state(state):
             events.append(event)
 
         # Should only have the second message's text (parentID matches msg_0002bbbbbb)
@@ -1012,9 +982,8 @@ class TestFetchFinalMessageState:
 
         events = []
         # Pass both control plane ID and OpenCode ID (new ID doesn't match old parentID)
-        async for event in bridge._fetch_final_message_state(
-            "cp-msg-new", "msg_0002newnew", cumulative_text
-        ):
+        state = make_prompt_state("cp-msg-new", "msg_0002newnew", cumulative_text=cumulative_text)
+        async for event in bridge._ensure_prompt_stream()._fetch_final_message_state(state):
             events.append(event)
 
         # Should have no events since parentID doesn't match
@@ -1038,9 +1007,8 @@ class TestFetchFinalMessageState:
         cumulative_text = {"part-1": "Same length"}
 
         events = []
-        async for event in bridge._fetch_final_message_state(
-            "cp-msg-1", "msg_0001aaaaaa", cumulative_text
-        ):
+        state = make_prompt_state("cp-msg-1", "msg_0001aaaaaa", cumulative_text=cumulative_text)
+        async for event in bridge._ensure_prompt_stream()._fetch_final_message_state(state):
             events.append(event)
 
         # Should have no events since text is not longer
@@ -1064,9 +1032,8 @@ class TestFetchFinalMessageState:
         cumulative_text = {"part-1": "Hello"}
 
         events = []
-        async for event in bridge._fetch_final_message_state(
-            "cp-msg-1", "msg_0001aaaaaa", cumulative_text
-        ):
+        state = make_prompt_state("cp-msg-1", "msg_0001aaaaaa", cumulative_text=cumulative_text)
+        async for event in bridge._ensure_prompt_stream()._fetch_final_message_state(state):
             events.append(event)
 
         # Should have one event with full text
@@ -1098,14 +1065,90 @@ class TestFetchFinalMessageState:
         cumulative_text: dict[str, str] = {}
 
         events = []
-        async for event in bridge._fetch_final_message_state(
-            "cp-msg-1", "msg_0001aaaaaa", cumulative_text
-        ):
+        state = make_prompt_state("cp-msg-1", "msg_0001aaaaaa", cumulative_text=cumulative_text)
+        async for event in bridge._ensure_prompt_stream()._fetch_final_message_state(state):
             events.append(event)
 
         # Should only have assistant message
         assert len(events) == 1
         assert events[0]["content"] == "Assistant response"
+
+    @pytest.mark.asyncio
+    async def test_compaction_fallback_skips_prior_prompt_messages(
+        self, bridge_with_mock_client: AgentBridge
+    ):
+        """After compaction the API's full-history response must not replay
+        prior turns' text: their parts were never streamed this prompt, so
+        every one of them reads as "longer than sent" and the last re-emitted
+        part would overwrite this prompt's final output. Only messages created
+        after this prompt's user message are eligible."""
+        bridge = bridge_with_mock_client
+
+        prompt_ts_ms = 1_754_000_000_000
+        prompt_user_id = oc_message_id(prompt_ts_ms, 2, "p")
+        prior_assistant_id = oc_message_id(prompt_ts_ms - 60_000, 1, "a")
+        prior_user_id = oc_message_id(prompt_ts_ms - 61_000, 1, "u")
+        compaction_user_id = oc_message_id(prompt_ts_ms + 900, 1, "w")
+        summary_id = oc_message_id(prompt_ts_ms + 1_000, 1, "s")
+        continue_user_id = oc_message_id(prompt_ts_ms + 1_500, 1, "v")
+        continuation_id = oc_message_id(prompt_ts_ms + 2_000, 1, "c")
+
+        all_messages = [
+            {
+                "info": {
+                    "id": prior_assistant_id,
+                    "role": "assistant",
+                    "parentID": prior_user_id,
+                    "time": {"created": prompt_ts_ms - 60_000},
+                },
+                "parts": [{"id": "part-prior", "type": "text", "text": "Prior turn final report"}],
+            },
+            {
+                "info": {
+                    "id": summary_id,
+                    "role": "assistant",
+                    "parentID": compaction_user_id,
+                    "summary": True,
+                    "time": {"created": prompt_ts_ms + 1_000},
+                },
+                "parts": [{"id": "part-summary", "type": "text", "text": "Internal summary"}],
+            },
+            {
+                "info": {
+                    "id": continuation_id,
+                    "role": "assistant",
+                    "parentID": continue_user_id,
+                    "time": {"created": prompt_ts_ms + 2_000},
+                },
+                "parts": [
+                    {
+                        "id": "part-continue",
+                        "type": "text",
+                        "text": "Final answer after compaction",
+                    }
+                ],
+            },
+        ]
+
+        bridge.http_client.get = AsyncMock(return_value=MockResponse(200, all_messages))
+
+        # The continuation's text was partially streamed before idle.
+        cumulative_text = {"part-continue": "Final answer"}
+
+        events = []
+        state = make_prompt_state(
+            "cp-msg-1",
+            prompt_user_id,
+            cumulative_text=cumulative_text,
+            compaction_occurred=True,
+            start_time=prompt_ts_ms / 1000,
+        )
+        async for event in bridge._ensure_prompt_stream()._fetch_final_message_state(state):
+            events.append(event)
+
+        assert len(events) == 1
+        assert events[0]["content"] == "Final answer after compaction"
+        assert events[0]["messageId"] == "cp-msg-1"
 
 
 class TestExtractErrorMessage:
@@ -1114,29 +1157,29 @@ class TestExtractErrorMessage:
     def test_named_error_with_data_message(self):
         """Should extract message from NamedError data.message."""
         error = {"name": "SomeError", "data": {"message": "Something broke"}}
-        assert AgentBridge._extract_error_message(error) == "Something broke"
+        assert OpenCodePromptStream._extract_error_message(error) == "Something broke"
 
     def test_dict_with_message_key(self):
         """Should fall back to error.message when no data.message."""
         error = {"message": "Direct message"}
-        assert AgentBridge._extract_error_message(error) == "Direct message"
+        assert OpenCodePromptStream._extract_error_message(error) == "Direct message"
 
     def test_dict_with_name_key_only(self):
         """Should fall back to error.name when no message key."""
         error = {"name": "TimeoutError"}
-        assert AgentBridge._extract_error_message(error) == "TimeoutError"
+        assert OpenCodePromptStream._extract_error_message(error) == "TimeoutError"
 
     def test_non_dict_error(self):
         """Should stringify non-dict errors."""
-        assert AgentBridge._extract_error_message("raw error string") == "raw error string"
+        assert OpenCodePromptStream._extract_error_message("raw error string") == "raw error string"
 
     def test_none_error(self):
         """Should return None for falsy error."""
-        assert AgentBridge._extract_error_message(None) is None
+        assert OpenCodePromptStream._extract_error_message(None) is None
 
     def test_empty_dict(self):
         """Should return None for empty dict (no message or name)."""
-        assert AgentBridge._extract_error_message({}) is None
+        assert OpenCodePromptStream._extract_error_message({}) is None
 
 
 class TestSSEFollowUpMessageBug:
@@ -1353,29 +1396,9 @@ class HangingMockSSEResponse:
         pass
 
 
-class ErrorMidStreamMockSSEResponse:
-    """Mock SSE response that yields some events, then drops the connection.
-
-    Simulates OpenCode severing the /event stream mid-response, which httpx
-    surfaces as RemoteProtocolError (incomplete chunked read) or ReadError.
-    """
-
-    def __init__(self, events_before_error: list[str], exc: Exception, status_code: int = 200):
-        self.status_code = status_code
-        self._events = events_before_error
-        self._exc = exc
-
-    async def aiter_text(self) -> AsyncIterator[str]:
-        for event in self._events:
-            yield event
-            await asyncio.sleep(0)
-        raise self._exc
-
+class HangingHandshakeSSEResponse(DelayedMockSSEResponse):
     async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        pass
+        await asyncio.sleep(3600)
 
 
 class DelayedMockHttpClient:
@@ -1390,7 +1413,12 @@ class DelayedMockHttpClient:
         self._post_call_count = 0
         self._get_call_count = 0
 
-    async def post(self, url: str, json: dict | None = None, timeout: float = 30.0) -> Any:
+    async def post(
+        self,
+        url: str,
+        json: dict | None = None,
+        timeout: float = MOCK_HTTP_TIMEOUT_SECONDS,
+    ) -> Any:
         self._post_call_count += 1
         self.post_urls.append(url)
         if self.post_responses:
@@ -1408,126 +1436,30 @@ class DelayedMockHttpClient:
         return self._sse_response
 
 
-class TestReadOomKillCount:
-    """_read_oom_kill_count parses the cgroup-v2 counter and fails soft."""
-
-    def test_parses_oom_kill_line_by_key(self, bridge: AgentBridge, monkeypatch):
-        mock_path = MagicMock()
-        mock_path.return_value.read_text.return_value = "low 0\nhigh 0\nmax 5\noom 2\noom_kill 3\n"
-        monkeypatch.setattr("sandbox_runtime.bridge.Path", mock_path)
-        assert bridge._read_oom_kill_count() == 3
-
-    def test_missing_oom_kill_key_returns_zero(self, bridge: AgentBridge, monkeypatch):
-        mock_path = MagicMock()
-        mock_path.return_value.read_text.return_value = "low 0\nhigh 0\nmax 5\n"
-        monkeypatch.setattr("sandbox_runtime.bridge.Path", mock_path)
-        assert bridge._read_oom_kill_count() == 0
-
-    def test_missing_file_returns_zero(self, bridge: AgentBridge, monkeypatch):
-        mock_path = MagicMock()
-        mock_path.return_value.read_text.side_effect = FileNotFoundError()
-        monkeypatch.setattr("sandbox_runtime.bridge.Path", mock_path)
-        assert bridge._read_oom_kill_count() == 0
-
-    def test_malformed_value_returns_zero(self, bridge: AgentBridge, monkeypatch):
-        mock_path = MagicMock()
-        mock_path.return_value.read_text.return_value = "oom_kill not-a-number\n"
-        monkeypatch.setattr("sandbox_runtime.bridge.Path", mock_path)
-        assert bridge._read_oom_kill_count() == 0
-
-    def test_oom_kill_line_with_no_value_returns_zero(self, bridge: AgentBridge, monkeypatch):
-        # A truncated/mid-write file can yield the key with no value.
-        mock_path = MagicMock()
-        mock_path.return_value.read_text.return_value = "low 0\noom_kill\n"
-        monkeypatch.setattr("sandbox_runtime.bridge.Path", mock_path)
-        assert bridge._read_oom_kill_count() == 0
+class HangingPromptPostHttpClient(DelayedMockHttpClient):
+    async def post(
+        self,
+        url: str,
+        json: dict | None = None,
+        timeout: float = MOCK_HTTP_TIMEOUT_SECONDS,
+    ) -> Any:
+        if url.endswith("/prompt_async"):
+            self.post_urls.append(url)
+            await asyncio.sleep(3600)
+        return await super().post(url, json=json, timeout=timeout)
 
 
-class TestSSEDropOomMessage:
-    """A mid-stream drop reports OOM when the cgroup oom_kill counter rose."""
-
-    async def _drain(self, bridge: AgentBridge):
-        async for _ in bridge._stream_opencode_response_sse("cp-msg-1", "Test prompt"):
-            pass
-
-    async def test_reports_oom_when_counter_rose(
-        self, bridge: AgentBridge, opencode_message_id: str, monkeypatch
-    ):
-        bridge.http_client = DelayedMockHttpClient(
-            ErrorMidStreamMockSSEResponse(
-                [], httpx.RemoteProtocolError("peer closed connection (incomplete chunked read)")
-            )
-        )
-        # First call is the baseline (stream start), second is at the drop.
-        monkeypatch.setattr(bridge, "_read_oom_kill_count", MagicMock(side_effect=[0, 1]))
-
-        with pytest.raises(SSEConnectionError, match="ran out of memory"):
-            await self._drain(bridge)
-
-    async def test_generic_message_when_counter_unchanged(
-        self, bridge: AgentBridge, opencode_message_id: str, monkeypatch
-    ):
-        bridge.http_client = DelayedMockHttpClient(
-            ErrorMidStreamMockSSEResponse(
-                [], httpx.RemoteProtocolError("peer closed connection (incomplete chunked read)")
-            )
-        )
-        monkeypatch.setattr(bridge, "_read_oom_kill_count", MagicMock(side_effect=[0, 0]))
-
-        with pytest.raises(SSEConnectionError, match="SSE stream connection dropped"):
-            await self._drain(bridge)
-
-    async def test_salvages_output_and_reads_counter_after_salvage(
-        self, bridge: AgentBridge, opencode_message_id: str, monkeypatch
-    ):
-        # An OOM drop that still has salvageable output. Pins two invariants:
-        # partial output is delivered before the OOM raise, and the counter is
-        # read only after the salvage round-trip (the handler's ordering contract).
-        http_client = DelayedMockHttpClient(
-            ErrorMidStreamMockSSEResponse(
-                events_before_error=[create_sse_event("server.connected", {})],
-                exc=httpx.RemoteProtocolError("peer closed connection (incomplete chunked read)"),
-            )
-        )
-        http_client.get_responses = [
-            MockResponse(
-                200,
-                [
-                    {
-                        "info": {
-                            "id": "oc-msg-1",
-                            "role": "assistant",
-                            "parentID": opencode_message_id,
-                        },
-                        "parts": [{"id": "part-1", "type": "text", "text": "partial answer"}],
-                    }
-                ],
-            )
-        ]
-        bridge.http_client = http_client
-
-        reads: list[int] = []
-
-        def fake_oom_read() -> int:
-            reads.append(1)
-            if len(reads) == 1:
-                return 0  # baseline, captured at stream start
-            # Second read is at the drop: salvage must already have run.
-            assert any(u.endswith("/abort") for u in http_client.post_urls)
-            assert any(u.endswith("/message") for u in http_client.get_urls)
-            return 1
-
-        monkeypatch.setattr(bridge, "_read_oom_kill_count", fake_oom_read)
-
-        events: list[dict[str, Any]] = []
-        with pytest.raises(SSEConnectionError, match="ran out of memory"):
-            async for event in bridge._stream_opencode_response_sse("msg-1", "test"):
-                events.append(event)
-
-        assert any(
-            e.get("type") == "token" and e.get("content") == "partial answer" for e in events
-        )
-        assert len(reads) == 2
+class HangingAbortHttpClient(DelayedMockHttpClient):
+    async def post(
+        self,
+        url: str,
+        json: dict | None = None,
+        timeout: float = MOCK_HTTP_TIMEOUT_SECONDS,
+    ) -> Any:
+        if url.endswith("/abort"):
+            self.post_urls.append(url)
+            await asyncio.sleep(3600)
+        return await super().post(url, json=json, timeout=timeout)
 
 
 class TestInactivityTimeout:
@@ -1549,7 +1481,7 @@ class TestInactivityTimeout:
         sse_response = HangingMockSSEResponse(
             initial_events=[create_sse_event("server.connected", {})]
         )
-        bridge.http_client = DelayedMockHttpClient(sse_response)
+        wire_opencode_transport(bridge, DelayedMockHttpClient(sse_response))
 
         with pytest.raises(RuntimeError, match="SSE stream inactive"):
             async for _event in bridge._stream_opencode_response_sse("msg-1", "test"):
@@ -1619,7 +1551,7 @@ class TestInactivityTimeout:
                 (create_sse_event("session.idle", {"sessionID": "oc-session-123"}), 0.1),
             ]
         )
-        bridge.http_client = DelayedMockHttpClient(sse_response)
+        wire_opencode_transport(bridge, DelayedMockHttpClient(sse_response))
 
         events = []
         async for event in bridge._stream_opencode_response_sse("msg-1", "test"):
@@ -1631,7 +1563,7 @@ class TestInactivityTimeout:
 
     @pytest.mark.asyncio
     async def test_heartbeat_resets_timeout(self, opencode_message_id: str):
-        """server.heartbeat events should keep the connection deadline alive."""
+        """server.heartbeat events should keep the session alive."""
         bridge = AgentBridge(
             sandbox_id="test-sandbox",
             session_id="test-session",
@@ -1681,7 +1613,7 @@ class TestInactivityTimeout:
                 (create_sse_event("session.idle", {"sessionID": "oc-session-123"}), 0),
             ]
         )
-        bridge.http_client = DelayedMockHttpClient(sse_response)
+        wire_opencode_transport(bridge, DelayedMockHttpClient(sse_response))
 
         events = []
         async for event in bridge._stream_opencode_response_sse("msg-1", "test"):
@@ -1695,13 +1627,45 @@ class TestInactivityTimeout:
 class TestPromptMaxDuration:
     """Tests for prompt max duration timeout behavior."""
 
-    @pytest.mark.asyncio
-    async def test_heartbeats_alone_do_not_keep_the_session_alive(self):
-        """A live connection carrying no work should fail on the session-progress deadline.
+    def test_default_preserves_legacy_snapshot_reserve(self, monkeypatch):
+        monkeypatch.delenv("SANDBOX_TIMEOUT_SECONDS", raising=False)
 
-        This is the shape of the usage-limit stall in issue #278: OpenCode kept heartbeating
-        while the provider rejected every request, so the connection deadline never expired.
-        """
+        bridge = AgentBridge(
+            sandbox_id="test-sandbox",
+            session_id="test-session",
+            control_plane_url="http://localhost:8787",
+            auth_token="test-token",
+        )
+
+        assert bridge.prompt_max_duration_seconds == 6300
+
+    def test_uses_configured_sandbox_timeout_with_snapshot_reserve(self, monkeypatch):
+        monkeypatch.setenv("SANDBOX_TIMEOUT_SECONDS", "14400")
+
+        bridge = AgentBridge(
+            sandbox_id="test-sandbox",
+            session_id="test-session",
+            control_plane_url="http://localhost:8787",
+            auth_token="test-token",
+        )
+
+        assert bridge.prompt_max_duration_seconds == 13500
+
+    def test_uses_proportional_snapshot_reserve_for_short_sandboxes(self, monkeypatch):
+        monkeypatch.setenv("SANDBOX_TIMEOUT_SECONDS", "600")
+
+        bridge = AgentBridge(
+            sandbox_id="test-sandbox",
+            session_id="test-session",
+            control_plane_url="http://localhost:8787",
+            auth_token="test-token",
+        )
+
+        assert bridge.prompt_max_duration_seconds == 450
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("hang_stage", ["sse_handshake", "prompt_post"])
+    async def test_prompt_deadline_covers_stream_setup(self, hang_stage: str):
         bridge = AgentBridge(
             sandbox_id="test-sandbox",
             session_id="test-session",
@@ -1709,31 +1673,25 @@ class TestPromptMaxDuration:
             auth_token="test-token",
         )
         bridge.opencode_session_id = "oc-session-123"
-        bridge.sse_inactivity_timeout = 2.0
-        bridge.session_progress_timeout_seconds = 0.25
+        bridge.prompt_max_duration_seconds = 0.1
 
-        sse_response = DelayedMockSSEResponse(
-            [
-                (create_sse_event("server.connected", {}), 0),
-                (create_sse_event("server.heartbeat", {}), 0.15),
-                (create_sse_event("server.heartbeat", {}), 0.15),
-                (create_sse_event("server.heartbeat", {}), 0.15),
-            ]
-        )
-        http_client = DelayedMockHttpClient(sse_response)
+        if hang_stage == "sse_handshake":
+            http_client = DelayedMockHttpClient(HangingHandshakeSSEResponse([]))
+        else:
+            http_client = HangingPromptPostHttpClient(DelayedMockSSEResponse([]))
         http_client.get_responses = [MockResponse(200, [])]
-        bridge.http_client = http_client
+        wire_opencode_transport(bridge, http_client)
 
-        with pytest.raises(RuntimeError, match="produced nothing"):
+        started_at = time.monotonic()
+        with pytest.raises(RuntimeError, match="Prompt exceeded max duration"):
             async for _event in bridge._stream_opencode_response_sse("msg-1", "test"):
                 pass
 
+        assert time.monotonic() - started_at < PROMPT_TIMEOUT_TEST_BUDGET_SECONDS
         assert any(url.endswith("/abort") for url in http_client.post_urls)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("status_type", ["busy", "retry"])
-    async def test_provider_wait_statuses_do_not_keep_the_session_alive(self, status_type: str):
-        """Provider wait statuses describe the stall rather than progress past it."""
+    async def test_prompt_timeout_does_not_wait_for_next_sse_event(self):
         bridge = AgentBridge(
             sandbox_id="test-sandbox",
             session_id="test-session",
@@ -1742,41 +1700,49 @@ class TestPromptMaxDuration:
         )
         bridge.opencode_session_id = "oc-session-123"
         bridge.sse_inactivity_timeout = 2.0
-        bridge.session_progress_timeout_seconds = 0.25
+        bridge.prompt_max_duration_seconds = 0.1
 
-        wait_status = create_sse_event(
-            "session.status",
-            {
-                "sessionID": "oc-session-123",
-                "status": {
-                    "type": status_type,
-                    "attempt": 1,
-                    "message": "Rate limited",
-                    "next": 1786006100468,
-                },
-            },
-        )
-        sse_response = DelayedMockSSEResponse(
-            [
-                (create_sse_event("server.connected", {}), 0),
-                (wait_status, 0.15),
-                (wait_status, 0.15),
-                (create_sse_event("server.heartbeat", {}), 0.15),
-            ]
-        )
+        sse_response = DelayedMockSSEResponse([(create_sse_event("server.heartbeat", {}), 1.0)])
         http_client = DelayedMockHttpClient(sse_response)
         http_client.get_responses = [MockResponse(200, [])]
-        bridge.http_client = http_client
+        wire_opencode_transport(bridge, http_client)
 
-        with pytest.raises(RuntimeError, match="produced nothing"):
+        started_at = time.monotonic()
+        with pytest.raises(RuntimeError, match="Prompt exceeded max duration"):
             async for _event in bridge._stream_opencode_response_sse("msg-1", "test"):
                 pass
 
+        assert time.monotonic() - started_at < PROMPT_TIMEOUT_TEST_BUDGET_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_prompt_timeout_bounds_cleanup(self):
+        bridge = AgentBridge(
+            sandbox_id="test-sandbox",
+            session_id="test-session",
+            control_plane_url="http://localhost:8787",
+            auth_token="test-token",
+        )
+        bridge.opencode_session_id = "oc-session-123"
+        bridge.prompt_max_duration_seconds = 0.1
+        bridge.prompt_cleanup_timeout_seconds = 0.1
+
+        http_client = HangingAbortHttpClient(
+            DelayedMockSSEResponse([(create_sse_event("server.heartbeat", {}), 1.0)])
+        )
+        wire_opencode_transport(bridge, http_client)
+
+        started_at = time.monotonic()
+        with pytest.raises(RuntimeError, match="Prompt exceeded max duration"):
+            async for _event in bridge._stream_opencode_response_sse("msg-1", "test"):
+                pass
+
+        assert time.monotonic() - started_at < PROMPT_TIMEOUT_TEST_BUDGET_SECONDS
         assert any(url.endswith("/abort") for url in http_client.post_urls)
 
     @pytest.mark.asyncio
-    async def test_server_chatter_does_not_hold_the_progress_deadline_open(self):
-        """File and lsp traffic share the stream but say nothing about the prompt progressing."""
+    async def test_prompt_timeout_does_not_cancel_suspended_consumer(
+        self, opencode_message_id: str
+    ):
         bridge = AgentBridge(
             sandbox_id="test-sandbox",
             session_id="test-session",
@@ -1784,55 +1750,10 @@ class TestPromptMaxDuration:
             auth_token="test-token",
         )
         bridge.opencode_session_id = "oc-session-123"
-        bridge.sse_inactivity_timeout = 2.0
-        bridge.session_progress_timeout_seconds = 0.25
+        bridge.prompt_max_duration_seconds = 0.1
 
         sse_response = DelayedMockSSEResponse(
             [
-                (create_sse_event("server.connected", {}), 0),
-                (create_sse_event("file.edited", {"file": "/workspace/a.py"}), 0.15),
-                (create_sse_event("lsp.diagnostics", {"path": "/workspace/a.py"}), 0.15),
-                (create_sse_event("server.heartbeat", {}), 0.15),
-            ]
-        )
-        http_client = DelayedMockHttpClient(sse_response)
-        http_client.get_responses = [MockResponse(200, [])]
-        bridge.http_client = http_client
-
-        with pytest.raises(RuntimeError, match="produced nothing"):
-            async for _event in bridge._stream_opencode_response_sse("msg-1", "test"):
-                pass
-
-    @pytest.mark.asyncio
-    async def test_session_work_resets_the_progress_deadline(self, opencode_message_id: str):
-        """Parts arriving between heartbeats should hold the session-progress deadline open."""
-        bridge = AgentBridge(
-            sandbox_id="test-sandbox",
-            session_id="test-session",
-            control_plane_url="http://localhost:8787",
-            auth_token="test-token",
-        )
-        bridge.opencode_session_id = "oc-session-123"
-        bridge.sse_inactivity_timeout = 2.0
-        bridge.session_progress_timeout_seconds = 0.3
-
-        def text_part(part_id: str, text: str) -> str:
-            return create_sse_event(
-                "message.part.updated",
-                {
-                    "part": {
-                        "type": "text",
-                        "id": part_id,
-                        "sessionID": "oc-session-123",
-                        "messageID": "oc-msg-1",
-                        "text": text,
-                    }
-                },
-            )
-
-        sse_response = DelayedMockSSEResponse(
-            [
-                (create_sse_event("server.connected", {}), 0),
                 (
                     create_sse_event(
                         "message.updated",
@@ -1847,21 +1768,34 @@ class TestPromptMaxDuration:
                     ),
                     0,
                 ),
-                (create_sse_event("server.heartbeat", {}), 0.2),
-                (text_part("part-1", "still"), 0.2),
-                (create_sse_event("server.heartbeat", {}), 0.2),
-                (text_part("part-2", "still working"), 0.2),
-                (create_sse_event("session.idle", {"sessionID": "oc-session-123"}), 0),
+                (
+                    create_sse_event(
+                        "message.part.updated",
+                        {
+                            "part": {
+                                "type": "text",
+                                "id": "part-1",
+                                "sessionID": "oc-session-123",
+                                "messageID": "oc-msg-1",
+                                "text": "Hello",
+                            }
+                        },
+                    ),
+                    0,
+                ),
             ]
         )
-        bridge.http_client = DelayedMockHttpClient(sse_response)
+        http_client = DelayedMockHttpClient(sse_response)
+        http_client.get_responses = [MockResponse(200, [])]
+        wire_opencode_transport(bridge, http_client)
+        stream = bridge._stream_opencode_response_sse("msg-1", "test")
 
-        events = [event async for event in bridge._stream_opencode_response_sse("msg-1", "test")]
+        assert (await anext(stream))["type"] == "token"
+        await asyncio.sleep(0.2)
+        with pytest.raises(RuntimeError, match="Prompt exceeded max duration"):
+            await anext(stream)
 
-        assert [e["content"] for e in events if e["type"] == "token"] == [
-            "still",
-            "still working",
-        ]
+        assert any(url.endswith("/abort") for url in http_client.post_urls)
 
     @pytest.mark.asyncio
     async def test_prompt_max_duration_timeout(self):
@@ -1874,7 +1808,7 @@ class TestPromptMaxDuration:
         )
         bridge.opencode_session_id = "oc-session-123"
         bridge.sse_inactivity_timeout = 2.0
-        bridge.PROMPT_MAX_DURATION = 0.25
+        bridge.prompt_max_duration_seconds = 0.25
 
         sse_response = DelayedMockSSEResponse(
             [
@@ -1885,85 +1819,9 @@ class TestPromptMaxDuration:
         )
         http_client = DelayedMockHttpClient(sse_response)
         http_client.get_responses = [MockResponse(200, [])]
-        bridge.http_client = http_client
+        wire_opencode_transport(bridge, http_client)
 
         with pytest.raises(RuntimeError, match="Prompt exceeded max duration"):
-            async for _event in bridge._stream_opencode_response_sse("msg-1", "test"):
-                pass
-
-        assert any(url.endswith("/abort") for url in http_client.post_urls)
-        assert any(url.endswith("/message") for url in http_client.get_urls)
-
-
-class TestSSEConnectionDropped:
-    """Tests for the OpenCode /event stream dropping mid-response."""
-
-    def _bridge(self) -> AgentBridge:
-        bridge = AgentBridge(
-            sandbox_id="test-sandbox",
-            session_id="test-session",
-            control_plane_url="http://localhost:8787",
-            auth_token="test-token",
-        )
-        bridge.opencode_session_id = "oc-session-123"
-        return bridge
-
-    @pytest.mark.asyncio
-    async def test_remote_protocol_error_yields_salvaged_output(self, opencode_message_id: str):
-        """A mid-stream incomplete chunked read recovers partial output, then raises."""
-        bridge = self._bridge()
-        sse_response = ErrorMidStreamMockSSEResponse(
-            events_before_error=[create_sse_event("server.connected", {})],
-            exc=httpx.RemoteProtocolError(
-                "peer closed connection without sending complete message body "
-                "(incomplete chunked read)"
-            ),
-        )
-        http_client = DelayedMockHttpClient(sse_response)
-        # Final-state fetch returns an assistant message the stream never got to emit.
-        http_client.get_responses = [
-            MockResponse(
-                200,
-                [
-                    {
-                        "info": {
-                            "id": "oc-msg-1",
-                            "role": "assistant",
-                            "parentID": opencode_message_id,
-                        },
-                        "parts": [{"id": "part-1", "type": "text", "text": "partial answer"}],
-                    }
-                ],
-            )
-        ]
-        bridge.http_client = http_client
-
-        events: list[dict[str, Any]] = []
-        with pytest.raises(SSEConnectionError):
-            async for event in bridge._stream_opencode_response_sse("msg-1", "test"):
-                events.append(event)
-
-        # The salvaged token reaches the caller before the error propagates.
-        assert any(
-            e.get("type") == "token" and e.get("content") == "partial answer" for e in events
-        )
-        # Salvage ran: OpenCode was stopped and final message state was fetched.
-        assert any(url.endswith("/abort") for url in http_client.post_urls)
-        assert any(url.endswith("/message") for url in http_client.get_urls)
-
-    @pytest.mark.asyncio
-    async def test_read_error_salvages_final_state(self):
-        """A lower-level socket read error also salvages instead of failing raw."""
-        bridge = self._bridge()
-        sse_response = ErrorMidStreamMockSSEResponse(
-            events_before_error=[create_sse_event("server.connected", {})],
-            exc=httpx.ReadError("connection reset"),
-        )
-        http_client = DelayedMockHttpClient(sse_response)
-        http_client.get_responses = [MockResponse(200, [])]
-        bridge.http_client = http_client
-
-        with pytest.raises(SSEConnectionError):
             async for _event in bridge._stream_opencode_response_sse("msg-1", "test"):
                 pass
 
@@ -1978,7 +1836,7 @@ class TestSubtaskStreaming:
     async def test_child_session_tool_events_streamed(
         self, bridge: AgentBridge, opencode_message_id: str
     ):
-        """Child session tool events should be forwarded with isSubtask=True."""
+        """Child tools emitted before Task completion should retain Task ownership."""
         http_client = bridge.http_client
 
         http_client.sse_events = [
@@ -2054,6 +1912,27 @@ class TestSubtaskStreaming:
                     }
                 },
             ),
+            # Foreground Tasks expose their child metadata on the completed tool state,
+            # after the child activity has already streamed.
+            create_sse_event(
+                "message.part.updated",
+                {
+                    "part": {
+                        "type": "tool",
+                        "id": "parent-part-1",
+                        "sessionID": "oc-session-123",
+                        "messageID": "oc-msg-1",
+                        "tool": "task",
+                        "callID": "task-call-1",
+                        "state": {
+                            "status": "completed",
+                            "input": {"prompt": "inspect files"},
+                            "output": '<task id="child-1" state="completed">...</task>',
+                            "metadata": {"sessionId": "child-1"},
+                        },
+                    }
+                },
+            ),
             create_sse_event("session.idle", {"sessionID": "oc-session-123"}),
         ]
 
@@ -2062,12 +1941,17 @@ class TestSubtaskStreaming:
             events.append(event)
 
         tool_events = [e for e in events if e["type"] == "tool_call"]
-        assert len(tool_events) == 2
-        assert tool_events[0]["status"] == "running"
-        assert tool_events[0]["isSubtask"] is True
-        assert tool_events[0]["messageId"] == "cp-msg-1"
-        assert tool_events[1]["status"] == "completed"
+        assert len(tool_events) == 3
+        assert tool_events[0]["tool"] == "task"
+        assert tool_events[0]["childSessionId"] == "child-1"
+        assert tool_events[1]["status"] == "running"
         assert tool_events[1]["isSubtask"] is True
+        assert tool_events[1]["childSessionId"] == "child-1"
+        assert tool_events[1]["taskCallId"] == "task-call-1"
+        assert tool_events[1]["messageId"] == "cp-msg-1"
+        assert tool_events[2]["status"] == "completed"
+        assert tool_events[2]["isSubtask"] is True
+        assert tool_events[2]["taskCallId"] == "task-call-1"
 
     @pytest.mark.asyncio
     async def test_child_text_events_not_forwarded(
@@ -2307,6 +2191,7 @@ class TestSubtaskStreaming:
         assert len(error_events) == 1
         assert error_events[0]["error"] == "Sub-task failed"
         assert error_events[0]["isSubtask"] is True
+        assert error_events[0]["childSessionId"] == "child-1"
 
         token_events = [e for e in events if e["type"] == "token"]
         assert len(token_events) == 1
@@ -2404,7 +2289,7 @@ class TestSubtaskStreaming:
                 },
             ),
             # NO session.created — child was resumed via task_id
-            # Parent task tool part with metadata.sessionId
+            # Parent task tool part with state.metadata.sessionId
             create_sse_event(
                 "message.part.updated",
                 {
@@ -2415,11 +2300,11 @@ class TestSubtaskStreaming:
                         "messageID": "oc-msg-1",
                         "tool": "task",
                         "callID": "task-call-1",
-                        "metadata": {"sessionId": "child-1"},
                         "state": {
                             "status": "running",
                             "input": {"prompt": "do something"},
                             "output": "",
+                            "metadata": {"sessionId": "child-1"},
                         },
                     }
                 },
@@ -2466,9 +2351,12 @@ class TestSubtaskStreaming:
         child_tools = [e for e in tool_events if e.get("isSubtask")]
         assert len(parent_tools) == 1
         assert parent_tools[0]["tool"] == "task"
+        assert parent_tools[0]["childSessionId"] == "child-1"
         assert len(child_tools) == 1
         assert child_tools[0]["tool"] == "Bash"
         assert child_tools[0]["isSubtask"] is True
+        assert child_tools[0]["childSessionId"] == "child-1"
+        assert child_tools[0]["taskCallId"] == "task-call-1"
 
     @pytest.mark.asyncio
     async def test_parent_child_callid_collision(
@@ -2655,124 +2543,6 @@ class TestCompactionHandling:
     """
 
     @pytest.mark.asyncio
-    async def test_context_overflow_recovers_after_compaction(
-        self, bridge: AgentBridge, opencode_message_id: str
-    ):
-        http_client = bridge.http_client
-
-        http_client.sse_events = [
-            create_sse_event("server.connected", {}),
-            create_sse_event(
-                "session.error",
-                {
-                    "sessionID": "oc-session-123",
-                    "error": {
-                        "name": "ContextOverflowError",
-                        "data": {"message": "Input exceeds context window of this model"},
-                    },
-                },
-            ),
-            create_sse_event("session.compacted", {"sessionID": "oc-session-123"}),
-            create_sse_event(
-                "message.updated",
-                {
-                    "info": {
-                        "id": "oc-msg-recovered",
-                        "role": "assistant",
-                        "sessionID": "oc-session-123",
-                        "parentID": "msg_synthetic_continue",
-                    }
-                },
-            ),
-            create_sse_event(
-                "message.part.updated",
-                {
-                    "part": {
-                        "type": "text",
-                        "id": "part-recovered",
-                        "sessionID": "oc-session-123",
-                        "messageID": "oc-msg-recovered",
-                        "text": "Recovered after compaction.",
-                    },
-                    "delta": "Recovered after compaction.",
-                },
-            ),
-            create_sse_event("session.idle", {"sessionID": "oc-session-123"}),
-        ]
-
-        events = []
-        async for event in bridge._stream_opencode_response_sse("cp-msg-1", "Test prompt"):
-            events.append(event)
-
-        assert [event["type"] for event in events] == ["context_compacted", "token"]
-        assert events[0]["messageId"] == "cp-msg-1"
-        assert events[1]["content"] == "Recovered after compaction."
-
-    @pytest.mark.asyncio
-    async def test_repeated_context_overflow_during_recovery_is_terminal(self, bridge: AgentBridge):
-        http_client = bridge.http_client
-        overflow = {
-            "name": "ContextOverflowError",
-            "data": {"message": "Input exceeds context window of this model"},
-        }
-
-        http_client.sse_events = [
-            create_sse_event("server.connected", {}),
-            create_sse_event(
-                "session.error",
-                {"sessionID": "oc-session-123", "error": overflow},
-            ),
-            create_sse_event(
-                "session.error",
-                {"sessionID": "oc-session-123", "error": overflow},
-            ),
-        ]
-
-        events = []
-        async for event in bridge._stream_opencode_response_sse("cp-msg-1", "Test prompt"):
-            events.append(event)
-
-        assert len(events) == 1
-        assert events[0]["type"] == "error"
-        assert events[0]["error"] == "Input exceeds context window of this model"
-
-    @pytest.mark.asyncio
-    async def test_unrelated_error_during_context_recovery_is_terminal(self, bridge: AgentBridge):
-        http_client = bridge.http_client
-
-        http_client.sse_events = [
-            create_sse_event("server.connected", {}),
-            create_sse_event(
-                "session.error",
-                {
-                    "sessionID": "oc-session-123",
-                    "error": {
-                        "name": "ContextOverflowError",
-                        "data": {"message": "Input exceeds context window of this model"},
-                    },
-                },
-            ),
-            create_sse_event(
-                "session.error",
-                {
-                    "sessionID": "oc-session-123",
-                    "error": {
-                        "name": "APIError",
-                        "data": {"message": "Provider unavailable"},
-                    },
-                },
-            ),
-        ]
-
-        events = []
-        async for event in bridge._stream_opencode_response_sse("cp-msg-1", "Test prompt"):
-            events.append(event)
-
-        assert len(events) == 1
-        assert events[0]["type"] == "error"
-        assert events[0]["error"] == "Provider unavailable"
-
-    @pytest.mark.asyncio
     async def test_post_compaction_text_forwarded(
         self, bridge: AgentBridge, opencode_message_id: str
     ):
@@ -2821,6 +2591,7 @@ class TestCompactionHandling:
                         "sessionID": "oc-session-123",
                         "parentID": "msg_compaction_user",
                         "summary": True,
+                        "time": {"created": created_after_prompt_start_ms()},
                     }
                 },
             ),
@@ -2833,6 +2604,7 @@ class TestCompactionHandling:
                         "role": "assistant",
                         "sessionID": "oc-session-123",
                         "parentID": "msg_synthetic_continue",
+                        "time": {"created": created_after_prompt_start_ms()},
                     }
                 },
             ),
@@ -2857,12 +2629,224 @@ class TestCompactionHandling:
             events.append(event)
 
         token_events = [e for e in events if e["type"] == "token"]
-        compaction_events = [e for e in events if e["type"] == "context_compacted"]
         assert len(token_events) == 2
         assert token_events[0]["content"] == "Let me check..."
         assert token_events[1]["content"] == "Here is the answer."
-        assert len(compaction_events) == 1
-        assert compaction_events[0]["messageId"] == "cp-msg-1"
+
+    @pytest.mark.asyncio
+    async def test_context_overflow_compacts_and_completes_successfully(
+        self, bridge: AgentBridge, opencode_message_id: str
+    ):
+        bridge._configure_git_identity = AsyncMock()
+        bridge._send_event = AsyncMock()
+        bridge.http_client.sse_events = [
+            create_sse_event("server.connected", {}),
+            create_sse_event(
+                "message.updated",
+                {
+                    "info": {
+                        "id": "oc-msg-before",
+                        "role": "assistant",
+                        "sessionID": "oc-session-123",
+                        "parentID": opencode_message_id,
+                    }
+                },
+            ),
+            create_sse_event(
+                "message.part.updated",
+                {
+                    "part": {
+                        "type": "text",
+                        "id": "part-before",
+                        "sessionID": "oc-session-123",
+                        "messageID": "oc-msg-before",
+                        "text": "Before compaction",
+                    }
+                },
+            ),
+            create_sse_event(
+                "session.error",
+                {
+                    "sessionID": "oc-session-123",
+                    "error": {
+                        "name": "ContextOverflowError",
+                        "data": {"message": "Context window exceeded"},
+                    },
+                },
+            ),
+            create_sse_event(
+                "message.updated",
+                {
+                    "info": {
+                        "id": "msg_compaction_user",
+                        "role": "user",
+                        "sessionID": "oc-session-123",
+                    }
+                },
+            ),
+            create_sse_event(
+                "message.updated",
+                {
+                    "info": {
+                        "id": "oc-msg-summary",
+                        "role": "assistant",
+                        "sessionID": "oc-session-123",
+                        "parentID": "msg_compaction_user",
+                        "summary": True,
+                        "time": {"created": created_after_prompt_start_ms()},
+                    }
+                },
+            ),
+            create_sse_event(
+                "message.part.updated",
+                {
+                    "part": {
+                        "type": "text",
+                        "id": "part-summary",
+                        "sessionID": "oc-session-123",
+                        "messageID": "oc-msg-summary",
+                        "text": "## Goal\nThe user was working on...",
+                    }
+                },
+            ),
+            create_sse_event("session.compacted", {"sessionID": "oc-session-123"}),
+            create_sse_event(
+                "message.updated",
+                {
+                    "info": {
+                        "id": "oc-msg-after",
+                        "role": "assistant",
+                        "sessionID": "oc-session-123",
+                        "parentID": "msg_synthetic_continue",
+                        "time": {"created": created_after_prompt_start_ms()},
+                    }
+                },
+            ),
+            create_sse_event(
+                "message.part.updated",
+                {
+                    "part": {
+                        "type": "text",
+                        "id": "part-after",
+                        "sessionID": "oc-session-123",
+                        "messageID": "oc-msg-after",
+                        "text": "After compaction",
+                    }
+                },
+            ),
+            create_sse_event("session.idle", {"sessionID": "oc-session-123"}),
+        ]
+
+        await bridge._handle_prompt(
+            {
+                "messageId": "cp-msg-1",
+                "content": "Test prompt",
+                "author": {"gitIdentity": {"mode": "agent-only"}},
+            }
+        )
+
+        events = [call.args[0] for call in bridge._send_event.await_args_list]
+        assert [event["content"] for event in events if event["type"] == "token"] == [
+            "Before compaction",
+            "After compaction",
+        ]
+        assert [event for event in events if event["type"] == "context_compacted"] == [
+            {"type": "context_compacted", "messageId": "cp-msg-1"}
+        ]
+        assert [event["type"] for event in events] == [
+            "token",
+            "context_compacted",
+            "token",
+            "execution_complete",
+        ]
+        assert [event for event in events if event["type"] == "error"] == []
+        assert events[-1] == {
+            "type": "execution_complete",
+            "messageId": "cp-msg-1",
+            "success": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_compaction_overflow_fails_after_partial_output(
+        self, bridge: AgentBridge, opencode_message_id: str
+    ):
+        bridge._configure_git_identity = AsyncMock()
+        bridge._send_event = AsyncMock()
+        bridge.http_client.sse_events = [
+            create_sse_event("server.connected", {}),
+            create_sse_event(
+                "message.updated",
+                {
+                    "info": {
+                        "id": "oc-msg-before",
+                        "role": "assistant",
+                        "sessionID": "oc-session-123",
+                        "parentID": opencode_message_id,
+                    }
+                },
+            ),
+            create_sse_event(
+                "message.part.updated",
+                {
+                    "part": {
+                        "type": "text",
+                        "id": "part-before",
+                        "sessionID": "oc-session-123",
+                        "messageID": "oc-msg-before",
+                        "text": "Partial output",
+                    }
+                },
+            ),
+            create_sse_event(
+                "message.updated",
+                {
+                    "info": {
+                        "id": "msg_compaction_user",
+                        "role": "user",
+                        "sessionID": "oc-session-123",
+                    }
+                },
+            ),
+            create_sse_event(
+                "message.updated",
+                {
+                    "info": {
+                        "id": "oc-msg-summary",
+                        "role": "assistant",
+                        "sessionID": "oc-session-123",
+                        "parentID": "msg_compaction_user",
+                        "summary": True,
+                        "error": {
+                            "name": "ContextOverflowError",
+                            "data": {"message": "Session too large to compact"},
+                        },
+                    }
+                },
+            ),
+            create_sse_event("session.idle", {"sessionID": "oc-session-123"}),
+        ]
+
+        await bridge._handle_prompt(
+            {
+                "messageId": "cp-msg-1",
+                "content": "Test prompt",
+                "author": {"gitIdentity": {"mode": "agent-only"}},
+            }
+        )
+
+        events = [call.args[0] for call in bridge._send_event.await_args_list]
+        assert [event["type"] for event in events] == ["token", "error", "execution_complete"]
+        assert events[1] == {
+            "type": "error",
+            "error": "Session too large to compact",
+            "messageId": "cp-msg-1",
+        }
+        assert events[-1] == {
+            "type": "execution_complete",
+            "messageId": "cp-msg-1",
+            "success": False,
+            "error": "Session too large to compact",
+        }
 
     @pytest.mark.asyncio
     async def test_compaction_summary_text_not_forwarded(
@@ -2889,6 +2873,18 @@ class TestCompactionHandling:
                 "session.compacted",
                 {"sessionID": "oc-session-123"},
             ),
+            # Compaction user message (the summary's parent) — observing it must
+            # not authorize the summary's text via parentID matching
+            create_sse_event(
+                "message.updated",
+                {
+                    "info": {
+                        "id": "msg_compaction_user",
+                        "role": "user",
+                        "sessionID": "oc-session-123",
+                    }
+                },
+            ),
             # Compaction summary with summary=True
             create_sse_event(
                 "message.updated",
@@ -2899,6 +2895,7 @@ class TestCompactionHandling:
                         "sessionID": "oc-session-123",
                         "parentID": "msg_compaction_user",
                         "summary": True,
+                        "time": {"created": created_after_prompt_start_ms()},
                     }
                 },
             ),
@@ -3019,6 +3016,7 @@ class TestCompactionHandling:
                         "role": "assistant",
                         "sessionID": "oc-session-123",
                         "parentID": "msg_synthetic_continue",
+                        "time": {"created": created_after_prompt_start_ms()},
                     }
                 },
             ),
@@ -3043,7 +3041,9 @@ class TestCompactionHandling:
             auth_token="test-token",
         )
         bridge.opencode_session_id = "oc-session-123"
-        bridge.http_client = AsyncMock()
+        wire_opencode_transport(bridge, AsyncMock())
+
+        prompt_ts_ms = 1_754_000_000_000
 
         # API returns: compaction summary + post-compaction response
         messages = [
@@ -3053,6 +3053,7 @@ class TestCompactionHandling:
                     "role": "assistant",
                     "parentID": "msg_compaction_user",
                     "summary": True,
+                    "time": {"created": prompt_ts_ms + 1_000},
                 },
                 "parts": [
                     {"id": "summary-part", "type": "text", "text": "## Goal\nSummary..."},
@@ -3063,6 +3064,7 @@ class TestCompactionHandling:
                     "id": "oc-msg-post",
                     "role": "assistant",
                     "parentID": "msg_synthetic_continue",
+                    "time": {"created": prompt_ts_ms + 2_000},
                 },
                 "parts": [
                     {"id": "post-part", "type": "text", "text": "Here is the answer."},
@@ -3073,13 +3075,13 @@ class TestCompactionHandling:
         bridge.http_client.get = AsyncMock(return_value=MockResponse(200, messages))
 
         events = []
-        async for event in bridge._fetch_final_message_state(
+        state = make_prompt_state(
             "cp-msg-1",
             "msg_original_id",
-            {},
-            set(),
             compaction_occurred=True,
-        ):
+            start_time=prompt_ts_ms / 1000,
+        )
+        async for event in bridge._ensure_prompt_stream()._fetch_final_message_state(state):
             events.append(event)
 
         # Should find the post-compaction response but NOT the summary
@@ -3097,7 +3099,7 @@ class TestCompactionHandling:
             auth_token="test-token",
         )
         bridge.opencode_session_id = "oc-session-123"
-        bridge.http_client = AsyncMock()
+        wire_opencode_transport(bridge, AsyncMock())
 
         messages = [
             {
@@ -3115,13 +3117,8 @@ class TestCompactionHandling:
         bridge.http_client.get = AsyncMock(return_value=MockResponse(200, messages))
 
         events = []
-        async for event in bridge._fetch_final_message_state(
-            "cp-msg-1",
-            "msg_original_id",
-            {},
-            set(),
-            compaction_occurred=False,
-        ):
+        state = make_prompt_state("cp-msg-1", "msg_original_id", compaction_occurred=False)
+        async for event in bridge._ensure_prompt_stream()._fetch_final_message_state(state):
             events.append(event)
 
         assert len(events) == 0

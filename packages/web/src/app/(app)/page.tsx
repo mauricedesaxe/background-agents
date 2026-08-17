@@ -1,6 +1,7 @@
 "use client";
 
-import { useSession } from "next-auth/react";
+import { useAuthSession } from "@/lib/auth-session";
+import { browserApiFetch } from "@/lib/browser-api-fetch";
 import { useRouter } from "next/navigation";
 import { mutate } from "swr";
 import { useState, useEffect, useRef, useCallback } from "react";
@@ -10,28 +11,66 @@ import { ErrorBanner } from "@/components/ui/error-banner";
 import { formatModelNameLower } from "@/lib/format";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
 import { isUnarchivedSessionListKey } from "@/lib/session-list";
+import { isSessionInboxKey } from "@/lib/session-inbox-api";
 import { APP_NAME } from "@/lib/site-config";
-import { DEFAULT_MODEL, getDefaultReasoningEffort, type ModelCategory } from "@open-inspect/shared";
+import type { SessionAttachmentReference } from "@open-inspect/shared/types/session-attachments";
+import { MAX_WEB_PROMPT_CHARS } from "@open-inspect/shared/types/websocket";
+import {
+  DEFAULT_MODEL,
+  getDefaultReasoningEffort,
+  type ModelCategory,
+} from "@open-inspect/shared/models";
 import { resolveModelPreference, type ModelPreference } from "@/lib/model-selection";
 import { useEnabledModels } from "@/hooks/use-enabled-models";
+import { useAttachmentDropZone } from "@/hooks/use-attachment-drop-zone";
+import {
+  ATTACHMENT_ACCEPT,
+  DEFAULT_ATTACHMENT_ONLY_MESSAGE,
+  useSessionAttachments,
+} from "@/hooks/use-session-attachments";
+import { AttachmentPreviewStrip } from "@/components/attachment-preview-strip";
 import {
   useSessionTargetPicker,
   type SessionTargetSelection,
 } from "@/hooks/use-session-target-picker";
 import { SessionTargetPicker } from "@/components/session-target-picker";
 import { ReasoningEffortPills } from "@/components/reasoning-effort-pills";
-import { ModelIcon, SendIcon } from "@/components/ui/icons";
+import { ModelIcon, PaperclipIcon, SendIcon } from "@/components/ui/icons";
 import { Combobox, type ComboboxGroup } from "@/components/ui/combobox";
-import { SchedulePromptPopover } from "@/components/schedule-prompt-popover";
+import { SessionSkillSelector } from "@/components/session-skill-selector";
+import { PromptSkillTextarea } from "@/components/prompt-skill-autocomplete";
+import type { SessionSkillSelection } from "@open-inspect/shared/types/skills";
+import {
+  useSkillResolutionPreview,
+  type SkillResolutionPreviewInput,
+  type SkillResolutionPreviewResponse,
+} from "@/hooks/use-managed-skills";
 import type { SessionTargetRequestFields } from "@/lib/session-target";
-import { VoiceInputButton } from "@/components/voice-input-button";
-import { appendTranscript } from "@/lib/transcription";
+import type { PromptSkillSuggestionSource } from "@/lib/prompt-skill-completion";
 
 const LAST_SELECTED_MODEL_STORAGE_KEY = "open-inspect-last-selected-model";
 const LAST_SELECTED_REASONING_EFFORT_STORAGE_KEY = "open-inspect-last-selected-reasoning-effort";
 
+function skillPreviewTarget(
+  fields: SessionTargetRequestFields | null
+): Omit<SkillResolutionPreviewInput, "selection"> | null {
+  if (!fields) return null;
+  if ("environmentId" in fields) return { environmentId: fields.environmentId };
+  if ("repositories" in fields) {
+    return {
+      repositories: fields.repositories.map((repository) => ({
+        ...repository,
+        baseBranch: null,
+      })),
+    };
+  }
+  return fields.repoOwner && fields.repoName
+    ? { repoOwner: fields.repoOwner, repoName: fields.repoName }
+    : {};
+}
+
 export default function Home() {
-  const { data: session } = useSession();
+  const { data: session } = useAuthSession();
   const router = useRouter();
   const picker = useSessionTargetPicker();
   const { sessionTarget, selectedBranch, configKey, buildRequestFields, isLaunchable } = picker;
@@ -41,13 +80,17 @@ export default function Home() {
   });
   const [modelPreferenceDraft, setModelPreferenceDraft] = useState<ModelPreference | null>(null);
   const [prompt, setPrompt] = useState("");
+  const [skillSelection, setSkillSelection] = useState<SessionSkillSelection>({ mode: "all" });
+  const skillSelectionKey =
+    skillSelection.mode === "profile" ? `profile:${skillSelection.profileId}` : skillSelection.mode;
+  const sessionAttachments = useSessionAttachments();
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
-  const [scheduleConfirmation, setScheduleConfirmation] = useState("");
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [isCreatingSession, setIsCreatingSession] = useState(false);
   const sessionCreationPromise = useRef<Promise<string | null> | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const submitInFlightRef = useRef(false);
   // Keyed by the picker's configKey so environment/ad-hoc selections
   // invalidate a warmed session exactly like repo/branch changes do.
   const pendingConfigRef = useRef<{
@@ -55,9 +98,16 @@ export default function Home() {
     model: string;
     reasoningEffort?: string;
     branch: string;
+    skills: string;
   } | null>(null);
   const hasHydratedModelPreferencesRef = useRef(false);
   const { enabledModels, enabledModelOptions, loading: loadingEnabledModels } = useEnabledModels();
+  const currentSkillPreviewTarget = session ? skillPreviewTarget(buildRequestFields()) : null;
+  const {
+    preview: skillPreview,
+    loading: skillPreviewLoading,
+    suggestions: skillSuggestions,
+  } = useSkillResolutionPreview(currentSkillPreviewTarget, skillSelection);
 
   useEffect(() => {
     if (hasHydratedModelPreferencesRef.current) return;
@@ -76,6 +126,8 @@ export default function Home() {
     loadingEnabledModels ? undefined : enabledModels
   );
 
+  // Skills are pinned while the session warms, so any identity input change
+  // must discard that session rather than submit a prompt with stale skills.
   useEffect(() => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -85,7 +137,7 @@ export default function Home() {
     setIsCreatingSession(false);
     sessionCreationPromise.current = null;
     pendingConfigRef.current = null;
-  }, [sessionTarget, selectedModel, reasoningEffort, selectedBranch]);
+  }, [sessionTarget, selectedModel, reasoningEffort, selectedBranch, skillSelectionKey]);
 
   const createSessionForWarming = useCallback(async () => {
     if (loadingEnabledModels) return null;
@@ -100,6 +152,7 @@ export default function Home() {
       model: selectedModel,
       reasoningEffort,
       branch: sessionTarget?.kind === "repo" ? selectedBranch : "",
+      skills: skillSelectionKey,
     };
     pendingConfigRef.current = currentConfig;
 
@@ -108,13 +161,14 @@ export default function Home() {
 
     const promise = (async () => {
       try {
-        const res = await fetch("/api/sessions", {
+        const res = await browserApiFetch("/api/sessions", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             ...targetRequestFields,
             model: selectedModel,
             reasoningEffort,
+            skillSelection,
           }),
           signal: abortController.signal,
         });
@@ -125,7 +179,8 @@ export default function Home() {
             pendingConfigRef.current?.target === currentConfig.target &&
             pendingConfigRef.current?.model === currentConfig.model &&
             pendingConfigRef.current?.reasoningEffort === currentConfig.reasoningEffort &&
-            pendingConfigRef.current?.branch === currentConfig.branch
+            pendingConfigRef.current?.branch === currentConfig.branch &&
+            pendingConfigRef.current?.skills === currentConfig.skills
           ) {
             setPendingSessionId(data.sessionId);
             return data.sessionId as string;
@@ -157,6 +212,8 @@ export default function Home() {
     buildRequestFields,
     selectedModel,
     reasoningEffort,
+    skillSelection,
+    skillSelectionKey,
     pendingSessionId,
     loadingEnabledModels,
   ]);
@@ -186,55 +243,32 @@ export default function Home() {
   );
 
   const handlePromptChange = (value: string) => {
+    const wasEmpty = prompt.length === 0;
     setPrompt(value);
+    if (
+      wasEmpty &&
+      value.length > 0 &&
+      !pendingSessionId &&
+      !isCreatingSession &&
+      !loadingEnabledModels &&
+      isLaunchable
+    ) {
+      createSessionForWarming();
+    }
   };
 
-  const handleTranscript = (text: string) => {
-    setPrompt((draft) => appendTranscript(draft, text));
-  };
-
-  const handleSchedule = async (instant: Date, timeZone: string): Promise<boolean> => {
-    if (!prompt.trim() || loadingEnabledModels || !isLaunchable) return false;
-    const target = buildRequestFields();
-    if (!target) return false;
-    setError("");
-    setScheduleConfirmation("");
-    try {
-      const response = await fetch("/api/scheduled-tasks", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          instructions: prompt,
-          executeAt: instant.toISOString(),
-          scheduleTz: timeZone,
-          model: selectedModel,
-          reasoningEffort,
-          ...scheduledTargetFields(target),
-        }),
-      });
-      const data = (await response.json()) as { error?: string };
-      if (!response.ok) {
-        setError(data.error ?? "Failed to schedule prompt");
-        return false;
-      }
-      setPrompt("");
-      setScheduleConfirmation(
-        `Scheduled for ${new Intl.DateTimeFormat(undefined, {
-          dateStyle: "medium",
-          timeStyle: "short",
-          timeZone,
-        }).format(instant)} (${timeZone})`
-      );
-      return true;
-    } catch {
-      setError("Failed to schedule prompt");
-      return false;
+  const handleAddFiles = (files: Iterable<File>) => {
+    sessionAttachments.addFiles(files);
+    if (!pendingSessionId && !isCreatingSession && isLaunchable) {
+      createSessionForWarming();
     }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!prompt.trim() || loadingEnabledModels) return;
+    if (submitInFlightRef.current || sessionAttachments.isUploading || loadingEnabledModels) return;
+    const hasAttachments = sessionAttachments.attachments.length > 0;
+    if (!prompt.trim() && !hasAttachments) return;
     if (!isLaunchable) {
       setError(
         sessionTarget?.kind === "repos"
@@ -244,6 +278,7 @@ export default function Home() {
       return;
     }
 
+    submitInFlightRef.current = true;
     setCreating(true);
     setError("");
 
@@ -255,22 +290,33 @@ export default function Home() {
 
       if (!sessionId) {
         setError("Failed to create session");
-        setCreating(false);
         return;
       }
 
-      const res = await fetch(`/api/sessions/${sessionId}/prompt`, {
+      let attachments: SessionAttachmentReference[] | undefined;
+      if (hasAttachments) {
+        try {
+          attachments = await sessionAttachments.uploadAll(sessionId);
+        } catch {
+          return;
+        }
+      }
+
+      const res = await browserApiFetch(`/api/sessions/${sessionId}/prompt`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          content: prompt,
+          content: prompt.trim() || DEFAULT_ATTACHMENT_ONLY_MESSAGE,
           model: selectedModel,
           reasoningEffort,
+          ...(attachments && attachments.length > 0 ? { attachments } : {}),
         }),
       });
 
       if (res.ok) {
+        sessionAttachments.clearAttachments();
         mutate(isUnarchivedSessionListKey);
+        mutate(isSessionInboxKey);
         router.push(`/session/${sessionId}`);
       } else {
         const data = await res.json();
@@ -279,6 +325,8 @@ export default function Home() {
       }
     } catch (_error) {
       setError("Failed to create session");
+    } finally {
+      submitInFlightRef.current = false;
       setCreating(false);
     }
   };
@@ -293,14 +341,24 @@ export default function Home() {
       setReasoningEffort={handleReasoningEffortChange}
       prompt={prompt}
       handlePromptChange={handlePromptChange}
-      handleTranscript={handleTranscript}
+      attachments={{
+        items: sessionAttachments.attachments,
+        error: sessionAttachments.attachmentError,
+        isUploading: sessionAttachments.isUploading,
+        onAdd: handleAddFiles,
+        onRemove: sessionAttachments.removeAttachment,
+      }}
       creating={creating}
       isCreatingSession={isCreatingSession}
       error={error}
-      scheduleConfirmation={scheduleConfirmation}
       handleSubmit={handleSubmit}
-      handleSchedule={handleSchedule}
       modelOptions={enabledModelOptions}
+      skillSelection={skillSelection}
+      setSkillSelection={setSkillSelection}
+      skillPreviewTarget={currentSkillPreviewTarget}
+      skillPreview={skillPreview}
+      skillPreviewLoading={skillPreviewLoading}
+      skillSuggestions={skillSuggestions}
     />
   );
 }
@@ -314,14 +372,18 @@ function HomeContent({
   setReasoningEffort,
   prompt,
   handlePromptChange,
-  handleTranscript,
+  attachments,
   creating,
   isCreatingSession,
   error,
-  scheduleConfirmation,
   handleSubmit,
-  handleSchedule,
   modelOptions,
+  skillSelection,
+  setSkillSelection,
+  skillPreviewTarget,
+  skillPreview,
+  skillPreviewLoading,
+  skillSuggestions,
 }: {
   isAuthenticated: boolean;
   picker: SessionTargetSelection;
@@ -331,17 +393,37 @@ function HomeContent({
   setReasoningEffort: (value: string | undefined) => void;
   prompt: string;
   handlePromptChange: (value: string) => void;
-  handleTranscript: (text: string) => void;
+  attachments: {
+    items: ReturnType<typeof useSessionAttachments>["attachments"];
+    error: string | null;
+    isUploading: boolean;
+    onAdd: (files: Iterable<File>) => void;
+    onRemove: (id: string) => void;
+  };
   creating: boolean;
   isCreatingSession: boolean;
   error: string;
-  scheduleConfirmation: string;
   handleSubmit: (e: React.FormEvent) => void;
-  handleSchedule: (instant: Date, timeZone: string) => Promise<boolean>;
   modelOptions: ModelCategory[];
+  skillSelection: SessionSkillSelection;
+  setSkillSelection: (value: SessionSkillSelection) => void;
+  skillPreviewTarget: Omit<SkillResolutionPreviewInput, "selection"> | null;
+  skillPreview: SkillResolutionPreviewResponse | null;
+  skillPreviewLoading: boolean;
+  skillSuggestions: PromptSkillSuggestionSource;
 }) {
   const { isOpen } = useSidebarContext();
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const attachmentsLocked = creating || attachments.isUploading;
+  const {
+    isDraggingOver,
+    handleFileInputChange,
+    handlePaste,
+    handleDrop,
+    handleDragOver,
+    handleDragLeave,
+  } = useAttachmentDropZone({ locked: attachmentsLocked, onAdd: attachments.onAdd });
   const { sessionTarget, selectedRepo, repos, loadingRepos, isLaunchable } = picker;
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -382,36 +464,67 @@ function HomeContent({
           {isAuthenticated && (
             <form onSubmit={handleSubmit}>
               {error && <ErrorBanner className="mb-4">{error}</ErrorBanner>}
-              {scheduleConfirmation && (
-                <p className="mb-4 border border-accent/40 bg-accent/10 px-3 py-2 text-sm text-foreground">
-                  {scheduleConfirmation}
-                </p>
-              )}
 
-              <div className="border border-border bg-input">
+              <div
+                className={`border border-border bg-input ${isDraggingOver ? "ring-2 ring-accent" : ""}`}
+                onPaste={handlePaste}
+                onDrop={handleDrop}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+              >
+                <AttachmentPreviewStrip
+                  items={attachments.items}
+                  error={attachments.error}
+                  onRemove={attachments.onRemove}
+                  disabled={attachmentsLocked}
+                />
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept={ATTACHMENT_ACCEPT}
+                  multiple
+                  className="hidden"
+                  onChange={handleFileInputChange}
+                />
                 {/* Text input area */}
                 <div className="relative">
-                  <textarea
+                  <PromptSkillTextarea
                     ref={inputRef}
                     value={prompt}
-                    onChange={(e) => handlePromptChange(e.target.value)}
+                    suggestions={skillSuggestions}
+                    onValueChange={handlePromptChange}
                     onKeyDown={handleKeyDown}
-                    placeholder="What do you want to build?"
+                    maxLength={MAX_WEB_PROMPT_CHARS}
                     disabled={creating}
+                    placeholder="What do you want to build?"
+                    autoComplete="off"
                     className="w-full resize-none bg-transparent px-4 pt-4 pb-12 focus:outline-none text-foreground placeholder:text-secondary-foreground disabled:opacity-50"
                     rows={3}
                   />
                   {/* Submit button */}
                   <div className="absolute bottom-3 right-3 flex items-center gap-2">
-                    {isCreatingSession && <span className="text-xs text-accent">Starting...</span>}
-                    <VoiceInputButton onTranscript={handleTranscript} disabled={creating} />
-                    <SchedulePromptPopover
-                      disabled={!prompt.trim() || creating || !isLaunchable}
-                      onSchedule={handleSchedule}
-                    />
+                    {isCreatingSession && (
+                      <span className="whitespace-nowrap text-xs text-accent">
+                        Warming sandbox...
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={attachmentsLocked}
+                      className="p-2 text-secondary-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition"
+                      title="Attach images"
+                      aria-label="Attach images"
+                    >
+                      <PaperclipIcon className="w-5 h-5" />
+                    </button>
                     <button
                       type="submit"
-                      disabled={!prompt.trim() || creating || !isLaunchable}
+                      disabled={
+                        (!prompt.trim() && attachments.items.length === 0) ||
+                        attachmentsLocked ||
+                        !isLaunchable
+                      }
                       className="p-2 text-secondary-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition"
                       title={`Send (${SHORTCUT_LABELS.SEND_PROMPT})`}
                       aria-label={`Send (${SHORTCUT_LABELS.SEND_PROMPT})`}
@@ -461,6 +574,15 @@ function HomeContent({
                       selectedModel={selectedModel}
                       reasoningEffort={reasoningEffort}
                       onSelect={setReasoningEffort}
+                      disabled={creating}
+                    />
+
+                    <SessionSkillSelector
+                      value={skillSelection}
+                      onChange={setSkillSelection}
+                      target={skillPreviewTarget}
+                      preview={skillPreview}
+                      previewLoading={skillPreviewLoading}
                       disabled={creating}
                     />
                   </div>
@@ -513,29 +635,4 @@ function HomeContent({
       </div>
     </div>
   );
-}
-
-function scheduledTargetFields(target: SessionTargetRequestFields): {
-  repositories: Array<{ repoOwner: string; repoName: string; baseBranch?: string }>;
-  environmentIds: string[];
-} {
-  if ("environmentId" in target) {
-    return { repositories: [], environmentIds: [target.environmentId] };
-  }
-  if ("repositories" in target) {
-    return { repositories: target.repositories, environmentIds: [] };
-  }
-  if (target.repoOwner && target.repoName) {
-    return {
-      repositories: [
-        {
-          repoOwner: target.repoOwner,
-          repoName: target.repoName,
-          baseBranch: target.branch,
-        },
-      ],
-      environmentIds: [],
-    };
-  }
-  return { repositories: [], environmentIds: [] };
 }

@@ -3,6 +3,11 @@
  */
 
 import type { SlackCompletionJob } from "../completion/job";
+import type { ControlPlaneFetcher } from "@open-inspect/shared/service-auth";
+
+export interface SlackCompletionQueue {
+  send(message: SlackCompletionJob, options?: { contentType?: "json" }): Promise<unknown>;
+}
 
 /**
  * Cloudflare Worker environment bindings.
@@ -12,10 +17,10 @@ export interface Env {
   SLACK_KV: KVNamespace;
 
   // Service binding to control plane
-  CONTROL_PLANE: Fetcher;
+  CONTROL_PLANE: ControlPlaneFetcher;
 
   // Durable completion handoff. All Slack completion callbacks enqueue here.
-  SLACK_COMPLETION_QUEUE: Queue<SlackCompletionJob>;
+  SLACK_COMPLETION_QUEUE: SlackCompletionQueue;
 
   // Environment variables
   DEPLOYMENT_NAME: string;
@@ -42,16 +47,6 @@ export interface Env {
 }
 
 /**
- * Repository configuration for the classifier.
- */
-export type {
-  RepoConfig,
-  RepoMetadata,
-  ControlPlaneRepo,
-  ControlPlaneReposResponse,
-} from "@open-inspect/shared";
-
-/**
  * Thread context for classification.
  */
 export interface ThreadContext {
@@ -62,7 +57,7 @@ export interface ThreadContext {
   previousMessages?: string[];
 }
 
-import type { ConfidenceLevel } from "@open-inspect/shared";
+import type { ConfidenceLevel } from "@open-inspect/shared/types/repository-catalog";
 // targets.ts is a pure leaf (types + policy functions, no I/O), so the types
 // barrel can depend on it without a cycle.
 import type { SlackSessionTarget } from "../targets";
@@ -81,63 +76,9 @@ export interface ClassificationResult {
   needsClarification: boolean;
 }
 
-export type { ConfidenceLevel, Environment } from "@open-inspect/shared";
 export type { SlackSessionTarget } from "../targets";
 
-/**
- * Slack event types.
- */
-export interface SlackEvent {
-  type: string;
-  event: {
-    type: string;
-    text?: string;
-    user?: string;
-    channel?: string;
-    ts?: string;
-    thread_ts?: string;
-    bot_id?: string;
-  };
-  event_id: string;
-  event_time: number;
-  team_id: string;
-}
-
-/**
- * Slack message event.
- */
-export interface SlackMessageEvent {
-  type: "message";
-  text: string;
-  user: string;
-  channel: string;
-  ts: string;
-  thread_ts?: string;
-  bot_id?: string;
-}
-
-/**
- * Slack app_mention event.
- */
-export interface SlackAppMentionEvent {
-  type: "app_mention";
-  text: string;
-  user: string;
-  channel: string;
-  ts: string;
-  thread_ts?: string;
-}
-
 export type { SlackInteractionPayload } from "../interaction-payload";
-
-/**
- * Callback context passed with prompts for follow-up notifications.
- */
-export type { SlackCallbackContext, CallbackContext } from "@open-inspect/shared";
-import type { SlackCallbackContext } from "@open-inspect/shared";
-
-// Keep backward-compatible alias
-export type SlackBotCallbackContext = SlackCallbackContext;
 
 /**
  * Thread-to-session mapping stored in KV for conversation continuity.
@@ -159,43 +100,3 @@ export interface ThreadSession {
    */
   lastPromptTs?: string;
 }
-
-/**
- * Completion callback payload from control-plane.
- */
-export interface CompletionCallback {
-  sessionId: string;
-  messageId: string;
-  success: boolean;
-  error?: string;
-  timestamp: number;
-  signature: string;
-  context: SlackCallbackContext;
-}
-
-/**
- * Tool-call callback payload from control-plane.
- */
-export interface ToolCallCallback {
-  sessionId: string;
-  tool: string;
-  args: Record<string, unknown>;
-  callId: string;
-  timestamp: number;
-  signature: string;
-  context: SlackCallbackContext;
-}
-
-/**
- * Event response from control-plane events API.
- */
-export type {
-  EventResponse,
-  ListEventsResponse,
-  ArtifactResponse,
-  ListArtifactsResponse,
-  ToolCallSummary,
-  ArtifactInfo,
-  AgentResponse,
-  UserPreferences,
-} from "@open-inspect/shared";

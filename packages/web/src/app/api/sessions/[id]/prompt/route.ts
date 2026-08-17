@@ -1,11 +1,29 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { getServerAuthSession } from "@/lib/server-auth-session";
+import {
+  BLANK_PROMPT_MESSAGE,
+  isBlankPrompt,
+  promptContentSchema,
+} from "@open-inspect/shared/types/prompts";
+import { sessionAttachmentReferencesSchema } from "@open-inspect/shared/types/session-attachments";
+import { z } from "zod";
 import { controlPlaneUserFetch } from "@/lib/control-plane";
 
+const promptRequestSchema = z
+  .strictObject({
+    content: promptContentSchema,
+    model: z.string().optional(),
+    reasoningEffort: z.string().optional(),
+    attachments: sessionAttachmentReferencesSchema.optional(),
+  })
+  .refine((prompt) => !isBlankPrompt(prompt), {
+    message: BLANK_PROMPT_MESSAGE,
+    path: ["content"],
+  });
+
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const session = await getServerSession(authOptions);
+  const session = await getServerAuthSession();
   if (!session?.user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -13,12 +31,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const { id: sessionId } = await params;
 
   try {
-    const body = await request.json();
-    const { content, model, reasoningEffort } = body;
-
-    if (!content) {
-      return NextResponse.json({ error: "content is required" }, { status: 400 });
+    const parsed = promptRequestSchema.safeParse(await request.json());
+    if (!parsed.success) {
+      return NextResponse.json({ error: "Invalid prompt request" }, { status: 400 });
     }
+    const { content, model, reasoningEffort, attachments } = parsed.data;
 
     // authorId is derived by the control plane from the Bearer principal and
     // is rejected in the body under strict enforcement.
@@ -29,6 +46,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         source: "web",
         model,
         reasoningEffort,
+        attachments,
       }),
     });
 

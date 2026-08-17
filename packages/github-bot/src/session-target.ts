@@ -10,7 +10,8 @@
  * session must always be able to check out the PR under review.
  */
 
-import { encodeRepositoryPathSegments, resolveAppName } from "@open-inspect/shared";
+import { encodeRepositoryPathSegments } from "@open-inspect/shared/types/repositories";
+import { resolveAppName } from "@open-inspect/shared/app-name";
 import { z } from "zod";
 import type { Env } from "./types";
 import { signedControlPlaneFetch } from "./internal-auth";
@@ -23,12 +24,8 @@ import type { ResolvedGitHubConfig } from "./utils/integration-config";
  * schema makes the two mutually exclusive.
  */
 export type SessionTargetFields =
-  | { repoOwner: string; repoName: string; branch?: string }
-  | {
-      environmentId: string;
-      branch?: string;
-      branchRepository?: { repoOwner: string; repoName: string };
-    };
+  | { repoOwner: string; repoName: string }
+  | { environmentId: string };
 
 const metadataResponseSchema = z.object({
   metadata: z.object({ defaultEnvironmentId: z.string().optional() }).nullable(),

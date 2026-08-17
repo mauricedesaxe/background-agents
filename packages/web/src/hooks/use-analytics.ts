@@ -1,4 +1,4 @@
-import { useSession } from "next-auth/react";
+import { useAuthSession } from "@/lib/auth-session";
 import useSWR from "swr";
 import type {
   AnalyticsBreakdownResponse,
@@ -6,11 +6,11 @@ import type {
   AnalyticsPullRequestsResponse,
   AnalyticsSummaryResponse,
   AnalyticsTimeseriesResponse,
-} from "@open-inspect/shared";
+} from "@open-inspect/shared/types/analytics";
 import { ANALYTICS_REFRESH_INTERVAL_MS } from "@/lib/analytics";
 
 export function useAnalyticsDashboard(days: AnalyticsDays) {
-  const { data: session } = useSession();
+  const { data: session } = useAuthSession();
   const refreshInterval = ANALYTICS_REFRESH_INTERVAL_MS;
 
   const summary = useSWR<AnalyticsSummaryResponse>(

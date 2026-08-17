@@ -6,9 +6,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from tests.runtime_helpers import make_opencode_server
+
 
 def _make_supervisor(session_config: dict | None = None):
-    """Create a SandboxSupervisor with MCP-relevant session config."""
+    """Create an OpenCodeServer with MCP-relevant session config."""
     env_vars = {
         "SANDBOX_ID": "test-sandbox",
         "REPO_OWNER": "acme",
@@ -16,9 +18,7 @@ def _make_supervisor(session_config: dict | None = None):
         "SESSION_CONFIG": json.dumps(session_config or {}),
     }
     with patch.dict(os.environ, env_vars, clear=False):
-        from sandbox_runtime.entrypoint import SandboxSupervisor
-
-        return SandboxSupervisor()
+        return make_opencode_server()
 
 
 # ─── _resolve_mcp_servers ────────────────────────────────────────────────────
@@ -43,43 +43,6 @@ class TestResolveMcpServers:
         assert len(result) == 2
         assert result[0]["name"] == "playwright"
         assert result[1]["name"] == "remote"
-
-    @pytest.mark.parametrize(
-        ("command", "expected"),
-        [
-            (["npx", "-y", "@playwright/mcp"], ["npx", "-y", "@playwright/mcp@0.0.79"]),
-            (
-                ["npx", "-p", "@playwright/mcp", "playwright-mcp"],
-                ["npx", "-p", "@playwright/mcp@0.0.79", "playwright-mcp"],
-            ),
-            (
-                ["npx", "--package", "@playwright/mcp", "playwright-mcp"],
-                ["npx", "--package", "@playwright/mcp@0.0.79", "playwright-mcp"],
-            ),
-        ],
-    )
-    def test_pins_playwright_mcp_to_the_cached_browser_revision(self, command, expected):
-        servers = [{"name": "playwright", "type": "local", "command": command}]
-        with patch.dict(os.environ, {"PLAYWRIGHT_MCP_VERSION": "0.0.79"}, clear=False):
-            sup = _make_supervisor({"mcp_servers": servers})
-            result = sup._resolve_mcp_servers()
-            assert result[0]["command"] == expected
-            assert sup.session_config["mcp_servers"][0]["command"] == command
-
-    @pytest.mark.parametrize(
-        "command",
-        [
-            ["node", "script.js", "@playwright/mcp"],
-            ["npx", "-y", "@playwright/mcp@0.0.78"],
-        ],
-    )
-    def test_preserves_non_bare_playwright_package_arguments(self, command):
-        with patch.dict(os.environ, {"PLAYWRIGHT_MCP_VERSION": "0.0.79"}, clear=False):
-            sup = _make_supervisor(
-                {"mcp_servers": [{"name": "playwright", "type": "local", "command": command}]}
-            )
-            result = sup._resolve_mcp_servers()
-            assert result[0]["command"] == command
 
 
 # ─── _install_mcp_packages ──────────────────────────────────────────────────

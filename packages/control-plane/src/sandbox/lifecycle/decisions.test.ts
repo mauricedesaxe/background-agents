@@ -13,13 +13,7 @@ import {
   evaluateConnectingTimeout,
   evaluateWarmDecision,
   evaluateExecutionTimeout,
-  DEFAULT_CIRCUIT_BREAKER_CONFIG,
-  DEFAULT_SPAWN_CONFIG,
-  DEFAULT_INACTIVITY_CONFIG,
-  INACTIVITY_TIMEOUT_MS,
-  INACTIVITY_EXTENSION_MS,
-  INACTIVITY_MIN_CHECK_INTERVAL_MS,
-  DEFAULT_HEARTBEAT_CONFIG,
+  isSandboxReconnectBlockedStatus,
   DEFAULT_CONNECTING_TIMEOUT_CONFIG,
   DEFAULT_EXECUTION_TIMEOUT_MS,
   type CircuitBreakerState,
@@ -33,7 +27,19 @@ import {
   type WarmState,
   type ExecutionTimeoutConfig,
 } from "./decisions";
-import { addDuration, durationMs, elapsed, epochMs, nowMs } from "../../time";
+
+describe("isSandboxReconnectBlockedStatus", () => {
+  it.each(["stopped", "stale"] as const)("blocks reconnects for %s sandboxes", (status) => {
+    expect(isSandboxReconnectBlockedStatus(status)).toBe(true);
+  });
+
+  it.each(["pending", "spawning", "connecting", "ready", "running", "failed"] as const)(
+    "allows reconnects for %s sandboxes",
+    (status) => {
+      expect(isSandboxReconnectBlockedStatus(status)).toBe(false);
+    }
+  );
+});
 
 // ==================== Circuit Breaker Tests ====================
 
@@ -123,11 +129,6 @@ describe("evaluateCircuitBreaker", () => {
     // At exact boundary, should reset
     expect(decision.shouldProceed).toBe(true);
     expect(decision.shouldReset).toBe(true);
-  });
-
-  it("uses default config values correctly", () => {
-    expect(DEFAULT_CIRCUIT_BREAKER_CONFIG.threshold).toBe(3);
-    expect(DEFAULT_CIRCUIT_BREAKER_CONFIG.windowMs).toBe(5 * 60 * 1000);
   });
 });
 
@@ -326,6 +327,44 @@ describe("evaluateSpawnDecision", () => {
     }
   });
 
+  it("skips restore when a spawn is already in progress in-memory", () => {
+    // A restore sets the in-memory flag synchronously but persists the
+    // "spawning" status only after its first await; a concurrent evaluation in
+    // that window still sees "stopped" and must not start a second restore.
+    const now = Date.now();
+    const state: SandboxState = {
+      status: "stopped",
+      createdAt: now - 120000,
+      snapshotImageId: "img-abc123",
+      hasActiveWebSocket: false,
+    };
+
+    const decision = evaluateSpawnDecision(state, config, now, true);
+
+    expect(decision.action).toBe("skip");
+    if (decision.action === "skip") {
+      expect(decision.reason).toContain("in-memory flag");
+    }
+  });
+
+  it("skips resume when a spawn is already in progress in-memory", () => {
+    const now = Date.now();
+    const state: SandboxState = {
+      status: "stopped",
+      createdAt: now - 120000,
+      snapshotImageId: null,
+      providerObjectId: "sb-123",
+      hasActiveWebSocket: false,
+    };
+
+    const decision = evaluateSpawnDecision(state, config, now, true, true);
+
+    expect(decision.action).toBe("skip");
+    if (decision.action === "skip") {
+      expect(decision.reason).toContain("in-memory flag");
+    }
+  });
+
   it('returns "spawn" when all conditions pass', () => {
     const now = Date.now();
     const state: SandboxState = {
@@ -366,11 +405,6 @@ describe("evaluateSpawnDecision", () => {
     const decision = evaluateSpawnDecision(state, config, now, false);
 
     expect(decision.action).toBe("spawn");
-  });
-
-  it("uses default config values correctly", () => {
-    expect(DEFAULT_SPAWN_CONFIG.cooldownMs).toBe(30000);
-    expect(DEFAULT_SPAWN_CONFIG.readyWaitMs).toBe(60000);
   });
 
   // ---- Persistent resume (Daytona-style) ----
@@ -468,7 +502,7 @@ describe("evaluateSpawnDecision", () => {
     expect(decision.action).toBe("spawn");
   });
 
-  it('returns "resume" after a failed connection when provider state still exists', () => {
+  it("does not resume for failed status even with providerObjectId", () => {
     const now = Date.now();
     const state: SandboxState = {
       status: "failed",
@@ -480,7 +514,8 @@ describe("evaluateSpawnDecision", () => {
 
     const decision = evaluateSpawnDecision(state, config, now, false, true);
 
-    expect(decision).toEqual({ action: "resume", providerObjectId: "daytona-abc123" });
+    // "failed" is not a resume-eligible status — should fall through to spawn
+    expect(decision.action).toBe("spawn");
   });
 });
 
@@ -488,18 +523,17 @@ describe("evaluateSpawnDecision", () => {
 
 describe("evaluateInactivityTimeout", () => {
   const config: InactivityConfig = {
-    timeoutMs: durationMs(10 * 60 * 1000),
-    extensionMs: durationMs(5 * 60 * 1000),
-    minCheckIntervalMs: durationMs(30 * 1000),
+    timeoutMs: 10 * 60 * 1000, // 10 minutes
+    extensionMs: 5 * 60 * 1000, // 5 minutes
+    minCheckIntervalMs: 30000, // 30 seconds
   };
 
   it('returns "schedule" for terminal states (stopped)', () => {
-    const now = nowMs();
+    const now = Date.now();
     const state: InactivityState = {
-      lastActivityMs: epochMs(now - config.timeoutMs - 60000), // Well past timeout
+      lastActivity: now - config.timeoutMs - 60000, // Well past timeout
       status: "stopped",
       connectedClientCount: 0,
-      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -511,12 +545,11 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it('returns "schedule" for terminal states (failed)', () => {
-    const now = nowMs();
+    const now = Date.now();
     const state: InactivityState = {
-      lastActivityMs: epochMs(now - config.timeoutMs - 60000),
+      lastActivity: now - config.timeoutMs - 60000,
       status: "failed",
       connectedClientCount: 0,
-      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -525,12 +558,11 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it('returns "schedule" for terminal states (stale)', () => {
-    const now = nowMs();
+    const now = Date.now();
     const state: InactivityState = {
-      lastActivityMs: epochMs(now - config.timeoutMs - 60000),
+      lastActivity: now - config.timeoutMs - 60000,
       status: "stale",
       connectedClientCount: 0,
-      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -539,12 +571,11 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it('returns "schedule" when no lastActivity', () => {
-    const now = nowMs();
+    const now = Date.now();
     const state: InactivityState = {
-      lastActivityMs: null,
+      lastActivity: null,
       status: "ready",
       connectedClientCount: 0,
-      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -556,12 +587,11 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it('returns "timeout" when inactivity exceeds threshold with no clients', () => {
-    const now = nowMs();
+    const now = Date.now();
     const state: InactivityState = {
-      lastActivityMs: epochMs(now - config.timeoutMs - 1000), // Just past timeout
+      lastActivity: now - config.timeoutMs - 1000, // Just past timeout
       status: "ready",
       connectedClientCount: 0,
-      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -573,33 +603,29 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it('returns "extend" when threshold exceeded but clients connected', () => {
-    const now = nowMs();
+    const now = Date.now();
     const state: InactivityState = {
-      lastActivityMs: epochMs(now - config.timeoutMs - 1000),
+      lastActivity: now - config.timeoutMs - 1000,
       status: "ready",
       connectedClientCount: 2,
-      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
 
     expect(decision.action).toBe("extend");
     if (decision.action === "extend") {
-      // What's left of the window, not a fresh extensionMs: this alarm is a
-      // second late, so the grant is a second short.
-      expect(decision.extensionMs).toBe(config.extensionMs - 1000);
+      expect(decision.extensionMs).toBe(config.extensionMs);
       expect(decision.shouldWarn).toBe(true);
     }
   });
 
   it('returns "schedule" with correct remaining time', () => {
-    const now = nowMs();
+    const now = Date.now();
     const inactiveTime = 5 * 60 * 1000; // 5 minutes
     const state: InactivityState = {
-      lastActivityMs: epochMs(now - inactiveTime),
+      lastActivity: now - inactiveTime,
       status: "ready",
       connectedClientCount: 0,
-      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -611,14 +637,13 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it("handles minimum check interval", () => {
-    const now = nowMs();
+    const now = Date.now();
     // 9 minutes 50 seconds - very close to timeout
     const inactiveTime = config.timeoutMs - 10000;
     const state: InactivityState = {
-      lastActivityMs: epochMs(now - inactiveTime),
+      lastActivity: now - inactiveTime,
       status: "ready",
       connectedClientCount: 0,
-      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -631,12 +656,11 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it("only applies to ready/running status", () => {
-    const now = nowMs();
+    const now = Date.now();
     const state: InactivityState = {
-      lastActivityMs: epochMs(now - config.timeoutMs - 60000),
+      lastActivity: now - config.timeoutMs - 60000,
       status: "spawning", // Not ready or running
       connectedClientCount: 0,
-      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -645,136 +669,16 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it('returns "timeout" for running status', () => {
-    const now = nowMs();
+    const now = Date.now();
     const state: InactivityState = {
-      lastActivityMs: epochMs(now - config.timeoutMs - 1000),
+      lastActivity: now - config.timeoutMs - 1000,
       status: "running",
       connectedClientCount: 0,
-      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
 
     expect(decision.action).toBe("timeout");
-  });
-
-  describe("extension is bounded", () => {
-    it('returns "timeout" once the extension is spent, even with clients connected', () => {
-      const now = nowMs();
-      const state: InactivityState = {
-        lastActivityMs: epochMs(now - (config.timeoutMs + config.extensionMs)),
-        status: "ready",
-        connectedClientCount: 2,
-        isProcessing: false,
-      };
-
-      const decision = evaluateInactivityTimeout(state, config, now);
-
-      expect(decision.action).toBe("timeout");
-    });
-
-    it("stops a sandbox held open by a client that never sends anything", () => {
-      // The extension used to be granted on every alarm without touching
-      // lastActivity, so a connected client extended forever and the sandbox
-      // only ever died at the provider's own backstop.
-      const lastActivityMs = nowMs();
-      const state: InactivityState = {
-        lastActivityMs,
-        status: "ready",
-        connectedClientCount: 1,
-        isProcessing: false,
-      };
-
-      // Walk the alarm chain forward as the manager would: each decision
-      // schedules the next check, and lastActivityMs never moves because the
-      // client is connected but silent.
-      let now = addDuration(lastActivityMs, config.timeoutMs);
-      const actions: string[] = [];
-      for (let i = 0; i < 10; i++) {
-        const decision = evaluateInactivityTimeout(state, config, now);
-        actions.push(decision.action);
-        if (decision.action === "timeout") break;
-        now = addDuration(
-          now,
-          decision.action === "extend" ? decision.extensionMs : decision.nextCheckMs
-        );
-      }
-
-      expect(actions).toEqual(["extend", "timeout"]);
-      expect(elapsed(lastActivityMs, now)).toBe(config.timeoutMs + config.extensionMs);
-    });
-
-    it("holds the bound when the alarm arrives late", () => {
-      // Alarms are not punctual. A late one used to be granted a fresh full
-      // extension, which pushed the deadline out past the bound rather than up
-      // to it: at 14 minutes idle, a 5-minute grant meant death at 19.
-      const lastActivityMs = nowMs();
-      const lateBy = durationMs(4 * 60 * 1000);
-      const now = addDuration(lastActivityMs, durationMs(config.timeoutMs + lateBy));
-      const state: InactivityState = {
-        lastActivityMs,
-        status: "ready",
-        connectedClientCount: 1,
-        isProcessing: false,
-      };
-
-      const decision = evaluateInactivityTimeout(state, config, now);
-
-      expect(decision.action).toBe("extend");
-      if (decision.action !== "extend") return;
-      const death = addDuration(now, decision.extensionMs);
-      expect(elapsed(lastActivityMs, death)).toBe(config.timeoutMs + config.extensionMs);
-    });
-  });
-
-  describe("in-flight runs", () => {
-    it('returns "schedule" rather than "timeout" while a message is processing', () => {
-      const now = nowMs();
-      const state: InactivityState = {
-        lastActivityMs: epochMs(now - config.timeoutMs - 1000),
-        status: "ready",
-        connectedClientCount: 0,
-        isProcessing: true,
-      };
-
-      const decision = evaluateInactivityTimeout(state, config, now);
-
-      expect(decision.action).toBe("schedule");
-    });
-
-    it("does not stop a run that has been silent far longer than the timeout", () => {
-      const now = nowMs();
-      const state: InactivityState = {
-        lastActivityMs: epochMs(now - 80 * 60 * 1000),
-        status: "ready",
-        connectedClientCount: 0,
-        isProcessing: true,
-      };
-
-      const decision = evaluateInactivityTimeout(state, config, now);
-
-      expect(decision.action).toBe("schedule");
-    });
-
-    it('returns "timeout" once the message is no longer processing', () => {
-      const now = nowMs();
-      const state: InactivityState = {
-        lastActivityMs: epochMs(now - config.timeoutMs - 1000),
-        status: "ready",
-        connectedClientCount: 0,
-        isProcessing: false,
-      };
-
-      const decision = evaluateInactivityTimeout(state, config, now);
-
-      expect(decision.action).toBe("timeout");
-    });
-  });
-
-  it("uses default config values correctly", () => {
-    expect(DEFAULT_INACTIVITY_CONFIG.timeoutMs).toBe(INACTIVITY_TIMEOUT_MS);
-    expect(DEFAULT_INACTIVITY_CONFIG.extensionMs).toBe(INACTIVITY_EXTENSION_MS);
-    expect(DEFAULT_INACTIVITY_CONFIG.minCheckIntervalMs).toBe(INACTIVITY_MIN_CHECK_INTERVAL_MS);
   });
 });
 
@@ -843,10 +747,6 @@ describe("evaluateHeartbeatHealth", () => {
 
     expect(health.isStale).toBe(true);
     expect(health.ageMs).toBe(config.timeoutMs + 1);
-  });
-
-  it("uses default config values correctly", () => {
-    expect(DEFAULT_HEARTBEAT_CONFIG.timeoutMs).toBe(90000);
   });
 });
 
@@ -918,10 +818,6 @@ describe("evaluateConnectingTimeout", () => {
       const result = evaluateConnectingTimeout(status, old, config, now);
       expect(result.isTimedOut).toBe(false);
     }
-  });
-
-  it("uses correct default config value", () => {
-    expect(DEFAULT_CONNECTING_TIMEOUT_CONFIG.timeoutMs).toBe(120_000);
   });
 });
 
@@ -1017,22 +913,22 @@ describe("evaluateWarmDecision", () => {
 
 describe("evaluateExecutionTimeout", () => {
   const config: ExecutionTimeoutConfig = {
-    timeoutMs: DEFAULT_EXECUTION_TIMEOUT_MS,
+    timeoutMs: DEFAULT_EXECUTION_TIMEOUT_MS, // 90 minutes
   };
 
-  it("does not preempt the bridge at its 90-minute deadline", () => {
+  it("returns not timed out within threshold", () => {
     const now = Date.now();
-    const startedAt = now - 90 * 60 * 1000;
+    const startedAt = now - 60000; // 1 minute ago
 
     const result = evaluateExecutionTimeout(startedAt, config, now);
 
     expect(result.isTimedOut).toBe(false);
-    expect(result.elapsedMs).toBe(90 * 60 * 1000);
+    expect(result.elapsedMs).toBe(60000);
   });
 
-  it("returns timed out past the configured threshold", () => {
+  it("returns timed out past threshold", () => {
     const now = Date.now();
-    const startedAt = now - DEFAULT_EXECUTION_TIMEOUT_MS - 1000;
+    const startedAt = now - DEFAULT_EXECUTION_TIMEOUT_MS - 1000; // Just past 90 minutes
 
     const result = evaluateExecutionTimeout(startedAt, config, now);
 
@@ -1040,7 +936,7 @@ describe("evaluateExecutionTimeout", () => {
     expect(result.elapsedMs).toBe(DEFAULT_EXECUTION_TIMEOUT_MS + 1000);
   });
 
-  it("returns timed out at the configured threshold", () => {
+  it("returns timed out at exact threshold", () => {
     const now = Date.now();
     const startedAt = now - DEFAULT_EXECUTION_TIMEOUT_MS;
 

@@ -1,24 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleRequest } from "./router";
-import { ParentSessionSpawnRejectedError, SessionIndexStore } from "./db/session-index";
-import { TEST_SERVICE_SECRETS } from "./router.test-support";
+import {
+  signedServiceRequest,
+  TEST_BACKGROUND_TASK_CONTEXT,
+  TEST_SERVICE_SECRETS,
+} from "./router.test-support";
+import { getEffectiveEnabledModels } from "./db/model-preferences";
+import { SessionIndexStore } from "./db/session-index";
 import { SessionInternalPaths } from "./session/contracts";
 
 const integrationSettingsMocks = vi.hoisted(() => ({
   resolveCodeServerEnabled: vi.fn().mockResolvedValue(false),
+  resolveVncEnabled: vi.fn().mockResolvedValue(false),
   resolveSandboxSettings: vi.fn().mockResolvedValue({}),
 }));
 
-const sessionIndexMocks = vi.hoisted(() => {
-  class ParentSessionSpawnRejectedError extends Error {}
-  const sessionAcceptsChildSpawns = (status: string) =>
-    !["completed", "failed", "archived", "cancelled"].includes(status);
-  return { ParentSessionSpawnRejectedError, sessionAcceptsChildSpawns };
-});
-
 vi.mock("./db/session-index", () => ({
-  ...sessionIndexMocks,
   SessionIndexStore: vi.fn(),
+}));
+
+vi.mock("./db/model-preferences", () => ({
+  getEffectiveEnabledModels: vi.fn(),
 }));
 
 vi.mock("./session/integration-settings-resolution", () => integrationSettingsMocks);
@@ -33,8 +35,10 @@ describe("handleSpawnChild prompt enqueue handling", () => {
     baseBranch?: string | null;
     model: string;
     reasoningEffort: string | null;
-    owner: {
+    sandboxTimeoutMs?: number;
+    promptAuthor: {
       userId: string;
+      canonicalUserId?: string | null;
       scmUserId: string | null;
       scmLogin: string | null;
       scmName: string | null;
@@ -51,9 +55,11 @@ describe("handleSpawnChild prompt enqueue handling", () => {
     repoId: 12345,
     model: "anthropic/claude-sonnet-4-6",
     reasoningEffort: null,
+    sandboxTimeoutMs: 14_400_000,
     baseBranch: "main",
-    owner: {
+    promptAuthor: {
       userId: "user-1",
+      canonicalUserId: "canonical-user-123",
       scmUserId: "12345",
       scmLogin: "acmedev",
       scmName: "Acme Dev",
@@ -73,18 +79,24 @@ describe("handleSpawnChild prompt enqueue handling", () => {
       repoOwner: context.repoOwner,
       repoName: context.repoName,
       environmentId: "env_parent",
-      status: "active",
     }),
     getSpawnDepth: vi.fn().mockResolvedValue(0),
-    countActiveChildren: vi.fn().mockResolvedValue(0),
     countTotalChildren: vi.fn().mockResolvedValue(0),
+    acquireChildAdmissionLease: vi.fn().mockResolvedValue({
+      token: "lease-token",
+      childSessionId: "child-session",
+      expiresAt: Date.now() + 60_000,
+    }),
+    releaseChildAdmissionLease: vi.fn().mockResolvedValue(undefined),
     create: vi.fn().mockResolvedValue(undefined),
     updateStatus: vi.fn().mockResolvedValue(true),
   });
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(getEffectiveEnabledModels).mockResolvedValue(["anthropic/claude-sonnet-4-6"]);
     integrationSettingsMocks.resolveCodeServerEnabled.mockResolvedValue(false);
+    integrationSettingsMocks.resolveVncEnabled.mockResolvedValue(false);
     integrationSettingsMocks.resolveSandboxSettings.mockResolvedValue({});
   });
 
@@ -92,39 +104,159 @@ describe("handleSpawnChild prompt enqueue handling", () => {
     env: Record<string, unknown>,
     body: Record<string, unknown> = { title: "Child task", prompt: "Do the thing" }
   ): Promise<Response> {
-    const session = env.SESSION as {
-      idFromName(name: string): unknown;
-      get(id: unknown): { fetch(request: Request): Promise<Response> } | undefined;
-    };
-    const authorizedEnv = {
-      ...env,
-      SESSION: {
-        idFromName: session.idFromName,
-        get: (id: unknown) => {
-          const stub = session.get(id);
-          return {
-            fetch: (request: Request) =>
-              new URL(request.url).pathname === SessionInternalPaths.verifySandboxToken
-                ? Promise.resolve(new Response(null, { status: 204 }))
-                : stub!.fetch(request),
-          };
+    return handleRequest(
+      await signedServiceRequest(`https://test.local/sessions/${parentId}/children`, {
+        method: "POST",
+        body: JSON.stringify(body),
+        service: "linear-bot",
+      }),
+      env as never,
+      TEST_BACKGROUND_TASK_CONTEXT
+    );
+  }
+
+  function makeSuccessfulEnv(context: TestSpawnContext) {
+    const parentStub: DurableObjectStub = {
+      fetch: vi.fn(async () => Response.json(context)),
+    } as never;
+    const childStub: DurableObjectStub = {
+      fetch: vi.fn(async (request: Request) => {
+        const path = new URL(request.url).pathname;
+        if (path === SessionInternalPaths.init) return Response.json({ status: "ok" });
+        if (path === SessionInternalPaths.prompt) {
+          return Response.json({ messageId: "msg-1", status: "queued" });
+        }
+        return Response.json({ error: "unexpected" }, { status: 404 });
+      }),
+    } as never;
+    return {
+      childStub,
+      env: {
+        ...TEST_SERVICE_SECRETS,
+        SCM_PROVIDER: "github",
+        DB: {},
+        SESSION: {
+          idFromName: (name: string) => name,
+          get: (id: string) => (id === parentId ? parentStub : childStub),
         },
       },
     };
-    return handleRequest(
-      new Request(`https://test.local/sessions/${parentId}/children`, {
-        method: "POST",
-        headers: { Authorization: "Bearer sandbox-token" },
-        body: JSON.stringify(body),
-      }),
-      authorizedEnv as never
-    );
   }
+
+  async function getInitBody(childStub: DurableObjectStub) {
+    const initRequest = vi.mocked(childStub.fetch).mock.calls.find((call) => {
+      const request = call[0] as Request;
+      return new URL(request.url).pathname === SessionInternalPaths.init;
+    })?.[0] as Request;
+    return initRequest.json<{ reasoningEffort: string | null }>();
+  }
+
+  it("inherits the parent's reasoning effort when omitted", async () => {
+    const store = makeStore();
+    vi.mocked(SessionIndexStore).mockImplementation(function () {
+      return store as never;
+    });
+    const { env, childStub } = makeSuccessfulEnv({ ...spawnContext, reasoningEffort: "high" });
+
+    const response = await makeRequest(env);
+
+    expect(response.status).toBe(201);
+    await expect(getInitBody(childStub)).resolves.toMatchObject({ reasoningEffort: "high" });
+  });
+
+  it("uses an explicit child reasoning effort override", async () => {
+    const store = makeStore();
+    vi.mocked(SessionIndexStore).mockImplementation(function () {
+      return store as never;
+    });
+    const { env, childStub } = makeSuccessfulEnv({ ...spawnContext, reasoningEffort: "high" });
+
+    const response = await makeRequest(env, {
+      title: "Child task",
+      prompt: "Do the thing",
+      reasoningEffort: "low",
+    });
+
+    expect(response.status).toBe(201);
+    await expect(getInitBody(childStub)).resolves.toMatchObject({ reasoningEffort: "low" });
+  });
+
+  it("rejects an explicit reasoning effort incompatible with the resolved model", async () => {
+    const store = makeStore();
+    vi.mocked(SessionIndexStore).mockImplementation(function () {
+      return store as never;
+    });
+    const { env, childStub } = makeSuccessfulEnv({ ...spawnContext, reasoningEffort: "high" });
+
+    const response = await makeRequest(env, {
+      title: "Child task",
+      prompt: "Do the thing",
+      reasoningEffort: "xhigh",
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error:
+        'Invalid reasoning effort "xhigh" for model "anthropic/claude-sonnet-4-6". Valid efforts: low, medium, high, max',
+    });
+    expect(childStub.fetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects "x-high" and reports the canonical "xhigh" value', async () => {
+    const store = makeStore();
+    vi.mocked(SessionIndexStore).mockImplementation(function () {
+      return store as never;
+    });
+    vi.mocked(getEffectiveEnabledModels).mockResolvedValue([
+      "anthropic/claude-sonnet-4-6",
+      "openai/gpt-5.6-sol",
+    ]);
+    const { env, childStub } = makeSuccessfulEnv(spawnContext);
+
+    const response = await makeRequest(env, {
+      title: "Child task",
+      prompt: "Do the thing",
+      model: "openai/gpt-5.6-sol",
+      reasoningEffort: "x-high",
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error:
+        'Invalid reasoning effort "x-high" for model "openai/gpt-5.6-sol". Valid efforts: none, low, medium, high, xhigh',
+    });
+    expect(childStub.fetch).not.toHaveBeenCalled();
+  });
+
+  it('accepts canonical "xhigh" for a model that supports it', async () => {
+    const store = makeStore();
+    vi.mocked(SessionIndexStore).mockImplementation(function () {
+      return store as never;
+    });
+    vi.mocked(getEffectiveEnabledModels).mockResolvedValue([
+      "anthropic/claude-sonnet-4-6",
+      "openai/gpt-5.6-sol",
+    ]);
+    const { env, childStub } = makeSuccessfulEnv(spawnContext);
+
+    const response = await makeRequest(env, {
+      title: "Child task",
+      prompt: "Do the thing",
+      model: "openai/gpt-5.6-sol",
+      reasoningEffort: "xhigh",
+    });
+
+    expect(response.status).toBe(201);
+    await expect(getInitBody(childStub)).resolves.toMatchObject({ reasoningEffort: "xhigh" });
+  });
 
   it("returns 201 when child prompt enqueue succeeds", async () => {
     const store = makeStore("canonical-user-123");
     vi.mocked(SessionIndexStore).mockImplementation(function () {
       return store as never;
+    });
+    integrationSettingsMocks.resolveSandboxSettings.mockResolvedValue({
+      sandboxTimeoutMs: 3_600_000,
     });
 
     const parentStub: DurableObjectStub = {
@@ -167,8 +299,93 @@ describe("handleSpawnChild prompt enqueue handling", () => {
       return new URL(request.url).pathname === SessionInternalPaths.init;
     })?.[0] as Request | undefined;
     expect(initRequest).toBeDefined();
-    await expect(initRequest!.json()).resolves.toMatchObject({ environmentId: "env_parent" });
+    await expect(initRequest!.json()).resolves.toMatchObject({
+      environmentId: "env_parent",
+      sandboxSettings: { sandboxTimeoutMs: 14_400_000 },
+    });
     expect(store.updateStatus).not.toHaveBeenCalled();
+  });
+
+  it("attributes the child and initial prompt to the active prompt author", async () => {
+    const activeAuthorContext = {
+      ...spawnContext,
+      promptAuthor: {
+        ...spawnContext.promptAuthor,
+        userId: "slack:U2",
+        canonicalUserId: "canonical-user-2",
+        scmLogin: "second-user",
+        scmAccessTokenEncrypted: "second-access",
+      },
+    };
+    const store = makeStore("canonical-user-1", activeAuthorContext as never);
+    vi.mocked(SessionIndexStore).mockImplementation(function () {
+      return store as never;
+    });
+    const { env, childStub } = makeSuccessfulEnv(activeAuthorContext as never);
+
+    const response = await makeRequest(env);
+
+    expect(response.status).toBe(201);
+    expect(store.create.mock.calls[0]?.[0]?.userId).toBe("canonical-user-2");
+    await expect(getInitBody(childStub)).resolves.toMatchObject({
+      userId: "slack:U2",
+      canonicalUserId: "canonical-user-2",
+      scmLogin: "second-user",
+      scmTokenEncrypted: "second-access",
+    });
+    const promptRequest = vi.mocked(childStub.fetch).mock.calls.find((call) => {
+      const request = call[0] as Request;
+      return new URL(request.url).pathname === SessionInternalPaths.prompt;
+    })?.[0] as Request;
+    await expect(promptRequest.json()).resolves.toMatchObject({
+      authorId: "slack:U2",
+      canonicalUserId: "canonical-user-2",
+      source: "agent",
+    });
+  });
+
+  it("preserves the provider default when the parent has no snapshotted timeout", async () => {
+    const store = makeStore("canonical-user-123");
+    vi.mocked(SessionIndexStore).mockImplementation(function () {
+      return store as never;
+    });
+    integrationSettingsMocks.resolveSandboxSettings.mockResolvedValue({
+      sandboxTimeoutMs: 3_600_000,
+      tunnelPorts: [3000],
+    });
+
+    const parentStub: DurableObjectStub = {
+      fetch: vi.fn(async () => Response.json({ ...spawnContext, sandboxTimeoutMs: undefined })),
+    } as never;
+    const childStub: DurableObjectStub = {
+      fetch: vi.fn(async (request: Request) => {
+        const path = new URL(request.url).pathname;
+        if (path === SessionInternalPaths.init) return Response.json({ status: "ok" });
+        if (path === SessionInternalPaths.prompt) {
+          return Response.json({ messageId: "msg-1", status: "queued" });
+        }
+        return Response.json({ error: "unexpected" }, { status: 404 });
+      }),
+    } as never;
+    const env = {
+      ...TEST_SERVICE_SECRETS,
+      SCM_PROVIDER: "github",
+      DB: {},
+      SESSION: {
+        idFromName: (name: string) => name,
+        get: (id: string) => (id === parentId ? parentStub : childStub),
+      },
+    };
+
+    const response = await makeRequest(env);
+
+    expect(response.status).toBe(201);
+    const initRequest = vi.mocked(childStub.fetch).mock.calls.find((call) => {
+      const request = call[0] as Request;
+      return new URL(request.url).pathname === SessionInternalPaths.init;
+    })?.[0] as Request;
+    const initBody = await initRequest.json<{ sandboxSettings: Record<string, unknown> }>();
+    expect(initBody.sandboxSettings).toEqual({ tunnelPorts: [3000] });
   });
 
   it("creates repo-less children for repo-less parents", async () => {
@@ -220,10 +437,7 @@ describe("handleSpawnChild prompt enqueue handling", () => {
     );
   });
 
-  it("inherits the parent's model and ignores one the caller names", async () => {
-    // A spawning agent cannot know which providers this deployment has keys
-    // for, so its choice is dropped rather than validated: every model it
-    // picked from an unconfigured provider cost a sandbox to boot and fail.
+  it("returns 400 when child specifies an invalid model", async () => {
     const store = makeStore();
     vi.mocked(SessionIndexStore).mockImplementation(function () {
       return store as never;
@@ -243,16 +457,51 @@ describe("handleSpawnChild prompt enqueue handling", () => {
       },
     };
 
-    const response = await makeRequest(env, {
-      title: "Child task",
-      prompt: "Do the thing",
-      model: "not-a-real-model",
-    });
-
-    expect(response.status).not.toBe(400);
-    expect(store.create).toHaveBeenCalledWith(
-      expect.objectContaining({ model: spawnContext.model })
+    const response = await handleRequest(
+      await signedServiceRequest(`https://test.local/sessions/${parentId}/children`, {
+        method: "POST",
+        service: "linear-bot",
+        body: JSON.stringify({
+          title: "Child task",
+          prompt: "Do the thing",
+          model: "not-a-real-model",
+        }),
+      }),
+      env as never,
+      TEST_BACKGROUND_TASK_CONTEXT
     );
+
+    expect(response.status).toBe(400);
+    const payload = await response.json<{ error: string }>();
+    expect(payload.error).toContain('Invalid model "not-a-real-model"');
+    expect(payload.error).toContain("Valid models:");
+  });
+
+  it("returns 503 when enabled model preferences cannot be read", async () => {
+    const store = makeStore();
+    vi.mocked(SessionIndexStore).mockImplementation(function () {
+      return store as never;
+    });
+    vi.mocked(getEffectiveEnabledModels).mockRejectedValue(new Error("D1 unavailable"));
+
+    const parentStub: DurableObjectStub = {
+      fetch: vi.fn(async () => Response.json(spawnContext)),
+    } as never;
+    const env = {
+      ...TEST_SERVICE_SECRETS,
+      SCM_PROVIDER: "github",
+      DB: {},
+      SESSION: {
+        idFromName: (name: string) => name,
+        get: () => parentStub,
+      },
+    };
+
+    const response = await makeRequest(env);
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({ error: "Model preferences unavailable" });
+    expect(store.create).not.toHaveBeenCalled();
   });
 
   it("returns 400 for a malformed child spawn request", async () => {
@@ -271,106 +520,19 @@ describe("handleSpawnChild prompt enqueue handling", () => {
       },
     };
 
-    const response = await makeRequest(env, { title: "Child task" });
+    const response = await handleRequest(
+      await signedServiceRequest(`https://test.local/sessions/${parentId}/children`, {
+        method: "POST",
+        service: "linear-bot",
+        body: JSON.stringify({ title: "Child task" }),
+      }),
+      env as never,
+      TEST_BACKGROUND_TASK_CONTEXT
+    );
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({ error: "title and prompt are required" });
     expect(SessionIndexStore).not.toHaveBeenCalled();
-  });
-
-  it("rejects child creation after the parent is cancelled", async () => {
-    const store = makeStore();
-    store.get.mockResolvedValue({
-      userId: "canonical-user-123",
-      repoOwner: "acme",
-      repoName: "web-app",
-      environmentId: "env_parent",
-      status: "cancelled",
-    });
-    vi.mocked(SessionIndexStore).mockImplementation(function () {
-      return store as never;
-    });
-    const parentFetch = vi.fn();
-    const env = {
-      ...TEST_SERVICE_SECRETS,
-      SCM_PROVIDER: "github",
-      DB: {},
-      SESSION: {
-        idFromName: (name: string) => name,
-        get: () => ({ fetch: parentFetch }),
-      },
-    };
-
-    const response = await makeRequest(env);
-
-    expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toEqual({
-      error: "Parent session no longer accepts child sessions",
-    });
-    expect(parentFetch).not.toHaveBeenCalled();
-    expect(store.create).not.toHaveBeenCalled();
-  });
-
-  it("rejects a child when cancellation wins the creation race", async () => {
-    const store = makeStore();
-    store.create.mockRejectedValue(new ParentSessionSpawnRejectedError(parentId));
-    vi.mocked(SessionIndexStore).mockImplementation(function () {
-      return store as never;
-    });
-    const parentStub: DurableObjectStub = {
-      fetch: vi.fn(async () => Response.json(spawnContext)),
-    } as never;
-    const env = {
-      ...TEST_SERVICE_SECRETS,
-      SCM_PROVIDER: "github",
-      DB: {},
-      SESSION: {
-        idFromName: (name: string) => name,
-        get: () => parentStub,
-      },
-    };
-
-    const response = await makeRequest(env);
-
-    expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toEqual({
-      error: "Parent session no longer accepts child sessions",
-    });
-  });
-
-  it("returns 409 when cancellation closes the fence before DO initialization", async () => {
-    const store = makeStore();
-    vi.mocked(SessionIndexStore).mockImplementation(function () {
-      return store as never;
-    });
-    const parentStub: DurableObjectStub = {
-      fetch: vi.fn(async () => Response.json(spawnContext)),
-    } as never;
-    const childStub: DurableObjectStub = {
-      fetch: vi.fn(async (request: Request) => {
-        const path = new URL(request.url).pathname;
-        if (path === SessionInternalPaths.init) {
-          return Response.json({ error: "Session initialization was cancelled" }, { status: 409 });
-        }
-        return Response.json({ error: "unexpected" }, { status: 404 });
-      }),
-    } as never;
-    const env = {
-      ...TEST_SERVICE_SECRETS,
-      SCM_PROVIDER: "github",
-      DB: {},
-      SESSION: {
-        idFromName: (name: string) => name,
-        get: (id: string) => (id === parentId ? parentStub : childStub),
-      },
-    };
-
-    const response = await makeRequest(env);
-
-    expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toEqual({
-      error: "Parent session no longer accepts child sessions",
-    });
   });
 
   it("returns 500 for a malformed parent spawn context", async () => {
@@ -403,7 +565,7 @@ describe("handleSpawnChild prompt enqueue handling", () => {
 
   it("uses configured concurrent child session limit", async () => {
     const store = makeStore();
-    store.countActiveChildren.mockResolvedValue(2);
+    store.acquireChildAdmissionLease.mockResolvedValue(null);
     vi.mocked(SessionIndexStore).mockImplementation(function () {
       return store as never;
     });
@@ -444,7 +606,6 @@ describe("handleSpawnChild prompt enqueue handling", () => {
 
   it("uses configured total child session limit", async () => {
     const store = makeStore();
-    store.countActiveChildren.mockResolvedValue(0);
     store.countTotalChildren.mockResolvedValue(4);
     vi.mocked(SessionIndexStore).mockImplementation(function () {
       return store as never;
@@ -474,6 +635,45 @@ describe("handleSpawnChild prompt enqueue handling", () => {
     await expect(response.json()).resolves.toMatchObject({
       error: "Maximum total children (4) reached",
     });
+  });
+
+  it("returns 400 when child specifies an empty-string model", async () => {
+    const store = makeStore();
+    vi.mocked(SessionIndexStore).mockImplementation(function () {
+      return store as never;
+    });
+
+    const parentStub: DurableObjectStub = {
+      fetch: vi.fn(async () => Response.json(spawnContext)),
+    } as never;
+
+    const env = {
+      ...TEST_SERVICE_SECRETS,
+      SCM_PROVIDER: "github",
+      DB: {},
+      SESSION: {
+        idFromName: (name: string) => name,
+        get: () => parentStub,
+      },
+    };
+
+    const response = await handleRequest(
+      await signedServiceRequest(`https://test.local/sessions/${parentId}/children`, {
+        method: "POST",
+        service: "linear-bot",
+        body: JSON.stringify({
+          title: "Child task",
+          prompt: "Do the thing",
+          model: "",
+        }),
+      }),
+      env as never,
+      TEST_BACKGROUND_TASK_CONTEXT
+    );
+
+    expect(response.status).toBe(400);
+    const payload = await response.json<{ error: string }>();
+    expect(payload.error).toContain('Invalid model ""');
   });
 
   it("propagates parent spawn-context errors", async () => {
@@ -546,77 +746,5 @@ describe("handleSpawnChild prompt enqueue handling", () => {
 
     const createdChildId = store.create.mock.calls[0]?.[0]?.id;
     expect(store.updateStatus).toHaveBeenCalledWith(createdChildId, "failed");
-  });
-
-  it("preserves cancellation when it wins before initial prompt enqueue", async () => {
-    const store = makeStore();
-    vi.mocked(SessionIndexStore).mockImplementation(function () {
-      return store as never;
-    });
-
-    const parentStub: DurableObjectStub = {
-      fetch: vi.fn(async () => Response.json(spawnContext)),
-    } as never;
-    const childStub: DurableObjectStub = {
-      fetch: vi.fn(async (request: Request) => {
-        const path = new URL(request.url).pathname;
-        if (path === SessionInternalPaths.init) return Response.json({ status: "ok" });
-        if (path === SessionInternalPaths.prompt) {
-          return Response.json({ error: "Session no longer accepts prompts" }, { status: 409 });
-        }
-        return Response.json({ error: "unexpected" }, { status: 404 });
-      }),
-    } as never;
-    const env = {
-      ...TEST_SERVICE_SECRETS,
-      SCM_PROVIDER: "github",
-      DB: {},
-      SESSION: {
-        idFromName: (name: string) => name,
-        get: (id: string) => (id === parentId ? parentStub : childStub),
-      },
-    };
-
-    const response = await makeRequest(env);
-
-    expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toEqual({
-      error: "Child session was cancelled before its prompt was queued",
-    });
-    expect(store.updateStatus).not.toHaveBeenCalled();
-  });
-
-  it("refuses to spawn when the repository's child-session cap is zero", async () => {
-    // Zero is the fan-out kill switch. It has to answer before anything is
-    // created, and answer 403 so the agent reports why instead of backing off
-    // against a limit that will never lift.
-    integrationSettingsMocks.resolveSandboxSettings.mockResolvedValue({
-      maxConcurrentChildSessions: 0,
-      maxTotalChildSessions: 0,
-    });
-    const store = makeStore();
-    vi.mocked(SessionIndexStore).mockImplementation(function () {
-      return store as never;
-    });
-
-    const parentStub: DurableObjectStub = {
-      fetch: vi.fn(async () => Response.json(spawnContext)),
-    } as never;
-
-    const env = {
-      ...TEST_SERVICE_SECRETS,
-      SCM_PROVIDER: "github",
-      DB: {},
-      SESSION: {
-        idFromName: (name: string) => name,
-        get: () => parentStub,
-      },
-    };
-
-    const response = await makeRequest(env);
-
-    expect(response.status).toBe(403);
-    expect(store.create).not.toHaveBeenCalled();
-    expect(parentStub.fetch).not.toHaveBeenCalled();
   });
 });

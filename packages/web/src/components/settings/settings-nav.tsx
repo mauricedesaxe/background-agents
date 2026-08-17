@@ -11,7 +11,9 @@ import {
   IntegrationsIcon,
   AppearanceIcon,
   TerminalIcon,
+  GitPrIcon,
   ChevronRightIcon,
+  SparkleIcon,
 } from "@/components/ui/icons";
 import { supportsRepoImages } from "@/lib/sandbox-provider";
 
@@ -57,9 +59,19 @@ const NAV_ITEMS = [
     icon: TerminalIcon,
   },
   {
+    id: "scm",
+    label: "SCM Settings",
+    icon: GitPrIcon,
+  },
+  {
     id: "integrations",
     label: "Integrations",
     icon: IntegrationsIcon,
+  },
+  {
+    id: "skills",
+    label: "Skills",
+    icon: SparkleIcon,
   },
   {
     id: "mcp-servers",
@@ -92,6 +104,7 @@ export function SettingsNav({ activeCategory, onSelect, onNavigate }: SettingsNa
             return (
               <li key={item.id}>
                 <button
+                  type="button"
                   onClick={() => {
                     onSelect(item.id);
                     onNavigate?.();
@@ -120,6 +133,7 @@ export function SettingsNav({ activeCategory, onSelect, onNavigate }: SettingsNa
           return (
             <li key={item.id}>
               <button
+                type="button"
                 onClick={() => onSelect(item.id)}
                 aria-current={isActive ? "page" : undefined}
                 className={`w-full flex items-center gap-2 px-3 py-2 text-sm rounded transition ${

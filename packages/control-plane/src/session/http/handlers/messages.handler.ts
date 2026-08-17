@@ -1,32 +1,17 @@
 import type { Logger } from "../../../logger";
+import { eventTypeSchema } from "@open-inspect/shared/types/sandbox-events";
 import {
-  PromptEnqueueRejectedError,
-  PromptIdConflictError,
+  enqueuePromptRequestSchema,
   type EnqueuePromptRequest,
-  type MessageService,
-} from "../../services/message.service";
+} from "../../enqueue-prompt-contract";
+import type { MessageService } from "../../services/message.service";
 import { parseEventListCursor } from "../../event-cursor";
-
-/**
- * Valid event types for filtering.
- * Includes both external types (from types.ts) and internal types used by the sandbox.
- */
-const VALID_EVENT_TYPES = [
-  "tool_call",
-  "tool_result",
-  "token",
-  "error",
-  "warning",
-  "git_sync",
-  "step_start",
-  "step_finish",
-  "execution_complete",
-  "heartbeat",
-  "push_complete",
-  "push_error",
-  "artifact",
-  "user_message",
-] as const;
+import { SessionAttachmentError } from "../../session-attachment-resolver";
+import {
+  PromptQueueFullError,
+  PromptRequestConflictError,
+  SessionNotPromptableError,
+} from "../../message-queue";
 
 /**
  * Valid message statuses for filtering.
@@ -49,14 +34,32 @@ export function createMessagesHandler(deps: MessagesHandlerDeps): MessagesHandle
   return {
     async enqueuePrompt(request: Request, log: Logger): Promise<Response> {
       try {
-        const body = (await request.json()) as EnqueuePromptRequest;
+        const raw = await request.json();
+        const result = enqueuePromptRequestSchema.safeParse(raw);
+        if (!result.success) {
+          return Response.json({ error: "Invalid prompt body" }, { status: 400 });
+        }
+
+        const body: EnqueuePromptRequest = result.data;
         return Response.json(await deps.messageService.enqueuePrompt(body));
       } catch (error) {
-        if (error instanceof PromptEnqueueRejectedError) {
+        if (error instanceof SessionAttachmentError) {
+          return Response.json({ error: error.message }, { status: 400 });
+        }
+        if (error instanceof SessionNotPromptableError) {
           return Response.json({ error: error.message }, { status: 409 });
         }
-        if (error instanceof PromptIdConflictError) {
-          return Response.json({ error: error.message }, { status: 409 });
+        if (error instanceof PromptQueueFullError) {
+          return Response.json(
+            { error: error.message, code: "PROMPT_QUEUE_FULL" },
+            { status: 429 }
+          );
+        }
+        if (error instanceof PromptRequestConflictError) {
+          return Response.json(
+            { error: error.message, code: "PROMPT_REQUEST_CONFLICT" },
+            { status: 409 }
+          );
         }
         log.error("handleEnqueuePrompt error", {
           error: error instanceof Error ? error : String(error),
@@ -75,7 +78,7 @@ export function createMessagesHandler(deps: MessagesHandlerDeps): MessagesHandle
       const type = url.searchParams.get("type");
       const messageId = url.searchParams.get("message_id");
 
-      if (type && !VALID_EVENT_TYPES.includes(type as (typeof VALID_EVENT_TYPES)[number])) {
+      if (type && !eventTypeSchema.safeParse(type).success) {
         return Response.json({ error: `Invalid event type: ${type}` }, { status: 400 });
       }
 
@@ -116,20 +119,7 @@ export function createMessagesHandler(deps: MessagesHandlerDeps): MessagesHandle
 
       const result = deps.messageService.listMessages({ cursor, limit, status });
 
-      return Response.json({
-        messages: result.messages.map((message) => ({
-          id: message.id,
-          authorId: message.author_id,
-          content: message.content,
-          source: message.source,
-          status: message.status,
-          createdAt: message.created_at,
-          startedAt: message.started_at,
-          completedAt: message.completed_at,
-        })),
-        cursor: result.cursor,
-        hasMore: result.hasMore,
-      });
+      return Response.json(result);
     },
   };
 }

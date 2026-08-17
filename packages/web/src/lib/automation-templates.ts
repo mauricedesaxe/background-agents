@@ -6,7 +6,7 @@
  * repo-required-at-creation invariant is untouched.
  */
 
-import type { AutomationTriggerType } from "@open-inspect/shared";
+import type { AutomationTriggerType } from "@open-inspect/shared/triggers";
 import type { AutomationFormValues } from "@/components/automations/automation-form";
 
 export type TemplateCategory =
@@ -23,7 +23,7 @@ export type TemplateCategory =
  * required so every template is complete by construction — making these
  * invariants compile-time rather than test-only.
  */
-export type AutomationTemplatePrefill = Omit<
+type AutomationTemplatePrefill = Omit<
   Partial<AutomationFormValues>,
   "repositories" | "scheduleTz"
 > & {
@@ -57,8 +57,8 @@ export const TEMPLATE_CATEGORIES: ReadonlyArray<{ id: TemplateCategory; label: s
   { id: "data-research", label: "Data & Research" },
 ];
 
+// Conservative cadences to limit recurring cost. Both are ≥ the 15-minute floor.
 const DAILY_9AM = "0 9 * * *";
-const DAILY_8AM = "0 8 * * *";
 const WEEKLY_MON_9AM = "0 9 * * 1";
 
 /**
@@ -268,108 +268,6 @@ export const automationTemplates: AutomationTemplate[] = [
     },
   },
   {
-    id: "upstream-exchange-outbound",
-    title: "Find work to contribute upstream",
-    description:
-      "Classify new fork commits for upstream usefulness and post a read-only daily Slack digest.",
-    categories: ["data-research"],
-    primaryOutput: "slack",
-    setupNote:
-      "For the tracked background-agents fork. Requires Slack notifications and the bot in #upstream-exchange.",
-    prefill: {
-      name: "Daily outbound upstream exchange",
-      triggerType: "schedule",
-      scheduleCron: DAILY_8AM,
-      model: "openai/gpt-5.6-sol",
-      reasoningEffort: "high",
-      instructions:
-        "Produce the daily outbound exchange report for the tracked fork mauricedesaxe/background-agents. " +
-        "This is classification and reporting only. Never write to ColeMurray/background-agents. Do not " +
-        "create or edit issues, comments, branches, commits, pull requests, releases, or repository settings " +
-        "in either repository. Do not modify the working tree. Use gh only for read operations.\n\n" +
-        "Read docs/FORK.md before classifying anything. Fetch the current upstream main without changing " +
-        "the checkout: `git fetch https://github.com/ColeMurray/background-agents.git " +
-        "+refs/heads/main:refs/remotes/upstream/main`. The sandbox clone is shallow, so deepen or fetch " +
-        "specific commits until the fork head, upstream head, durable cursor, and merge base are all " +
-        "available. Recompute the fork head, upstream head, and merge base. Never trust a pin written in a " +
-        "document.\n\n" +
-        "Call upstream-exchange with action=cursor, direction=outbound, and " +
-        "sourceRepository=mauricedesaxe/background-agents. The returned SHA is the last finalized to_sha. " +
-        "If there is no cursor, begin at the merge base. Verify the chosen start is an ancestor of the fork " +
-        "head. Examine every fork commit after that start through the fork head, oldest first. Call " +
-        "upstream-exchange action=begin with the exact ordered SHA list plus fromSha (null when there was no " +
-        "durable cursor), toSha=fork head, both heads, and merge base. Keep the returned scanId and " +
-        "classifiedCommitShas.\n\n" +
-        "Classify each expected commit absent from classifiedCommitShas with upstream-exchange action=classify. " +
-        "Never recreate an existing durable disposition. Use only these " +
-        "outbound classifications: candidate, intentional_divergence, deployment_specific, already_upstream, " +
-        "or not_useful_upstream. A candidate must say whether its useful unit is an idea, bug report, test " +
-        "case, or implementation. Record concrete evidence, affected packages, Terraform impact, migration " +
-        "impact, touched docs/FORK.md divergence entries, whether overlapping tests require hand-merging, and " +
-        "semantic-port evidence, and usefulUnit for candidates (idea, bug_report, test_case, or implementation). " +
-        "proposedArtifact must be null because outbound reporting cannot propose local fork work. " +
-        "Use commit diffs, commit and PR context, and current upstream code as evidence rather than judging the " +
-        "subject line alone.\n\n" +
-        "Post one concise digest to #upstream-exchange with slack-notify and pass scan_id=scanId. Include the " +
-        "examined compare range, fork head, upstream head, merge base, links to candidate commits, the useful " +
-        "unit and rationale for each candidate, and explicit grouped exclusions. If there are no commits, " +
-        "post a short no-op report with the unchanged range and heads. The run is successful only after that " +
-        "Slack call returns ok=true. Do not call slack-notify without scan_id.",
-    },
-  },
-  {
-    id: "upstream-exchange-inbound",
-    title: "Review new upstream changes",
-    description:
-      "Classify new upstream commits against fork behavior and post a read-only daily Slack digest.",
-    categories: ["data-research"],
-    primaryOutput: "slack",
-    setupNote:
-      "For the tracked background-agents fork. Requires Slack notifications and the bot in #upstream-exchange.",
-    prefill: {
-      name: "Daily inbound upstream exchange",
-      triggerType: "schedule",
-      scheduleCron: DAILY_9AM,
-      model: "openai/gpt-5.6-sol",
-      reasoningEffort: "high",
-      instructions:
-        "Produce the daily inbound exchange report for mauricedesaxe/background-agents from " +
-        "ColeMurray/background-agents. This is classification and reporting only. Do not create or edit " +
-        "issues, comments, branches, commits, pull requests, releases, or repository settings. Never merge, " +
-        "cherry-pick, rebase, or modify the working tree. Use gh only for read operations. A human will create " +
-        "or update a local issue after reading the digest.\n\n" +
-        "Read docs/FORK.md before classifying anything. Fetch current upstream main without changing the " +
-        "checkout: `git fetch https://github.com/ColeMurray/background-agents.git " +
-        "+refs/heads/main:refs/remotes/upstream/main`. The sandbox clone is shallow, so deepen or fetch " +
-        "specific commits until the fork head, upstream head, durable cursor, and merge base are all " +
-        "available. Recompute the fork head, upstream head, and merge base. Never trust a pin written in a " +
-        "document.\n\n" +
-        "Call upstream-exchange with action=cursor, direction=inbound, and " +
-        "sourceRepository=ColeMurray/background-agents. The returned SHA is the last finalized to_sha. If " +
-        "there is no cursor, begin at the merge base. Verify the chosen start is an ancestor of upstream main. " +
-        "Examine every upstream commit after that start through upstream main, oldest first. Call " +
-        "upstream-exchange action=begin with the exact ordered SHA list plus fromSha (null when there was no " +
-        "durable cursor), toSha=upstream head, both heads, and merge base. Keep the returned scanId and " +
-        "classifiedCommitShas.\n\n" +
-        "Classify each expected commit absent from classifiedCommitShas with upstream-exchange action=classify. " +
-        "Never recreate an existing durable disposition. Use only these " +
-        "inbound classifications: present, not_applicable, divergence_conflict, clean_candidate, or " +
-        "needs_decision. Record concrete evidence, affected packages, Terraform or binding impact, migration " +
-        "impact, touched docs/FORK.md divergence entries, whether overlapping tests require hand-merging, and " +
-        "semantic-port evidence. usefulUnit must be null for inbound classifications. proposedArtifact is a " +
-        "short human follow-up description when local work is proposed, otherwise null. " +
-        "Inspect the upstream diff and the current fork implementation. Preserve all intentional behavior in " +
-        "docs/FORK.md. Test files must be hand-merged, upstream migrations retain upstream IDs, fork-local " +
-        "migrations use 9000+, and package contract changes include Terraform review.\n\n" +
-        "Post one concise digest to #upstream-exchange with slack-notify and pass scan_id=scanId. Include the " +
-        "examined compare range, fork head, upstream head, merge base, a link and rationale for every clean " +
-        "candidate or needs-decision commit, divergence conflicts, and grouped present/not-applicable " +
-        "exclusions. Include any proposed local artifact only as a human follow-up description, never create " +
-        "it. If there are no commits, post a short no-op report with the unchanged range and heads. The run is " +
-        "successful only after Slack returns ok=true. Do not call slack-notify without scan_id.",
-    },
-  },
-  {
     id: "dependency-digest",
     title: "Weekly dependency digest",
     description:
@@ -392,107 +290,4 @@ export const automationTemplates: AutomationTemplate[] = [
         "modify dependencies or open a pull request — this is a read-only report.",
     },
   },
-  {
-    // Fork-local: hardcodes personal audience/ICP sources and exemplar videos,
-    // so it is deliberately not upstreamable. See docs/FORK.md.
-    id: "content-ideas",
-    title: "Weekly content ideas from your changelog",
-    description:
-      "Survey what shipped this week and turn the decisions behind it into content ideas, posted to Slack.",
-    categories: ["data-research"],
-    primaryOutput: "slack",
-    setupNote:
-      "Posts to Slack — requires Slack agent notifications enabled and the bot invited to the channel.",
-    prefill: {
-      name: "Weekly content ideas",
-      triggerType: "schedule",
-      scheduleCron: WEEKLY_MON_9AM,
-      // Judgement-and-taste task rather than a coding task, so the frontier
-      // general model beats the codex variants.
-      model: "openai/gpt-5.6-sol",
-      reasoningEffort: "high",
-      instructions:
-        "Survey everything that landed in this repository over the last 7 days and propose 3-5 " +
-        "content ideas drawn from it. Ideas, not titles, and not a summary of the week.\n\n" +
-        "First, understand who this is for. Read https://alexlazar.dev/about, " +
-        "https://alexlazar.dev/services and https://alexlazar.dev/projects. The audience is the " +
-        "buyer described there: founders, CTOs, engineering managers and product managers at " +
-        "3-50 person startups. The goal is client work and reputation, never audience growth. " +
-        "The test for every idea is whether it shows judgement that buyer would want to rent.\n\n" +
-        "Then look at what has already been made, so you do not propose it again. Read " +
-        "https://alexlazar.dev/blog and https://www.youtube.com/@_alexlazar_. The channel also " +
-        "contains recorded interviews and conversations with guests: ignore them entirely. They " +
-        "are a separate kind of content, they are not a format you may propose, and they are not " +
-        "a reference for the style of anything you propose.\n\n" +
-        "These are the solo videos that define the style and format to aim for. Study them as " +
-        "exemplars, and do not propose a topic any of them already covers:\n" +
-        "- https://youtu.be/jfE3iYVXjhg (build: WalkUp demo)\n" +
-        "- https://youtu.be/uxG5TFsDXGw (build: I made my job search easier with LLMs)\n" +
-        "- https://youtu.be/FnSULR1FV70 (build: an AI 'testosterone doctor' chatbot)\n" +
-        "- https://youtu.be/IK3btzdIhSc (explainer: RAG for busy people)\n" +
-        "- https://youtu.be/3uOlxH0lZkI (explainer: the 101 of SEO)\n" +
-        "- https://youtu.be/T9iaRB6hyG8 (take: latency and architecture)\n" +
-        "- https://youtu.be/2e2Fpq3IXLE (take: cut scope, ship iteratively)\n" +
-        "- https://youtu.be/mSIvR6D3bFs (take: HTMX is fast, you may not need local first)\n" +
-        "- https://youtu.be/5xLJ9vIGCvs (take: the future is self hosted)\n" +
-        "- https://youtu.be/gKS3yXa2PRw (take: indie hackers, get a job)\n" +
-        "- https://youtu.be/-ry-h2_HynI (technique: pre-compute for backend performance)\n" +
-        "- https://youtu.be/WIMY-s7yOT0 (technique: more SEO juice out of free tools)\n\n" +
-        "Now survey the week. Do not read only the diff. Read merged pull request bodies, closed " +
-        "issues and their comments, and commit messages. The reasoning behind a change is what " +
-        "makes it worth talking about; the diff alone tells you what changed but not why it was " +
-        "chosen over the alternative. Weight most heavily any change where a non-obvious option " +
-        "was rejected for a stated reason.\n\n" +
-        "Treat two kinds of change as high value rather than as internal chores.\n\n" +
-        "First, the agentic harness, tooling, review process and developer workflow. Consulting " +
-        "work is sold on that kind of judgement, and an agentic harness setup is an advertised " +
-        "service, so a change to how agents are configured or how work gets reviewed is usually " +
-        "a stronger idea than a product feature.\n\n" +
-        "Second, anything that touches go-to-market engineering: SEO, the newsletter, analytics, " +
-        "landing and content pages, distribution, and automations that drive any of them. This " +
-        "is a service area being deliberately built toward without much public proof yet, so " +
-        "real work in it is disproportionately worth talking about. Do not skip a change just " +
-        "because it landed on a marketing site rather than in application code.\n\n" +
-        "Now apply the maturity test, which is the most important filter and the one you are " +
-        "most likely to get wrong. An idea qualifies only if the thing it is about is finished " +
-        "and can be shown today, or the decision stands on its own without that thing existing. " +
-        "Most of what lands in any week is mid-project work, and a decision taken inside an " +
-        "unfinished project is not a story yet: the outcome is not known and there is nothing to " +
-        "demonstrate. A well-argued decision is not enough on its own. Do not propose it.\n\n" +
-        "When several decisions cluster inside one unfinished project, do not pitch them " +
-        "separately. Collapse them into a single parked idea: say the project is worth a demo " +
-        "and a behind-the-scenes explanation once it ships, and name the decisions that would go " +
-        "into it. One parked idea beats three premature ones.\n\n" +
-        "Propose at most two ideas from any one project, so a single busy area cannot fill the " +
-        "whole list.\n\n" +
-        "Each idea must fit one of these formats:\n" +
-        "- The take: a decision that was made, argued, ideally against the obvious choice.\n" +
-        "- The explainer: a concept compressed for a busy technical person.\n" +
-        "- The technique: one tactic, shown applied to real code.\n" +
-        "- The build: something shipped, demoed.\n\n" +
-        "Where a finished thing can be shown, prefer the build format over arguing about it. A " +
-        "demo of something working is more convincing to this buyer than a claim, and it is the " +
-        "format most often missed because it needs finished work to point at.\n\n" +
-        "For each idea give: the angle in one or two sentences, the format tag, a link to the " +
-        "pull request or issue it came from, and one line on why it lands with that buyer. No " +
-        "titles, no scripts, no outlines.\n\n" +
-        "Post the ideas to the #content Slack channel using the slack-notify tool. Keep it short " +
-        "enough to read on a phone. Return fewer than three ideas whenever fewer than three " +
-        "clear the maturity test, and say plainly that the week was thin. Padding the list with " +
-        "premature or obvious ideas is the fastest way to make this message ignorable, so one " +
-        "good idea is a better result than five weak ones.",
-    },
-  },
 ];
-
-export function getTemplateById(id: string): AutomationTemplate | undefined {
-  return automationTemplates.find((t) => t.id === id);
-}
-
-export function getTemplatesForCategory(category: TemplateCategory): AutomationTemplate[] {
-  return automationTemplates.filter((t) => t.categories.includes(category));
-}
-
-export function getVisibleCategories(): Array<{ id: TemplateCategory; label: string }> {
-  return TEMPLATE_CATEGORIES.filter((c) => getTemplatesForCategory(c.id).length > 0);
-}

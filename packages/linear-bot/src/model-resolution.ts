@@ -7,7 +7,7 @@ import {
   getDefaultReasoningEffort,
   getValidModelOrDefault,
   isValidReasoningEffort,
-} from "@open-inspect/shared";
+} from "@open-inspect/shared/models";
 
 /**
  * Resolve a target (repository or environment) from the static team mapping:
@@ -38,6 +38,7 @@ const MODEL_LABEL_MAP: Record<string, string> = {
   "opus-4-7": "anthropic/claude-opus-4-7",
   "opus-4-8": "anthropic/claude-opus-4-8",
   "opus-5": "anthropic/claude-opus-5",
+  "sonnet-5": "anthropic/claude-sonnet-5",
   fable: "anthropic/claude-fable-5",
   "fable-5": "anthropic/claude-fable-5",
   "gpt-5.4": "openai/gpt-5.4",

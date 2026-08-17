@@ -1,20 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   automationRepositoriesInputSchema,
-  createSessionRequestSchema,
-  MAX_AUTOMATION_REPOSITORIES,
-  MAX_SESSION_REPOSITORIES,
   MAX_TARGET_REPOSITORIES,
   decodeRepositoryPathSegments,
   encodeRepositoryPathSegments,
   formatRepositoryFullName,
   parseRepositoryFullName,
   prArtifactBelongsToRepo,
-  sandboxEventSchema,
   serverMessageSchema,
   sessionRepositoriesInputSchema,
   toRepositoryRef,
 } from "./index";
+import { sandboxEventSchema } from "./sandbox-events";
+import { createSessionRequestSchema } from "./session-api";
 
 describe("repository full names", () => {
   it("round-trips a repository with a nested owner namespace", () => {
@@ -42,13 +40,6 @@ describe("repository full names", () => {
     ["group%ZZsubgroup", "web"],
   ])("rejects a non-canonical repository API path (%s/%s)", (owner, name) => {
     expect(decodeRepositoryPathSegments(owner, name)).toBeNull();
-  });
-});
-
-describe("MAX_TARGET_REPOSITORIES aliases", () => {
-  it("keeps automation and session caps as the same constant", () => {
-    expect(MAX_AUTOMATION_REPOSITORIES).toBe(MAX_TARGET_REPOSITORIES);
-    expect(MAX_SESSION_REPOSITORIES).toBe(MAX_TARGET_REPOSITORIES);
   });
 });
 
@@ -183,17 +174,7 @@ describe("createSessionRequestSchema environmentId (three-way exclusivity)", () 
     expect(result.success).toBe(false);
   });
 
-  it("accepts a branch override for the environment primary repository", () => {
-    const result = createSessionRequestSchema.safeParse({
-      environmentId: "env_abc123",
-      branch: "main",
-      branchRepository: { repoOwner: "acme", repoName: "app" },
-    });
-
-    expect(result.success).toBe(true);
-  });
-
-  it("rejects an environment branch override without its repository identity", () => {
+  it("rejects environmentId combined with a scalar branch", () => {
     const result = createSessionRequestSchema.safeParse({
       environmentId: "env_abc123",
       branch: "main",

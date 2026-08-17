@@ -3,7 +3,6 @@ import { env } from "cloudflare:test";
 import { AutomationStore, type AutomationRow } from "../../src/db/automation-store";
 import { cleanD1Tables } from "./cleanup";
 import { makeRunRow, seedRun, fetchRuns } from "./run-helpers";
-import { UpstreamExchangeStore } from "../../src/db/upstream-exchange-store";
 
 function getSchedulerStub() {
   const id = env.SCHEDULER.idFromName("global-scheduler");
@@ -149,57 +148,6 @@ describe("SchedulerDO (integration)", () => {
       expect(automation!.consecutive_failures).toBe(1);
     });
 
-    it("fails a successful exchange run when its durable scan is incomplete", async () => {
-      const store = new AutomationStore(env.DB);
-      const now = Date.now();
-      await store.create(makeAutomation({ id: "auto-exchange-incomplete" }));
-      await seedRun(
-        makeRunRow("auto-exchange-incomplete", {
-          id: "run-exchange-incomplete",
-          session_id: "sess-exchange-incomplete",
-          status: "running",
-          started_at: now,
-        })
-      );
-      await new UpstreamExchangeStore(env.DB).beginScan({
-        id: crypto.randomUUID(),
-        automationId: "auto-exchange-incomplete",
-        automationRunId: "run-exchange-incomplete",
-        direction: "inbound",
-        sourceRepository: "ColeMurray/background-agents",
-        fromSha: null,
-        toSha: "2".repeat(40),
-        forkHeadSha: "a".repeat(40),
-        upstreamHeadSha: "2".repeat(40),
-        mergeBaseSha: "b".repeat(40),
-        expectedCommitShas: ["1".repeat(40)],
-      });
-
-      const response = await getSchedulerStub().fetch("http://internal/internal/run-complete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          automationId: "auto-exchange-incomplete",
-          runId: "run-exchange-incomplete",
-          sessionId: "sess-exchange-incomplete",
-          messageId: "msg-exchange-incomplete",
-          success: true,
-        }),
-      });
-
-      expect(response.status).toBe(200);
-      const run = await store.getRunById("auto-exchange-incomplete", "run-exchange-incomplete");
-      expect(run?.status).toBe("failed");
-      expect(run?.failure_reason).toContain("Slack delivery receipt is missing");
-      expect(
-        await new UpstreamExchangeStore(env.DB).getCursor(
-          "auto-exchange-incomplete",
-          "inbound",
-          "ColeMurray/background-agents"
-        )
-      ).toBeNull();
-    });
-
     it("auto-pauses after 3 consecutive failures", async () => {
       const store = new AutomationStore(env.DB);
       const now = Date.now();
@@ -321,33 +269,6 @@ describe("SchedulerDO (integration)", () => {
       expect(automation!.consecutive_failures).toBe(1);
     });
 
-    it("does not recover a run during the control-plane timeout headroom", async () => {
-      const store = new AutomationStore(env.DB);
-      const now = Date.now();
-      await store.create(
-        makeAutomation({ id: "auto-headroom", next_run_at: now + 86400000, enabled: 1 })
-      );
-
-      const ninetyFiveMinutesAgo = now - 95 * 60 * 1000;
-      await seedRun(
-        makeRunRow("auto-headroom", {
-          id: "run-headroom",
-          status: "running",
-          session_id: "sess-headroom",
-          scheduled_at: ninetyFiveMinutesAgo,
-          started_at: ninetyFiveMinutesAgo,
-          created_at: ninetyFiveMinutesAgo,
-        })
-      );
-
-      const stub = getSchedulerStub();
-      const res = await stub.fetch("http://internal/internal/tick", { method: "POST" });
-      expect(res.status).toBe(200);
-
-      const run = await store.getRunById("auto-headroom", "run-headroom");
-      expect(run!.status).toBe("running");
-    });
-
     it("recovers timed-out running runs during sweep", async () => {
       const store = new AutomationStore(env.DB);
       const now = Date.now();
@@ -355,6 +276,7 @@ describe("SchedulerDO (integration)", () => {
         makeAutomation({ id: "auto-t2", next_run_at: now + 86400000, enabled: 1 })
       );
 
+      // Default EXECUTION_TIMEOUT_MS is 90 minutes
       const twoHoursAgo = now - 2 * 60 * 60 * 1000;
       await seedRun(
         makeRunRow("auto-t2", {
@@ -450,34 +372,6 @@ describe("SchedulerDO (integration)", () => {
       const automation = await store.getById("auto-t4");
       expect(automation!.next_run_at).not.toBeNull();
       expect(automation!.next_run_at!).toBeGreaterThan(now);
-    });
-
-    it("claims a delayed one-shot once and does not replay it on later ticks", async () => {
-      const store = new AutomationStore(env.DB);
-      const dueAt = Date.now() - 10 * 60 * 1000;
-      await store.create(
-        makeAutomation({
-          id: "once-delayed",
-          trigger_type: "once",
-          schedule_cron: null,
-          next_run_at: dueAt,
-          user_id: "owner-1",
-        })
-      );
-      const stub = getSchedulerStub();
-
-      await stub.fetch("http://internal/internal/tick", { method: "POST" });
-      await stub.fetch("http://internal/internal/tick", { method: "POST" });
-
-      const automation = await store.getById("once-delayed");
-      expect(automation).toMatchObject({ enabled: 0, next_run_at: null });
-      expect(await fetchRuns("once-delayed")).toHaveLength(1);
-      const { invocations } = await store.listInvocations("once-delayed", {
-        limit: 10,
-        offset: 0,
-      });
-      expect(invocations).toHaveLength(1);
-      expect(invocations[0]!.scheduledAt).toBe(dueAt);
     });
 
     it("auto-pauses after recovery sweep detects 3rd consecutive failure", async () => {
@@ -674,7 +568,7 @@ describe("SchedulerDO (integration)", () => {
           automationId,
           runId,
           sessionId: `sess-${runId}`,
-          messageId: "msg-int",
+          messageId: `msg-${runId}`,
           success,
           ...(success ? {} : { error: "boom" }),
         }),

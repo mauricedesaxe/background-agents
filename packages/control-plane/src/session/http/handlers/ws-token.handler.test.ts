@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Logger } from "../../../logger";
 import type { ParticipantRow } from "../../types";
 import { createWsTokenHandler } from "./ws-token.handler";
+import type { ParticipantRepository } from "../../participant-repository";
 
 function createParticipant(overrides: Partial<ParticipantRow> = {}): ParticipantRow {
   return {
@@ -31,12 +32,10 @@ function createHandler() {
   };
 
   const getParticipantByUserId = vi.fn<(userId: string) => ParticipantRow | null>();
-  const getParticipantByWsTokenHash = vi.fn<(tokenHash: string) => ParticipantRow | null>();
   const generateId = vi
     .fn<(bytes?: number) => string>()
     .mockImplementation((bytes?: number) => (bytes === 32 ? "plain-token" : "participant-1"));
   const hashToken = vi.fn<(token: string) => Promise<string>>().mockResolvedValue("token-hash");
-  const wsTokenTtlMs = 24 * 60 * 60 * 1000;
   const now = vi.fn(() => 1234);
   const log = {
     debug: vi.fn(),
@@ -47,12 +46,10 @@ function createHandler() {
   } as unknown as Logger;
 
   const wsTokenHandler = createWsTokenHandler({
-    repository,
+    repository: repository as unknown as ParticipantRepository,
     getParticipantByUserId,
-    getParticipantByWsTokenHash,
     generateId,
     hashToken,
-    wsTokenTtlMs,
     now,
   });
 
@@ -60,17 +57,14 @@ function createHandler() {
   // repeating it at every invocation.
   const handler = {
     generateWsToken: (request: Request) => wsTokenHandler.generateWsToken(request, log),
-    verifyWsToken: (request: Request) => wsTokenHandler.verifyWsToken(request),
   };
 
   return {
     handler,
     repository,
     getParticipantByUserId,
-    getParticipantByWsTokenHash,
     generateId,
     hashToken,
-    wsTokenTtlMs,
     now,
     log,
   };
@@ -140,7 +134,6 @@ describe("createWsTokenHandler", () => {
       scmUserId: "scm-user-1",
       scmLogin: "octocat-updated",
       scmName: "Updated Octocat",
-      authName: null,
       scmEmail: "updated@example.com",
       scmAccessTokenEncrypted: "enc-access-new",
       scmRefreshTokenEncrypted: "enc-refresh-new",
@@ -184,7 +177,6 @@ describe("createWsTokenHandler", () => {
       scmUserId: null,
       scmLogin: null,
       scmName: null,
-      authName: null,
       scmEmail: null,
       scmAccessTokenEncrypted: null,
       scmRefreshTokenEncrypted: null,
@@ -226,7 +218,6 @@ describe("createWsTokenHandler", () => {
       scmUserId: "scm-user-1",
       scmLogin: "octocat",
       scmName: "The Octocat",
-      authName: null,
       scmEmail: "octocat@example.com",
       scmAccessTokenEncrypted: "enc-access",
       scmRefreshTokenEncrypted: "enc-refresh",
@@ -271,7 +262,6 @@ describe("createWsTokenHandler", () => {
       scmUserId: null,
       scmLogin: null,
       scmName: null,
-      authName: null,
       scmEmail: null,
       scmAccessTokenEncrypted: null,
       scmRefreshTokenEncrypted: null,
@@ -281,7 +271,7 @@ describe("createWsTokenHandler", () => {
     });
   });
 
-  it("persists a provider-agnostic authName for presence (e.g. Google users)", async () => {
+  it("does not copy profile names into new participants", async () => {
     const { handler, repository, getParticipantByUserId } = createHandler();
     const createdParticipant = createParticipant({ id: "participant-new", scm_name: null });
     getParticipantByUserId.mockReturnValueOnce(null).mockReturnValueOnce(createdParticipant);
@@ -290,7 +280,6 @@ describe("createWsTokenHandler", () => {
       new Request("http://internal/internal/ws-token", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        // Google auth: no SCM fields, but a display name is supplied.
         body: JSON.stringify({ userId: "google-sub-123", authName: "Ada Lovelace" }),
       })
     );
@@ -300,12 +289,12 @@ describe("createWsTokenHandler", () => {
       expect.objectContaining({
         userId: "google-sub-123",
         scmName: null,
-        authName: "Ada Lovelace",
       })
     );
+    expect(repository.createParticipant.mock.calls[0]?.[0]).not.toHaveProperty("authName");
   });
 
-  it("persists authName on the update path for an existing participant", async () => {
+  it("does not copy profile names into existing participants", async () => {
     const { handler, repository, getParticipantByUserId } = createHandler();
     // Existing participant → update path (createParticipant is not called).
     getParticipantByUserId.mockReturnValue(createParticipant({ scm_name: null }));
@@ -320,49 +309,6 @@ describe("createWsTokenHandler", () => {
 
     expect(response.status).toBe(200);
     expect(repository.createParticipant).not.toHaveBeenCalled();
-    expect(repository.updateParticipantCoalesce).toHaveBeenCalledWith(
-      "participant-1",
-      expect.objectContaining({ authName: "Ada Lovelace" })
-    );
-  });
-
-  describe("verifyWsToken", () => {
-    function verifyRequest(body: unknown): Request {
-      return new Request("http://internal/internal/verify-ws-token", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-    }
-
-    it("returns 401 when the token is missing", async () => {
-      const { handler } = createHandler();
-      const response = await handler.verifyWsToken(verifyRequest({}));
-      expect(response.status).toBe(401);
-    });
-
-    it("returns 401 when no participant matches the token hash", async () => {
-      const { handler, getParticipantByWsTokenHash } = createHandler();
-      getParticipantByWsTokenHash.mockReturnValue(null);
-      const response = await handler.verifyWsToken(verifyRequest({ token: "nope" }));
-      expect(response.status).toBe(401);
-    });
-
-    it("returns 401 when the token is older than the TTL", async () => {
-      const { handler, getParticipantByWsTokenHash, wsTokenTtlMs } = createHandler();
-      getParticipantByWsTokenHash.mockReturnValue(
-        createParticipant({ ws_token_created_at: 1234 - wsTokenTtlMs - 1 })
-      );
-      const response = await handler.verifyWsToken(verifyRequest({ token: "stale" }));
-      expect(response.status).toBe(401);
-    });
-
-    it("returns 200 with the participant id for a fresh token", async () => {
-      const { handler, getParticipantByWsTokenHash } = createHandler();
-      getParticipantByWsTokenHash.mockReturnValue(createParticipant({ ws_token_created_at: 1234 }));
-      const response = await handler.verifyWsToken(verifyRequest({ token: "fresh" }));
-      expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ participantId: "participant-1" });
-    });
+    expect(repository.updateParticipantCoalesce.mock.calls[0]?.[1]).not.toHaveProperty("authName");
   });
 });

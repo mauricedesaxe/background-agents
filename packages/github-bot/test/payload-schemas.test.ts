@@ -11,12 +11,7 @@ import {
 } from "../src/payload-schemas";
 
 const sender = { login: "octocat", id: 123, avatar_url: "https://example.com/avatar.png" };
-const repository = {
-  owner: { login: "open-inspect" },
-  name: "background-agents",
-  private: false,
-  default_branch: "main",
-};
+const repository = { owner: { login: "open-inspect" }, name: "background-agents", private: false };
 const pullRequest = {
   number: 42,
   title: "Add validation",
@@ -47,19 +42,6 @@ describe("GitHub bot payload schemas", () => {
     });
 
     expect(result.success).toBe(false);
-  });
-
-  it("preserves issue body and repository default branch for issue commands", () => {
-    const result = issueCommentPayloadSchema.safeParse({
-      action: "created",
-      issue: { number: 42, title: "Bug report", body: "Steps to reproduce" },
-      comment: { id: 99, body: "/open-inspect investigate", user: { login: "reviewer" } },
-      repository,
-      sender,
-    });
-
-    expect(result.success && result.data.issue.body).toBe("Steps to reproduce");
-    expect(result.success && result.data.repository.default_branch).toBe("main");
   });
 
   it("parses nullable pull request bodies and nullable requested reviewers", () => {

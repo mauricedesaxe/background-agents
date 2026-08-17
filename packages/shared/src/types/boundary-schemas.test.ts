@@ -3,17 +3,33 @@ import {
   automationRepositoriesInputSchema,
   automationRepositoryInputSchema,
   clientMessageSchema,
-  createSessionResponseSchema,
-  createSessionRequestSchema,
   MAX_AUTOMATION_REPOSITORIES,
   normalizeOptionalRepositoryPair,
   RepositoryPairValidationError,
-  sandboxEventSchema,
   serverMessageSchema,
+  sessionAttachmentUploadResponseSchema,
+} from ".";
+import { sessionParticipantProfilesResponseSchema } from "./sessions";
+import { listArtifactsResponseSchema } from "./artifacts";
+import {
+  callbackContextSchema,
+  cancelChildSessionRequestSchema,
+  childFollowUpPromptRequestSchema,
+  createSessionRequestSchema,
+  createSessionResponseSchema,
+  MAX_CHILD_FOLLOW_UP_PROMPT_CHARS,
+  linearCompletionCallbackSchema,
+  linearToolCallCallbackSchema,
+  sendPromptRequestSchema,
   sendPromptResponseSchema,
   spawnChildSessionRequestSchema,
-  spawnContextSchema,
-} from ".";
+} from "./session-api";
+import { MAX_WEB_PROMPT_CHARS } from "./websocket";
+import {
+  listEventsResponseSchema,
+  sandboxEventSchema,
+  toolCallIdentityKey,
+} from "./sandbox-events";
 
 describe("boundary schemas", () => {
   describe("createSessionRequestSchema", () => {
@@ -126,6 +142,333 @@ describe("boundary schemas", () => {
     });
   });
 
+  describe("sessionAttachmentUploadResponseSchema", () => {
+    it("parses an upload response and ignores unknown fields", () => {
+      const result = sessionAttachmentUploadResponseSchema.safeParse({
+        attachmentId: "att-1",
+        mimeType: "image/png",
+        sizeBytes: 1024,
+      });
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({ attachmentId: "att-1", mimeType: "image/png" });
+    });
+
+    it("rejects ids the prompt schema would reject", () => {
+      // Non-empty but not a canonical id: accepting these lets a bad id reach
+      // client state and fail later, at prompt validation.
+      expect(
+        sessionAttachmentUploadResponseSchema.safeParse({
+          attachmentId: "bad id",
+          mimeType: "image/png",
+        }).success
+      ).toBe(false);
+      expect(
+        sessionAttachmentUploadResponseSchema.safeParse({
+          attachmentId: "a".repeat(129),
+          mimeType: "image/png",
+        }).success
+      ).toBe(false);
+      expect(
+        sessionAttachmentUploadResponseSchema.safeParse({ attachmentId: "", mimeType: "image/png" })
+          .success
+      ).toBe(false);
+    });
+
+    it("rejects unsupported or missing mime types", () => {
+      expect(
+        sessionAttachmentUploadResponseSchema.safeParse({
+          attachmentId: "att-1",
+          mimeType: "application/pdf",
+        }).success
+      ).toBe(false);
+      expect(
+        sessionAttachmentUploadResponseSchema.safeParse({ attachmentId: "att-1" }).success
+      ).toBe(false);
+    });
+  });
+
+  describe("completion response schemas", () => {
+    it("parses valid event and artifact list responses", () => {
+      expect(
+        listEventsResponseSchema.safeParse({
+          events: [
+            {
+              id: "event-1",
+              type: "token",
+              data: { content: "hello" },
+              messageId: "msg-1",
+              createdAt: 123,
+            },
+          ],
+          cursor: "next-page",
+          hasMore: true,
+        }).success
+      ).toBe(true);
+      expect(
+        listArtifactsResponseSchema.safeParse({
+          artifacts: [
+            {
+              id: "artifact-1",
+              type: "branch",
+              url: "https://example.com/tree/main",
+              metadata: { head: "main" },
+              createdAt: 123,
+            },
+          ],
+        }).success
+      ).toBe(true);
+    });
+
+    it("rejects malformed or partial completion responses", () => {
+      expect(
+        listEventsResponseSchema.safeParse({
+          events: [{ id: "event-1", type: "token", data: {}, messageId: "msg-1" }],
+          hasMore: false,
+        }).success
+      ).toBe(false);
+      expect(
+        listArtifactsResponseSchema.safeParse({
+          artifacts: [{ id: "artifact-1", type: "branch", url: null }],
+        }).success
+      ).toBe(false);
+    });
+
+    it("rejects an events page that reports more results without a cursor", () => {
+      const page = {
+        events: [
+          {
+            id: "event-1",
+            type: "token",
+            data: { content: "hello" },
+            messageId: "msg-1",
+            createdAt: 123,
+          },
+        ],
+        hasMore: true,
+      };
+
+      expect(listEventsResponseSchema.safeParse(page).success).toBe(false);
+      expect(listEventsResponseSchema.safeParse({ ...page, cursor: "" }).success).toBe(false);
+      expect(listEventsResponseSchema.safeParse({ ...page, cursor: "next-page" }).success).toBe(
+        true
+      );
+    });
+
+    it("preserves updatedAt on listed artifacts", () => {
+      const parsed = listArtifactsResponseSchema.safeParse({
+        artifacts: [
+          {
+            id: "artifact-1",
+            type: "pr",
+            url: "https://example.com/pull/1",
+            metadata: { number: 1 },
+            createdAt: 123,
+            updatedAt: 456,
+          },
+        ],
+      });
+
+      expect(parsed.success).toBe(true);
+      expect(parsed.success && parsed.data.artifacts[0].updatedAt).toBe(456);
+    });
+
+    it("accepts nullable boundary fields returned by the control plane", () => {
+      expect(
+        listEventsResponseSchema.safeParse({
+          events: [
+            {
+              id: "event-1",
+              type: "execution_complete",
+              data: { success: true },
+              messageId: null,
+              createdAt: 123,
+            },
+          ],
+          hasMore: false,
+        }).success
+      ).toBe(true);
+      expect(
+        listArtifactsResponseSchema.safeParse({
+          artifacts: [
+            {
+              id: "artifact-1",
+              type: "branch",
+              url: null,
+              metadata: null,
+              createdAt: 123,
+            },
+          ],
+        }).success
+      ).toBe(true);
+    });
+  });
+
+  describe("sendPromptRequestSchema", () => {
+    it("parses a valid prompt request with a Slack callback context", () => {
+      const result = sendPromptRequestSchema.safeParse({
+        content: "Investigate the failure",
+        source: "slack",
+        model: "anthropic/claude-sonnet-4-6",
+        reasoningEffort: "high",
+        attachments: [{ attachmentId: "att-1", name: "screenshot.png" }],
+        callbackContext: {
+          source: "slack",
+          channel: "C123",
+          threadTs: "1710000000.000100",
+          repoFullName: "open-inspect/background-agents",
+          model: "anthropic/claude-sonnet-4-6",
+          reactionMessageTs: "1710000000.000200",
+        },
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it("rejects a malformed prompt request", () => {
+      expect(sendPromptRequestSchema.safeParse({ content: 123 }).success).toBe(false);
+      expect(sendPromptRequestSchema.safeParse({ source: "web" }).success).toBe(false);
+      expect(sendPromptRequestSchema.safeParse({ content: "" }).success).toBe(false);
+      expect(
+        sendPromptRequestSchema.safeParse({ content: "hello", source: "unknown" }).success
+      ).toBe(false);
+    });
+  });
+
+  describe("childFollowUpPromptRequestSchema", () => {
+    it("accepts non-empty content through the documented limit", () => {
+      expect(
+        childFollowUpPromptRequestSchema.safeParse({ content: "Continue with the failing tests" })
+          .success
+      ).toBe(true);
+      expect(
+        childFollowUpPromptRequestSchema.safeParse({
+          content: "x".repeat(MAX_CHILD_FOLLOW_UP_PROMPT_CHARS),
+        }).success
+      ).toBe(true);
+    });
+
+    it("rejects empty, whitespace-only, and oversized content", () => {
+      expect(childFollowUpPromptRequestSchema.safeParse({ content: "" }).success).toBe(false);
+      expect(childFollowUpPromptRequestSchema.safeParse({ content: " \n\t " }).success).toBe(false);
+      expect(
+        childFollowUpPromptRequestSchema.safeParse({
+          content: "x".repeat(MAX_CHILD_FOLLOW_UP_PROMPT_CHARS + 1),
+        }).success
+      ).toBe(false);
+    });
+
+    it("rejects fields that expand the parent sandbox authority", () => {
+      for (const extra of [
+        { source: "web" },
+        { authorId: "forged" },
+        { model: "openai/gpt-5.4" },
+        { attachments: [] },
+        { callbackContext: {} },
+      ]) {
+        expect(
+          childFollowUpPromptRequestSchema.safeParse({ content: "Continue", ...extra }).success
+        ).toBe(false);
+      }
+    });
+  });
+
+  describe("callbackContextSchema", () => {
+    it("parses valid callback contexts", () => {
+      expect(
+        callbackContextSchema.safeParse({
+          source: "slack",
+          channel: "C123",
+          threadTs: "1710000000.000100",
+          repoFullName: "open-inspect/background-agents",
+          model: "anthropic/claude-sonnet-4-6",
+        }).success
+      ).toBe(true);
+      expect(
+        callbackContextSchema.safeParse({
+          source: "linear",
+          issueId: "issue-1",
+          issueIdentifier: "OI-123",
+          issueUrl: "https://linear.app/open-inspect/issue/OI-123/test",
+          repoFullName: "open-inspect/background-agents",
+          model: "anthropic/claude-sonnet-4-6",
+          transitionIssueOnStart: false,
+        }).success
+      ).toBe(true);
+      expect(
+        callbackContextSchema.safeParse({
+          source: "automation",
+          automationId: "automation-1",
+          runId: "run-1",
+          automationName: "Nightly sweep",
+        }).success
+      ).toBe(true);
+    });
+
+    it("rejects malformed or partial callback contexts", () => {
+      expect(callbackContextSchema.safeParse({ source: "slack", channel: "C123" }).success).toBe(
+        false
+      );
+      expect(
+        callbackContextSchema.safeParse({
+          source: "automation",
+          automationId: "automation-1",
+          runId: null,
+          automationName: "Nightly sweep",
+        }).success
+      ).toBe(false);
+      expect(callbackContextSchema.safeParse({ source: "github" }).success).toBe(false);
+    });
+  });
+
+  describe("Linear callback schemas", () => {
+    const context = {
+      source: "linear",
+      issueId: "issue-1",
+      issueIdentifier: "OI-123",
+      issueUrl: "https://linear.app/open-inspect/issue/OI-123/test",
+      model: "anthropic/claude-sonnet-4-6",
+    };
+
+    it("requires a complete completion callback and valid Linear context", () => {
+      const callback = {
+        sessionId: "session-1",
+        messageId: "message-1",
+        success: true,
+        timestamp: 123,
+        context,
+        signature: "signature",
+      };
+
+      expect(linearCompletionCallbackSchema.safeParse(callback).success).toBe(true);
+      expect(
+        linearCompletionCallbackSchema.safeParse({
+          ...callback,
+          context: { source: "linear", issueId: "issue-1" },
+        }).success
+      ).toBe(false);
+    });
+
+    it("requires tool args and callId", () => {
+      const callback = {
+        sessionId: "session-1",
+        tool: "bash",
+        args: { command: "npm test" },
+        callId: "call-1",
+        timestamp: 123,
+        context,
+        signature: "signature",
+      };
+
+      expect(linearToolCallCallbackSchema.safeParse(callback).success).toBe(true);
+      const { args: _args, ...withoutArgs } = callback;
+      expect(linearToolCallCallbackSchema.safeParse(withoutArgs).success).toBe(false);
+      expect(linearToolCallCallbackSchema.safeParse({ ...callback, callId: "" }).success).toBe(
+        false
+      );
+      expect(linearToolCallCallbackSchema.safeParse({ ...callback, tool: "" }).success).toBe(false);
+    });
+  });
+
   describe("sandboxEventSchema", () => {
     it("parses a valid tool call event", () => {
       const result = sandboxEventSchema.safeParse({
@@ -141,6 +484,70 @@ describe("boundary schemas", () => {
       });
 
       expect(result.success).toBe(true);
+    });
+
+    it("preserves task activity correlation fields", () => {
+      const taskResult = sandboxEventSchema.safeParse({
+        type: "tool_call",
+        tool: "task",
+        args: { description: "Review code" },
+        callId: "task-call-1",
+        status: "completed",
+        messageId: "message-1",
+        sandboxId: "sandbox-1",
+        timestamp: 123,
+        childSessionId: "child-session-1",
+      });
+      const childResult = sandboxEventSchema.safeParse({
+        type: "tool_call",
+        tool: "bash",
+        args: { command: "npm test" },
+        callId: "child-call-1",
+        status: "completed",
+        messageId: "message-1",
+        sandboxId: "sandbox-1",
+        timestamp: 124,
+        isSubtask: true,
+        childSessionId: "child-session-1",
+        taskCallId: "task-call-1",
+      });
+      const errorResult = sandboxEventSchema.safeParse({
+        type: "error",
+        error: "Child failed",
+        messageId: "message-1",
+        sandboxId: "sandbox-1",
+        timestamp: 125,
+        isSubtask: true,
+        childSessionId: "child-session-1",
+        taskCallId: "task-call-1",
+      });
+
+      expect(taskResult.success && taskResult.data.childSessionId).toBe("child-session-1");
+      expect(childResult.success && childResult.data).toMatchObject({
+        isSubtask: true,
+        childSessionId: "child-session-1",
+        taskCallId: "task-call-1",
+      });
+      expect(errorResult.success && errorResult.data).toMatchObject({
+        isSubtask: true,
+        childSessionId: "child-session-1",
+        taskCallId: "task-call-1",
+      });
+    });
+
+    it("uses task ownership when a child session ID is unavailable", () => {
+      const base = {
+        type: "tool_call" as const,
+        tool: "bash",
+        args: {},
+        callId: "shared-call",
+        messageId: "message-1",
+        isSubtask: true,
+      };
+
+      expect(toolCallIdentityKey({ ...base, taskCallId: "task-1" })).not.toBe(
+        toolCallIdentityKey({ ...base, taskCallId: "task-2" })
+      );
     });
 
     it("rejects a malformed partial sandbox event", () => {
@@ -186,28 +593,6 @@ describe("boundary schemas", () => {
       }
     });
 
-    it("parses a message-scoped context compaction event", () => {
-      const result = sandboxEventSchema.safeParse({
-        type: "context_compacted",
-        messageId: "message-1",
-        sandboxId: "sandbox-1",
-        timestamp: 123,
-      });
-
-      expect(result.success).toBe(true);
-    });
-
-    it("parses a manual context compaction start event", () => {
-      const result = sandboxEventSchema.safeParse({
-        type: "context_compaction_started",
-        requestId: "compact-1",
-        sandboxId: "sandbox-1",
-        timestamp: 123,
-      });
-
-      expect(result.success).toBe(true);
-    });
-
     it("parses step finish events with structured token usage", () => {
       const tokenUsage = {
         total: 223,
@@ -220,7 +605,6 @@ describe("boundary schemas", () => {
       const result = sandboxEventSchema.safeParse({
         type: "step_finish",
         messageId: "message-1",
-        stepId: "step-1",
         cost: 0.001,
         tokens: tokenUsage,
         reason: "end_turn",
@@ -230,7 +614,6 @@ describe("boundary schemas", () => {
 
       expect(result.success).toBe(true);
       if (result.success) {
-        expect(result.data.stepId).toBe("step-1");
         expect(result.data.tokens).toEqual(tokenUsage);
       }
     });
@@ -246,40 +629,28 @@ describe("boundary schemas", () => {
       expect(result.success).toBe(true);
     });
 
-    it("parses permanent context loss", () => {
-      const unavailable = sandboxEventSchema.safeParse({
-        type: "context_unavailable",
-        sandboxId: "sandbox-1",
-        opencodeSessionId: "ses-1",
-        error: "The expected OpenCode session is unavailable",
-        timestamp: 123,
-      });
-
-      expect(unavailable.success).toBe(true);
-    });
-
-    it("rejects legacy checkpoint events from the current protocol", () => {
-      const checkpoint = sandboxEventSchema.safeParse({
-        type: "checkpoint",
-        checkpointStatus: "confirmed",
-        checkpointId: "cp-legacy",
-        attemptId: "cpa-legacy",
-        checksum: "a".repeat(64),
-        byteLength: 100,
-        ackId: "checkpoint:cp-legacy:confirmed",
+    it("parses context compaction events with required message association", () => {
+      const event = {
+        type: "context_compacted",
+        messageId: "message-1",
         sandboxId: "sandbox-1",
         timestamp: 123,
-      });
+      };
 
-      expect(checkpoint.success).toBe(false);
+      expect(sandboxEventSchema.safeParse(event)).toEqual(
+        expect.objectContaining({ success: true, data: event })
+      );
+      expect(sandboxEventSchema.safeParse({ ...event, messageId: undefined }).success).toBe(false);
+      expect(sandboxEventSchema.safeParse({ ...event, sandboxId: undefined }).success).toBe(false);
+      expect(sandboxEventSchema.safeParse({ ...event, timestamp: undefined }).success).toBe(false);
     });
   });
 
   describe("clientMessageSchema", () => {
-    it("parses a valid prompt with attachments", () => {
+    it("parses a valid prompt with attachments and request correlation", () => {
       const result = clientMessageSchema.safeParse({
         type: "prompt",
-        requestId: "request-1",
+        clientRequestId: "0190cc3e-95ca-7dd8-b0a7-55ca8456ee31",
         content: "Investigate the failing build",
         model: "anthropic/claude-sonnet-4-6",
         reasoningEffort: "high",
@@ -294,6 +665,64 @@ describe("boundary schemas", () => {
       expect(result.success).toBe(true);
     });
 
+    it("requires clientRequestId for prompt correlation", () => {
+      expect(clientMessageSchema.safeParse({ type: "prompt", content: "Continue" }).success).toBe(
+        false
+      );
+    });
+
+    it("parses correlated queued prompt cancellation", () => {
+      expect(
+        clientMessageSchema.parse({
+          type: "cancel_prompt",
+          messageId: "message-1",
+          clientRequestId: "request-1",
+        })
+      ).toMatchObject({ messageId: "message-1", clientRequestId: "request-1" });
+      expect(
+        clientMessageSchema.safeParse({
+          type: "cancel_prompt",
+          messageId: "",
+          clientRequestId: "request-1",
+        }).success
+      ).toBe(false);
+    });
+
+    it("rejects invalid prompt request correlation identifiers", () => {
+      expect(
+        clientMessageSchema.safeParse({ type: "prompt", content: "Continue", clientRequestId: "" })
+          .success
+      ).toBe(false);
+      expect(
+        clientMessageSchema.safeParse({
+          type: "prompt",
+          content: "Continue",
+          clientRequestId: "x".repeat(129),
+        }).success
+      ).toBe(false);
+    });
+
+    it("rejects blank and oversized prompts but accepts attachment-only prompts", () => {
+      expect(clientMessageSchema.safeParse({ type: "prompt", content: "  \n" }).success).toBe(
+        false
+      );
+      expect(
+        clientMessageSchema.safeParse({
+          type: "prompt",
+          clientRequestId: "request-oversized",
+          content: "x".repeat(MAX_WEB_PROMPT_CHARS + 1),
+        }).success
+      ).toBe(false);
+      expect(
+        clientMessageSchema.safeParse({
+          type: "prompt",
+          clientRequestId: "request-attachment-only",
+          content: " \n",
+          attachments: [{ name: "evidence.png", attachmentId: "attachment-1" }],
+        }).success
+      ).toBe(true);
+    });
+
     it("rejects inline and remote attachment sources", () => {
       for (const attachment of [
         { name: "inline.png", content: "aGVsbG8=" },
@@ -301,6 +730,7 @@ describe("boundary schemas", () => {
       ]) {
         const result = clientMessageSchema.safeParse({
           type: "prompt",
+          clientRequestId: "request-source",
           content: "Look",
           attachments: [attachment],
         });
@@ -311,6 +741,7 @@ describe("boundary schemas", () => {
     it("rejects prompts with more than six attachments", () => {
       const result = clientMessageSchema.safeParse({
         type: "prompt",
+        clientRequestId: "request-attachments",
         content: "Compare these",
         attachments: Array.from({ length: 7 }, (_, index) => ({
           name: `${index}.png`,
@@ -329,6 +760,7 @@ describe("boundary schemas", () => {
         expect(
           clientMessageSchema.safeParse({
             type: "prompt",
+            clientRequestId: "request-attachment-bounds",
             content: "Look",
             attachments: [attachment],
           }).success
@@ -364,82 +796,10 @@ describe("boundary schemas", () => {
   });
 
   describe("serverMessageSchema", () => {
-    it("parses persisted and live prompt queue snapshots", () => {
-      const promptQueue = [
-        {
-          messageId: "message-2",
-          position: 2,
-          content: "second",
-          timestamp: 123,
-          author: { participantId: "participant-1", name: "Pat" },
-        },
-        { messageId: "message-3", position: 3, content: "third", timestamp: 124 },
-      ];
-
-      expect(
-        serverMessageSchema.safeParse({
-          type: "prompt_queue",
-          prompts: promptQueue,
-        }).success
-      ).toBe(true);
-
-      const subscribed = serverMessageSchema.safeParse({
-        type: "subscribed",
-        sessionId: "session-1",
-        state: {
-          id: "session-1",
-          title: null,
-          repoOwner: null,
-          repoName: null,
-          baseBranch: null,
-          branchName: null,
-          status: "active",
-          sandboxStatus: "ready",
-          messageCount: 3,
-          createdAt: 123,
-        },
-        artifacts: [],
-        participantId: "participant-1",
-        promptQueue,
-        activePrompt: { ...promptQueue[0], messageId: "message-active", position: 1 },
-      });
-
-      expect(subscribed.success).toBe(true);
-      if (subscribed.success && subscribed.data.type === "subscribed") {
-        expect(subscribed.data.promptQueue).toEqual(promptQueue);
-        expect(subscribed.data.activePrompt).toEqual({
-          ...promptQueue[0],
-          messageId: "message-active",
-          position: 1,
-        });
-      }
-    });
-
-    it("parses acknowledgement status without a queue position", () => {
-      expect(
-        serverMessageSchema.safeParse({
-          type: "prompt_queued",
-          messageId: "request-1",
-          status: "completed",
-        }).success
-      ).toBe(true);
-    });
-
-    it("parses prompt-specific rejection messages", () => {
-      expect(
-        serverMessageSchema.safeParse({
-          type: "prompt_rejected",
-          requestId: "request-1",
-          message: "Request ID belongs to another prompt",
-        }).success
-      ).toBe(true);
-    });
-
     it("parses a valid subscribed message with nullable fields", () => {
       const result = serverMessageSchema.safeParse({
         type: "subscribed",
-        sessionId: "session-1",
-        state: {
+        session: {
           id: "session-1",
           title: null,
           repoOwner: null,
@@ -463,7 +823,8 @@ describe("boundary schemas", () => {
           },
         ],
         participantId: "participant-1",
-        replay: {
+        promptQueue: [],
+        timeline: {
           events: [],
           hasMore: false,
           cursor: null,
@@ -474,11 +835,34 @@ describe("boundary schemas", () => {
       expect(result.success).toBe(true);
     });
 
-    it("keeps recognized replay events and drops unknown ones without failing", () => {
+    it("accepts subscribed snapshots", () => {
       const result = serverMessageSchema.safeParse({
         type: "subscribed",
-        sessionId: "session-1",
-        state: {
+        session: {
+          id: "session-1",
+          title: null,
+          repoOwner: null,
+          repoName: null,
+          baseBranch: null,
+          branchName: null,
+          status: "active",
+          sandboxStatus: "ready",
+          messageCount: 0,
+          createdAt: 123,
+        },
+        artifacts: [],
+        participantId: "participant-1",
+        promptQueue: [],
+        timeline: { events: [], hasMore: false, cursor: null },
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it("keeps recognized timeline events and drops unknown ones without failing", () => {
+      const result = serverMessageSchema.safeParse({
+        type: "subscribed",
+        session: {
           id: "session-1",
           title: null,
           repoOwner: null,
@@ -494,11 +878,26 @@ describe("boundary schemas", () => {
         },
         artifacts: [],
         participantId: "participant-1",
-        replay: {
+        promptQueue: [],
+        timeline: {
           events: [
-            { type: "ready", sandboxId: "sandbox-1", opencodeSessionId: null, timestamp: 1 },
-            { type: "some_future_event", foo: "bar", timestamp: 2 },
-            { type: "token", content: "hi", messageId: "m1", sandboxId: "sandbox-1", timestamp: 3 },
+            {
+              eventId: "event-1",
+              timelineSequence: 1,
+              event: { type: "ready", sandboxId: "sandbox-1", timestamp: 1 },
+            },
+            { eventId: "event-2", timelineSequence: 2, event: { type: "future" } },
+            {
+              eventId: "event-3",
+              timelineSequence: 3,
+              event: {
+                type: "token",
+                content: "hi",
+                messageId: "m1",
+                sandboxId: "sandbox-1",
+                timestamp: 3,
+              },
+            },
           ],
           hasMore: false,
           cursor: null,
@@ -508,7 +907,10 @@ describe("boundary schemas", () => {
 
       expect(result.success).toBe(true);
       if (result.success) {
-        expect(result.data.replay?.events.map((event) => event.type)).toEqual(["ready", "token"]);
+        expect(result.data.timeline.events.map((item) => item.event.type)).toEqual([
+          "ready",
+          "token",
+        ]);
       }
     });
 
@@ -516,8 +918,17 @@ describe("boundary schemas", () => {
       const result = serverMessageSchema.safeParse({
         type: "history_page",
         items: [
-          { type: "some_legacy_event", foo: "bar", timestamp: 1 },
-          { type: "git_sync", status: "completed", sandboxId: "sandbox-1", timestamp: 2 },
+          { eventId: "event-1", timelineSequence: 1, event: { type: "future" } },
+          {
+            eventId: "event-2",
+            timelineSequence: 2,
+            event: {
+              type: "git_sync",
+              status: "completed",
+              sandboxId: "sandbox-1",
+              timestamp: 2,
+            },
+          },
         ],
         hasMore: false,
         cursor: null,
@@ -525,7 +936,7 @@ describe("boundary schemas", () => {
 
       expect(result.success).toBe(true);
       if (result.success && result.data.type === "history_page") {
-        expect(result.data.items.map((item) => item.type)).toEqual(["git_sync"]);
+        expect(result.data.items.map((item) => item.event.type)).toEqual(["git_sync"]);
       }
     });
 
@@ -543,10 +954,107 @@ describe("boundary schemas", () => {
       expect(result.success).toBe(false);
     });
 
+    it("accepts context compaction events in live messages and timeline hydration", () => {
+      const event = {
+        type: "context_compacted",
+        messageId: "message-1",
+        sandboxId: "sandbox-1",
+        timestamp: 123,
+      };
+
+      expect(serverMessageSchema.safeParse({ type: "sandbox_event", event }).success).toBe(true);
+
+      const history = serverMessageSchema.safeParse({
+        type: "history_page",
+        items: [{ eventId: "event-1", timelineSequence: 1, event }],
+        hasMore: false,
+        cursor: null,
+      });
+      expect(history.success).toBe(true);
+      if (history.success && history.data.type === "history_page") {
+        expect(history.data.items).toEqual([{ eventId: "event-1", timelineSequence: 1, event }]);
+      }
+
+      const subscribed = serverMessageSchema.safeParse({
+        type: "subscribed",
+        session: {
+          id: "session-1",
+          title: null,
+          repoOwner: null,
+          repoName: null,
+          baseBranch: null,
+          branchName: null,
+          status: "completed",
+          sandboxStatus: "stopped",
+          messageCount: 1,
+          createdAt: 123,
+        },
+        artifacts: [],
+        participantId: "participant-1",
+        promptQueue: [],
+        timeline: {
+          events: [{ eventId: "event-1", timelineSequence: 1, event }],
+          hasMore: false,
+          cursor: null,
+        },
+      });
+      expect(subscribed.success).toBe(true);
+      if (subscribed.success && subscribed.data.type === "subscribed") {
+        expect(subscribed.data.timeline.events).toEqual([
+          { eventId: "event-1", timelineSequence: 1, event },
+        ]);
+      }
+    });
+
     it("rejects an unknown message type", () => {
       const result = serverMessageSchema.safeParse({ type: "unexpected" });
 
       expect(result.success).toBe(false);
+    });
+  });
+
+  describe("participant profile boundaries", () => {
+    it("parses only safe profile fields keyed by canonical user ID", () => {
+      const result = sessionParticipantProfilesResponseSchema.parse({
+        profiles: {
+          "user-1": {
+            userId: "user-1",
+            displayName: "Ada Lovelace",
+            avatarUrl: "https://avatars.example/ada",
+            email: "private@example.com",
+          },
+        },
+      });
+
+      expect(result).toEqual({
+        profiles: {
+          "user-1": {
+            userId: "user-1",
+            displayName: "Ada Lovelace",
+            avatarUrl: "https://avatars.example/ada",
+          },
+        },
+      });
+    });
+
+    it("accepts historical user messages without an author userId", () => {
+      const legacy = sandboxEventSchema.safeParse({
+        type: "user_message",
+        content: "hello",
+        messageId: "message-1",
+        timestamp: 1,
+        author: { participantId: "participant-1", name: "Legacy User" },
+      });
+      const current = sandboxEventSchema.safeParse({
+        type: "user_message",
+        content: "hello",
+        messageId: "message-2",
+        timestamp: 1,
+        author: { participantId: "participant-1", userId: "user-1", name: "Ada" },
+      });
+
+      expect(legacy.success).toBe(true);
+      expect(current.success).toBe(true);
     });
   });
 
@@ -573,58 +1081,21 @@ describe("boundary schemas", () => {
     });
   });
 
-  describe("spawnContextSchema", () => {
-    it("parses a valid spawn context with nullable fields", () => {
-      const result = spawnContextSchema.safeParse({
-        repoOwner: "open-inspect",
-        repoName: "background-agents",
-        repoId: null,
-        model: "anthropic/claude-sonnet-4-6",
-        reasoningEffort: null,
-        baseBranch: null,
-        owner: {
-          userId: "user-1",
-          scmUserId: null,
-          scmLogin: null,
-          scmName: null,
-          scmEmail: null,
-          scmAccessTokenEncrypted: null,
-          scmRefreshTokenEncrypted: null,
-          scmTokenExpiresAt: null,
-        },
-      });
+  describe("cancelChildSessionRequestSchema", () => {
+    it("parses an empty options object", () => {
+      const result = cancelChildSessionRequestSchema.safeParse({});
 
       expect(result.success).toBe(true);
     });
 
-    it("parses a repo-less spawn context", () => {
-      const result = spawnContextSchema.safeParse({
-        repoOwner: null,
-        repoName: null,
-        repoId: null,
-        model: "anthropic/claude-sonnet-4-6",
-        reasoningEffort: null,
-        baseBranch: null,
-        owner: {
-          userId: "user-1",
-          scmUserId: null,
-          scmLogin: null,
-          scmName: null,
-          scmEmail: null,
-          scmAccessTokenEncrypted: null,
-          scmRefreshTokenEncrypted: null,
-          scmTokenExpiresAt: null,
-        },
-      });
+    it("parses an explicit cancelNested flag", () => {
+      const result = cancelChildSessionRequestSchema.safeParse({ cancelNested: false });
 
       expect(result.success).toBe(true);
     });
 
-    it("rejects a malformed partial spawn context", () => {
-      const result = spawnContextSchema.safeParse({
-        repoOwner: "open-inspect",
-        repoName: "background-agents",
-      });
+    it("rejects a non-boolean cancelNested", () => {
+      const result = cancelChildSessionRequestSchema.safeParse({ cancelNested: "yes" });
 
       expect(result.success).toBe(false);
     });

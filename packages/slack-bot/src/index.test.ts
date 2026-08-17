@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { Env } from "./types";
-import type * as SharedModule from "@open-inspect/shared";
+import type { ControlPlaneFetcher } from "@open-inspect/shared/service-auth";
+import type * as SlackModule from "@open-inspect/shared/slack";
 
 const { mockVerifySlackSignature, mockPublishView, mockOpenView, mockGetUserInfo } = vi.hoisted(
   () => ({
@@ -11,8 +12,8 @@ const { mockVerifySlackSignature, mockPublishView, mockOpenView, mockGetUserInfo
   })
 );
 
-vi.mock("@open-inspect/shared", async () => {
-  const actual = await vi.importActual<typeof SharedModule>("@open-inspect/shared");
+vi.mock("@open-inspect/shared/slack", async () => {
+  const actual = await vi.importActual<typeof SlackModule>("@open-inspect/shared/slack");
   return {
     ...actual,
     verifySlackSignature: mockVerifySlackSignature,
@@ -56,42 +57,63 @@ function createMockKV() {
   };
 }
 
-function makeEnv(): Env {
+function mockReposResponseBody(repos: Array<Record<string, unknown>>) {
   return {
+    repos: repos.map((repo, index) => ({
+      ...repo,
+      id: typeof repo.id === "number" ? repo.id : index + 1,
+      fullName:
+        typeof repo.fullName === "string"
+          ? repo.fullName
+          : `${String(repo.owner)}/${String(repo.name)}`,
+      description:
+        repo.description === null || typeof repo.description === "string" ? repo.description : null,
+      archived: typeof repo.archived === "boolean" ? repo.archived : false,
+    })),
+    cached: false,
+    cachedAt: "2026-07-27T00:00:00.000Z",
+  };
+}
+
+function makeEnv() {
+  const controlPlaneFetch = vi.fn<ControlPlaneFetcher["fetch"]>();
+  controlPlaneFetch.mockImplementation(async (input) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/repos")) {
+      return new Response(
+        JSON.stringify(
+          mockReposResponseBody([
+            {
+              id: "acme/app",
+              owner: "acme",
+              name: "app",
+              fullName: "acme/app",
+              defaultBranch: "main",
+              private: true,
+            },
+          ])
+        ),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    return new Response(JSON.stringify({ enabledModels: ["anthropic/claude-haiku-4-5"] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+
+  const env = {
     SLACK_KV: createMockKV() as unknown as KVNamespace,
     SLACK_COMPLETION_QUEUE: {
       send: vi.fn(),
-    } as unknown as Queue,
+    },
     CONTROL_PLANE: {
-      fetch: vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url.includes("/repos")) {
-          return new Response(
-            JSON.stringify({
-              repos: [
-                {
-                  id: "acme/app",
-                  owner: "acme",
-                  name: "app",
-                  fullName: "acme/app",
-                  defaultBranch: "main",
-                  private: true,
-                },
-              ],
-            }),
-            {
-              status: 200,
-              headers: { "Content-Type": "application/json" },
-            }
-          );
-        }
-
-        return new Response(JSON.stringify({ enabledModels: ["anthropic/claude-haiku-4-5"] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }),
-    } as unknown as Fetcher,
+      fetch: controlPlaneFetch,
+    },
     DEPLOYMENT_NAME: "test",
     CONTROL_PLANE_URL: "https://control-plane.test",
     WEB_APP_URL: "https://app.test",
@@ -103,6 +125,8 @@ function makeEnv(): Env {
     SERVICE_AUTH_SECRET: "test-secret",
     LOG_LEVEL: "error",
   };
+  env satisfies Env;
+  return env;
 }
 
 function makeCtx() {
@@ -129,23 +153,21 @@ function buildNumberedRepos(count: number) {
 }
 
 /** Point CONTROL_PLANE.fetch at a fixed repo list (other routes return enabledModels). */
-function mockReposFetch(env: Env, repos: unknown[]) {
-  (env.CONTROL_PLANE.fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
-    async (input: RequestInfo | URL) => {
-      const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("/repos")) {
-        return new Response(JSON.stringify({ repos }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-
-      return new Response(JSON.stringify({ enabledModels: ["anthropic/claude-haiku-4-5"] }), {
+function mockReposFetch(env: ReturnType<typeof makeEnv>, repos: Array<Record<string, unknown>>) {
+  env.CONTROL_PLANE.fetch.mockImplementation(async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/repos")) {
+      return new Response(JSON.stringify(mockReposResponseBody(repos)), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
     }
-  );
+
+    return new Response(JSON.stringify({ enabledModels: ["anthropic/claude-haiku-4-5"] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
 }
 
 function createDeferred<T>() {
@@ -167,90 +189,91 @@ function makeSessionEnv(
     prompt?: unknown | unknown[];
     promptStatus?: number | number[];
   } = {}
-): Env {
+): ReturnType<typeof makeEnv> {
   const env = makeEnv();
   let promptResponseIndex = 0;
-  (env.CONTROL_PLANE.fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
-    async (input: RequestInfo | URL) => {
-      const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("/repos")) {
-        order.push("repos");
-        return new Response(
-          JSON.stringify({
-            repos: [
-              {
-                id: "acme/app",
-                owner: "acme",
-                name: "app",
-                fullName: "acme/app",
-                defaultBranch: "main",
-                private: true,
-              },
-            ],
-          }),
-          {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }
-        );
-      }
-
-      if (url.endsWith("/sessions")) {
-        order.push("session");
-        return new Response(
-          JSON.stringify(responses.session ?? { sessionId: "session-1", status: "created" }),
-          {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }
-        );
-      }
-
-      if (url.includes("/prompt")) {
-        order.push("prompt");
-        const promptResponse = Array.isArray(responses.prompt)
-          ? responses.prompt[promptResponseIndex++]
-          : responses.prompt;
-        const promptStatus = Array.isArray(responses.promptStatus)
-          ? responses.promptStatus[promptResponseIndex - 1]
-          : responses.promptStatus;
-        return new Response(JSON.stringify(promptResponse ?? { messageId: "msg-1" }), {
-          status: promptStatus ?? 200,
+  env.CONTROL_PLANE.fetch.mockImplementation(async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/repos")) {
+      order.push("repos");
+      return new Response(
+        JSON.stringify(
+          mockReposResponseBody([
+            {
+              id: "acme/app",
+              owner: "acme",
+              name: "app",
+              fullName: "acme/app",
+              defaultBranch: "main",
+              private: true,
+            },
+          ])
+        ),
+        {
+          status: 200,
           headers: { "Content-Type": "application/json" },
-        });
-      }
+        }
+      );
+    }
 
-      return new Response(JSON.stringify({ enabledModels: ["anthropic/claude-haiku-4-5"] }), {
-        status: 200,
+    if (url.endsWith("/sessions")) {
+      order.push("session");
+      return new Response(
+        JSON.stringify(responses.session ?? { sessionId: "session-1", status: "created" }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    if (url.includes("/attachments")) {
+      order.push("attachment");
+      return new Response(JSON.stringify({ attachmentId: "att-1", mimeType: "image/png" }), {
+        status: 201,
         headers: { "Content-Type": "application/json" },
       });
     }
-  );
+
+    if (url.includes("/prompt")) {
+      order.push("prompt");
+      const promptResponse = Array.isArray(responses.prompt)
+        ? responses.prompt[promptResponseIndex++]
+        : responses.prompt;
+      const promptStatus = Array.isArray(responses.promptStatus)
+        ? responses.promptStatus[promptResponseIndex - 1]
+        : responses.promptStatus;
+      return new Response(JSON.stringify(promptResponse ?? { messageId: "msg-1" }), {
+        status: promptStatus ?? 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    return new Response(JSON.stringify({ enabledModels: ["anthropic/claude-haiku-4-5"] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
   return env;
 }
 
 function mockSlackFetch(
   order: string[] = [],
   options: {
-    statusResponse?: Response | Promise<Response>;
     threadMessages?: unknown[];
     threadRepliesError?: string;
-    /** Successive `conversations.replies` pages, chained via next_cursor. */
-    threadPages?: unknown[][];
+    /** HTTP status for files.slack.com downloads (default 200 with bytes). */
+    fileDownloadStatus?: number;
   } = {}
 ) {
-  let threadPageIndex = 0;
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url.includes("assistant.threads.setStatus")) {
       order.push("status");
-      return (
-        options.statusResponse ??
-        new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        })
-      );
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     if (url.includes("conversations.info")) {
@@ -265,19 +288,6 @@ function mockSlackFetch(
     }
 
     if (url.includes("conversations.replies")) {
-      if (options.threadPages) {
-        const page = options.threadPages[threadPageIndex] ?? [];
-        const hasMore = threadPageIndex < options.threadPages.length - 1;
-        threadPageIndex += 1;
-        return new Response(
-          JSON.stringify({
-            ok: true,
-            messages: page,
-            ...(hasMore ? { response_metadata: { next_cursor: `cursor-${threadPageIndex}` } } : {}),
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
       const payload = options.threadRepliesError
         ? { ok: false, error: options.threadRepliesError }
         : { ok: true, messages: options.threadMessages ?? [] };
@@ -287,12 +297,12 @@ function mockSlackFetch(
       });
     }
 
-    if (url.includes("users.info")) {
-      const userId = new URL(url).searchParams.get("user") ?? "U0";
-      return new Response(
-        JSON.stringify({ ok: true, user: { id: userId, name: `name-${userId}` } }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
-      );
+    if (url.includes("files.slack.com")) {
+      order.push("filedownload");
+      if (options.fileDownloadStatus && options.fileDownloadStatus !== 200) {
+        return new Response("denied", { status: options.fileDownloadStatus });
+      }
+      return new Response(new Uint8Array(16).fill(1), { status: 200 });
     }
 
     if (url.includes("chat.postMessage")) {
@@ -396,7 +406,7 @@ describe("POST /events", () => {
     vi.clearAllMocks();
     clearLocalCache();
     mockVerifySlackSignature.mockResolvedValue(true);
-    mockGetUserInfo.mockResolvedValue({ ok: true, user: undefined });
+    mockGetUserInfo.mockResolvedValue({ ok: false, error: "user_not_found" });
   });
 
   it("publishes App Home when the home tab is opened", async () => {
@@ -510,13 +520,12 @@ describe("POST /events", () => {
     expect(startingStatusBodies(slackFetch)).toHaveLength(3);
     expect(order.indexOf("status")).toBeLessThan(order.indexOf("channelInfo"));
     expect(order.indexOf("status")).toBeLessThan(order.indexOf("session"));
+    expect(mockGetUserInfo).toHaveBeenCalledOnce();
 
     const postBodies = slackApiBodies(slackFetch, "chat.postMessage");
     expect(postBodies.some((body) => String(body.text).includes("Session started!"))).toBe(false);
 
-    const sessionBodies = sessionFetchBodies(
-      env.CONTROL_PLANE.fetch as unknown as { mock: { calls: readonly (readonly unknown[])[] } }
-    );
+    const sessionBodies = sessionFetchBodies(env.CONTROL_PLANE.fetch);
     expect(sessionBodies[0]).not.toHaveProperty("title");
     expect((env.SLACK_KV as unknown as { put: ReturnType<typeof vi.fn> }).put).toHaveBeenCalledWith(
       "thread:C123:111.222",
@@ -551,47 +560,66 @@ describe("POST /events", () => {
     slackFetch.mockRestore();
   });
 
-  it("embeds repo options in clarification messages when the repo list fits inline", async () => {
-    const slackFetch = mockSlackFetch([]);
+  it("resolves the actor once across clarification and selection", async () => {
+    const order: string[] = [];
+    const slackFetch = mockSlackFetch(order);
     const env = makeEnv();
-    (env.CONTROL_PLANE.fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
-      async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url.includes("/repos")) {
-          return new Response(
-            JSON.stringify({
-              repos: [
-                { owner: "acme", name: "web", defaultBranch: "main", private: true },
-                { owner: "acme", name: "api", defaultBranch: "main", private: true },
-                { owner: "acme", name: "docs", defaultBranch: "main", private: true },
-              ],
-            }),
-            { status: 200, headers: { "Content-Type": "application/json" } }
-          );
-        }
+    mockGetUserInfo.mockResolvedValue({
+      ok: true,
+      user: { id: "U123", name: "ajan", profile: { display_name: "Ajan" } },
+    });
+    env.CONTROL_PLANE.fetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/repos")) {
+        return new Response(
+          JSON.stringify(
+            mockReposResponseBody([
+              { owner: "acme", name: "web", defaultBranch: "main", private: true },
+              { owner: "acme", name: "api", defaultBranch: "main", private: true },
+              { owner: "acme", name: "docs", defaultBranch: "main", private: true },
+            ])
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
 
-        if (url.includes("/integration-settings/slack")) {
-          return new Response(
-            JSON.stringify({
-              settings: {
-                defaults: {
-                  routingRules: [
-                    { keyword: "frontend", target: "acme/web" },
-                    { keyword: "backend", target: "acme/api" },
-                  ],
-                },
+      if (url.includes("/integration-settings/slack")) {
+        return new Response(
+          JSON.stringify({
+            settings: {
+              defaults: {
+                routingRules: [
+                  { keyword: "frontend", target: "acme/web" },
+                  { keyword: "backend", target: "acme/api" },
+                ],
               },
-            }),
-            { status: 200, headers: { "Content-Type": "application/json" } }
-          );
-        }
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
 
-        return new Response(JSON.stringify({ enabledModels: ["anthropic/claude-haiku-4-5"] }), {
+      if (url.endsWith("/sessions")) {
+        order.push("session");
+        return new Response(JSON.stringify({ sessionId: "session-1", status: "created" }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
       }
-    );
+
+      if (url.includes("/prompt")) {
+        order.push("prompt");
+        return new Response(JSON.stringify({ messageId: "msg-1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      return new Response(JSON.stringify({ enabledModels: ["anthropic/claude-haiku-4-5"] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
 
     const ctx = makeCtx();
     const response = await app.fetch(
@@ -632,6 +660,52 @@ describe("POST /events", () => {
         ]),
       })
     );
+
+    expect(mockGetUserInfo).not.toHaveBeenCalled();
+    await expect(
+      (env.SLACK_KV as unknown as { get: (key: string, type: string) => Promise<unknown> }).get(
+        "pending:C123:111.222",
+        "json"
+      )
+    ).resolves.toEqual(
+      expect.objectContaining({
+        message: "frontend backend help",
+        userId: "U123",
+        unattributedPrompt: { forwardedMessages: [] },
+      })
+    );
+
+    const selectionCtx = makeCtx();
+    const selectionResponse = await app.fetch(
+      new Request("http://localhost/interactions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "x-slack-signature": "v0=test",
+          "x-slack-request-timestamp": `${Math.floor(Date.now() / 1000)}`,
+        },
+        body: new URLSearchParams({
+          payload: JSON.stringify({
+            type: "block_actions",
+            user: { id: "U123" },
+            channel: { id: "C123" },
+            message: { ts: "111.222" },
+            actions: [{ action_id: "select_repo", selected_option: { value: "acme/web" } }],
+          }),
+        }),
+      }),
+      env,
+      selectionCtx
+    );
+
+    expect(selectionResponse.status).toBe(200);
+    await flushWaitUntil(selectionCtx);
+    expect(mockGetUserInfo).toHaveBeenCalledOnce();
+    expect(promptFetchBodies(env.CONTROL_PLANE.fetch)).toEqual([
+      expect.objectContaining({
+        content: expect.stringContaining("[Ajan (U123)]: frontend backend help"),
+      }),
+    ]);
 
     slackFetch.mockRestore();
   });
@@ -791,16 +865,18 @@ describe("POST /events", () => {
     expect(order.indexOf("status")).toBeLessThan(order.indexOf("prompt"));
     expect(order).not.toContain("session");
 
-    const promptBodies = promptFetchBodies(
-      env.CONTROL_PLANE.fetch as unknown as { mock: { calls: readonly (readonly unknown[])[] } }
-    );
+    const promptBodies = promptFetchBodies(env.CONTROL_PLANE.fetch);
     expect(promptBodies).toHaveLength(1);
     expect(promptBodies[0].content).toContain("now add coverage");
+    expect(promptBodies[0].content).toContain("[U123]: now add coverage");
     expect(promptBodies[0].content).toContain("Slack channel context");
     expect(promptBodies[0].content).not.toContain("Context from the Slack thread");
     expect(promptBodies[0].content).not.toContain("The latest commit is");
     expect(
-      slackFetch.mock.calls.some(([input]) => String(input).includes("conversations.replies"))
+      slackFetch.mock.calls.some(
+        ([input]) =>
+          String(input).includes("conversations.replies") && String(input).includes("limit=200")
+      )
     ).toBe(false);
     // Legacy mappings without lastPromptTs get stamped so the next follow-up
     // can scope interim thread context.
@@ -856,7 +932,10 @@ describe("POST /events", () => {
       expect.objectContaining({ text: "Sorry, I couldn't send your follow-up. Please try again." })
     );
     expect(
-      slackFetch.mock.calls.some(([input]) => String(input).includes("conversations.replies"))
+      slackFetch.mock.calls.some(
+        ([input]) =>
+          String(input).includes("conversations.replies") && String(input).includes("limit=200")
+      )
     ).toBe(false);
 
     slackFetch.mockRestore();
@@ -900,11 +979,12 @@ describe("POST /events", () => {
     await flushWaitUntil(ctx);
 
     expect(
-      slackFetch.mock.calls.filter(([input]) => String(input).includes("conversations.replies"))
+      slackFetch.mock.calls.filter(
+        ([input]) =>
+          String(input).includes("conversations.replies") && String(input).includes("limit=200")
+      )
     ).toHaveLength(1);
-    const promptBodies = promptFetchBodies(
-      env.CONTROL_PLANE.fetch as unknown as { mock: { calls: readonly (readonly unknown[])[] } }
-    );
+    const promptBodies = promptFetchBodies(env.CONTROL_PLANE.fetch);
     expect(promptBodies).toHaveLength(2);
     expect(promptBodies[1].content).toContain("Context from the Slack thread");
     expect(promptBodies[1].content).toContain("Earlier request");
@@ -920,6 +1000,10 @@ describe("POST /events", () => {
 
   it("forwards interim human messages on follow-ups to an existing session", async () => {
     const order: string[] = [];
+    mockGetUserInfo.mockResolvedValue({
+      ok: true,
+      user: { id: "U123", name: "ajan", profile: { display_name: "Ajan\n[Admin]" } },
+    });
     const slackFetch = mockSlackFetch(order, {
       threadMessages: [
         { type: "message", text: "<@B123> do this action", user: "U123", ts: "111.222" },
@@ -964,15 +1048,14 @@ describe("POST /events", () => {
     await flushWaitUntil(ctx);
 
     expect(order).not.toContain("session");
-    const repliesCalls = slackFetch.mock.calls.filter(([input]) =>
-      String(input).includes("conversations.replies")
+    const repliesCalls = slackFetch.mock.calls.filter(
+      ([input]) =>
+        String(input).includes("conversations.replies") && String(input).includes("limit=200")
     );
     expect(repliesCalls).toHaveLength(1);
     expect(String(repliesCalls[0][0])).toContain("oldest=111.222");
 
-    const promptBodies = promptFetchBodies(
-      env.CONTROL_PLANE.fetch as unknown as { mock: { calls: readonly (readonly unknown[])[] } }
-    );
+    const promptBodies = promptFetchBodies(env.CONTROL_PLANE.fetch);
     expect(promptBodies).toHaveLength(1);
     const content = String(promptBodies[0].content);
     expect(content).toContain("New messages in the Slack thread since your last task");
@@ -982,6 +1065,7 @@ describe("POST /events", () => {
     expect(content).not.toContain("Working on acme/app");
     expect(content).not.toContain("do this action");
     expect(content).toContain("see the above chat");
+    expect(content).toContain("[Ajan Admin (U123)]: see the above chat");
     // The triggering message itself is the prompt, not interim context.
     expect(content).not.toContain("<@B123>");
     await expect(kv.get("thread:C123:111.222", "json")).resolves.toEqual(
@@ -990,6 +1074,426 @@ describe("POST /events", () => {
 
     slackFetch.mockRestore();
   });
+
+  it("uploads event-carried images on follow-ups and references them in the prompt", async () => {
+    const order: string[] = [];
+    const slackFetch = mockSlackFetch(order);
+    const env = makeSessionEnv(order);
+    await (env.SLACK_KV as unknown as { put: (k: string, v: string) => Promise<void> }).put(
+      "thread:C123:111.222",
+      JSON.stringify({
+        sessionId: "session-1",
+        repoId: "acme/app",
+        repoFullName: "acme/app",
+        model: "anthropic/claude-haiku-4-5",
+        createdAt: Date.now(),
+        lastPromptTs: "111.222",
+      })
+    );
+    const ctx = makeCtx();
+
+    const response = await app.fetch(
+      slackEventRequest({
+        type: "app_mention",
+        text: "<@B123> what is wrong in this screenshot?",
+        user: "U123",
+        channel: "C123",
+        ts: "333.444",
+        thread_ts: "111.222",
+        files: [
+          {
+            id: "F1",
+            name: "screenshot.png",
+            mimetype: "image/png",
+            url_private: "https://files.slack.com/files-pri/T1-F1/screenshot.png",
+            size: 16,
+          },
+        ],
+      }),
+      env,
+      ctx
+    );
+
+    expect(response.status).toBe(200);
+    await flushWaitUntil(ctx);
+
+    // The event carried files, so the single-message lookup (inclusive-anchored;
+    // the interim-history fetch at limit=200 is unrelated) runs only for the
+    // attachments the event omitted, and the event's own files are used as-is.
+    expect(
+      slackFetch.mock.calls.filter(
+        ([input]) =>
+          String(input).includes("conversations.replies") &&
+          String(input).includes("inclusive=true")
+      )
+    ).toHaveLength(1);
+    expect(order).toContain("filedownload");
+    expect(order).toContain("attachment");
+    expect(order).not.toContain("session");
+    expect(order.indexOf("attachment")).toBeLessThan(order.indexOf("prompt"));
+    const promptBodies = promptFetchBodies(env.CONTROL_PLANE.fetch);
+    expect(promptBodies).toHaveLength(1);
+    expect(promptBodies[0].attachments).toEqual([
+      { attachmentId: "att-1", name: "screenshot.png" },
+    ]);
+
+    slackFetch.mockRestore();
+  });
+
+  it("recovers files for mentions whose event lacks them via conversation history", async () => {
+    const order: string[] = [];
+    const slackFetch = mockSlackFetch(order, {
+      threadMessages: [
+        {
+          type: "message",
+          text: "<@B123> look at this",
+          user: "U123",
+          ts: "333.444",
+          files: [
+            {
+              id: "F1",
+              name: "bug.png",
+              mimetype: "image/png",
+              url_private: "https://files.slack.com/files-pri/T1-F1/bug.png",
+              size: 16,
+            },
+          ],
+        },
+      ],
+    });
+    const env = makeSessionEnv(order);
+    await (env.SLACK_KV as unknown as { put: (k: string, v: string) => Promise<void> }).put(
+      "thread:C123:111.222",
+      JSON.stringify({
+        sessionId: "session-1",
+        repoId: "acme/app",
+        repoFullName: "acme/app",
+        model: "anthropic/claude-haiku-4-5",
+        createdAt: Date.now(),
+        lastPromptTs: "111.222",
+      })
+    );
+    const ctx = makeCtx();
+
+    const response = await app.fetch(
+      slackEventRequest({
+        type: "app_mention",
+        text: "<@B123> look at this",
+        user: "U123",
+        channel: "C123",
+        ts: "333.444",
+        thread_ts: "111.222",
+      }),
+      env,
+      ctx
+    );
+
+    expect(response.status).toBe(200);
+    await flushWaitUntil(ctx);
+
+    // The single-message lookup recovered the file, which was then forwarded.
+    // The lookup anchors on oldest=<target ts> with inclusive=true (replies are
+    // oldest-first); the interim-history fetch never sets inclusive.
+    const lookupCalls = slackFetch.mock.calls.filter(
+      ([input]) =>
+        String(input).includes("conversations.replies") &&
+        String(input).includes("oldest=333.444") &&
+        String(input).includes("inclusive=true")
+    );
+    expect(lookupCalls).toHaveLength(1);
+    expect(order).toContain("filedownload");
+    expect(order).toContain("attachment");
+    const promptBodies = promptFetchBodies(env.CONTROL_PLANE.fetch);
+    expect(promptBodies).toHaveLength(1);
+    expect(promptBodies[0].attachments).toEqual([{ attachmentId: "att-1", name: "bug.png" }]);
+
+    slackFetch.mockRestore();
+  });
+
+  it("quotes a message forwarded with a mention into the prompt", async () => {
+    // Forwarding puts the shared message's body in the message's `attachments`,
+    // never in its `text` — which holds only the comment the user typed. The
+    // mention event may omit attachments, so they come back with the same
+    // single-message lookup that recovers files.
+    const order: string[] = [];
+    const slackFetch = mockSlackFetch(order, {
+      threadMessages: [
+        {
+          type: "message",
+          text: "<@B123> deal with this",
+          user: "U123",
+          ts: "333.444",
+          attachments: [
+            {
+              is_msg_unfurl: true,
+              is_share: true,
+              author_name: "Ada Lovelace",
+              channel_name: "engineering",
+              channel_id: "C999",
+              ts: "222.111",
+              from_url: "https://acme.slack.com/archives/C999/p222111",
+              text: "The nightly analytics job has failed three days running",
+              files: [
+                {
+                  id: "F1",
+                  name: "chart.png",
+                  mimetype: "image/png",
+                  url_private: "https://files.slack.com/files-pri/T1-F1/chart.png",
+                  size: 16,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    const env = makeSessionEnv(order);
+    await (env.SLACK_KV as unknown as { put: (k: string, v: string) => Promise<void> }).put(
+      "thread:C123:111.222",
+      JSON.stringify({
+        sessionId: "session-1",
+        repoId: "acme/app",
+        repoFullName: "acme/app",
+        model: "anthropic/claude-haiku-4-5",
+        createdAt: Date.now(),
+        lastPromptTs: "111.222",
+      })
+    );
+    const ctx = makeCtx();
+
+    const response = await app.fetch(
+      slackEventRequest({
+        type: "app_mention",
+        text: "<@B123> deal with this",
+        user: "U123",
+        channel: "C123",
+        ts: "333.444",
+        thread_ts: "111.222",
+      }),
+      env,
+      ctx
+    );
+
+    expect(response.status).toBe(200);
+    await flushWaitUntil(ctx);
+
+    const promptBodies = promptFetchBodies(env.CONTROL_PLANE.fetch);
+    expect(promptBodies).toHaveLength(1);
+    const content = String(promptBodies[0].content);
+    expect(content).toContain("Slack messages forwarded with this request");
+    expect(content).toContain("[Forwarded message from Ada Lovelace in #engineering]");
+    expect(content).toContain("The nightly analytics job has failed three days running");
+    // Source ids let an agent with Slack tooling read the original thread.
+    expect(content).toContain(
+      "Source: https://acme.slack.com/archives/C999/p222111 — Slack channel C999 — message ts 222.111"
+    );
+    // The user's own instruction still lands last, after the quoted context.
+    expect(content.endsWith("deal with this")).toBe(true);
+    // The image the forwarded message carried rides the normal attachment path.
+    expect(order).toContain("filedownload");
+    expect(promptBodies[0].attachments).toEqual([{ attachmentId: "att-1", name: "chart.png" }]);
+
+    slackFetch.mockRestore();
+  });
+
+  it("runs a forwarded message that arrived in a DM with no comment", async () => {
+    const order: string[] = [];
+    const slackFetch = mockSlackFetch(order);
+    const env = makeSessionEnv(order);
+    await (env.SLACK_KV as unknown as { put: (k: string, v: string) => Promise<void> }).put(
+      "thread:D123:111.222",
+      JSON.stringify({
+        sessionId: "session-1",
+        repoId: "acme/app",
+        repoFullName: "acme/app",
+        model: "anthropic/claude-haiku-4-5",
+        createdAt: Date.now(),
+        lastPromptTs: "111.222",
+      })
+    );
+    const ctx = makeCtx();
+
+    const response = await app.fetch(
+      slackEventRequest({
+        type: "message",
+        channel_type: "im",
+        text: "",
+        user: "U123",
+        channel: "D123",
+        ts: "333.444",
+        thread_ts: "111.222",
+        attachments: [
+          {
+            is_msg_unfurl: true,
+            is_share: true,
+            author_name: "Ada Lovelace",
+            text: "The nightly analytics job has failed three days running",
+          },
+        ],
+      }),
+      env,
+      ctx
+    );
+
+    expect(response.status).toBe(200);
+    await flushWaitUntil(ctx);
+
+    const promptBodies = promptFetchBodies(env.CONTROL_PLANE.fetch);
+    expect(promptBodies).toHaveLength(1);
+    const content = String(promptBodies[0].content);
+    expect(content).toContain(
+      "[Forwarded message from Ada Lovelace]\nThe nightly analytics job has failed three days running"
+    );
+    // With no comment of their own the forward is the whole request, so the
+    // prompt still ends with something actionable.
+    expect(content.endsWith("See the forwarded Slack message(s).")).toBe(true);
+
+    slackFetch.mockRestore();
+  });
+
+  it.each([
+    [
+      "a direct image-only DM loses every image",
+      {
+        subtype: "file_share",
+        files: [
+          {
+            id: "F1",
+            name: "screenshot.png",
+            mimetype: "image/png",
+            url_private: "https://files.slack.com/files-pri/T1-F1/screenshot.png",
+            size: 16,
+          },
+        ],
+      },
+      true,
+      2,
+      "didn't start on this request",
+    ],
+    [
+      "an image-only forwarded message loses every image",
+      {
+        text: "",
+        attachments: [
+          {
+            is_msg_unfurl: true,
+            is_share: true,
+            author_name: "Ada Lovelace",
+            channel_id: "C999",
+            ts: "222.111",
+            from_url: "https://acme.slack.com/archives/C999/p222111",
+            text: "",
+            files: [
+              {
+                id: "F1",
+                name: "chart.png",
+                mimetype: "image/png",
+                url_private: "https://files.slack.com/files-pri/T1-F1/chart.png",
+                size: 16,
+              },
+            ],
+          },
+        ],
+      },
+      true,
+      2,
+      "didn't start on this request",
+    ],
+    [
+      "a body-less forward contains only unsupported files",
+      {
+        text: "",
+        attachments: [
+          {
+            is_msg_unfurl: true,
+            is_share: true,
+            author_name: "Ada Lovelace",
+            text: "",
+            files: [
+              {
+                id: "F1",
+                name: "incident.pdf",
+                mimetype: "application/pdf",
+                url_private: "https://files.slack.com/files-pri/T1-F1/incident.pdf",
+                size: 16,
+              },
+            ],
+          },
+        ],
+      },
+      false,
+      0,
+      "Please include a message with your request",
+    ],
+    [
+      "an app mention contains a body-less forward with only unsupported files",
+      {
+        type: "app_mention",
+        text: "<@B123>",
+        attachments: [
+          {
+            is_msg_unfurl: true,
+            is_share: true,
+            author_name: "Ada Lovelace",
+            text: "",
+            files: [
+              {
+                id: "F1",
+                name: "incident.pdf",
+                mimetype: "application/pdf",
+                url_private: "https://files.slack.com/files-pri/T1-F1/incident.pdf",
+                size: 16,
+              },
+            ],
+          },
+        ],
+      },
+      false,
+      0,
+      "Please include a message with your request",
+    ],
+  ] satisfies Array<[string, Record<string, unknown>, boolean, number, string]>)(
+    "starts nothing when %s",
+    async (_caseName, eventFields, downloadsImage, expectedStartingStatuses, expectedMessage) => {
+      const order: string[] = [];
+      const slackFetch = mockSlackFetch(order, { fileDownloadStatus: 403 });
+      const env = makeSessionEnv(order);
+      const ctx = makeCtx();
+
+      const response = await app.fetch(
+        slackEventRequest({
+          type: "message",
+          user: "U123",
+          channel: "D123",
+          ts: "444.555",
+          channel_type: "im",
+          ...eventFields,
+        }),
+        env,
+        ctx
+      );
+
+      expect(response.status).toBe(200);
+      await flushWaitUntil(ctx);
+
+      // The placeholder prompt would be meaningless with no image attached, so
+      // no session is created and the user is told nothing ran.
+      if (downloadsImage) expect(order).toContain("filedownload");
+      else expect(order).not.toContain("filedownload");
+      expect(startingStatusBodies(slackFetch)).toHaveLength(expectedStartingStatuses);
+      expect(order).not.toContain("session");
+      expect(order).not.toContain("prompt");
+      expect(slackApiBodies(slackFetch, "chat.postMessage")).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            text: expect.stringContaining(expectedMessage),
+          }),
+        ])
+      );
+
+      slackFetch.mockRestore();
+    }
+  );
 
   it("keeps the interim checkpoint when the thread fetch fails", async () => {
     const order: string[] = [];
@@ -1030,9 +1534,7 @@ describe("POST /events", () => {
 
     // The prompt is still sent — thread context stays best effort — but the
     // checkpoint is not advanced past messages that were never considered.
-    const promptBodies = promptFetchBodies(
-      env.CONTROL_PLANE.fetch as unknown as { mock: { calls: readonly (readonly unknown[])[] } }
-    );
+    const promptBodies = promptFetchBodies(env.CONTROL_PLANE.fetch);
     expect(promptBodies).toHaveLength(1);
     expect(String(promptBodies[0].content)).not.toContain(
       "New messages in the Slack thread since your last task"
@@ -1041,90 +1543,6 @@ describe("POST /events", () => {
       expect.objectContaining({ sessionId: "session-1", lastPromptTs: "111.222" })
     );
 
-    slackFetch.mockRestore();
-  });
-
-  it("resolves author names only for the thread messages it keeps", async () => {
-    // Only the last ten messages reach the prompt, so only their authors may
-    // cost a users.info call. Resolving before the slice fanned a long thread
-    // out into hundreds of Slack calls.
-    const page = (offset: number) =>
-      Array.from({ length: 30 }, (_, idx) => ({
-        type: "message",
-        text: `message ${offset + idx}`,
-        user: `U${offset + idx}`,
-        ts: `1.${offset + idx}`,
-      }));
-    const order: string[] = [];
-    const slackFetch = mockSlackFetch(order, { threadPages: [page(0), page(30)] });
-    const env = makeSessionEnv(order);
-    const ctx = makeCtx();
-
-    const response = await app.fetch(
-      slackEventRequest({
-        type: "app_mention",
-        text: "<@B123> now add coverage",
-        user: "U123",
-        channel: "C123",
-        ts: "333.444",
-        thread_ts: "111.222",
-      }),
-      env,
-      ctx
-    );
-
-    expect(response.status).toBe(200);
-    await flushWaitUntil(ctx);
-
-    const repliesCalls = slackFetch.mock.calls.filter(([input]) =>
-      String(input).includes("conversations.replies")
-    );
-    expect(repliesCalls).toHaveLength(2);
-
-    const resolvedUserIds = slackFetch.mock.calls
-      .filter(([input]) => String(input).includes("users.info"))
-      .map(([input]) => new URL(String(input)).searchParams.get("user"));
-    expect(resolvedUserIds).toHaveLength(10);
-    expect([...resolvedUserIds].sort()).toEqual(
-      Array.from({ length: 10 }, (_, idx) => `U${50 + idx}`).sort()
-    );
-
-    slackFetch.mockRestore();
-  });
-
-  it("warns when the thread came back truncated", async () => {
-    // A thread long enough to hit the pagination cap loses its newest messages,
-    // so the history is silently partial unless the truncation is reported.
-    const pages = Array.from({ length: 26 }, (_, idx) => [
-      { type: "message", text: `message ${idx}`, user: `U${idx}`, ts: `1.${idx}` },
-    ]);
-    const order: string[] = [];
-    const slackFetch = mockSlackFetch(order, { threadPages: pages });
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const env = makeSessionEnv(order);
-    const ctx = makeCtx();
-
-    const response = await app.fetch(
-      slackEventRequest({
-        type: "app_mention",
-        text: "<@B123> summarise this",
-        user: "U123",
-        channel: "C123",
-        ts: "333.444",
-        thread_ts: "111.222",
-      }),
-      env,
-      ctx
-    );
-
-    expect(response.status).toBe(200);
-    await flushWaitUntil(ctx);
-
-    expect(
-      warn.mock.calls.some(([entry]) => String(entry).includes("slack.thread_context.truncated"))
-    ).toBe(true);
-
-    warn.mockRestore();
     slackFetch.mockRestore();
   });
 
@@ -1154,56 +1572,6 @@ describe("POST /events", () => {
 
     slackFetch.mockRestore();
   });
-
-  it("does not wait for Starting status before creating a session", async () => {
-    const statusDeferred = createDeferred<Response>();
-    const order: string[] = [];
-    const slackFetch = mockSlackFetch(order, { statusResponse: statusDeferred.promise });
-    const env = makeSessionEnv(order);
-    const ctx = makeCtx();
-
-    const response = await app.fetch(
-      slackEventRequest({
-        type: "message",
-        text: "fix the auth tests",
-        user: "U123",
-        channel: "D123",
-        ts: "444.555",
-        channel_type: "im",
-      }),
-      env,
-      ctx
-    );
-
-    expect(response.status).toBe(200);
-    const backgroundPromise = ctx.waitUntil.mock.calls[0]?.[0] as Promise<void>;
-    const backgroundOutcome = await Promise.race([
-      backgroundPromise.then(() => "complete"),
-      new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 25)),
-    ]);
-
-    expect(backgroundOutcome).toBe("complete");
-    expect(order).toContain("session");
-    expect(order).toContain("prompt");
-    expect(ctx.waitUntil).toHaveBeenCalledTimes(4);
-
-    const statusPromise = ctx.waitUntil.mock.calls[1]?.[0] as Promise<void>;
-    const statusOutcome = await Promise.race([
-      statusPromise.then(() => "complete"),
-      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 25)),
-    ]);
-    expect(statusOutcome).toBe("pending");
-
-    statusDeferred.resolve(
-      new Response(JSON.stringify({ ok: false, error: "missing_scope" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      })
-    );
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    slackFetch.mockRestore();
-  });
 });
 
 describe("POST /interactions", () => {
@@ -1212,7 +1580,7 @@ describe("POST /interactions", () => {
     clearLocalCache();
     mockVerifySlackSignature.mockResolvedValue(true);
     mockOpenView.mockResolvedValue({ ok: true });
-    mockGetUserInfo.mockResolvedValue({ ok: true, user: undefined });
+    mockGetUserInfo.mockResolvedValue({ ok: false, error: "user_not_found" });
   });
 
   it("sets Starting status for repo-selection starts before session creation", async () => {
@@ -1308,21 +1676,19 @@ describe("POST /interactions", () => {
       })
     );
 
-    (env.CONTROL_PLANE.fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
-      async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url.includes("/repos")) {
-          return new Response(JSON.stringify({ repos: [] }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        return new Response(JSON.stringify({ enabledModels: [] }), {
+    env.CONTROL_PLANE.fetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/repos")) {
+        return new Response(JSON.stringify(mockReposResponseBody([])), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
       }
-    );
+      return new Response(JSON.stringify({ enabledModels: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
 
     const payload = {
       type: "block_actions",
@@ -1660,7 +2026,7 @@ describe("POST /interactions", () => {
 
   it("prefers repo branch over global branch when creating a session", async () => {
     const slackFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-      return new Response(JSON.stringify({ ok: true, ts: "123.456" }), {
+      return new Response(JSON.stringify({ ok: true, channel: "C123", ts: "123.456" }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -1712,50 +2078,48 @@ describe("POST /interactions", () => {
       "repo-branch"
     );
 
-    (env.CONTROL_PLANE.fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
-      async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url.includes("/repos")) {
-          return new Response(
-            JSON.stringify({
-              repos: [
-                {
-                  id: "acme/app",
-                  owner: "acme",
-                  name: "app",
-                  fullName: "acme/app",
-                  defaultBranch: "main",
-                  private: true,
-                },
-              ],
-            }),
-            {
-              status: 200,
-              headers: { "Content-Type": "application/json" },
-            }
-          );
-        }
-
-        if (url.endsWith("/sessions")) {
-          return new Response(JSON.stringify({ sessionId: "session-1", status: "created" }), {
+    env.CONTROL_PLANE.fetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/repos")) {
+        return new Response(
+          JSON.stringify(
+            mockReposResponseBody([
+              {
+                id: "acme/app",
+                owner: "acme",
+                name: "app",
+                fullName: "acme/app",
+                defaultBranch: "main",
+                private: true,
+              },
+            ])
+          ),
+          {
             status: 200,
             headers: { "Content-Type": "application/json" },
-          });
-        }
+          }
+        );
+      }
 
-        if (url.includes("/prompt")) {
-          return new Response(JSON.stringify({ messageId: "msg-1" }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-
-        return new Response(JSON.stringify({ enabledModels: ["anthropic/claude-haiku-4-5"] }), {
+      if (url.endsWith("/sessions")) {
+        return new Response(JSON.stringify({ sessionId: "session-1", status: "created" }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
       }
-    );
+
+      if (url.includes("/prompt")) {
+        return new Response(JSON.stringify({ messageId: "msg-1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      return new Response(JSON.stringify({ enabledModels: ["anthropic/claude-haiku-4-5"] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
 
     const ctx = makeCtx();
     const response = await app.fetch(request, env, ctx);
@@ -1767,9 +2131,7 @@ describe("POST /interactions", () => {
     await flushWaitUntil(ctx, 1);
     expect(ctx.waitUntil).toHaveBeenCalledTimes(3);
 
-    const sessionCall = (
-      env.CONTROL_PLANE.fetch as unknown as { mock: { calls: unknown[][] } }
-    ).mock.calls.find(([input]) => {
+    const sessionCall = env.CONTROL_PLANE.fetch.mock.calls.find(([input]) => {
       const url = typeof input === "string" ? input : (input as URL).toString();
       return url.endsWith("/sessions");
     });
@@ -1784,7 +2146,7 @@ describe("POST /interactions", () => {
 
   it("forwards display identity fields from getUserInfo to session creation", async () => {
     const slackFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-      return new Response(JSON.stringify({ ok: true, ts: "123.456" }), {
+      return new Response(JSON.stringify({ ok: true, channel: "C123", ts: "123.456" }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -1835,53 +2197,49 @@ describe("POST /interactions", () => {
       })
     );
 
-    (env.CONTROL_PLANE.fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
-      async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url.includes("/repos")) {
-          return new Response(
-            JSON.stringify({
-              repos: [
-                {
-                  id: "acme/app",
-                  owner: "acme",
-                  name: "app",
-                  fullName: "acme/app",
-                  defaultBranch: "main",
-                  private: true,
-                },
-              ],
-            }),
-            { status: 200, headers: { "Content-Type": "application/json" } }
-          );
-        }
-        if (url.endsWith("/sessions")) {
-          return new Response(JSON.stringify({ sessionId: "session-1", status: "created" }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        if (url.includes("/prompt")) {
-          return new Response(JSON.stringify({ messageId: "msg-1" }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        return new Response(JSON.stringify({ enabledModels: [] }), {
+    env.CONTROL_PLANE.fetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/repos")) {
+        return new Response(
+          JSON.stringify(
+            mockReposResponseBody([
+              {
+                id: "acme/app",
+                owner: "acme",
+                name: "app",
+                fullName: "acme/app",
+                defaultBranch: "main",
+                private: true,
+              },
+            ])
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith("/sessions")) {
+        return new Response(JSON.stringify({ sessionId: "session-1", status: "created" }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
       }
-    );
+      if (url.includes("/prompt")) {
+        return new Response(JSON.stringify({ messageId: "msg-1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ enabledModels: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
 
     const ctx = makeCtx();
     const response = await app.fetch(request, env, ctx);
     expect(response.status).toBe(200);
     await flushWaitUntil(ctx);
 
-    const sessionCall = (
-      env.CONTROL_PLANE.fetch as unknown as { mock: { calls: unknown[][] } }
-    ).mock.calls.find(([input]) => {
+    const sessionCall = env.CONTROL_PLANE.fetch.mock.calls.find(([input]) => {
       const url = typeof input === "string" ? input : (input as URL).toString();
       return url.endsWith("/sessions");
     });
@@ -1891,6 +2249,7 @@ describe("POST /interactions", () => {
     const body = JSON.parse(String(init.body)) as Record<string, unknown>;
     expect(body.actorDisplayName).toBe("Jane");
     expect(body.actorEmail).toBe("jane@example.com");
+    expect(mockGetUserInfo).toHaveBeenCalledOnce();
     // Identity travels via the signed actor assertion, never the body.
     expect(body.actorUserId).toBeUndefined();
     expect(body.spawnSource).toBeUndefined();
@@ -1900,7 +2259,7 @@ describe("POST /interactions", () => {
 
   it("creates session even when getUserInfo throws", async () => {
     const slackFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-      return new Response(JSON.stringify({ ok: true, ts: "123.456" }), {
+      return new Response(JSON.stringify({ ok: true, channel: "C123", ts: "123.456" }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -1940,53 +2299,49 @@ describe("POST /interactions", () => {
       })
     );
 
-    (env.CONTROL_PLANE.fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
-      async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url.includes("/repos")) {
-          return new Response(
-            JSON.stringify({
-              repos: [
-                {
-                  id: "acme/app",
-                  owner: "acme",
-                  name: "app",
-                  fullName: "acme/app",
-                  defaultBranch: "main",
-                  private: true,
-                },
-              ],
-            }),
-            { status: 200, headers: { "Content-Type": "application/json" } }
-          );
-        }
-        if (url.endsWith("/sessions")) {
-          return new Response(JSON.stringify({ sessionId: "session-1", status: "created" }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        if (url.includes("/prompt")) {
-          return new Response(JSON.stringify({ messageId: "msg-1" }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        return new Response(JSON.stringify({ enabledModels: [] }), {
+    env.CONTROL_PLANE.fetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/repos")) {
+        return new Response(
+          JSON.stringify(
+            mockReposResponseBody([
+              {
+                id: "acme/app",
+                owner: "acme",
+                name: "app",
+                fullName: "acme/app",
+                defaultBranch: "main",
+                private: true,
+              },
+            ])
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith("/sessions")) {
+        return new Response(JSON.stringify({ sessionId: "session-1", status: "created" }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
       }
-    );
+      if (url.includes("/prompt")) {
+        return new Response(JSON.stringify({ messageId: "msg-1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ enabledModels: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
 
     const ctx = makeCtx();
     const response = await app.fetch(request, env, ctx);
     expect(response.status).toBe(200);
     await flushWaitUntil(ctx);
 
-    const sessionCall = (
-      env.CONTROL_PLANE.fetch as unknown as { mock: { calls: unknown[][] } }
-    ).mock.calls.find(([input]) => {
+    const sessionCall = env.CONTROL_PLANE.fetch.mock.calls.find(([input]) => {
       const url = typeof input === "string" ? input : (input as URL).toString();
       return url.endsWith("/sessions");
     });

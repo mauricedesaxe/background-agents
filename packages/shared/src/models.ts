@@ -10,7 +10,7 @@
  *
  * - "none": No reasoning (OpenAI only)
  * - "low"/"medium"/"high"/"xhigh": Progressive reasoning depth
- * - "max": Maximum reasoning budget (Anthropic extended thinking)
+ * - "max": Maximum reasoning effort for models that support it
  */
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -59,9 +59,18 @@ export const MODEL_CATALOG = [
       {
         id: "anthropic/claude-sonnet-4-6",
         name: "Claude Sonnet 4.6",
-        description: "Latest balanced, fast coding",
+        description: "Balanced, fast coding",
         default: true,
         reasoning: { efforts: ["low", "medium", "high", "max"], default: "high" },
+      },
+      {
+        id: "anthropic/claude-sonnet-5",
+        name: "Claude Sonnet 5",
+        description: "Latest Sonnet, adaptive thinking",
+        reasoning: {
+          efforts: ["low", "medium", "high", "xhigh", "max"],
+          default: "high",
+        },
       },
       {
         id: "anthropic/claude-opus-4-5",
@@ -158,7 +167,7 @@ export const MODEL_CATALOG = [
         name: "GPT 5.6 Luna",
         description: "Fast, cost-efficient high-volume workloads",
         reasoning: {
-          efforts: ["none", "low", "medium", "high", "xhigh"],
+          efforts: ["none", "low", "medium", "high", "xhigh", "max"],
           default: undefined,
         },
       },
@@ -182,6 +191,7 @@ export const MODEL_CATALOG = [
     models: [
       { id: "opencode/kimi-k2.5", name: "Kimi K2.5", description: "Moonshot AI" },
       { id: "opencode/kimi-k2.6", name: "Kimi K2.6", description: "Moonshot AI" },
+      { id: "opencode/kimi-k3", name: "Kimi K3", description: "Moonshot AI" },
       { id: "opencode/minimax-m2.5", name: "MiniMax M2.5", description: "MiniMax" },
       { id: "opencode/qwen3.7-max", name: "Qwen3.7 Max", description: "Alibaba Cloud" },
       { id: "opencode/glm-5", name: "GLM 5", description: "Z.ai 744B MoE" },
@@ -189,19 +199,34 @@ export const MODEL_CATALOG = [
     ],
   },
   {
-    category: "Z.AI Coding Plan",
+    category: "xAI / SuperGrok",
     enabledByDefault: false,
     models: [
       {
-        id: "zai-coding-plan/glm-5.2",
-        name: "GLM 5.2",
-        description: "Z.AI Coding Plan. Text-only",
+        id: "xai/grok-4.5",
+        name: "Grok 4.5",
+        description: "Grok for chat, coding, and agentic tools",
+        reasoning: { efforts: ["low", "medium", "high"], default: "high" },
       },
       {
-        id: "zai-coding-plan/glm-5.3",
-        name: "GLM 5.3",
-        description: "Z.AI Coding Plan. Text-only",
+        id: "xai/grok-4.6",
+        name: "Grok 4.6",
+        description: "Latest Grok for chat, coding, and agentic tools",
+        reasoning: { efforts: ["low", "medium", "high"], default: "high" },
       },
+      {
+        id: "xai/grok-build-0.1",
+        name: "Grok Build 0.1",
+        description: "Coding model for SuperGrok subscribers",
+      },
+    ],
+  },
+  {
+    category: "Z.AI Coding Plan",
+    enabledByDefault: false,
+    models: [
+      { id: "zai-coding-plan/glm-5.2", name: "GLM 5.2", description: "Z.AI Coding Plan" },
+      { id: "zai-coding-plan/glm-5.3", name: "GLM 5.3", description: "Z.AI Coding Plan" },
     ],
   },
   {
@@ -210,65 +235,6 @@ export const MODEL_CATALOG = [
     models: [
       { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", description: "Fast model" },
       { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", description: "Most capable" },
-    ],
-  },
-  // OpenCode maps reasoning-effort variants for OpenRouter Gemini 3 models but not for Grok, so
-  // an effort control on Grok would render in the UI and do nothing. Gemini defaults to "high"
-  // because OpenCode asks for high effort when no effort is sent: the control is there to turn
-  // it down, not to switch reasoning on.
-  {
-    category: "OpenRouter",
-    enabledByDefault: false,
-    models: [
-      {
-        id: "openrouter/google/gemini-3.1-flash-lite",
-        name: "Gemini 3.1 Flash Lite",
-        description: "Google, fast and cheap. Multimodal",
-        reasoning: {
-          efforts: ["none", "low", "medium", "high", "xhigh"],
-          default: "high",
-        },
-      },
-      {
-        id: "openrouter/google/gemini-3.1-pro-preview",
-        name: "Gemini 3.1 Pro",
-        description: "Google, most capable. Multimodal",
-        reasoning: {
-          efforts: ["none", "low", "medium", "high", "xhigh"],
-          default: "high",
-        },
-      },
-      {
-        id: "openrouter/x-ai/grok-4.3",
-        name: "Grok 4.3",
-        description: "xAI, balanced. Multimodal",
-      },
-      {
-        id: "openrouter/x-ai/grok-4.5",
-        name: "Grok 4.5",
-        description: "xAI, most capable. Multimodal",
-      },
-      {
-        id: "openrouter/deepseek/deepseek-v4-flash-0731",
-        name: "DeepSeek V4 Flash 0731",
-        description: "DeepSeek, fast and cheap agentic coding. Text-only",
-      },
-      {
-        id: "openrouter/deepseek/deepseek-v4-pro",
-        name: "DeepSeek V4 Pro",
-        description: "DeepSeek, most capable. Text-only",
-      },
-      { id: "openrouter/z-ai/glm-5.2", name: "GLM 5.2", description: "Z.ai. Text-only" },
-      {
-        id: "openrouter/moonshotai/kimi-k3",
-        name: "Kimi K3",
-        description: "Moonshot AI. Multimodal",
-      },
-      {
-        id: "openrouter/minimax/minimax-m3",
-        name: "MiniMax M3",
-        description: "MiniMax. Multimodal",
-      },
     ],
   },
 ] as const satisfies readonly ModelCatalogGroup[];
@@ -424,23 +390,6 @@ export function isValidReasoningEffort(model: string, effort: string): boolean {
 }
 
 /**
- * Resolve a requested reasoning effort against the model it will actually run on.
- *
- * An effort stored on a session (or inherited by a child session) outlives the model it was
- * chosen for, so it can be one the new model does not support. Falls back to the model's own
- * default in that case, and to undefined for models with no reasoning controls at all.
- */
-export function resolveReasoningEffort(
-  model: string,
-  requested: string | null | undefined
-): ReasoningEffort | undefined {
-  if (requested && isValidReasoningEffort(model, requested)) {
-    return requested as ReasoningEffort;
-  }
-  return getDefaultReasoningEffort(model);
-}
-
-/**
  * Extract provider and model from a model ID.
  *
  * Normalizes bare Claude model names first, then splits on "/".
@@ -449,7 +398,6 @@ export function resolveReasoningEffort(
  * extractProviderAndModel("anthropic/claude-haiku-4-5") // { provider: "anthropic", model: "claude-haiku-4-5" }
  * extractProviderAndModel("claude-haiku-4-5") // { provider: "anthropic", model: "claude-haiku-4-5" }
  * extractProviderAndModel("openai/gpt-5.3-codex") // { provider: "openai", model: "gpt-5.3-codex" }
- * extractProviderAndModel("openrouter/google/gemini-3.1-pro-preview") // { provider: "openrouter", model: "google/gemini-3.1-pro-preview" }
  */
 export function extractProviderAndModel(modelId: string): { provider: string; model: string } {
   const normalized = normalizeModelId(modelId);

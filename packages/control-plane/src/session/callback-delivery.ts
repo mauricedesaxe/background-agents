@@ -20,29 +20,23 @@ export async function deliverWithRetry(
   let httpStatus: number | undefined;
   for (let attempt = 1; attempt <= CALLBACK_ATTEMPTS; attempt++) {
     const controller = new AbortController();
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = new Promise<never>((_resolve, reject) => {
-      timeout = setTimeout(() => {
-        controller.abort();
-        reject(controller.signal.reason);
-      }, CALLBACK_ATTEMPT_TIMEOUT_MS);
-    });
+    const timeout = setTimeout(() => controller.abort(), CALLBACK_ATTEMPT_TIMEOUT_MS);
+    let failure: DeliveryFailure;
     httpStatus = undefined;
     try {
-      let failure: DeliveryFailure;
-      try {
-        const response = await Promise.race([send(controller.signal), timedOut]);
-        httpStatus = response.status;
-        if (response.ok) return { delivered: true, attempts: attempt, httpStatus };
-        failure = { attempt, response };
-      } catch (error) {
-        failure = { attempt, error };
-      }
-      await Promise.race([Promise.resolve().then(() => onFailure(failure)), timedOut]).catch(
-        () => undefined
-      );
+      const response = await send(controller.signal);
+      httpStatus = response.status;
+      if (response.ok) return { delivered: true, attempts: attempt, httpStatus };
+      failure = { attempt, response };
+    } catch (error) {
+      failure = { attempt, error };
     } finally {
-      if (timeout) clearTimeout(timeout);
+      clearTimeout(timeout);
+    }
+    try {
+      await onFailure(failure);
+    } catch {
+      // Observability must not alter the delivery retry policy.
     }
 
     if (attempt < CALLBACK_ATTEMPTS) await sleep(CALLBACK_RETRY_DELAY_MS);

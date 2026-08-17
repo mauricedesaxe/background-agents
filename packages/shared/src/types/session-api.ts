@@ -1,9 +1,16 @@
 import { z } from "zod";
-import { recordSchema, type AgentResponse } from "./artifacts";
+import { sessionSkillSelectionSchema } from "./skills";
+import type { AgentResponse } from "./artifacts";
 import { sessionRepositoriesInputSchema } from "./repositories";
 import type { EventResponse } from "./sandbox-events";
-import type { Session } from "./sessions";
-import { sessionStatusSchema, type SandboxStatus, type SessionStatus } from "./statuses";
+import { MAX_WEB_PROMPT_CHARS, promptContentSchema } from "./prompts";
+import {
+  messageSourceSchema,
+  sessionStatusSchema,
+  type SandboxStatus,
+  type Session,
+  type SessionStatus,
+} from "./sessions";
 
 export interface UserPreferences {
   userId: string;
@@ -13,17 +20,29 @@ export interface UserPreferences {
   updatedAt: number;
 }
 
-export interface SlackCallbackContext {
-  source: "slack";
-  channel: string;
-  threadTs: string;
-  repoFullName: string;
-  model: string;
-  reasoningEffort?: string;
-  reactionMessageTs?: string;
-}
-
 const nonEmptyStringSchema = z.string().trim().min(1);
+
+export const MAX_CHILD_FOLLOW_UP_PROMPT_CHARS = MAX_WEB_PROMPT_CHARS;
+
+export const slackCallbackContextSchema = z.object({
+  source: z.literal("slack"),
+  channel: z.string(),
+  threadTs: z.string(),
+  repoFullName: z.string(),
+  model: z.string(),
+  reasoningEffort: z.string().optional(),
+  reactionMessageTs: z.string().optional(),
+  /**
+   * Set when the session belongs to an automation rather than an interactive
+   * request. A thread follow-up completes through the same callback as an
+   * `@mention` turn, so the route alone cannot tell the two apart, and only the
+   * control plane knows which automation (if any) owns the thread.
+   */
+  automationId: z.string().optional(),
+});
+
+export type SlackCallbackContext = z.infer<typeof slackCallbackContextSchema>;
+
 const linearCallbackContextBaseSchema = z.strictObject({
   source: z.literal("linear"),
   issueId: nonEmptyStringSchema,
@@ -63,17 +82,85 @@ export const linearStartCallbackSchema = z.strictObject({
 
 export type LinearStartCallback = z.infer<typeof linearStartCallbackSchema>;
 
-export interface AutomationCallbackContext {
-  source: "automation";
-  automationId: string;
-  runId: string;
-  automationName: string;
-}
+export const linearCompletionCallbackPayloadSchema = z.strictObject({
+  sessionId: nonEmptyStringSchema,
+  messageId: nonEmptyStringSchema,
+  success: z.boolean(),
+  error: z.string().optional(),
+  timestamp: z.number().refine(Number.isFinite),
+  context: linearCallbackContextSchema,
+});
 
-export type CallbackContext =
-  | SlackCallbackContext
-  | LinearCallbackContext
-  | AutomationCallbackContext;
+export const linearCompletionCallbackSchema = linearCompletionCallbackPayloadSchema.extend({
+  signature: nonEmptyStringSchema,
+});
+
+export type LinearCompletionCallback = z.infer<typeof linearCompletionCallbackSchema>;
+
+export const linearToolCallCallbackPayloadSchema = z.strictObject({
+  sessionId: nonEmptyStringSchema,
+  tool: nonEmptyStringSchema,
+  args: z.record(z.string(), z.unknown()),
+  callId: nonEmptyStringSchema,
+  status: z.string().optional(),
+  timestamp: z.number().refine(Number.isFinite),
+  context: linearCallbackContextSchema,
+});
+
+export const linearToolCallCallbackSchema = linearToolCallCallbackPayloadSchema.extend({
+  signature: nonEmptyStringSchema,
+});
+
+export type LinearToolCallCallback = z.infer<typeof linearToolCallCallbackSchema>;
+
+export const automationCallbackContextSchema = z.object({
+  source: z.literal("automation"),
+  automationId: z.string(),
+  runId: z.string(),
+  automationName: z.string(),
+});
+
+export type AutomationCallbackContext = z.infer<typeof automationCallbackContextSchema>;
+
+export const callbackContextSchema = z.union([
+  slackCallbackContextSchema,
+  linearCallbackContextSchema,
+  automationCallbackContextSchema,
+]);
+
+export type CallbackContext = z.infer<typeof callbackContextSchema>;
+
+export const sendPromptRequestSchema = z
+  .object({
+    content: promptContentSchema,
+    source: messageSourceSchema.optional(),
+    model: z.string().optional(),
+    reasoningEffort: z.string().optional(),
+    attachments: z.unknown().optional(),
+    callbackContext: z.unknown().optional(),
+  })
+  .refine(
+    (prompt) =>
+      prompt.content.trim().length > 0 ||
+      (Array.isArray(prompt.attachments) && prompt.attachments.length > 0),
+    {
+      message: "Prompt content must not be blank without attachments",
+      path: ["content"],
+    }
+  );
+
+export type SendPromptRequest = z.infer<typeof sendPromptRequestSchema>;
+
+/** Request body for POST /sessions/:parentId/children/:childId/prompt. */
+export const childFollowUpPromptRequestSchema = z.strictObject({
+  content: z
+    .string()
+    .min(1)
+    .max(MAX_CHILD_FOLLOW_UP_PROMPT_CHARS)
+    .refine((content) => content.trim().length > 0, { message: "content must not be blank" }),
+});
+
+export type ChildFollowUpPromptRequest = z.infer<typeof childFollowUpPromptRequestSchema>;
 
 function hasRepositoryIdentifier(value: string | null | undefined): boolean {
   return typeof value === "string" && value.trim().length > 0;
@@ -83,8 +170,6 @@ interface CreateSessionRepositoryFields {
   repoOwner?: string | null;
   repoName?: string | null;
   branch?: string;
-  branchRepository?: { repoOwner: string; repoName: string } | null;
-  environmentId?: string | null;
 }
 
 function hasMatchingRepositoryIdentifiers(data: CreateSessionRepositoryFields): boolean {
@@ -92,15 +177,15 @@ function hasMatchingRepositoryIdentifiers(data: CreateSessionRepositoryFields): 
 }
 
 function hasRepositoryForBranch(data: CreateSessionRepositoryFields): boolean {
-  const hasBranch = Boolean(data.branch?.trim());
-  const hasBranchRepository = data.branchRepository != null;
-  if (!hasBranch) return !hasBranchRepository;
-  if (hasRepositoryIdentifier(data.repoOwner)) return !hasBranchRepository;
-  return hasRepositoryIdentifier(data.environmentId) && hasBranchRepository;
+  return hasRepositoryIdentifier(data.repoOwner) || !data.branch?.trim();
 }
 
 function hasScalarRepositoryTarget(data: CreateSessionRepositoryFields): boolean {
-  return hasRepositoryIdentifier(data.repoOwner) || hasRepositoryIdentifier(data.repoName);
+  return (
+    hasRepositoryIdentifier(data.repoOwner) ||
+    hasRepositoryIdentifier(data.repoName) ||
+    Boolean(data.branch?.trim())
+  );
 }
 
 function hasExclusiveSessionTarget(
@@ -109,6 +194,12 @@ function hasExclusiveSessionTarget(
     environmentId?: string | null;
   }
 ): boolean {
+  // At most one target mode may be selected: a named environment
+  // (environmentId), an ad-hoc repository list (repositories), or the scalar
+  // repoOwner/repoName/branch form. Presence-based, not length-based: any
+  // provided array selects the list mode (sessionRepositoriesInputSchema
+  // separately rejects empty lists, so [] can never smuggle another mode
+  // through).
   const activeModes = [
     Boolean(data.repositories),
     hasRepositoryIdentifier(data.environmentId),
@@ -124,12 +215,9 @@ const createSessionRequestBaseSchema = z.object({
   model: z.string().optional(),
   reasoningEffort: z.string().optional(),
   branch: z.string().optional(),
-  branchRepository: z
-    .object({ repoOwner: z.string().trim().min(1), repoName: z.string().trim().min(1) })
-    .nullish(),
   /**
    * Ordered repository list ([0] = primary). Mutually exclusive with the
-   * scalar repoOwner/repoName fields and environmentId.
+   * scalar repoOwner/repoName/branch fields and environmentId.
    */
   repositories: sessionRepositoriesInputSchema.optional(),
   /**
@@ -139,6 +227,8 @@ const createSessionRequestBaseSchema = z.object({
    * fields.
    */
   environmentId: z.string().trim().min(1).nullish(),
+  /** Managed skills are resolved and pinned when the session is created. */
+  skillSelection: sessionSkillSelectionSchema.optional(),
 });
 
 export const createSessionRequestSchema = createSessionRequestBaseSchema
@@ -147,11 +237,11 @@ export const createSessionRequestSchema = createSessionRequestBaseSchema
     path: ["repoName"],
   })
   .refine(hasRepositoryForBranch, {
-    message: "branch requires a scalar repository or an identified environment repository",
+    message: "branch requires repoOwner and repoName",
     path: ["branch"],
   })
   .refine(hasExclusiveSessionTarget, {
-    message: "environmentId, repositories, and repoOwner/repoName are mutually exclusive",
+    message: "environmentId, repositories, and repoOwner/repoName/branch are mutually exclusive",
     path: ["repositories"],
   });
 
@@ -159,6 +249,12 @@ export type CreateSessionRequest = z.infer<typeof createSessionRequestSchema>;
 
 export const createSessionInputSchema = createSessionRequestBaseSchema
   .extend({
+    // Display-only identity fields. Callers may not assert identity or SCM
+    // credentials in the body — identity derives from the verified principal
+    // and the control plane rejects forbidden identity fields.
+    scmLogin: z.string().optional(),
+    scmName: z.string().optional(),
+    scmEmail: z.string().optional(),
     actorDisplayName: z.string().optional(),
     actorEmail: z.string().optional(),
     actorAvatarUrl: z.string().optional(),
@@ -168,11 +264,11 @@ export const createSessionInputSchema = createSessionRequestBaseSchema
     path: ["repoName"],
   })
   .refine(hasRepositoryForBranch, {
-    message: "branch requires a scalar repository or an identified environment repository",
+    message: "branch requires repoOwner and repoName",
     path: ["branch"],
   })
   .refine(hasExclusiveSessionTarget, {
-    message: "environmentId, repositories, and repoOwner/repoName are mutually exclusive",
+    message: "environmentId, repositories, and repoOwner/repoName/branch are mutually exclusive",
     path: ["repositories"],
   });
 
@@ -182,18 +278,10 @@ export const createMediaArtifactRequestSchema = z.object({
   artifactId: z.string(),
   artifactType: z.string(),
   objectKey: z.string(),
-  metadata: recordSchema.optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 export type CreateMediaArtifactRequest = z.infer<typeof createMediaArtifactRequestSchema>;
-
-export const createBoardArtifactRequestSchema = z.object({
-  artifactId: z.string().min(1),
-  boardId: z.string().min(1),
-  title: z.string(),
-});
-
-export type CreateBoardArtifactRequest = z.infer<typeof createBoardArtifactRequestSchema>;
 
 export const createSessionResponseSchema = z.object({
   sessionId: z.string().min(1),
@@ -215,53 +303,24 @@ export interface ListSessionsResponse {
   hasMore: boolean;
 }
 
-/**
- * Request body for POST /sessions/:parentId/children.
- *
- * There is deliberately no `model`: a child inherits the parent's, so a spawning
- * agent cannot pick a provider this deployment has no credentials for. A caller
- * that still sends one has it stripped here rather than rejected, so an agent
- * built against the older shape keeps working.
- */
+/** Request body for POST /sessions/:parentId/children. */
 export const spawnChildSessionRequestSchema = z.object({
   title: z.string(),
   prompt: z.string(),
   repoOwner: z.string().optional(),
   repoName: z.string().optional(),
+  model: z.string().optional(),
   reasoningEffort: z.string().optional(),
 });
 
 export type SpawnChildSessionRequest = z.infer<typeof spawnChildSessionRequestSchema>;
 
-/**
- * Returned by the parent Durable Object's GET /internal/spawn-context.
- *
- * Deliberately scalar in v1: child sessions inherit — and are restricted to —
- * the parent's PRIMARY repository, even for multi-repo parents. The spawn
- * route validates against the scalar mirror. Letting children target another
- * repository requires spawnContext.repositories, a named fast-follow (design
- * §13.13), not a v1 promise.
- */
-export const spawnContextSchema = z.object({
-  repoOwner: z.string().nullable(),
-  repoName: z.string().nullable(),
-  repoId: z.number().nullable(),
-  model: z.string(),
-  reasoningEffort: z.string().nullable(),
-  baseBranch: z.string().nullable(),
-  owner: z.object({
-    userId: z.string(),
-    scmUserId: z.string().nullable(),
-    scmLogin: z.string().nullable(),
-    scmName: z.string().nullable(),
-    scmEmail: z.string().nullable(),
-    scmAccessTokenEncrypted: z.string().nullable(),
-    scmRefreshTokenEncrypted: z.string().nullable(),
-    scmTokenExpiresAt: z.number().nullable(),
-  }),
+/** Request body for POST /sessions/:parentId/children/:childId/cancel. */
+export const cancelChildSessionRequestSchema = z.object({
+  cancelNested: z.boolean().optional(),
 });
 
-export type SpawnContext = z.infer<typeof spawnContextSchema>;
+export type CancelChildSessionRequest = z.infer<typeof cancelChildSessionRequestSchema>;
 
 /** Returned by the child Durable Object's GET /internal/child-summary. */
 export interface ChildSessionFinalResponse extends AgentResponse {
@@ -291,6 +350,7 @@ export interface ChildSessionDetail {
     updatedAt: number;
   };
   sandbox: { status: SandboxStatus } | null;
+  hasUnfinishedPrompt?: boolean;
   artifacts: Array<{ type: string; url: string; metadata: unknown }>;
   recentEvents: Array<{ type: string; data: unknown; createdAt: number }>;
   finalResponse?: ChildSessionFinalResponse | null;

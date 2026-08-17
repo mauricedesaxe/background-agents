@@ -10,7 +10,7 @@ import type { Env } from "./types";
 import type { Logger } from "./logger";
 import { createLogger, parseLogLevel } from "./logger";
 import { verifyWebhookSignature } from "./verify";
-import { normalizeGitHubEvent } from "@open-inspect/shared";
+import { normalizeGitHubEvent } from "@open-inspect/shared/triggers";
 import { signedControlPlaneFetch } from "./internal-auth";
 import {
   issueCommentPayloadSchema,
@@ -29,7 +29,7 @@ import {
   isReviewRequestedForBot,
   type HandlerResult,
 } from "./handlers";
-import { createKvCacheStore } from "@open-inspect/shared";
+import { createKvCacheStore } from "@open-inspect/shared/cache-store";
 
 const app = new Hono<{ Bindings: Env }>();
 const DELIVERY_DEDUPE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
@@ -62,13 +62,32 @@ app.post("/webhooks/github", async (c) => {
     return c.json({ error: "invalid signature" }, 401);
   }
 
+  let dedupeKey: string | null = null;
+  if (deliveryId) {
+    dedupeKey = getDeliveryDedupeKey(deliveryId);
+    const existing = await cacheStore.get(dedupeKey);
+    if (existing) {
+      log.info("webhook.duplicate_delivery", {
+        delivery_id: deliveryId,
+        event_type: event,
+        dedupe_status: existing,
+      });
+      return c.json({ ok: true, duplicate: true });
+    }
+
+    await cacheStore.put(dedupeKey, DELIVERY_STATUS_PROCESSING, {
+      expirationTtl: ttlSecondsFromMs(DELIVERY_PROCESSING_TTL_MS),
+    });
+  } else {
+    log.warn("webhook.delivery_id_missing", { event_type: event });
+  }
+
   const payload: unknown = JSON.parse(rawBody);
   const summaryResult = webhookSummaryPayloadSchema.safeParse(payload);
   const summary = summaryResult.success ? summaryResult.data : null;
   const actionResult = webhookActionPayloadSchema.safeParse(payload);
   const action = summary?.action ?? (actionResult.success ? actionResult.data.action : undefined);
   const traceId = crypto.randomUUID();
-  const normalizationPayload = actionResult.success ? actionResult.data : {};
 
   log.info("webhook.received", {
     event_type: event,
@@ -79,35 +98,6 @@ app.post("/webhooks/github", async (c) => {
       : undefined,
     action,
   });
-
-  let dedupeKey: string | null = null;
-  if (deliveryId && shouldDedupeDelivery(event, normalizationPayload)) {
-    const candidateKey = getDeliveryDedupeKey(deliveryId);
-    try {
-      const existing = await cacheStore.get(candidateKey);
-      if (existing) {
-        log.info("webhook.duplicate_delivery", {
-          delivery_id: deliveryId,
-          event_type: event,
-          dedupe_status: existing,
-        });
-        return c.json({ ok: true, duplicate: true });
-      }
-
-      await cacheStore.put(candidateKey, DELIVERY_STATUS_PROCESSING, {
-        expirationTtl: ttlSecondsFromMs(DELIVERY_PROCESSING_TTL_MS),
-      });
-      dedupeKey = candidateKey;
-    } catch (err) {
-      log.warn("webhook.dedupe_claim_failed", {
-        trace_id: traceId,
-        delivery_id: deliveryId,
-        error: err instanceof Error ? err : new Error(String(err)),
-      });
-    }
-  } else if (!deliveryId) {
-    log.warn("webhook.delivery_id_missing", { event_type: event });
-  }
 
   c.executionCtx.waitUntil(
     handleWebhook(c.env, log, event, payload, traceId, deliveryId)
@@ -150,20 +140,6 @@ app.post("/webhooks/github", async (c) => {
   return c.json({ ok: true });
 });
 
-function shouldDedupeDelivery(
-  event: string | undefined,
-  normalizationPayload: Record<string, unknown>
-): boolean {
-  if (event && normalizeGitHubEvent(event, normalizationPayload) !== null) return true;
-
-  const action = normalizationPayload.action;
-  return (
-    (event === "pull_request" && (action === "opened" || action === "review_requested")) ||
-    (event === "issue_comment" && action === "created") ||
-    (event === "pull_request_review_comment" && action === "created")
-  );
-}
-
 async function handleWebhook(
   env: Env,
   log: Logger,
@@ -192,84 +168,62 @@ async function handleWebhook(
   };
 
   const start = Date.now();
-  let dispatchFailure: { error: unknown } | null = null;
+  let result: HandlerResult;
 
   try {
-    const result = await dispatchHandler(env, log, event, p, payload, traceId);
-    const wideEvent: Record<string, unknown> = {
-      ...wideEventBase,
-      outcome: result.outcome,
-      duration_ms: Date.now() - start,
-    };
-    if (result.outcome === "skipped") {
-      wideEvent.skip_reason = result.skip_reason;
-    } else {
-      wideEvent.session_id = result.session_id;
-      wideEvent.message_id = result.message_id;
-      wideEvent.handler_action = result.handler_action;
-    }
-    log.info("webhook.handled", wideEvent);
+    result = await dispatchHandler(env, log, event, p, payload, traceId);
   } catch (err) {
-    dispatchFailure = { error: err };
     log.info("webhook.handled", {
       ...wideEventBase,
       outcome: "error",
       duration_ms: Date.now() - start,
       error: err instanceof Error ? err : new Error(String(err)),
     });
+    throw err;
   }
 
-  // The two paths are independent: a throwing built-in handler must not stop
-  // the forward, and a failing forward must not affect bot behavior. GitHub
-  // already got a 200 (the work runs in waitUntil), so a dropped forward here
-  // is never redelivered and the automation silently never fires.
-  //
-  // `p` is deliberately not the payload forwarded here. The summary schema types
-  // `pull_request` as a bare object, and a bare object strips its unknown keys
-  // whatever the outer `.passthrough()` does, so head, base, labels and state
-  // never survive it. The action schema names no nested key, so passthrough
-  // preserves the whole object and automations can match on those fields.
-  const normalizationPayload = actionResult.success ? actionResult.data : {};
-  await forwardNormalizedEvent(env, log, event, normalizationPayload, traceId, deliveryId);
+  const wideEvent: Record<string, unknown> = {
+    ...wideEventBase,
+    outcome: result.outcome,
+    duration_ms: Date.now() - start,
+  };
+  if (result.outcome === "skipped") {
+    wideEvent.skip_reason = result.skip_reason;
+  } else {
+    wideEvent.session_id = result.session_id;
+    wideEvent.message_id = result.message_id;
+    wideEvent.handler_action = result.handler_action;
+  }
+  log.info("webhook.handled", wideEvent);
 
-  if (dispatchFailure !== null) throw dispatchFailure.error;
-}
-
-async function forwardNormalizedEvent(
-  env: Env,
-  log: Logger,
-  event: string | undefined,
-  normalizationPayload: Record<string, unknown>,
-  traceId: string,
-  deliveryId: string | undefined
-): Promise<void> {
-  if (!event) return;
-  const normalizedEvent = normalizeGitHubEvent(event, normalizationPayload);
-  if (normalizedEvent === null) return;
-
-  try {
-    const body = JSON.stringify(normalizedEvent);
-    const response = await signedControlPlaneFetch(env, {
-      method: "POST",
-      url: "https://internal/internal/github-event",
-      body,
-      traceId,
-    });
-    if (!response.ok) {
-      log.warn("webhook.github_event_forward_failed", {
-        trace_id: traceId,
-        delivery_id: deliveryId,
-        event_type: event,
-        status: response.status,
-      });
+  // Forward normalized event to control-plane for automation triggering.
+  // Use the passthrough parse so nested lifecycle fields are not stripped by
+  // the summary schema used for logging and bot dispatch.
+  if (event) {
+    const normalizationPayload = actionResult.success ? actionResult.data : {};
+    const normalizedEvent = normalizeGitHubEvent(event, normalizationPayload);
+    if (normalizedEvent !== null) {
+      try {
+        const url = "https://internal/internal/github-event";
+        const body = JSON.stringify(normalizedEvent);
+        const response = await signedControlPlaneFetch(env, { method: "POST", url, body, traceId });
+        if (!response.ok) {
+          log.warn("webhook.github_event_forward_failed", {
+            trace_id: traceId,
+            delivery_id: deliveryId,
+            event_type: event,
+            status: response.status,
+          });
+        }
+      } catch (err) {
+        log.warn("webhook.github_event_forward_error", {
+          trace_id: traceId,
+          delivery_id: deliveryId,
+          event_type: event,
+          error: err instanceof Error ? err : new Error(String(err)),
+        });
+      }
     }
-  } catch (err) {
-    log.warn("webhook.github_event_forward_error", {
-      trace_id: traceId,
-      delivery_id: deliveryId,
-      event_type: event,
-      error: err instanceof Error ? err : new Error(String(err)),
-    });
   }
 }
 

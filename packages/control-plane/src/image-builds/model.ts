@@ -9,7 +9,14 @@
  * (`repository_shas`) and spawn selection is gated by the runtime version
  * baked at build time.
  */
-import type { ImageBuildScopeKind, ImageBuildStatus } from "@open-inspect/shared";
+import {
+  formatRepositoryFullName,
+  parseRepositoryFullName,
+} from "@open-inspect/shared/types/repositories";
+import type {
+  ImageBuildScopeKind,
+  ImageBuildStatus,
+} from "@open-inspect/shared/types/image-builds";
 
 /**
  * Providers with image-build support: Modal images, Vercel snapshots,
@@ -30,18 +37,19 @@ export interface ImageBuildScope {
 
 /** The repo scope for a repository, id normalized to lowercase `owner/name`. */
 export function repoImageBuildScope(repoOwner: string, repoName: string): ImageBuildScope {
-  return { kind: "repo", id: `${repoOwner.toLowerCase()}/${repoName.toLowerCase()}` };
+  return {
+    kind: "repo",
+    id: formatRepositoryFullName({ repoOwner, repoName }).toLowerCase(),
+  };
 }
 
 /**
- * Split a repo scope id back into its owner/name halves. Null on anything
- * that is not exactly `owner/name` — callers fail closed (a malformed id can
- * only come from a raw store write, never from repoImageBuildScope).
+ * Split a repo scope id back into its structured identity. Null on malformed
+ * values — callers fail closed (a malformed id can only come from a raw store
+ * write, never from repoImageBuildScope).
  */
 export function parseRepoScopeId(scopeId: string): { repoOwner: string; repoName: string } | null {
-  const segments = scopeId.split("/");
-  if (segments.length !== 2 || !segments[0] || !segments[1]) return null;
-  return { repoOwner: segments[0], repoName: segments[1] };
+  return parseRepositoryFullName(scopeId);
 }
 
 /** Opaque provider artifact reference, optionally tied to the build sandbox that produced it. */
@@ -73,11 +81,11 @@ export interface ImageBuildCallbackBuild {
  * Compatibility floor for prebuilt-image runtimes.
  *
  * Bumped ONLY on breaking runtime changes, never on routine CACHE_BUSTER
- * bumps. v53 is the list-native runtime — the first that can boot a
- * multi-repo workspace — so no image baked by an earlier runtime may ever be
- * selected for a session.
+ * bumps. v56 is the managed-provider runtime — the first that consumes
+ * provider-availability markers instead of durable OAuth credentials — so no
+ * image baked by an earlier runtime may ever be selected for a session.
  */
-export const MIN_COMPATIBLE_RUNTIME_VERSION = 53;
+export const MIN_COMPATIBLE_RUNTIME_VERSION = 56;
 
 /**
  * Parse the numeric prefix of a SANDBOX_VERSION ("v53-list-native-runtime"

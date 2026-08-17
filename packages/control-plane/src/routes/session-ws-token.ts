@@ -1,14 +1,19 @@
 import { applyIdentityEnforcement } from "../auth/identity-enforcement";
-import { UserStore } from "../db/user-store";
 import { SessionInternalPaths } from "../session/contracts";
-import { resolveGitHubEnrichment } from "../session/identity";
 import type { Env } from "../types";
-import { error, parseJsonBody, parsePattern, type Route } from "./shared";
+import {
+  defineRoutes,
+  error,
+  GITHUB_USER_OR_SERVICE_ROUTE,
+  parseJsonBody,
+  parsePattern,
+  type Route,
+} from "./shared";
 import { sessionRoute, type SessionRouteContext } from "./session-route";
 
 async function handleSessionWsToken(
   request: Request,
-  env: Env,
+  _env: Env,
   match: RegExpMatchArray,
   ctx: SessionRouteContext
 ): Promise<Response> {
@@ -18,7 +23,6 @@ async function handleSessionWsToken(
   const body = await parseJsonBody<{
     scmLogin?: string;
     scmName?: string;
-    authName?: string;
     scmEmail?: string;
   }>(request);
   if (body instanceof Response) return body;
@@ -30,9 +34,6 @@ async function handleSessionWsToken(
   if (enforcement.rejection) return enforcement.rejection;
   const userId = enforcement.enforced.participantUserId;
   const canonicalUserId = enforcement.enforced.canonicalUserId;
-  const enrichment = canonicalUserId
-    ? await resolveGitHubEnrichment(env, ctx.db, new UserStore(ctx.db), canonicalUserId)
-    : null;
 
   return ctx.metrics.time("do_fetch", () =>
     ctx.sessionRuntime.fetch(sessionId, SessionInternalPaths.wsToken, {
@@ -40,23 +41,19 @@ async function handleSessionWsToken(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         userId,
-        scmUserId: enrichment?.scmUserId,
-        scmLogin: enrichment?.scmLogin,
-        scmName: enrichment?.displayName,
-        authName: body.authName,
-        scmEmail: enrichment?.email,
-        scmTokenEncrypted: enrichment?.accessTokenEncrypted,
-        scmRefreshTokenEncrypted: enrichment?.refreshTokenEncrypted,
-        scmTokenExpiresAt: enrichment?.tokenExpiresAt,
+        canonicalUserId,
+        scmLogin: body.scmLogin,
+        scmName: body.scmName,
+        scmEmail: body.scmEmail,
       }),
     })
   );
 }
 
-export const sessionWsTokenRoutes: Route[] = [
+export const sessionWsTokenRoutes: Route[] = defineRoutes(GITHUB_USER_OR_SERVICE_ROUTE, [
   sessionRoute({
     method: "POST",
     pattern: parsePattern("/sessions/:id/ws-token"),
     handler: handleSessionWsToken,
   }),
-];
+]);

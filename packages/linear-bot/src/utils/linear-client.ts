@@ -3,39 +3,54 @@
  */
 
 import {
-  linearAgentActivityResponseSchema,
-  linearAgentSessionUpdateResponseSchema,
-  linearCommentCreateResponseSchema,
   linearIssueDetailsResponseSchema,
   linearRepoSuggestionsResponseSchema,
   linearUserResponseSchema,
   type Env,
   type LinearIssueDetails,
 } from "../types";
-import { timingSafeEqual } from "@open-inspect/shared";
-import { z } from "zod";
-import { computeHmacHex } from "@open-inspect/shared";
+import { computeHmacHex, timingSafeEqual } from "@open-inspect/shared/auth";
 import { createLogger } from "../logger";
 import {
   getClientCredentialsTokenOrThrow,
   LINEAR_CLIENT_CREDENTIALS_SCOPE,
   LinearAuthError,
 } from "./linear-credentials";
+import { z } from "zod";
 
 export {
   completeLinearOAuthInstallation,
   getClientCredentialsTokenOrThrow,
   LinearAuthError,
-  type LinearAuthFailure,
-  type LinearAuthFailureReason,
 } from "./linear-credentials";
 
 const log = createLogger("linear-client");
 
 const LINEAR_API_URL = "https://api.linear.app/graphql";
-const linearGraphQLErrorResponseSchema = z.object({
-  errors: z.array(z.object({ message: z.string() })),
+
+const linearCommentCreateResponseSchema = z.object({
+  data: z
+    .object({
+      commentCreate: z
+        .object({
+          success: z.boolean(),
+        })
+        .nullable()
+        .optional(),
+    })
+    .nullable()
+    .optional(),
 });
+
+const linearGraphQLErrorSchema = z.object({
+  message: z.string().optional(),
+});
+
+const linearGraphQLResponseSchema = z
+  .object({
+    errors: z.array(linearGraphQLErrorSchema).optional(),
+  })
+  .passthrough();
 
 // ─── OAuth Helpers ───────────────────────────────────────────────────────────
 
@@ -89,14 +104,11 @@ export async function getLinearClientOrThrow(
 /**
  * Execute a GraphQL query against the Linear API.
  */
-export async function linearGraphQL<T>(
+export async function linearGraphQL(
   client: LinearApiClient,
   query: string,
-  variables: Record<string, unknown>,
-  responseSchema: z.ZodType<T>
-): Promise<T> {
-  const operation =
-    query.match(/\b(?:query|mutation)\s+([_A-Za-z][_0-9A-Za-z]*)/)?.[1] ?? "UnknownOperation";
+  variables: Record<string, unknown>
+): Promise<Record<string, unknown>> {
   const body = JSON.stringify({ query, variables });
   const send = (accessToken: string) =>
     fetch(LINEAR_API_URL, {
@@ -144,39 +156,21 @@ export async function linearGraphQL<T>(
   }
 
   if (!res.ok) {
-    throw new Error(`Linear ${operation} API error: ${res.status}`);
+    throw new Error(`Linear API error: ${res.status}`);
   }
 
-  return parseLinearGraphQLResponse(res, operation, responseSchema);
-}
-
-async function parseLinearGraphQLResponse<T>(
-  response: Response,
-  operation: string,
-  responseSchema: z.ZodType<T>
-): Promise<T> {
-  let json: unknown;
-  try {
-    json = await response.json();
-  } catch {
-    throw new Error(`Linear ${operation} response validation failed`);
-  }
-
-  if (typeof json === "object" && json !== null && "errors" in json) {
-    const errorResponse = linearGraphQLErrorResponseSchema.safeParse(json);
-    if (!errorResponse.success) {
-      throw new Error(`Linear ${operation} response validation failed`);
-    }
-    if (errorResponse.data.errors.length > 0) {
-      throw new Error(`Linear ${operation} GraphQL error`);
-    }
-  }
-
-  const parsed = responseSchema.safeParse(json);
+  const parsed = linearGraphQLResponseSchema.safeParse(await res.json());
   if (!parsed.success) {
-    throw new Error(`Linear ${operation} response validation failed`);
+    throw new Error("Linear GraphQL error: unexpected response shape");
   }
-  return parsed.data;
+  const json = parsed.data;
+
+  if (Array.isArray(json.errors) && json.errors.length > 0) {
+    const msg = json.errors[0]?.message ?? "Unknown GraphQL error";
+    throw new Error(`Linear GraphQL error: ${msg}`);
+  }
+
+  return json;
 }
 
 // ─── Agent Activities ────────────────────────────────────────────────────────
@@ -199,8 +193,7 @@ export async function emitAgentActivity(
     `,
       {
         input: { agentSessionId, content, ephemeral },
-      },
-      linearAgentActivityResponseSchema
+      }
     );
     return true;
   } catch (err) {
@@ -222,7 +215,7 @@ export async function fetchIssueDetails(
   issueId: string
 ): Promise<LinearIssueDetails | null> {
   try {
-    const response = await linearGraphQL(
+    const data = await linearGraphQL(
       client,
       `
       query IssueDetails($id: String!) {
@@ -247,11 +240,13 @@ export async function fetchIssueDetails(
         }
       }
     `,
-      { id: issueId },
-      linearIssueDetailsResponseSchema
+      { id: issueId }
     );
 
-    const issue = response.data.issue;
+    const parsed = linearIssueDetailsResponseSchema.safeParse(data);
+    if (!parsed.success) return null;
+
+    const issue = parsed.data.data?.issue;
     if (!issue) return null;
 
     return issue;
@@ -284,8 +279,7 @@ export async function updateAgentSession(
         }
       }
     `,
-      { id: agentSessionId, input },
-      linearAgentSessionUpdateResponseSchema
+      { id: agentSessionId, input }
     );
   } catch (err) {
     log.error("linear.update_session_failed", {
@@ -305,7 +299,7 @@ export async function getRepoSuggestions(
   candidateRepos: Array<{ hostname: string; repositoryFullName: string }>
 ): Promise<Array<{ repositoryFullName: string; confidence: number }>> {
   try {
-    const response = await linearGraphQL(
+    const data = await linearGraphQL(
       client,
       `
       query RepoSuggestions($issueId: String!, $agentSessionId: String!, $candidateRepositories: [IssueRepositorySuggestionInput!]!) {
@@ -321,11 +315,13 @@ export async function getRepoSuggestions(
         }
       }
     `,
-      { issueId, agentSessionId, candidateRepositories: candidateRepos },
-      linearRepoSuggestionsResponseSchema
+      { issueId, agentSessionId, candidateRepositories: candidateRepos }
     );
 
-    return response.data.issueRepositorySuggestions?.suggestions ?? [];
+    const parsed = linearRepoSuggestionsResponseSchema.safeParse(data);
+    if (!parsed.success) return [];
+
+    return parsed.data.data?.issueRepositorySuggestions?.suggestions || [];
   } catch (err) {
     log.error("linear.repo_suggestions_failed", {
       issue_id: issueId,
@@ -345,7 +341,7 @@ export async function fetchUser(
   userId: string
 ): Promise<{ id: string; name: string; email: string | null } | null> {
   try {
-    const response = await linearGraphQL(
+    const data = await linearGraphQL(
       client,
       `
       query FetchUser($id: String!) {
@@ -356,11 +352,13 @@ export async function fetchUser(
         }
       }
     `,
-      { id: userId },
-      linearUserResponseSchema
+      { id: userId }
     );
 
-    const user = response.data.user;
+    const parsed = linearUserResponseSchema.safeParse(data);
+    if (!parsed.success) return null;
+
+    const user = parsed.data.data?.user;
     if (!user) return null;
 
     return {
@@ -413,10 +411,9 @@ export async function postIssueComment(
   });
 
   if (!response.ok) return { success: false };
-  const result = await parseLinearGraphQLResponse(
-    response,
-    "CommentCreate",
-    linearCommentCreateResponseSchema
+  const result = linearCommentCreateResponseSchema.safeParse(
+    await response.json().catch(() => null)
   );
-  return { success: result.data.commentCreate.success };
+  if (!result.success) return { success: false };
+  return { success: result.data.data?.commentCreate?.success ?? false };
 }

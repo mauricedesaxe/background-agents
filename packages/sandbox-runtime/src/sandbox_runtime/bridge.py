@@ -13,47 +13,67 @@ import argparse
 import asyncio
 import contextlib
 import json
+import math
 import os
 import re
-import secrets
-import subprocess
 import tempfile
 import time
-from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, NoReturn
+from typing import Any, NoReturn
 
-import httpx
 import websockets
 from websockets import ClientConnection, State
 from websockets.exceptions import InvalidStatus
 
-from .constants import BOOT_WARNINGS_FILE_PATH, REPO_MANIFEST_FILE_PATH
+from .attachment_processor import (
+    AttachmentProcessor,
+    HydratedSessionAttachment,
+    parse_session_image_attachments,
+)
+from .constants import (
+    BOOT_WARNINGS_FILE_PATH,
+    DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+    MAX_SNAPSHOT_RESERVE_SECONDS,
+    REPO_MANIFEST_FILE_PATH,
+    SANDBOX_TIMEOUT_ENV_VAR,
+    SNAPSHOT_RESERVE_FRACTION,
+)
+from .diff_capture import ControlPlaneDiffClient, SessionDiffRefreshWorker
+from .event_forwarder import BufferedEventForwarder
+from .git_signing import GitSigningError, GitSigningRuntime
 from .log_config import configure_logging, get_logger
+from .opencode_client import OpenCodeClient
+from .prompt_stream import OpenCodePromptStream
 from .repo_config import find_repo_entry, load_repo_manifest
 from .types import GitUser
 
 configure_logging()
 
-# Fallback git identity when prompt author has no SCM name/email configured.
-# Matches the co-author trailer used in generateCommitMessage (shared/git.ts).
-FALLBACK_GIT_USER = GitUser(name="OpenInspect", email="open-inspect@noreply.github.com")
 
-KEEPALIVE_EVENT_TYPES = frozenset({"server.heartbeat", "server.connected"})
-"""SSE events that prove the connection is alive but say nothing about the agent's progress."""
+def parse_prompt_git_author(author_data: object) -> GitUser | None:
+    """Parse the control plane's explicit Git author mode without inference."""
+    if not isinstance(author_data, dict):
+        raise GitSigningError("Invalid prompt Git identity")
 
+    identity = author_data.get("gitIdentity")
+    if not isinstance(identity, dict):
+        raise GitSigningError("Invalid prompt Git identity")
 
-def should_reset_progress_deadline(event_type: str | None, props: dict[str, Any]) -> bool:
-    """OpenCode multiplexes unrelated server chatter onto the prompt event stream."""
-    if not event_type or not event_type.startswith(("message.", "session.")):
-        return False
-    if event_type != "session.status":
-        return True
+    mode = identity.get("mode")
+    if mode == "agent-only":
+        return None
+    if mode != "attributed-user":
+        raise GitSigningError("Invalid prompt Git identity")
 
-    status = props.get("status")
-    return not isinstance(status, dict) or status.get("type") not in {"busy", "retry"}
+    name = identity.get("name")
+    email = identity.get("email")
+    if not isinstance(name, str) or not name.strip():
+        raise GitSigningError("Invalid prompt Git identity")
+    if not isinstance(email, str) or not email.strip():
+        raise GitSigningError("Invalid prompt Git identity")
+    return GitUser(name=name.strip(), email=email.strip())
 
 
 @dataclass(frozen=True)
@@ -121,175 +141,15 @@ class PushRejected(Exception):
     """
 
 
-class OpenCodeIdentifier:
-    """
-    Generate OpenCode-compatible ascending IDs.
-
-    Port of OpenCode's TypeScript implementation:
-    https://github.com/anomalyco/opencode/blob/8f0d08fae07c97a090fcd31d0d4c4a6fa7eeaa1d/packages/opencode/src/id/id.ts
-
-    Format: {prefix}_{timestamp_hex}{random_base62}
-    - prefix: type identifier (e.g., "msg" for messages)
-    - timestamp_hex: 12 hex chars encoding (timestamp_ms * 0x1000 + counter)
-    - random_base62: 14 random base62 characters
-
-    IDs are monotonically increasing, ensuring new user messages always have
-    IDs greater than previous assistant messages (required for OpenCode's
-    prompt loop).
-
-    Note: Uses class-level state for monotonic generation. Safe for async code
-    but NOT thread-safe.
-    """
-
-    PREFIXES: ClassVar[dict[str, str]] = {
-        "session": "ses",
-        "message": "msg",
-        "part": "prt",
-    }
-    BASE62_CHARS: ClassVar[str] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-    RANDOM_LENGTH: ClassVar[int] = 14
-
-    _last_timestamp: ClassVar[int] = 0
-    _counter: ClassVar[int] = 0
-
-    @classmethod
-    def ascending(cls, prefix: str) -> str:
-        """Generate an ascending ID with the given prefix."""
-        if prefix not in cls.PREFIXES:
-            raise ValueError(f"Unknown prefix: {prefix}")
-
-        prefix_str = cls.PREFIXES[prefix]
-        current_timestamp = int(time.time() * 1000)
-
-        if current_timestamp != cls._last_timestamp:
-            cls._last_timestamp = current_timestamp
-            cls._counter = 0
-        cls._counter += 1
-
-        encoded = current_timestamp * 0x1000 + cls._counter
-        encoded_48bit = encoded & 0xFFFFFFFFFFFF
-        timestamp_bytes = encoded_48bit.to_bytes(6, byteorder="big")
-        timestamp_hex = timestamp_bytes.hex()
-        random_suffix = cls._random_base62(cls.RANDOM_LENGTH)
-
-        return f"{prefix_str}_{timestamp_hex}{random_suffix}"
-
-    @classmethod
-    def _random_base62(cls, length: int) -> str:
-        """Generate random base62 string."""
-        return "".join(cls.BASE62_CHARS[secrets.randbelow(62)] for _ in range(length))
-
-
-class SSEConnectionError(Exception):
-    """Raised when SSE connection fails."""
-
-    pass
-
-
 class SessionTerminatedError(Exception):
     """Raised when the control plane has terminated the session (HTTP 410).
 
     This is a non-recoverable error - the bridge should exit gracefully
-    rather than retry. A later prompt lets the control plane resume the same
-    provider object when its disk still exists.
+    rather than retry. The session can be restored via user action (sending
+    a new prompt), which will trigger snapshot restoration on the control plane.
     """
 
     pass
-
-
-class EventPump:
-    """Buffers prompt events and drains them to a sink on a separate task.
-
-    The prompt consumer used to `await` the WebSocket send for every event
-    inline, so a slow send stalled the loop that reads OpenCode's SSE stream.
-    That backpressure filled OpenCode's send buffer until it severed the
-    connection (an incomplete chunked read). This decouples the two: the
-    producer `enqueue`s events without blocking, and the pump task drains them
-    to the sink as fast as the sink allows, so the SSE reader keeps draining.
-
-    Single producer (the prompt loop) and single consumer (the pump task) run
-    on one event loop, so the deque needs no lock. On overflow the oldest
-    droppable event is evicted first (a token's content is cumulative, so a
-    later token replaces it losslessly), then any other non-critical event,
-    then the oldest event, purely to bound memory. Critical events are never
-    dropped.
-    """
-
-    def __init__(
-        self,
-        sink: Callable[[dict[str, Any]], Awaitable[None]],
-        *,
-        max_buffered: int,
-        critical_types: set[str],
-        droppable_types: set[str],
-    ) -> None:
-        self._sink = sink
-        self._max_buffered = max_buffered
-        self._critical_types = critical_types
-        self._droppable_types = droppable_types
-        self._buffer: deque[dict[str, Any]] = deque()
-        self._wakeup = asyncio.Event()
-        self._closed = False
-        self._dropped = 0
-        self._task: asyncio.Task[None] | None = None
-
-    def start(self) -> None:
-        self._task = asyncio.create_task(self._run())
-
-    def enqueue(self, event: dict[str, Any]) -> None:
-        """Buffer an event for delivery. Never blocks the caller."""
-        if len(self._buffer) >= self._max_buffered:
-            self._evict_one()
-        self._buffer.append(event)
-        self._wakeup.set()
-
-    def _evict_one(self) -> None:
-        # Prefer dropping a superseded event (a token's content is cumulative,
-        # so a later token replaces it losslessly). Fall back to any other
-        # non-critical event, then the oldest event, only to bound memory under
-        # extreme sustained backpressure.
-        if self._drop_first(lambda t: t in self._droppable_types):
-            return
-        if self._drop_first(lambda t: t not in self._critical_types):
-            return
-        self._buffer.popleft()
-        self._dropped += 1
-
-    def _drop_first(self, predicate: Callable[[str], bool]) -> bool:
-        for i, buffered in enumerate(self._buffer):
-            if predicate(buffered.get("type", "")):
-                del self._buffer[i]
-                self._dropped += 1
-                return True
-        return False
-
-    async def _run(self) -> None:
-        while True:
-            while self._buffer:
-                await self._sink(self._buffer.popleft())
-            if self._closed:
-                return
-            self._wakeup.clear()
-            if not self._buffer:
-                await self._wakeup.wait()
-
-    async def aclose(self) -> int:
-        """Drain every buffered event to the sink, then stop. Returns drop count.
-
-        Awaiting this before sending a terminal event guarantees the terminal
-        event lands after everything already produced.
-        """
-        self._closed = True
-        self._wakeup.set()
-        if self._task is not None:
-            await self._task
-            self._task = None
-        return self._dropped
-
-    def cancel(self) -> None:
-        """Stop the pump without draining. Idempotent; safe after aclose."""
-        if self._task is not None and not self._task.done():
-            self._task.cancel()
 
 
 class AgentBridge:
@@ -310,46 +170,9 @@ class AgentBridge:
     SSE_INACTIVITY_TIMEOUT = 120.0
     SSE_INACTIVITY_TIMEOUT_MIN = 5.0
     SSE_INACTIVITY_TIMEOUT_MAX = 3600.0
-    SESSION_PROGRESS_TIMEOUT_SECONDS = 600.0
-    SESSION_PROGRESS_TIMEOUT_SECONDS_MIN = 30.0
-    SESSION_PROGRESS_TIMEOUT_SECONDS_MAX = 5400.0
-    HTTP_CONNECT_TIMEOUT = 30.0
-    HTTP_DEFAULT_TIMEOUT = 30.0
-    OPENCODE_REQUEST_TIMEOUT = 30.0
-    SESSION_VERIFY_TIMEOUT_SECONDS = 10.0
-    SESSION_VERIFY_BACKOFF_BASE_SECONDS = 2.0
-    SESSION_VERIFY_BACKOFF_MAX_SECONDS = 30.0
     GIT_PUSH_TIMEOUT_SECONDS = 300.0
     GIT_PUSH_TERMINATE_GRACE_SECONDS = 5.0
-    JJ_COMMAND_TIMEOUT_SECONDS = 30.0
-    PROMPT_MAX_DURATION = 5400.0
-    COMPACTION_MAX_DURATION = 300.0
-    GIT_CONFIG_TIMEOUT_SECONDS = 10.0
-    MAX_PENDING_PART_EVENTS = 2000
-    MAX_EVENT_BUFFER_SIZE = 1000
-    ACK_RETRY_INTERVAL_SECONDS = 5.0
-    # Cap on events buffered between the SSE reader and the WebSocket sender
-    # while a prompt streams. Sized generously since it only fills when the
-    # send genuinely can't keep up; overflow evicts superseded events first.
-    MAX_STREAM_BUFFER_SIZE = 2000
-    OPENCODE_DEFAULT_TITLE_RE = re.compile(
-        r"^(new session|child session) - " r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$",
-        re.IGNORECASE,
-    )
-    CRITICAL_EVENT_TYPES: ClassVar[set[str]] = {
-        "step_finish",
-        "execution_complete",
-        "error",
-        "snapshot_ready",
-        "push_complete",
-        "push_error",
-        "context_compacted",
-        "context_compaction_failed",
-        "context_unavailable",
-    }
-    # Events whose payload is cumulative, so a later one supersedes an earlier
-    # one. These are safe to drop first under stream backpressure.
-    SUPERSEDABLE_EVENT_TYPES: ClassVar[set[str]] = {"token"}
+    DIFF_REFRESH_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
     def __init__(
         self,
@@ -358,6 +181,7 @@ class AgentBridge:
         control_plane_url: str,
         auth_token: str,
         opencode_port: int = 4096,
+        opencode_client: OpenCodeClient | None = None,
     ):
         self.sandbox_id = sandbox_id
         self.session_id = session_id
@@ -373,6 +197,13 @@ class AgentBridge:
             sandbox_id=sandbox_id,
             session_id=session_id,
         )
+        self.attachment_processor = AttachmentProcessor(
+            control_plane_url=control_plane_url,
+            session_id=session_id,
+            auth_token=auth_token,
+            log=self.log,
+            warn_user=self._send_media_warning,
+        )
 
         self.sse_inactivity_timeout = self._resolve_timeout_seconds(
             name="BRIDGE_SSE_INACTIVITY_TIMEOUT",
@@ -380,11 +211,21 @@ class AgentBridge:
             min_value=self.SSE_INACTIVITY_TIMEOUT_MIN,
             max_value=self.SSE_INACTIVITY_TIMEOUT_MAX,
         )
-        self.session_progress_timeout_seconds = self._resolve_timeout_seconds(
-            name="BRIDGE_SESSION_PROGRESS_TIMEOUT",
-            default=self.SESSION_PROGRESS_TIMEOUT_SECONDS,
-            min_value=self.SESSION_PROGRESS_TIMEOUT_SECONDS_MIN,
-            max_value=self.SESSION_PROGRESS_TIMEOUT_SECONDS_MAX,
+        sandbox_timeout_seconds = self._resolve_positive_timeout_seconds(
+            name=SANDBOX_TIMEOUT_ENV_VAR,
+            default=DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+        )
+        snapshot_reserve_seconds = min(
+            MAX_SNAPSHOT_RESERVE_SECONDS,
+            sandbox_timeout_seconds * SNAPSHOT_RESERVE_FRACTION,
+        )
+        self.prompt_cleanup_timeout_seconds = snapshot_reserve_seconds
+        self.prompt_max_duration_seconds = sandbox_timeout_seconds - snapshot_reserve_seconds
+        self.log.info(
+            "bridge.prompt_timeout_config",
+            timeout_ms=int(self.prompt_max_duration_seconds * 1000),
+            sandbox_timeout_ms=int(sandbox_timeout_seconds * 1000),
+            snapshot_reserve_ms=int(snapshot_reserve_seconds * 1000),
         )
 
         self.ws: ClientConnection | None = None
@@ -393,40 +234,74 @@ class AgentBridge:
 
         # Session state
         self.opencode_session_id: str | None = None
-        self.opencode_session_error: str | None = None
-        self.provided_opencode_session_id: str | None = (
-            os.environ.get("OPENCODE_SESSION_ID") or None
-        )
         self.session_id_file = Path(tempfile.gettempdir()) / "opencode-session-id"
         self.repo_path = Path("/workspace")
         # Supervisor-written canonical repo manifest; push targeting resolves
         # member checkout paths through it rather than joining spec-supplied
         # names into the filesystem.
         self.repo_manifest_path = Path(REPO_MANIFEST_FILE_PATH)
+        self.git_signing = GitSigningRuntime(
+            control_plane_url=control_plane_url,
+            session_id=session_id,
+            auth_token=auth_token,
+            repo_manifest_path=self.repo_manifest_path,
+        )
 
-        # HTTP client for OpenCode API
-        self.http_client: httpx.AsyncClient | None = None
+        # OpenCode transport client; owns its connection pool unless one was
+        # injected (mirrors ControlPlaneDiffClient).
+        self.opencode_client = opencode_client or OpenCodeClient(
+            base_url=self.opencode_base_url,
+            log=self.log,
+        )
+
+        # Prompt SSE translator; created on first prompt so that
+        # sse_inactivity_timeout stays overridable until streaming starts.
+        self._prompt_stream: OpenCodePromptStream | None = None
 
         # Track the current prompt task so _handle_stop can cancel it
         self._current_prompt_task: asyncio.Task[None] | None = None
-        self._current_compaction_task: asyncio.Task[None] | None = None
-        self._prompt_stop_requested = False
+        self.diff_refresh = SessionDiffRefreshWorker(
+            client=ControlPlaneDiffClient(
+                control_plane_url=self.control_plane_url,
+                session_id=self.session_id,
+                auth_token=self.auth_token,
+            ),
+            manifest_path=self.repo_manifest_path,
+            log=self.log,
+        )
 
-        # Event buffer: survives WS reconnection, flushed on reconnect
-        self._event_buffer: list[dict[str, Any]] = []
+        # Reconnect-safe event delivery: buffers while the WS is down and
+        # re-sends unacknowledged critical events (see event_forwarder.py).
+        self.event_forwarder = BufferedEventForwarder(sandbox_id=sandbox_id, log=self.log)
 
-        # Pending ACKs: events sent but not yet acknowledged by the control plane.
-        # Keyed by ackId, re-sent on reconnect until the DO confirms receipt.
-        self._pending_acks: dict[str, dict[str, Any]] = {}
-        self._context_unavailable_ack_id = f"context_unavailable:{secrets.token_hex(8)}"
-
-        self._last_forwarded_session_title: str | None = None
+        self._connected_at_monotonic: float | None = None
+        self._connection_count = 0
+        self._reconnect_attempt_count = 0
+        self._total_connected_duration_seconds = 0.0
 
     @property
     def ws_url(self) -> str:
         """WebSocket URL for control plane connection."""
         url = self.control_plane_url.replace("https://", "wss://").replace("http://", "ws://")
         return f"{url}/sessions/{self.session_id}/ws?type=sandbox"
+
+    def _build_ready_event(self) -> dict[str, Any]:
+        repositories = load_repo_manifest(self.repo_manifest_path)
+        return {
+            "type": "ready",
+            "sandboxId": self.sandbox_id,
+            "opencodeSessionId": self.opencode_session_id,
+            "repositories": [
+                {
+                    "position": position,
+                    "repoOwner": repository.owner,
+                    "repoName": repository.name,
+                    "baseSha": repository.base_sha,
+                }
+                for position, repository in enumerate(repositories)
+                if repository.base_sha
+            ],
+        }
 
     @staticmethod
     def _redact_git_stderr(stderr_text: str, push_url: str, redacted_push_url: str) -> str:
@@ -445,49 +320,38 @@ class AgentBridge:
         """
         self.log.info("bridge.run_start")
 
-        self.http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(
-                self.HTTP_DEFAULT_TIMEOUT,
-                connect=self.HTTP_CONNECT_TIMEOUT,
-            )
-        )
+        await self._load_session_id()
         reconnect_attempts = 0
+        run_outcome = "shutdown"
+        signing_initialized = False
 
         try:
-            await self._load_session_id()
             while not self.shutdown_event.is_set():
+                run_outcome = "shutdown"
                 try:
+                    if not signing_initialized:
+                        await self.git_signing.initialize(None)
+                        signing_initialized = True
                     await self._connect_and_run()
+                    if not self.shutdown_event.is_set():
+                        run_outcome = "connection_closed"
                     reconnect_attempts = 0
-                except SessionTerminatedError as e:
-                    # Non-recoverable: session has been terminated by control plane
-                    self.log.info(
-                        "bridge.disconnect",
-                        reason="session_terminated",
-                        detail=str(e),
-                    )
+                except SessionTerminatedError:
+                    run_outcome = "session_terminated"
                     self.shutdown_event.set()
                     break
-                except websockets.ConnectionClosed as e:
-                    self.log.warn(
-                        "bridge.disconnect",
-                        reason="connection_closed",
-                        ws_close_code=e.code,
-                    )
+                except websockets.ConnectionClosed:
+                    run_outcome = "connection_closed"
                 except Exception as e:
                     error_str = str(e)
                     # Check for fatal HTTP errors that shouldn't trigger retry
                     if self._is_fatal_connection_error(error_str):
-                        self.log.error(
-                            "bridge.disconnect",
-                            reason="fatal_error",
-                            exc=e,
-                        )
+                        run_outcome = "fatal_error"
                         self.shutdown_event.set()
                         break
+                    run_outcome = "connection_error"
                     self.log.warn(
-                        "bridge.disconnect",
-                        reason="connection_error",
+                        "bridge.connect_error",
                         detail=error_str,
                     )
 
@@ -495,6 +359,7 @@ class AgentBridge:
                     break
 
                 reconnect_attempts += 1
+                self._reconnect_attempt_count += 1
                 delay = min(
                     self.RECONNECT_BACKOFF_BASE**reconnect_attempts,
                     self.RECONNECT_MAX_DELAY,
@@ -502,19 +367,65 @@ class AgentBridge:
                 self.log.info(
                     "bridge.reconnect",
                     attempt=reconnect_attempts,
+                    reconnect_attempt_count=self._reconnect_attempt_count,
                     delay_s=round(delay, 1),
                 )
                 await asyncio.sleep(delay)
 
         finally:
-            # Cancel in-flight OpenCode work before closing resources.
-            for task in (self._current_prompt_task, self._current_compaction_task):
-                if task and not task.done():
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await task
-            if self.http_client:
-                await self.http_client.aclose()
+            # Cancel any in-flight prompt task before closing resources
+            if self._current_prompt_task and not self._current_prompt_task.done():
+                self._current_prompt_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await self._current_prompt_task
+            await self.diff_refresh.close(
+                timeout_seconds=self.DIFF_REFRESH_SHUTDOWN_TIMEOUT_SECONDS
+            )
+            await self.opencode_client.aclose()
+            self.log.info(
+                "bridge.run_complete",
+                outcome=run_outcome,
+                connection_count=self._connection_count,
+                reconnect_count=max(0, self._connection_count - 1),
+                reconnect_attempt_count=self._reconnect_attempt_count,
+                total_connected_duration_seconds=round(self._total_connected_duration_seconds, 3),
+            )
+
+    def _mark_connected(self, *, now_monotonic: float | None = None) -> None:
+        self._connection_count += 1
+        self._connected_at_monotonic = time.monotonic() if now_monotonic is None else now_monotonic
+
+    def _finalize_connection(
+        self, *, now_monotonic: float | None = None
+    ) -> dict[str, float | int] | None:
+        if self._connected_at_monotonic is None:
+            return None
+
+        ended_at = time.monotonic() if now_monotonic is None else now_monotonic
+        connection_duration_seconds = max(0.0, ended_at - self._connected_at_monotonic)
+        self._connected_at_monotonic = None
+        self._total_connected_duration_seconds += connection_duration_seconds
+
+        return {
+            "connection_duration_seconds": round(connection_duration_seconds, 3),
+            "total_connected_duration_seconds": round(self._total_connected_duration_seconds, 3),
+            "connection_count": self._connection_count,
+            "reconnect_count": max(0, self._connection_count - 1),
+            "reconnect_attempt_count": self._reconnect_attempt_count,
+        }
+
+    def _log_disconnect(
+        self,
+        *,
+        reason: str,
+        level: str = "info",
+        **fields: Any,
+    ) -> None:
+        connection_fields = self._finalize_connection()
+        if connection_fields is None:
+            return
+        log_method = getattr(self.log, level)
+        log_method("bridge.disconnect", reason=reason, **connection_fields, **fields)
 
     def _is_fatal_connection_error(self, error_str: str) -> bool:
         """Check if a connection error is fatal and shouldn't trigger retry.
@@ -557,39 +468,23 @@ class AgentBridge:
                 ping_timeout=10,
             ) as ws:
                 self.ws = ws
-                self.log.info("bridge.connect", outcome="success")
-                sent_on_connect: set[str] = set()
-
-                if self.opencode_session_error and self.opencode_session_id:
-                    sent_on_connect.add(self._context_unavailable_ack_id)
-                    await self._send_event(
-                        {
-                            "type": "context_unavailable",
-                            "opencodeSessionId": self.opencode_session_id,
-                            "error": self.opencode_session_error,
-                            "ackId": self._context_unavailable_ack_id,
-                        }
-                    )
-                else:
-                    await self._send_event(
-                        {
-                            "type": "ready",
-                            "sandboxId": self.sandbox_id,
-                            "opencodeSessionId": self.opencode_session_id,
-                            "contextStatus": ("existing" if self.opencode_session_id else "fresh"),
-                        }
-                    )
-
-                await self._drain_boot_warnings()
-
-                just_flushed = await self._flush_event_buffer()
-                await self._flush_pending_acks(skip_ack_ids=sent_on_connect | just_flushed)
-
-                heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-                ack_retry_task = asyncio.create_task(self._ack_retry_loop())
+                self._mark_connected()
+                heartbeat_task: asyncio.Task[None] | None = None
                 background_tasks: set[asyncio.Task[None]] = set()
 
                 try:
+                    self.log.info(
+                        "bridge.connect",
+                        outcome="success",
+                        connection_count=self._connection_count,
+                        reconnect_count=max(0, self._connection_count - 1),
+                        reconnect_attempt_count=self._reconnect_attempt_count,
+                    )
+                    await self.event_forwarder.bind(ws)
+                    await self._send_event(self._build_ready_event())
+                    await self._drain_boot_warnings()
+
+                    heartbeat_task = asyncio.create_task(self._heartbeat_loop())
                     async for message in ws:
                         if self.shutdown_event.is_set():
                             break
@@ -605,12 +500,33 @@ class AgentBridge:
                         except Exception as e:
                             self.log.error("bridge.command_error", exc=e)
 
+                except websockets.ConnectionClosed as e:
+                    self._log_disconnect(
+                        reason="connection_closed",
+                        level="warn",
+                        ws_close_code=e.code,
+                    )
+                    raise
+
                 finally:
-                    heartbeat_task.cancel()
-                    ack_retry_task.cancel()
+                    if heartbeat_task is not None:
+                        heartbeat_task.cancel()
                     for task in background_tasks:
                         task.cancel()
                     self.ws = None
+                    self.event_forwarder.unbind()
+                    if self._connected_at_monotonic is not None:
+                        close_code = getattr(ws, "close_code", None)
+                        reason = (
+                            "shutdown_requested"
+                            if self.shutdown_event.is_set()
+                            else "connection_closed"
+                        )
+                        level = "warn" if close_code not in (None, 1000, 1001) else "info"
+                        extra_fields = (
+                            {"ws_close_code": close_code} if close_code is not None else {}
+                        )
+                        self._log_disconnect(reason=reason, level=level, **extra_fields)
 
         except InvalidStatus as e:
             status = getattr(getattr(e, "response", None), "status_code", None)
@@ -634,12 +550,6 @@ class AgentBridge:
                         "timestamp": time.time(),
                     }
                 )
-
-    async def _ack_retry_loop(self) -> None:
-        """Retry critical events while the current WebSocket stays connected."""
-        while not self.shutdown_event.is_set():
-            await asyncio.sleep(self.ACK_RETRY_INTERVAL_SECONDS)
-            await self._flush_pending_acks()
 
     async def _drain_boot_warnings(self) -> None:
         """Forward supervisor boot warnings queued before the bridge existed.
@@ -670,137 +580,13 @@ class AgentBridge:
                 continue
             await self._send_event({"type": "warning", **entry})
 
+    async def _send_media_warning(self, message: str) -> None:
+        """Surface non-fatal media handling failures to the user timeline."""
+        await self._send_event({"type": "warning", "scope": "media", "message": message})
+
     async def _send_event(self, event: dict[str, Any]) -> None:
         """Send event to control plane, buffering if WS is unavailable."""
-        event_type = event.get("type", "unknown")
-        event["sandboxId"] = self.sandbox_id
-        event["timestamp"] = event.get("timestamp", time.time())
-
-        is_critical = event_type in self.CRITICAL_EVENT_TYPES
-        if is_critical and "ackId" not in event:
-            event["ackId"] = self._make_ack_id(event)
-
-        if not self.ws or self.ws.state != State.OPEN:
-            self._buffer_event(event)
-            return
-
-        try:
-            await self.ws.send(json.dumps(event))
-            if is_critical:
-                self._pending_acks[event["ackId"]] = event
-        except Exception as e:
-            self.log.warn("bridge.send_error", event_type=event_type, exc=e)
-            self._buffer_event(event)
-
-    async def _flush_event_buffer(self) -> set[str]:
-        """Flush buffered events to the control plane after reconnect.
-
-        Returns the set of ackIds that were added to _pending_acks during this
-        flush, so the caller can skip them in _flush_pending_acks (avoiding
-        double-send on the same reconnect).
-        """
-        if not self._event_buffer:
-            return set()
-
-        self.log.info("bridge.flush_buffer_start", buffer_size=len(self._event_buffer))
-        flushed = 0
-        just_added: set[str] = set()
-        while self._event_buffer:
-            event = self._event_buffer[0]
-            if not self.ws or self.ws.state != State.OPEN:
-                break
-            try:
-                await self.ws.send(json.dumps(event))
-                self._event_buffer.pop(0)
-                flushed += 1
-                # Track critical events sent from buffer as pending ACKs
-                if event.get("type") in self.CRITICAL_EVENT_TYPES and "ackId" in event:
-                    self._pending_acks[event["ackId"]] = event
-                    just_added.add(event["ackId"])
-            except Exception as e:
-                self.log.warn("bridge.flush_send_error", exc=e)
-                break
-
-        self.log.info(
-            "bridge.flush_buffer_complete",
-            flushed=flushed,
-            remaining=len(self._event_buffer),
-        )
-        return just_added
-
-    def _buffer_event(self, event: dict[str, Any]) -> None:
-        """Buffer an event for later delivery after WS reconnect."""
-        if len(self._event_buffer) >= self.MAX_EVENT_BUFFER_SIZE:
-            # Evict oldest non-critical event; fall back to oldest if all critical
-            evicted = False
-            for i, buffered in enumerate(self._event_buffer):
-                if buffered.get("type") not in self.CRITICAL_EVENT_TYPES:
-                    self._event_buffer.pop(i)
-                    evicted = True
-                    break
-            if not evicted:
-                self._event_buffer.pop(0)
-
-        self._event_buffer.append(event)
-        self.log.debug(
-            "bridge.event_buffered",
-            event_type=event.get("type", "unknown"),
-            buffer_size=len(self._event_buffer),
-        )
-
-    @staticmethod
-    def _make_ack_id(event: dict[str, Any]) -> str:
-        """Generate a deterministic ack ID for a critical event.
-
-        Format: "{type}:{stepId}" for step events, "{type}:{messageId}" for other messages,
-        "{type}:{random_hex}" for events without (e.g., snapshot_ready).
-        Deterministic IDs give natural deduplication on the DO side.
-        """
-        event_type = event.get("type", "unknown")
-        step_id = event.get("stepId")
-        if step_id:
-            return f"{event_type}:{step_id}"
-        message_id = event.get("messageId")
-        if event_type == "step_finish" and message_id:
-            return f"{event_type}:{message_id}:{event.get('timestamp')}"
-        if message_id:
-            return f"{event_type}:{message_id}"
-        request_id = event.get("requestId")
-        if request_id:
-            return f"{event_type}:{request_id}"
-        return f"{event_type}:{secrets.token_hex(8)}"
-
-    async def _flush_pending_acks(self, skip_ack_ids: set[str] | None = None) -> None:
-        """Re-send unacknowledged critical events on the current WebSocket.
-
-        Events stay in _pending_acks until the DO sends an ACK command.
-
-        Args:
-            skip_ack_ids: ackIds to skip (already sent during _flush_event_buffer
-                          on this same reconnect).
-        """
-        if not self._pending_acks:
-            return
-
-        self.log.info("bridge.flush_pending_acks_start", count=len(self._pending_acks))
-        resent = 0
-        for ack_id, event in list(self._pending_acks.items()):
-            if skip_ack_ids and ack_id in skip_ack_ids:
-                continue
-            if not self.ws or self.ws.state != State.OPEN:
-                break
-            try:
-                await self.ws.send(json.dumps(event))
-                resent += 1
-            except Exception as e:
-                self.log.warn("bridge.flush_pending_ack_error", ack_id=ack_id, exc=e)
-                break
-
-        self.log.info(
-            "bridge.flush_pending_acks_complete",
-            resent=resent,
-            total=len(self._pending_acks),
-        )
+        await self.event_forwarder.send(event)
 
     async def _handle_command(self, cmd: dict[str, Any]) -> asyncio.Task[None] | None:
         """Handle command from control plane.
@@ -815,15 +601,19 @@ class AgentBridge:
 
         if cmd_type == "prompt":
             message_id = cmd.get("messageId") or cmd.get("message_id", "unknown")
+            self.diff_refresh.prompt_started()
             task = asyncio.create_task(self._handle_prompt(cmd))
             self._current_prompt_task = task
 
             def handle_task_exception(t: asyncio.Task[None], mid: str = message_id) -> None:
+                # Release the diff worker's idle gate before any refresh request
+                # below so the refresh can start immediately.
+                self.diff_refresh.prompt_finished()
                 if self._current_prompt_task is t:
                     self._current_prompt_task = None
                 if t.cancelled():
                     asyncio.create_task(
-                        self._send_event(
+                        self._send_terminal_event_and_refresh(
                             {
                                 "type": "execution_complete",
                                 "messageId": mid,
@@ -834,7 +624,7 @@ class AgentBridge:
                     )
                 elif exc := t.exception():
                     asyncio.create_task(
-                        self._send_event(
+                        self._send_terminal_event_and_refresh(
                             {
                                 "type": "execution_complete",
                                 "messageId": mid,
@@ -843,42 +633,13 @@ class AgentBridge:
                             }
                         )
                     )
+                else:
+                    self.diff_refresh.request(mid)
 
             task.add_done_callback(handle_task_exception)
             # Don't return the task — prompt tasks must survive WS disconnects.
             # Returning it would add it to background_tasks, which gets cancelled
             # in the _connect_and_run finally block on WS close.
-            return None
-        elif cmd_type == "compact_context":
-            request_id = str(cmd.get("requestId") or "unknown")
-            if self._current_prompt_task and not self._current_prompt_task.done():
-                await self._send_compaction_failure(
-                    request_id, "Context can only be compacted while the session is idle"
-                )
-                return None
-            if self._current_compaction_task and not self._current_compaction_task.done():
-                await self._send_compaction_failure(
-                    request_id, "Context compaction is already in progress"
-                )
-                return None
-
-            task = asyncio.create_task(self._handle_context_compaction(cmd))
-            self._current_compaction_task = task
-
-            def handle_compaction_exception(
-                completed: asyncio.Task[None], rid: str = request_id
-            ) -> None:
-                if self._current_compaction_task is completed:
-                    self._current_compaction_task = None
-                if completed.cancelled():
-                    asyncio.create_task(
-                        self._send_compaction_failure(rid, "Context compaction was cancelled")
-                    )
-                elif exc := completed.exception():
-                    asyncio.create_task(self._send_compaction_failure(rid, str(exc)))
-
-            task.add_done_callback(handle_compaction_exception)
-            # Like prompt tasks, native compaction must survive bridge WS reconnects.
             return None
         elif cmd_type == "stop":
             await self._handle_stop()
@@ -890,14 +651,19 @@ class AgentBridge:
             self.git_sync_complete.set()
         elif cmd_type == "push":
             await self._handle_push(cmd)
+        elif cmd_type == "refresh_diff":
+            self.diff_refresh.request(None)
         elif cmd_type == "ack":
             ack_id = cmd.get("ackId")
-            if ack_id and ack_id in self._pending_acks:
-                del self._pending_acks[ack_id]
+            if ack_id and self.event_forwarder.acknowledge(ack_id):
                 self.log.debug("bridge.ack_received", ack_id=ack_id)
         else:
             self.log.debug("bridge.unknown_command", cmd_type=cmd_type)
         return None
+
+    async def _send_terminal_event_and_refresh(self, event: dict[str, Any]) -> None:
+        await self._send_event(event)
+        self.diff_refresh.request(str(event.get("messageId") or "") or None)
 
     async def _handle_prompt(self, cmd: dict[str, Any]) -> None:
         """Handle prompt command - send to OpenCode and stream response."""
@@ -905,13 +671,10 @@ class AgentBridge:
         content = cmd.get("content", "")
         model = cmd.get("model")
         reasoning_effort = cmd.get("reasoningEffort")
+        raw_attachments = cmd.get("attachments")
         author_data = cmd.get("author", {})
         start_time = time.time()
         outcome = "success"
-        pump: EventPump | None = None
-
-        if self._current_compaction_task and not self._current_compaction_task.done():
-            raise RuntimeError("Wait for context compaction to finish before sending a prompt")
 
         self.log.info(
             "prompt.start",
@@ -921,40 +684,38 @@ class AgentBridge:
         )
 
         try:
-            if self.opencode_session_error:
-                raise RuntimeError(self.opencode_session_error)
-
-            scm_name = author_data.get("scmName")
-            scm_email = author_data.get("scmEmail")
-            await self._configure_git_identity(
-                GitUser(
-                    name=scm_name or FALLBACK_GIT_USER.name,
-                    email=scm_email or FALLBACK_GIT_USER.email,
-                )
-            )
+            prompt_author = parse_prompt_git_author(author_data)
+            await self._configure_git_identity(prompt_author)
 
             if not self.opencode_session_id:
                 await self._create_opencode_session()
 
+            session_attachments, rejected_attachments = parse_session_image_attachments(
+                raw_attachments
+            )
+            if rejected_attachments:
+                self.log.warn(
+                    "prompt.invalid_attachments",
+                    message_id=message_id,
+                    rejected_count=rejected_attachments,
+                )
+                await self._send_media_warning(
+                    f"{rejected_attachments} invalid attachment(s) were skipped."
+                )
+            attachments = await self.attachment_processor.process(session_attachments)
+
             had_error = False
             error_message = None
             emitted_output = False
-            pump = EventPump(
-                self._send_event,
-                max_buffered=self.MAX_STREAM_BUFFER_SIZE,
-                critical_types=self.CRITICAL_EVENT_TYPES,
-                droppable_types=self.SUPERSEDABLE_EVENT_TYPES,
-            )
-            pump.start()
             async for event in self._stream_opencode_response_sse(
-                message_id, content, model, reasoning_effort
+                message_id, content, model, reasoning_effort, attachments
             ):
                 if event.get("type") == "error":
                     had_error = True
                     error_message = event.get("error")
                 elif event.get("type") in ("token", "tool_call", "step_finish"):
                     emitted_output = True
-                pump.enqueue(event)
+                await self._send_event(event)
 
             if not had_error and not emitted_output:
                 had_error = True
@@ -969,9 +730,6 @@ class AgentBridge:
             if had_error:
                 outcome = "error"
 
-            # Drain everything the agent produced before the terminal event, so
-            # execution_complete always lands last.
-            self._log_dropped_events(message_id, await pump.aclose())
             await self._send_event(
                 {
                     "type": "execution_complete",
@@ -981,26 +739,9 @@ class AgentBridge:
                 }
             )
 
-        except asyncio.CancelledError:
-            if not self._prompt_stop_requested:
-                raise
-            outcome = "error"
-            if pump is not None:
-                self._log_dropped_events(message_id, await pump.aclose())
-            await self._send_event(
-                {
-                    "type": "execution_complete",
-                    "messageId": message_id,
-                    "success": False,
-                    "error": "Task was cancelled",
-                }
-            )
         except Exception as e:
             outcome = "error"
             self.log.error("prompt.error", exc=e, message_id=message_id)
-            if pump is not None:
-                # Deliver any output salvaged before the failure, then complete.
-                self._log_dropped_events(message_id, await pump.aclose())
             await self._send_event(
                 {
                     "type": "execution_complete",
@@ -1010,10 +751,6 @@ class AgentBridge:
                 }
             )
         finally:
-            if asyncio.current_task() is self._current_prompt_task:
-                self._prompt_stop_requested = False
-            if pump is not None:
-                pump.cancel()
             duration_ms = int((time.time() - start_time) * 1000)
             self.log.info(
                 "prompt.run",
@@ -1024,126 +761,9 @@ class AgentBridge:
                 duration_ms=duration_ms,
             )
 
-    async def _handle_context_compaction(self, cmd: dict[str, Any]) -> None:
-        request_id = str(cmd.get("requestId") or "unknown")
-        model = str(cmd.get("model") or "")
-        if self.opencode_session_error:
-            await self._send_compaction_failure(request_id, self.opencode_session_error)
-            return
-        if not self.http_client:
-            raise RuntimeError("OpenCode client is not ready")
-        if not self.opencode_session_id:
-            raise RuntimeError("OpenCode session is not ready")
-        if "/" not in model:
-            raise RuntimeError("Compaction model must include a provider")
-
-        provider_id, model_id = model.split("/", 1)
-        sse_url = f"{self.opencode_base_url}/event"
-        summarize_url = f"{self.opencode_base_url}/session/{self.opencode_session_id}/summarize"
-        started_at = time.time()
-        self.log.info(
-            "context.compaction.start",
-            request_id=request_id,
-            provider_id=provider_id,
-            model_id=model_id,
-        )
-
-        try:
-            async with asyncio.timeout(self.COMPACTION_MAX_DURATION):
-                async with self.http_client.stream(
-                    "GET",
-                    sse_url,
-                    timeout=httpx.Timeout(None, connect=self.HTTP_CONNECT_TIMEOUT, read=None),
-                ) as sse_response:
-                    if sse_response.status_code != 200:
-                        raise RuntimeError(
-                            f"OpenCode event stream failed with status {sse_response.status_code}"
-                        )
-
-                    response = await self.http_client.post(
-                        summarize_url,
-                        json={"providerID": provider_id, "modelID": model_id},
-                        timeout=None,
-                    )
-                    if response.status_code != 200:
-                        detail = getattr(response, "text", "")
-                        raise RuntimeError(
-                            f"OpenCode summarize failed with status {response.status_code}"
-                            + (f": {detail}" if detail else "")
-                        )
-
-                    async for event in self._parse_sse_stream(sse_response):
-                        event_type = event.get("type")
-                        props = event.get("properties", {})
-                        if not isinstance(props, dict):
-                            continue
-                        if props.get("sessionID") != self.opencode_session_id:
-                            continue
-                        if event_type == "session.compacted":
-                            await self._send_event(
-                                {
-                                    "type": "context_compacted",
-                                    "requestId": request_id,
-                                }
-                            )
-                            self.log.info(
-                                "context.compaction.complete",
-                                request_id=request_id,
-                                outcome="success",
-                                duration_ms=int((time.time() - started_at) * 1000),
-                            )
-                            return
-                        if event_type == "session.error":
-                            error = self._extract_error_message(props.get("error", {}))
-                            raise RuntimeError(error or "OpenCode context compaction failed")
-
-                    raise RuntimeError("OpenCode event stream ended before compaction completed")
-        except TimeoutError:
-            await self._request_opencode_stop(reason="compaction_timeout")
-            raise RuntimeError(
-                f"Context compaction timed out after {self.COMPACTION_MAX_DURATION:.0f}s"
-            ) from None
-        except asyncio.CancelledError:
-            await self._request_opencode_stop(reason="compaction_cancelled")
-            raise
-
-    async def _send_compaction_failure(self, request_id: str, error: str) -> None:
-        self.log.error(
-            "context.compaction.complete",
-            request_id=request_id,
-            outcome="failure",
-            error=error,
-        )
-        await self._send_event(
-            {
-                "type": "context_compaction_failed",
-                "requestId": request_id,
-                "error": error,
-            }
-        )
-
-    def _log_dropped_events(self, message_id: str, dropped: int) -> None:
-        if dropped:
-            self.log.warn(
-                "bridge.stream_events_dropped",
-                message_id=message_id,
-                dropped=dropped,
-            )
-
     async def _create_opencode_session(self) -> None:
         """Create a new OpenCode session."""
-        if not self.http_client:
-            raise RuntimeError("HTTP client not initialized")
-
-        resp = await self.http_client.post(
-            f"{self.opencode_base_url}/session",
-            json={},
-            timeout=self.OPENCODE_REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-        self.opencode_session_id = data.get("id")
+        self.opencode_session_id = await self.opencode_client.create_session()
         self.log.info(
             "opencode.session.ensure",
             opencode_session_id=self.opencode_session_id,
@@ -1151,278 +771,19 @@ class AgentBridge:
         )
 
         await self._save_session_id()
-        await self._send_event(
-            {
-                "type": "opencode_session_created",
-                "sandboxId": self.sandbox_id,
-                "opencodeSessionId": self.opencode_session_id,
-            }
-        )
 
-    def _normalize_forwardable_session_title(self, title: object) -> str | None:
-        if not isinstance(title, str):
-            return None
-
-        trimmed = title.strip()
-        if not trimmed or self.OPENCODE_DEFAULT_TITLE_RE.match(trimmed):
-            return None
-        return trimmed
-
-    def _session_title_event_once(self, title: object) -> dict[str, str] | None:
-        trimmed = self._normalize_forwardable_session_title(title)
-        if trimmed is None:
-            return None
-        if trimmed == self._last_forwarded_session_title:
-            return None
-
-        self._last_forwarded_session_title = trimmed
-        return {"type": "session_title", "title": trimmed}
-
-    def _session_title_event_from_sse(
-        self, event_type: object, props: dict[str, Any]
-    ) -> dict[str, str] | None:
-        if event_type != "session.updated":
-            return None
-
-        info = props.get("info")
-        if not isinstance(info, dict):
-            return None
-
-        session_id = props.get("sessionID") or info.get("id")
-        if session_id != self.opencode_session_id:
-            return None
-
-        return self._session_title_event_once(info.get("title"))
-
-    def _provider_retry_event_from_sse(
-        self, event_type: object, props: dict[str, Any]
-    ) -> dict[str, Any] | None:
-        """Build a `provider_retry` event from OpenCode's retry status, if this event is one.
-
-        OpenCode retries a rejected provider request on a schedule with no attempt cap, honouring
-        the provider's `retry-after` for up to 24 days, and emits nothing but heartbeats while it
-        waits. A usage limit therefore reads as a session that is simply thinking (issue #278).
-        The retry status is the only place the reason surfaces, and it carries OpenCode's own
-        normalized provider message, so forwarding it covers every provider rather than only the
-        ones whose error bodies we know how to parse.
-        """
-        if event_type != "session.status":
-            return None
-        if props.get("sessionID") != self.opencode_session_id:
-            return None
-
-        status = props.get("status")
-        if not isinstance(status, dict) or status.get("type") != "retry":
-            return None
-
-        event: dict[str, Any] = {
-            "type": "provider_retry",
-            "attempt": status.get("attempt", 0),
-            "message": str(status.get("message") or "").strip()
-            or "The provider rejected the request.",
-            "nextAttemptAtMs": status.get("next", 0),
-        }
-
-        action = status.get("action")
-        if isinstance(action, dict) and action.get("provider"):
-            event["providerName"] = str(action["provider"])
-        return event
-
-    @staticmethod
-    def _extract_error_message(error: object) -> str | None:
-        """Extract message from OpenCode NamedError: { "name": "...", "data": { "message": "..." } }."""
-        if isinstance(error, dict):
-            data = error.get("data")
-            if isinstance(data, dict) and "message" in data:
-                return str(data["message"])
-            message = error.get("message") or error.get("name")
-            return str(message) if message else None
-        return str(error) if error else None
-
-    @staticmethod
-    def _is_context_overflow_error(error: object) -> bool:
-        return isinstance(error, dict) and error.get("name") == "ContextOverflowError"
-
-    def _transform_part_to_event(
-        self,
-        part: dict[str, Any],
-        message_id: str,
-    ) -> dict[str, Any] | None:
-        """Transform a single OpenCode part to a bridge event."""
-        part_type = part.get("type")
-
-        if part_type == "text":
-            text = part.get("text", "")
-            if text:
-                return {
-                    "type": "token",
-                    "content": text,
-                    "messageId": message_id,
-                }
-        elif part_type == "tool":
-            state = part.get("state", {})
-            status = state.get("status", "")
-            tool_input = state.get("input", {})
-
-            self.log.debug(
-                "bridge.tool_part",
-                tool=part.get("tool"),
-                status=status,
+    def _ensure_prompt_stream(self) -> OpenCodePromptStream:
+        """The long-lived prompt SSE translator, created on first use."""
+        if self._prompt_stream is None:
+            self._prompt_stream = OpenCodePromptStream(
+                client=self.opencode_client,
+                attachment_processor=self.attachment_processor,
+                log=self.log,
+                sse_inactivity_timeout_seconds=self.sse_inactivity_timeout,
+                prompt_max_duration_seconds=self.prompt_max_duration_seconds,
+                prompt_cleanup_timeout_seconds=self.prompt_cleanup_timeout_seconds,
             )
-
-            if status in ("pending", "") and not tool_input:
-                return None
-
-            return {
-                "type": "tool_call",
-                "tool": part.get("tool", ""),
-                "args": tool_input,
-                "callId": part.get("callID", ""),
-                "status": status,
-                "output": state.get("output", ""),
-                "messageId": message_id,
-            }
-        elif part_type == "step-finish":
-            return {
-                "type": "step_finish",
-                **({"stepId": part["id"]} if part.get("id") else {}),
-                "cost": part.get("cost"),
-                "tokens": part.get("tokens"),
-                "reason": part.get("reason"),
-                "messageId": message_id,
-            }
-        elif part_type == "step-start":
-            return {
-                "type": "step_start",
-                "messageId": message_id,
-            }
-
-        return None
-
-    # Anthropic extended thinking budget tokens by reasoning effort level.
-    # "max" uses 31,999 — the API maximum for streaming responses.
-    # "high" uses 16,000 — a balanced level for faster responses with good reasoning.
-    ANTHROPIC_THINKING_BUDGETS: ClassVar[dict[str, int]] = {
-        "high": 16_000,
-        "max": 31_999,
-    }
-    ANTHROPIC_ADAPTIVE_THINKING_MODELS: ClassVar[set[str]] = {
-        "claude-fable-5",
-        "claude-opus-4-6",
-        "claude-opus-4-7",
-        "claude-opus-4-8",
-        "claude-opus-5",
-        "claude-sonnet-4-6",
-    }
-    ANTHROPIC_ADAPTIVE_EFFORTS: ClassVar[set[str]] = {"low", "medium", "high", "xhigh", "max"}
-
-    def _build_prompt_request_body(
-        self,
-        content: str,
-        model: str | None,
-        opencode_message_id: str | None = None,
-        reasoning_effort: str | None = None,
-    ) -> dict[str, Any]:
-        """Build request body for OpenCode prompt requests.
-
-        Args:
-            content: The prompt text content
-            model: Optional model override (e.g., "claude-haiku-4-5" or "anthropic/claude-haiku-4-5")
-            opencode_message_id: OpenCode-compatible ascending message ID (e.g., "msg_...").
-                                 When provided, OpenCode uses this as the user message ID,
-                                 and assistant responses will have parentID pointing to it.
-            reasoning_effort: Optional reasoning effort level (e.g., "high", "max")
-        """
-        request_body: dict[str, Any] = {"parts": [{"type": "text", "text": content}]}
-
-        if opencode_message_id:
-            request_body["messageID"] = opencode_message_id
-
-        if model:
-            if "/" in model:
-                provider_id, model_id = model.split("/", 1)
-            else:
-                provider_id, model_id = "anthropic", model
-            model_spec: dict[str, Any] = {
-                "providerID": provider_id,
-                "modelID": model_id,
-            }
-
-            # OpenCode's prompt route strips "options" from the model ref and honours only the
-            # top-level "variant", which it maps to provider options per model. The anthropic
-            # and openai arms below still write "options" and are kept as they are until that
-            # is confirmed and migrated separately; the tests pin the two shapes apart.
-            if reasoning_effort:
-                if provider_id == "openrouter":
-                    request_body["variant"] = reasoning_effort
-                elif provider_id == "anthropic":
-                    if model_id in self.ANTHROPIC_ADAPTIVE_THINKING_MODELS:
-                        anthropic_options: dict[str, Any] = {
-                            "thinking": {"type": "adaptive"},
-                        }
-                        if reasoning_effort in self.ANTHROPIC_ADAPTIVE_EFFORTS:
-                            anthropic_options["outputConfig"] = {"effort": reasoning_effort}
-                        model_spec["options"] = anthropic_options
-                    else:
-                        budget = self.ANTHROPIC_THINKING_BUDGETS.get(reasoning_effort)
-                        if budget is not None:
-                            model_spec["options"] = {
-                                "thinking": {"type": "enabled", "budgetTokens": budget}
-                            }
-                elif provider_id == "openai":
-                    model_spec["options"] = {
-                        "reasoningEffort": reasoning_effort,
-                        "reasoningSummary": "auto",
-                    }
-
-            request_body["model"] = model_spec
-
-        return request_body
-
-    async def _parse_sse_stream(
-        self,
-        response: httpx.Response,
-        timeout_ctx: asyncio.Timeout | None = None,
-    ) -> AsyncIterator[dict[str, Any]]:
-        """Parse Server-Sent Events stream from OpenCode.
-
-        SSE format:
-            data: {"type": "...", "properties": {...}}
-
-            data: {"type": "...", "properties": {...}}
-
-        Events are separated by double newlines.
-        If timeout_ctx is provided, the deadline is reset on every chunk received.
-        """
-        buffer = ""
-        async for chunk in response.aiter_text():
-            buffer += chunk
-            if timeout_ctx is not None:
-                timeout_ctx.reschedule(
-                    asyncio.get_running_loop().time() + self.sse_inactivity_timeout
-                )
-
-            # Process complete events (separated by double newlines)
-            while "\n\n" in buffer:
-                event_str, buffer = buffer.split("\n\n", 1)
-
-                # Parse the event lines
-                data_lines: list[str] = []
-                for line in event_str.split("\n"):
-                    if line.startswith("data:"):
-                        # Handle both "data: {...}" and "data:{...}" formats
-                        data_content = line[5:].lstrip()
-                        if data_content:
-                            data_lines.append(data_content)
-
-                # Join multi-line data and parse JSON
-                if data_lines:
-                    try:
-                        raw_data = "\n".join(data_lines)
-                        event = json.loads(raw_data)
-                        yield event
-                    except json.JSONDecodeError as e:
-                        self.log.debug("bridge.sse_parse_error", exc=e)
+        return self._prompt_stream
 
     async def _stream_opencode_response_sse(
         self,
@@ -1430,653 +791,31 @@ class AgentBridge:
         content: str,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        attachments: list[HydratedSessionAttachment] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Stream response from OpenCode using Server-Sent Events.
-
-        Uses messageID-based correlation for reliable event attribution:
-        1. Generate an OpenCode-compatible ascending ID for the user message
-        2. OpenCode creates assistant messages with parentID = our ascending ID
-        3. Filter events to only process parts from our assistant messages
-        4. Use control plane's message_id for events sent back
-        5. Track child sessions (sub-tasks) and forward their non-text events
-           with isSubtask=True
-
-        The ascending ID ensures our user message ID is lexicographically greater
-        than any previous assistant message IDs, preventing the early exit condition
-        in OpenCode's prompt loop (lastUser.id < lastAssistant.id).
-        """
-        if not self.http_client or not self.opencode_session_id:
+        """Stream one prompt's response events (see prompt_stream.py)."""
+        if not self.opencode_session_id:
             raise RuntimeError("OpenCode session not initialized")
 
-        opencode_message_id = OpenCodeIdentifier.ascending("message")
-        request_body = self._build_prompt_request_body(
-            content, model, opencode_message_id, reasoning_effort
-        )
-
-        sse_url = f"{self.opencode_base_url}/event"
-        async_url = f"{self.opencode_base_url}/session/{self.opencode_session_id}/prompt_async"
-
-        cumulative_text: dict[str, str] = {}
-        emitted_tool_states: set[str] = set()
-        allowed_assistant_msg_ids: set[str] = set()
-        user_message_ids: set[str] = {opencode_message_id}
-        pending_parts: dict[str, list[tuple[dict[str, Any], Any]]] = {}
-        pending_parts_total = 0
-        pending_drop_logged = False
-        # Child session tracking (sub-tasks)
-        tracked_child_session_ids: set[str] = set()
-
-        # Compaction tracking: after compaction, parentID changes so we must
-        # accept all non-summary assistant messages from the parent session
-        compaction_occurred = False
-        context_overflow_recovery_pending = False
-
-        start_time = time.time()
-        # Baseline for OOM detection: if this cgroup's oom_kill counter rises
-        # while we stream, a drop below is very likely OpenCode being OOM-killed.
-        oom_kill_baseline = self._read_oom_kill_count()
-        loop = asyncio.get_running_loop()
-
-        def buffer_part(oc_msg_id: str, part: dict[str, Any], delta: Any) -> None:
-            nonlocal pending_parts_total
-            nonlocal pending_drop_logged
-            if pending_parts_total >= self.MAX_PENDING_PART_EVENTS:
-                if not pending_drop_logged:
-                    self.log.warn(
-                        "bridge.pending_parts_dropped",
-                        message_id=message_id,
-                        limit=self.MAX_PENDING_PART_EVENTS,
-                    )
-                    pending_drop_logged = True
-                return
-            pending_parts.setdefault(oc_msg_id, []).append((part, delta))
-            pending_parts_total += 1
-
-        def handle_part(
-            part: dict[str, Any],
-            delta: Any,
-            *,
-            is_subtask: bool = False,
-        ) -> list[dict[str, Any]]:
-            part_type = part.get("type", "")
-            part_id = part.get("id", "")
-            events: list[dict[str, Any]] = []
-
-            if part_type == "text":
-                if is_subtask:
-                    return events  # Don't forward child text tokens
-                text = part.get("text", "")
-                if delta:
-                    cumulative_text[part_id] = cumulative_text.get(part_id, "") + delta
-                else:
-                    cumulative_text[part_id] = text
-
-                if cumulative_text.get(part_id):
-                    events.append(
-                        {
-                            "type": "token",
-                            "content": cumulative_text[part_id],
-                            "messageId": message_id,
-                        }
-                    )
-
-            elif part_type == "tool":
-                tool_event = self._transform_part_to_event(part, message_id)
-                if tool_event:
-                    state = part.get("state", {})
-                    status = state.get("status", "")
-                    call_id = part.get("callID", "")
-                    part_sid = part.get("sessionID", "")
-                    tool_key = f"tool:{part_sid}:{call_id}:{status}"
-
-                    if tool_key not in emitted_tool_states:
-                        emitted_tool_states.add(tool_key)
-                        events.append(tool_event)
-
-            elif part_type == "step-start":
-                events.append(
-                    {
-                        "type": "step_start",
-                        "messageId": message_id,
-                    }
-                )
-
-            elif part_type == "step-finish":
-                events.append(
-                    {
-                        "type": "step_finish",
-                        **({"stepId": part["id"]} if part.get("id") else {}),
-                        "cost": part.get("cost"),
-                        "tokens": part.get("tokens"),
-                        "reason": part.get("reason"),
-                        "messageId": message_id,
-                    }
-                )
-
-            if is_subtask:
-                for ev in events:
-                    ev["isSubtask"] = True
-            return events
-
-        try:
-            deadline = asyncio.get_running_loop().time() + self.sse_inactivity_timeout
-            async with asyncio.timeout_at(deadline) as timeout_ctx:
-                async with self.http_client.stream(
-                    "GET",
-                    sse_url,
-                    timeout=httpx.Timeout(None, connect=self.HTTP_CONNECT_TIMEOUT, read=None),
-                ) as sse_response:
-                    if sse_response.status_code != 200:
-                        raise SSEConnectionError(
-                            f"SSE connection failed: {sse_response.status_code}"
-                        )
-
-                    prompt_start = loop.time()
-                    last_progress_at = prompt_start
-                    prompt_response = await self.http_client.post(
-                        async_url,
-                        json=request_body,
-                        timeout=self.OPENCODE_REQUEST_TIMEOUT,
-                    )
-                    if prompt_response.status_code not in [200, 204]:
-                        error_body = prompt_response.text
-                        self.log.error(
-                            "bridge.prompt_request_error",
-                            status_code=prompt_response.status_code,
-                            error_body=error_body,
-                        )
-                        raise RuntimeError(
-                            f"Async prompt failed: {prompt_response.status_code} - {error_body}"
-                        )
-
-                    async for event in self._parse_sse_stream(sse_response, timeout_ctx):
-                        event_type = event.get("type")
-                        props = event.get("properties", {})
-                        if not isinstance(props, dict):
-                            props = {}
-
-                        if event_type in KEEPALIVE_EVENT_TYPES:
-                            stalled_for = loop.time() - last_progress_at
-                            if stalled_for > self.session_progress_timeout_seconds:
-                                elapsed = time.time() - start_time
-                                self.log.error(
-                                    "bridge.session_progress_timeout",
-                                    timeout_name="session_progress",
-                                    timeout_ms=int(self.session_progress_timeout_seconds * 1000),
-                                    elapsed_ms=int(elapsed * 1000),
-                                    operation="bridge.sse",
-                                    message_id=message_id,
-                                )
-                                await self._request_opencode_stop(reason="session_progress_timeout")
-                                async for final_event in self._fetch_final_message_state(
-                                    message_id,
-                                    opencode_message_id,
-                                    cumulative_text,
-                                    allowed_assistant_msg_ids,
-                                    user_message_ids=user_message_ids,
-                                    compaction_occurred=compaction_occurred,
-                                ):
-                                    yield final_event
-                                raise RuntimeError(
-                                    f"The agent produced nothing for "
-                                    f"{self.session_progress_timeout_seconds:.0f}s while its connection "
-                                    f"stayed alive. Total elapsed: {elapsed:.0f}s"
-                                )
-                        else:
-                            if should_reset_progress_deadline(event_type, props):
-                                last_progress_at = loop.time()
-
-                            # Track direct child sessions before filtering
-                            if event_type == "session.created":
-                                info = props.get("info", {})
-                                child_id = info.get("id")
-                                child_parent = info.get("parentID")
-                                if child_id and child_parent == self.opencode_session_id:
-                                    tracked_child_session_ids.add(child_id)
-                                    self.log.info(
-                                        "bridge.child_session_detected",
-                                        child_session_id=child_id,
-                                        source="session.created",
-                                    )
-                                # Always continue: no downstream handler processes session.created,
-                                # and non-matching events would just fall through to no-op.
-                                continue
-
-                            title_event = self._session_title_event_from_sse(event_type, props)
-                            if title_event:
-                                yield title_event
-                            if event_type == "session.updated":
-                                continue
-
-                            retry_event = self._provider_retry_event_from_sse(event_type, props)
-                            if retry_event:
-                                self.log.warn(
-                                    "bridge.provider_retry",
-                                    attempt=retry_event["attempt"],
-                                    provider=retry_event.get("providerName"),
-                                    next_attempt_at_ms=retry_event["nextAttemptAtMs"],
-                                    reason=retry_event["message"],
-                                )
-                                yield retry_event
-                                continue
-
-                            event_session_id = props.get("sessionID") or props.get("part", {}).get(
-                                "sessionID"
-                            )
-                            is_child = event_session_id in tracked_child_session_ids
-                            if (
-                                not event_session_id
-                                or event_session_id == self.opencode_session_id
-                                or is_child
-                            ):
-                                if event_type == "message.updated":
-                                    info = props.get("info", {})
-                                    msg_session_id = info.get("sessionID")
-                                    if msg_session_id == self.opencode_session_id:
-                                        oc_msg_id = info.get("id", "")
-                                        parent_id = info.get("parentID", "")
-                                        role = info.get("role", "")
-                                        finish = info.get("finish", "")
-
-                                        if role == "user" and oc_msg_id:
-                                            if oc_msg_id not in user_message_ids:
-                                                self.log.info(
-                                                    "bridge.user_message_id_discovered",
-                                                    expected_id=opencode_message_id,
-                                                    actual_id=oc_msg_id,
-                                                )
-                                            user_message_ids.add(oc_msg_id)
-
-                                        parent_matches = parent_id in user_message_ids
-                                        is_compaction_summary = info.get("summary") is True
-
-                                        self.log.debug(
-                                            "bridge.message_updated",
-                                            role=role,
-                                            oc_msg_id=oc_msg_id,
-                                            parent_match=parent_matches,
-                                            compaction_occurred=compaction_occurred,
-                                            is_compaction_summary=is_compaction_summary,
-                                        )
-
-                                        if role == "assistant" and oc_msg_id:
-                                            # Accept if: parentID matches our message,
-                                            # OR compaction happened and this isn't the
-                                            # compaction summary itself
-                                            if parent_matches or (
-                                                compaction_occurred and not is_compaction_summary
-                                            ):
-                                                allowed_assistant_msg_ids.add(oc_msg_id)
-                                                pending = pending_parts.pop(oc_msg_id, [])
-                                                if pending:
-                                                    pending_parts_total -= len(pending)
-                                                    for part, delta in pending:
-                                                        for part_event in handle_part(part, delta):
-                                                            yield part_event
-
-                                        if finish and finish not in ("tool-calls", ""):
-                                            self.log.debug(
-                                                "bridge.message_finished",
-                                                finish=finish,
-                                            )
-
-                                    elif msg_session_id in tracked_child_session_ids:
-                                        # Child session: authorize all assistant messages
-                                        oc_msg_id = info.get("id", "")
-                                        role = info.get("role", "")
-                                        if role == "assistant" and oc_msg_id:
-                                            allowed_assistant_msg_ids.add(oc_msg_id)
-                                            pending = pending_parts.pop(oc_msg_id, [])
-                                            if pending:
-                                                pending_parts_total -= len(pending)
-                                                for part, delta in pending:
-                                                    for ev in handle_part(
-                                                        part, delta, is_subtask=True
-                                                    ):
-                                                        yield ev
-
-                                elif event_type == "message.part.updated":
-                                    part = props.get("part", {})
-                                    delta = props.get("delta")
-                                    oc_msg_id = part.get("messageID", "")
-                                    part_session_id = part.get("sessionID", "")
-
-                                    # Discover child sessions from task tool metadata (covers task_id resume)
-                                    if (
-                                        part.get("tool") == "task"
-                                        and part_session_id == self.opencode_session_id
-                                    ):
-                                        metadata = part.get("metadata")
-                                        child_sid = (
-                                            metadata.get("sessionId")
-                                            if isinstance(metadata, dict)
-                                            else None
-                                        )
-                                        if child_sid and child_sid not in tracked_child_session_ids:
-                                            tracked_child_session_ids.add(child_sid)
-                                            self.log.info(
-                                                "bridge.child_session_detected",
-                                                child_session_id=child_sid,
-                                                source="task_metadata",
-                                            )
-
-                                    if oc_msg_id in allowed_assistant_msg_ids:
-                                        if part_session_id in tracked_child_session_ids:
-                                            for ev in handle_part(part, delta, is_subtask=True):
-                                                yield ev
-                                        else:
-                                            for part_event in handle_part(part, delta):
-                                                yield part_event
-                                    elif oc_msg_id:
-                                        buffer_part(oc_msg_id, part, delta)
-
-                                elif event_type == "session.idle":
-                                    idle_session_id = props.get("sessionID")
-                                    # Only parent idle terminates the stream
-                                    if idle_session_id == self.opencode_session_id:
-                                        elapsed = time.time() - start_time
-                                        self.log.debug(
-                                            "bridge.session_idle",
-                                            elapsed_s=round(elapsed, 1),
-                                            tracked_msgs=len(allowed_assistant_msg_ids),
-                                        )
-                                        async for final_event in self._fetch_final_message_state(
-                                            message_id,
-                                            opencode_message_id,
-                                            cumulative_text,
-                                            allowed_assistant_msg_ids,
-                                            user_message_ids=user_message_ids,
-                                            compaction_occurred=compaction_occurred,
-                                        ):
-                                            yield final_event
-                                        return
-
-                                elif event_type == "session.status":
-                                    status_session_id = props.get("sessionID")
-                                    status = props.get("status", {})
-                                    # Only parent status=idle terminates the stream
-                                    if (
-                                        status_session_id == self.opencode_session_id
-                                        and status.get("type") == "idle"
-                                    ):
-                                        elapsed = time.time() - start_time
-                                        self.log.debug(
-                                            "bridge.session_status_idle",
-                                            elapsed_s=round(elapsed, 1),
-                                            tracked_msgs=len(allowed_assistant_msg_ids),
-                                        )
-                                        async for final_event in self._fetch_final_message_state(
-                                            message_id,
-                                            opencode_message_id,
-                                            cumulative_text,
-                                            allowed_assistant_msg_ids,
-                                            user_message_ids=user_message_ids,
-                                            compaction_occurred=compaction_occurred,
-                                        ):
-                                            yield final_event
-                                        return
-
-                                elif event_type == "session.error":
-                                    error_session_id = props.get("sessionID")
-                                    if error_session_id == self.opencode_session_id:
-                                        error = props.get("error", {})
-                                        error_msg = self._extract_error_message(error)
-                                        if (
-                                            self._is_context_overflow_error(error)
-                                            and not context_overflow_recovery_pending
-                                        ):
-                                            context_overflow_recovery_pending = True
-                                            self.log.info(
-                                                "bridge.context_overflow_recovery_pending",
-                                                message_id=message_id,
-                                            )
-                                            continue
-                                        self.log.error("bridge.session_error", error_msg=error_msg)
-                                        yield {
-                                            "type": "error",
-                                            "error": error_msg or "Unknown error",
-                                            "messageId": message_id,
-                                        }
-                                        return
-                                    elif error_session_id in tracked_child_session_ids:
-                                        error_msg = self._extract_error_message(
-                                            props.get("error", {})
-                                        )
-                                        self.log.error(
-                                            "bridge.child_session_error",
-                                            error_msg=error_msg,
-                                            child_session_id=error_session_id,
-                                        )
-                                        yield {
-                                            "type": "error",
-                                            "error": error_msg or "Sub-task error",
-                                            "messageId": message_id,
-                                            "isSubtask": True,
-                                        }
-                                        # No return — parent stream continues
-
-                                elif event_type == "session.compacted":
-                                    compacted_session_id = props.get("sessionID")
-                                    if compacted_session_id == self.opencode_session_id:
-                                        compaction_occurred = True
-                                        self.log.info(
-                                            "bridge.session_compacted",
-                                            message_id=message_id,
-                                        )
-                                        yield {
-                                            "type": "context_compacted",
-                                            "messageId": message_id,
-                                        }
-
-                        if loop.time() > prompt_start + self.PROMPT_MAX_DURATION:
-                            elapsed = time.time() - start_time
-                            self.log.error(
-                                "bridge.prompt_max_duration_timeout",
-                                timeout_ms=int(self.PROMPT_MAX_DURATION * 1000),
-                                elapsed_ms=int(elapsed * 1000),
-                                message_id=message_id,
-                            )
-                            await self._request_opencode_stop(reason="prompt_max_duration_timeout")
-                            async for final_event in self._fetch_final_message_state(
-                                message_id,
-                                opencode_message_id,
-                                cumulative_text,
-                                allowed_assistant_msg_ids,
-                                user_message_ids=user_message_ids,
-                                compaction_occurred=compaction_occurred,
-                            ):
-                                yield final_event
-                            raise RuntimeError(
-                                f"Prompt exceeded max duration of {self.PROMPT_MAX_DURATION:.0f}s."
-                            )
-
-        except TimeoutError:
-            elapsed = time.time() - start_time
-            self.log.error(
-                "bridge.sse_inactivity_timeout",
-                timeout_name="sse_inactivity",
-                timeout_ms=int(self.sse_inactivity_timeout * 1000),
-                elapsed_ms=int(elapsed * 1000),
-                operation="bridge.sse",
-                message_id=message_id,
-            )
-            await self._request_opencode_stop(reason="inactivity_timeout")
-            async for final_event in self._fetch_final_message_state(
-                message_id,
-                opencode_message_id,
-                cumulative_text,
-                allowed_assistant_msg_ids,
-                user_message_ids=user_message_ids,
-                compaction_occurred=compaction_occurred,
-            ):
-                yield final_event
-            raise RuntimeError(
-                f"SSE stream inactive for {self.sse_inactivity_timeout:.0f}s "
-                f"(no data received). Total elapsed: {elapsed:.0f}s"
-            )
-
-        except (httpx.RemoteProtocolError, httpx.ReadError) as e:
-            # OpenCode drops the /event stream mid-response under high output
-            # (fan-out, test suites). httpx raises RemoteProtocolError for the
-            # incomplete chunked read; ReadError covers lower-level socket
-            # resets. RemoteProtocolError is a sibling of ReadError under
-            # TransportError, so the old ReadError-only handler never caught it.
-            # Salvage whatever OpenCode already produced instead of failing raw,
-            # mirroring the inactivity-timeout path above.
-            elapsed = time.time() - start_time
-            self.log.error(
-                "bridge.sse_connection_dropped",
-                exc=e,
-                operation="bridge.sse",
-                message_id=message_id,
-                elapsed_ms=int(elapsed * 1000),
-            )
-            await self._request_opencode_stop(reason="sse_connection_dropped")
-            async for final_event in self._fetch_final_message_state(
-                message_id,
-                opencode_message_id,
-                cumulative_text,
-                allowed_assistant_msg_ids,
-                user_message_ids=user_message_ids,
-                compaction_occurred=compaction_occurred,
-            ):
-                yield final_event
-            # Read the OOM counter after the salvage round-trip above, by which
-            # point the kernel has settled any kill: a rise since baseline means
-            # OpenCode was OOM-killed, so surface a readable cause instead of the
-            # raw transport error.
-            if self._read_oom_kill_count() > oom_kill_baseline:
-                raise SSEConnectionError(
-                    "The agent ran out of memory and was restarted. Try a "
-                    "smaller or less parallel task, or a larger sandbox."
-                ) from e
-            raise SSEConnectionError(f"SSE stream connection dropped: {e}")
-
-    def _read_oom_kill_count(self) -> int:
-        """Return this cgroup's cumulative ``oom_kill`` count, or 0 if unknown.
-
-        Reads cgroup-v2 ``/sys/fs/cgroup/memory.events`` and parses the
-        ``oom_kill N`` line by key (the file has several lines: low / high /
-        max / oom / oom_kill). Any problem (missing file, not cgroup-v2,
-        unreadable, or a missing key) is treated as 0 so callers fall back to
-        the generic path without special-casing.
-        """
-        try:
-            events = Path("/sys/fs/cgroup/memory.events").read_text()
-        except (OSError, ValueError):
-            return 0
-        for line in events.splitlines():
-            key, _, value = line.partition(" ")
-            if key == "oom_kill":
-                try:
-                    return int(value)
-                except ValueError:
-                    return 0
-        return 0
-
-    async def _fetch_final_message_state(
-        self,
-        message_id: str,
-        opencode_message_id: str,
-        cumulative_text: dict[str, str],
-        tracked_msg_ids: set[str] | None = None,
-        user_message_ids: set[str] | None = None,
-        compaction_occurred: bool = False,
-    ) -> AsyncIterator[dict[str, Any]]:
-        """Fetch final message state from API to ensure complete text.
-
-        This is called after session.idle to capture any text that may have
-        been missed due to SSE event ordering. It fetches the latest message
-        state and emits any text that's longer than what we've already sent.
-
-        Args:
-            message_id: Control plane message ID (used in events sent back)
-            opencode_message_id: OpenCode ascending ID (used for parentID correlation)
-            cumulative_text: Text already sent, keyed by part ID
-            tracked_msg_ids: Assistant message IDs tracked during SSE streaming
-            compaction_occurred: Whether session compaction happened during this prompt.
-                When True, accepts non-summary assistant messages even if parentID
-                doesn't match, since compaction changes the message chain.
-
-        Uses parentID-based correlation if available, falling back to
-        tracked_msg_ids from SSE streaming if parentID doesn't match.
-        """
-        if not self.http_client or not self.opencode_session_id:
-            return
-
-        messages_url = f"{self.opencode_base_url}/session/{self.opencode_session_id}/message"
-
-        try:
-            response = await self.http_client.get(
-                messages_url,
-                timeout=self.OPENCODE_REQUEST_TIMEOUT,
-            )
-            if response.status_code != 200:
-                self.log.warn(
-                    "bridge.final_state_fetch_error",
-                    status_code=response.status_code,
-                )
-                return
-
-            messages = response.json()
-
-            for msg in messages:
-                info = msg.get("info", {})
-                role = info.get("role", "")
-                msg_id = info.get("id", "")
-                parent_id = info.get("parentID", "")
-
-                if role != "assistant":
-                    continue
-
-                valid_parent_ids = user_message_ids or {opencode_message_id}
-                parent_matches = parent_id in valid_parent_ids
-                in_tracked_set = tracked_msg_ids and msg_id in tracked_msg_ids
-                is_compaction_summary = info.get("summary") is True
-
-                # Accept if: parentID matches, was tracked during SSE, or
-                # compaction occurred and this isn't the summary message
-                should_accept = (
-                    parent_matches
-                    or in_tracked_set
-                    or (compaction_occurred and not is_compaction_summary)
-                )
-                if not should_accept:
-                    continue
-
-                parts = msg.get("parts", [])
-                for part in parts:
-                    part_type = part.get("type", "")
-                    part_id = part.get("id", "")
-
-                    if part_type == "text":
-                        text = part.get("text", "")
-                        previously_sent = cumulative_text.get(part_id, "")
-                        if len(text) > len(previously_sent):
-                            self.log.debug(
-                                "bridge.final_text_update",
-                                prev_len=len(previously_sent),
-                                new_len=len(text),
-                            )
-                            cumulative_text[part_id] = text
-                            yield {
-                                "type": "token",
-                                "content": text,
-                                "messageId": message_id,
-                            }
-
-        except Exception as e:
-            self.log.error("bridge.final_state_error", exc=e)
+        stream = self._ensure_prompt_stream()
+        async for event in stream.stream_prompt(
+            opencode_session_id=self.opencode_session_id,
+            message_id=message_id,
+            content=content,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            attachments=attachments,
+        ):
+            yield event
 
     async def _handle_stop(self) -> None:
-        """Cancel active OpenCode work and request a server-side abort."""
+        """Handle stop command - cancel prompt task and request OpenCode stop."""
         self.log.info("bridge.stop")
+        task = self._current_prompt_task
+        if task and not task.done():
+            task.cancel()
+        # Best-effort: also tell OpenCode to stop (saves LLM compute cost)
         await self._request_opencode_stop(reason="command")
-        if self._current_prompt_task and not self._current_prompt_task.done():
-            self._prompt_stop_requested = True
-            self._current_prompt_task.cancel()
-        if self._current_compaction_task and not self._current_compaction_task.done():
-            self._current_compaction_task.cancel()
 
     async def _handle_snapshot(self) -> None:
         """Handle snapshot command - prepare for snapshot."""
@@ -2091,9 +830,8 @@ class AgentBridge:
     async def _handle_shutdown(self) -> None:
         """Handle shutdown command - graceful shutdown."""
         self.log.info("bridge.shutdown_requested")
-        for task in (self._current_prompt_task, self._current_compaction_task):
-            if task and not task.done():
-                task.cancel()
+        if self._current_prompt_task and not self._current_prompt_task.done():
+            self._current_prompt_task.cancel()
         self.shutdown_event.set()
 
     async def _handle_push(self, cmd: dict[str, Any]) -> None:
@@ -2117,8 +855,7 @@ class AgentBridge:
         try:
             self._validate_push_request(request, spec_present=push_spec is not None)
             repo_dir = self._resolve_push_checkout(request)
-            refspec = await self._resolve_push_refspec(request, repo_dir)
-            await self._run_git_push(request, repo_dir, refspec)
+            await self._run_git_push(request, repo_dir)
         except PushRejected as rejection:
             await self._send_push_error(str(rejection), request)
             return
@@ -2217,130 +954,12 @@ class AgentBridge:
             self._reject_push(reason="no_repo_configured", message="No repository found")
         return repo_dirs[0].parent
 
-    async def _resolve_push_refspec(self, request: PushRequest, repo_dir: Path) -> str:
-        """Return the refspec to push, rewritten for a Jujutsu working copy.
-
-        The control plane builds every spec against git `HEAD` because that is
-        the only ref a plain clone is guaranteed to have. A jj-colocated
-        checkout has no branch checked out: jj pins `.git/HEAD` to `@-` and
-        keeps the working-copy commit `@` outside git's view entirely, so
-        `HEAD` lags the session's work by at least one commit and pushing it
-        publishes an empty branch. In that repo the bookmark is the ref that
-        names the work, so we make one and push it instead.
-        """
-        if not (repo_dir / ".jj").exists():
-            return request.refspec
-
-        revision = "@" if await self._jj_working_copy_has_changes(repo_dir) else "@-"
-        await self._reject_if_no_commits_beyond_trunk(request, repo_dir, revision)
-
-        bookmark = request.branch_name
-        await self._run_jj(
-            repo_dir,
-            ["bookmark", "set", bookmark, "--revision", revision, "--allow-backwards"],
-            failure="Push failed - could not point a jj bookmark at the session's work",
-        )
-        self.log.info(
-            "git.push_jj_bookmark",
-            branch_name=request.branch_name,
-            bookmark=bookmark,
-            revision=revision,
-        )
-        # jj exports every bookmark to refs/heads/<name> on each command, so
-        # the bookmark is already a git ref by the time git push reads it.
-        return f"refs/heads/{bookmark}:refs/heads/{request.branch_name}"
-
-    async def _jj_working_copy_has_changes(self, repo_dir: Path) -> bool:
-        """True when `@` carries work of its own rather than sitting empty.
-
-        jj auto-snapshots the working directory into `@`, so unsaved edits live
-        there and nowhere else. An empty `@` is what `jj commit` leaves behind,
-        and then `@-` is the tip.
-        """
-        stdout = await self._run_jj(
-            repo_dir,
-            ["log", "--no-graph", "--revisions", "@", "--template", 'if(empty, "", "changed")'],
-            failure="Push failed - could not read the jj working copy",
-        )
-        return stdout.strip() == "changed"
-
-    async def _reject_if_no_commits_beyond_trunk(
-        self, request: PushRequest, repo_dir: Path, revision: str
-    ) -> None:
-        """Reject a push whose revision adds nothing to trunk.
-
-        Pushing it would succeed and create a branch identical to the base,
-        which reads as a completed push everywhere downstream while delivering
-        none of the session's work. That silent success is the failure this
-        whole path exists to prevent, so it has to be loud.
-        """
-        stdout = await self._run_jj(
-            repo_dir,
-            [
-                "log",
-                "--no-graph",
-                "--revisions",
-                f"trunk()..{revision}",
-                "--template",
-                'change_id.short() ++ "\n"',
-            ],
-            failure="Push failed - could not check the jj revision against trunk",
-        )
-        if stdout.strip():
-            return
-        self._reject_push(
-            reason="jj_revision_empty",
-            message=(
-                f"Push failed - {revision} has no commits beyond trunk(), "
-                "so pushing it would publish an empty branch"
-            ),
-            branch_name=request.branch_name,
-            revision=revision,
-        )
-
-    async def _run_jj(self, repo_dir: Path, args: list[str], *, failure: str) -> str:
-        """Run a jj command in repo_dir and return its stdout.
-
-        A jj command that fails leaves us unable to tell which revision holds
-        the work, and the fallback of pushing `HEAD` anyway is the bug, so
-        every failure raises rather than degrading to git.
-        """
-        try:
-            process = await asyncio.create_subprocess_exec(
-                "jj",
-                *args,
-                cwd=repo_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except FileNotFoundError:
-            raise PushRejected(
-                f"{failure} - the checkout has a .jj directory but jj is not installed"
-            ) from None
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=self.JJ_COMMAND_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            await self._terminate_push_process(process, "jj")
-            raise PushRejected(
-                f"{failure} - jj timed out after {int(self.JJ_COMMAND_TIMEOUT_SECONDS)}s"
-            ) from None
-
-        if process.returncode != 0:
-            stderr_text = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
-            self.log.warn("git.push_jj_failed", args=args, stderr=stderr_text)
-            raise PushRejected(f"{failure}: {stderr_text}" if stderr_text else failure)
-
-        return stdout.decode("utf-8", errors="replace")
-
-    async def _run_git_push(self, request: PushRequest, repo_dir: Path, refspec: str) -> None:
+    async def _run_git_push(self, request: PushRequest, repo_dir: Path) -> None:
         """Run git push in repo_dir; raises PushRejected on failure or timeout."""
         self.log.info(
             "git.push_command",
             branch_name=request.branch_name,
-            refspec=refspec,
+            refspec=request.refspec,
             force=request.force,
             remote_url=request.redacted_push_url,
         )
@@ -2349,7 +968,7 @@ class AgentBridge:
             "git",
             "push",
             request.push_url,
-            refspec,
+            request.refspec,
             *(["-f"] if request.force else []),
             cwd=repo_dir,
             stdout=asyncio.subprocess.PIPE,
@@ -2367,7 +986,7 @@ class AgentBridge:
                 branch_name=request.branch_name,
                 timeout_ms=int(self.GIT_PUSH_TIMEOUT_SECONDS * 1000),
             )
-            await self._terminate_push_process(process, "git push")
+            await self._terminate_push_process(process, request.branch_name)
             raise PushRejected(
                 f"Push failed - git push timed out after {int(self.GIT_PUSH_TIMEOUT_SECONDS)}s"
             ) from None
@@ -2391,9 +1010,9 @@ class AgentBridge:
             )
 
     async def _terminate_push_process(
-        self, process: asyncio.subprocess.Process, command: str
+        self, process: asyncio.subprocess.Process, branch_name: str
     ) -> None:
-        """Terminate a hung push subprocess, escalating to kill after a grace period."""
+        """Terminate a hung git push, escalating to kill after a grace period."""
         with contextlib.suppress(ProcessLookupError):
             process.terminate()
         try:
@@ -2404,7 +1023,7 @@ class AgentBridge:
         except TimeoutError:
             self.log.warn(
                 "git.push_kill",
-                command=command,
+                branch_name=branch_name,
                 timeout_ms=int(self.GIT_PUSH_TERMINATE_GRACE_SECONDS * 1000),
             )
             with contextlib.suppress(ProcessLookupError):
@@ -2424,141 +1043,33 @@ class AgentBridge:
             }
         )
 
-    async def _configure_git_identity(self, user: GitUser) -> None:
-        """Configure git identity for commit attribution in every member checkout."""
-        self.log.debug("git.identity_configure", git_name=user.name, git_email=user.email)
-
-        repo_dirs = list(self.repo_path.glob("*/.git"))
-        if not repo_dirs:
-            self.log.debug("git.identity_skip", reason="no_repo_configured")
-            return
-
-        async def _run_git_config(repo_dir: Path, *args: str) -> None:
-            cmd = ["git", "config", "--local", *args]
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=repo_dir,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
-            try:
-                _, stderr = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=self.GIT_CONFIG_TIMEOUT_SECONDS,
-                )
-            except TimeoutError as e:
-                process.kill()
-                with contextlib.suppress(ProcessLookupError):
-                    await process.wait()
-                raise subprocess.TimeoutExpired(
-                    cmd=cmd,
-                    timeout=self.GIT_CONFIG_TIMEOUT_SECONDS,
-                ) from e
-
-            if process.returncode != 0:
-                if process.returncode is None:
-                    raise RuntimeError("git config exited without a return code")
-                raise subprocess.CalledProcessError(
-                    returncode=process.returncode,
-                    cmd=cmd,
-                    stderr=stderr,
-                )
-
-        try:
-            for git_dir in repo_dirs:
-                repo_dir = git_dir.parent
-                await _run_git_config(repo_dir, "user.name", user.name)
-                await _run_git_config(repo_dir, "user.email", user.email)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-            self.log.error("git.identity_error", exc=e)
+    async def _configure_git_identity(self, user: GitUser | None) -> None:
+        """Refresh signing state and configure prompt-scoped author identity."""
+        await self.git_signing.refresh(user)
 
     async def _load_session_id(self) -> None:
-        """Load the OpenCode session ID to reattach to, if any.
-
-        Prefers the control-plane-provided OPENCODE_SESSION_ID (reattach on
-        resume) over the on-disk cache, then verifies the session still exists
-        via OpenCode. A missing expected session blocks prompts rather than
-        silently becoming a blank conversation.
-        """
-        candidate: str | None = None
-        source: str | None = None
-        if self.provided_opencode_session_id:
-            candidate = self.provided_opencode_session_id
-            source = "env"
-        elif self.session_id_file.exists():
+        """Load OpenCode session ID from file if it exists."""
+        if self.session_id_file.exists():
             try:
-                candidate = self.session_id_file.read_text().strip() or None
-                source = "file"
-            except Exception as e:
-                self.log.error("opencode.session.load_error", exc=e)
-                return
+                self.opencode_session_id = self.session_id_file.read_text().strip()
+                self.log.info(
+                    "opencode.session.ensure",
+                    opencode_session_id=self.opencode_session_id,
+                    action="loaded",
+                )
 
-        if not candidate:
-            return
-
-        self.opencode_session_id = candidate
-        self.log.info(
-            "opencode.session.ensure",
-            opencode_session_id=self.opencode_session_id,
-            action="loaded",
-            source=source,
-        )
-
-        if self.http_client:
-            error_message = (
-                f"OpenCode session {self.opencode_session_id} is unavailable; "
-                "refusing to continue without its conversation context"
-            )
-            attempt = 0
-            delay_seconds = self.SESSION_VERIFY_BACKOFF_BASE_SECONDS
-            while not self.shutdown_event.is_set():
-                attempt += 1
-                verification_error = None
-                verification_status = None
                 try:
-                    resp = await self.http_client.get(
-                        f"{self.opencode_base_url}/session/{self.opencode_session_id}",
-                        timeout=self.SESSION_VERIFY_TIMEOUT_SECONDS,
-                    )
-                except httpx.RequestError as error:
-                    verification_error = error
-                else:
-                    verification_status = resp.status_code
-                    if resp.status_code == 200:
-                        return
-                    if resp.status_code == 404:
-                        self.log.error(
+                    if not await self.opencode_client.session_exists(self.opencode_session_id):
+                        self.log.info(
                             "opencode.session.invalid",
                             opencode_session_id=self.opencode_session_id,
-                            source=source,
-                            status_code=resp.status_code,
                         )
-                        self.opencode_session_error = error_message
-                        return
-                    if resp.status_code < 500 and resp.status_code not in (408, 425, 429):
-                        raise RuntimeError(
-                            f"OpenCode session verification rejected with HTTP {resp.status_code}"
-                        )
+                        self.opencode_session_id = None
+                except Exception:
+                    self.opencode_session_id = None
 
-                self.log.warn(
-                    "opencode.session.verify_retry",
-                    exc=verification_error,
-                    opencode_session_id=self.opencode_session_id,
-                    source=source,
-                    status_code=verification_status,
-                    attempt=attempt,
-                    delay_s=delay_seconds,
-                )
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(
-                        self.shutdown_event.wait(),
-                        timeout=delay_seconds,
-                    )
-                delay_seconds = min(
-                    delay_seconds * 2,
-                    self.SESSION_VERIFY_BACKOFF_MAX_SECONDS,
-                )
+            except Exception as e:
+                self.log.error("opencode.session.load_error", exc=e)
 
     async def _save_session_id(self) -> None:
         """Save OpenCode session ID to file for persistence."""
@@ -2569,19 +1080,9 @@ class AgentBridge:
                 self.log.error("opencode.session.save_error", exc=e)
 
     async def _request_opencode_stop(self, reason: str) -> bool:
-        if not self.http_client or not self.opencode_session_id:
+        if not self.opencode_session_id:
             return False
-
-        try:
-            await self.http_client.post(
-                f"{self.opencode_base_url}/session/{self.opencode_session_id}/abort",
-                timeout=self.OPENCODE_REQUEST_TIMEOUT,
-            )
-            self.log.info("bridge.stop_requested", reason=reason)
-            return True
-        except Exception as e:
-            self.log.warn("bridge.stop_request_error", exc=e, reason=reason)
-            return False
+        return await self.opencode_client.request_stop(self.opencode_session_id, reason=reason)
 
     def _resolve_timeout_seconds(
         self,
@@ -2628,6 +1129,28 @@ class AgentBridge:
             timeout_ms=int(value * 1000),
             min_ms=int(min_value * 1000),
             max_ms=int(max_value * 1000),
+        )
+        return value
+
+    def _resolve_positive_timeout_seconds(self, name: str, default: float) -> float:
+        raw = os.environ.get(name)
+        try:
+            value = default if raw is None or raw == "" else float(raw)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError
+        except ValueError:
+            self.log.warn(
+                "bridge.timeout_invalid",
+                timeout_name=name,
+                timeout_ms=int(default * 1000),
+                detail=f"invalid value '{raw}', using default",
+            )
+            value = default
+
+        self.log.info(
+            "bridge.timeout_config",
+            timeout_name=name,
+            timeout_ms=int(value * 1000),
         )
         return value
 

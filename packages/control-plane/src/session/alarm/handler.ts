@@ -1,18 +1,18 @@
 import type { Logger } from "../../logger";
 import { evaluateExecutionTimeout } from "../../sandbox/lifecycle/decisions";
 import type { SandboxLifecycleManager } from "../../sandbox/lifecycle/manager";
+import type { AlarmScheduler } from "../../platform-ports";
 import type { SessionMessageQueue } from "../message-queue";
-import type { SessionRepository } from "../repository";
-import type { SessionStatusService } from "../session-status-service";
+import type { MessageRepository } from "../message-repository";
 
 export interface AlarmHandlerDeps {
-  repository: Pick<SessionRepository, "getProcessingMessageWithStartedAt">;
+  repository: MessageRepository;
   messageQueue: Pick<
     SessionMessageQueue,
-    "failStuckProcessingMessage" | "failStuckPendingMessage" | "processMessageQueue"
+    "failStuckProcessingMessage" | "recoverStopConfirmationTimeout"
   >;
   lifecycleManager: Pick<SandboxLifecycleManager, "handleAlarm">;
-  statusService: Pick<SessionStatusService, "handleAutoArchiveAlarm">;
+  alarmScheduler: AlarmScheduler;
   executionTimeoutMs: number;
   now: () => number;
   /** Session-scoped logger — alarms run outside any request, so there is no request correlation. */
@@ -32,7 +32,7 @@ export interface AlarmHandler {
 export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
   return {
     async handle(): Promise<void> {
-      let executionTimedOut = false;
+      await deps.messageQueue.recoverStopConfirmationTimeout();
       // Execution timeout check: if a message has been in 'processing' longer than
       // the configured timeout, fail it. This is idempotent - if the message was
       // already failed (by onSandboxTerminating or a prior alarm),
@@ -46,29 +46,22 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
           now
         );
         if (result.isTimedOut) {
-          executionTimedOut = true;
           deps.log.warn("Execution timeout: message stuck in processing", {
             event: "execution.timeout",
             message_id: processing.id,
             elapsed_ms: result.elapsedMs,
             timeout_ms: deps.executionTimeoutMs,
           });
-          await deps.messageQueue.failStuckProcessingMessage({
-            type: "execution_timeout",
-            elapsedMs: result.elapsedMs,
-          });
+          await deps.messageQueue.failStuckProcessingMessage();
+        } else {
+          // An earlier lifecycle alarm has consumed the Durable Object's single
+          // alarm slot. Reassert this message's deadline before lifecycle handling
+          // schedules its next check so stuck-message recovery cannot be delayed.
+          await deps.alarmScheduler.scheduleAlarm(processing.started_at + deps.executionTimeoutMs);
         }
       }
 
-      // Pending-message watchdog: fail a message whose spawned/resumed sandbox
-      // never connected. Self-guards (still pending, no sandbox, not processing,
-      // aged out), so it's safe to run on every alarm regardless of what armed it.
-      await deps.messageQueue.failStuckPendingMessage();
-
-      await deps.statusService.handleAutoArchiveAlarm(deps.now());
-
-      const canAdvanceQueue = await deps.lifecycleManager.handleAlarm({ executionTimedOut });
-      if (canAdvanceQueue) await deps.messageQueue.processMessageQueue();
+      await deps.lifecycleManager.handleAlarm();
     },
   };
 }

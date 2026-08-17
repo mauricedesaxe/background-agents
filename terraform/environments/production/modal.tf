@@ -4,17 +4,17 @@
 
 # Calculate hash of Modal source files for change detection
 # Uses sha256sum (Linux) or shasum (macOS) for cross-platform compatibility
-# Includes .py/.js/.ts/.sh under src/ AND modal-infra's pyproject.toml + uv.lock, so
-# dependency-only changes (e.g. a modal version bump) also trigger a redeploy.
+# Includes every bundled source file, including skill Markdown and companion
+# assets, plus dependency and deployment inputs.
 data "external" "modal_source_hash" {
   count = local.use_modal_backend ? 1 : 0
 
   program = ["bash", "-c", <<-EOF
     cd ${var.project_root}
     if command -v sha256sum &> /dev/null; then
-      hash=$( ( find packages/modal-infra/src packages/sandbox-runtime/src -type f \( -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.sh" \) -exec sha256sum {} \; ; sha256sum packages/modal-infra/pyproject.toml packages/modal-infra/uv.lock ) | sha256sum | cut -d' ' -f1)
+      hash=$( ( find packages/modal-infra/src packages/sandbox-runtime/src -type f -exec sha256sum {} \; ; sha256sum packages/modal-infra/deploy.py packages/modal-infra/pyproject.toml packages/modal-infra/uv.lock terraform/modules/modal-app/scripts/deploy.sh ) | sort | sha256sum | cut -d' ' -f1)
     else
-      hash=$( ( find packages/modal-infra/src packages/sandbox-runtime/src -type f \( -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.sh" \) -exec shasum -a 256 {} \; ; shasum -a 256 packages/modal-infra/pyproject.toml packages/modal-infra/uv.lock ) | shasum -a 256 | cut -d' ' -f1)
+      hash=$( ( find packages/modal-infra/src packages/sandbox-runtime/src -type f -exec shasum -a 256 {} \; ; shasum -a 256 packages/modal-infra/deploy.py packages/modal-infra/pyproject.toml packages/modal-infra/uv.lock terraform/modules/modal-app/scripts/deploy.sh ) | sort | shasum -a 256 | cut -d' ' -f1)
     fi
     echo "{\"hash\": \"$hash\"}"
   EOF
@@ -55,9 +55,7 @@ module "modal_app" {
       name = "internal-api"
       values = {
         MODAL_API_SECRET            = var.modal_api_secret
-        SERVICE_AUTH_SECRET         = random_password.service_auth_secret_modal.result
         ALLOWED_CONTROL_PLANE_HOSTS = local.control_plane_host
-        CONTROL_PLANE_URL           = local.control_plane_url
       }
     }
   ]

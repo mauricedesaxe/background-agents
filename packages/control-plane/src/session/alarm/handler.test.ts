@@ -1,24 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Logger } from "../../logger";
-import type { SessionMessageQueue } from "../message-queue";
 import { createAlarmHandler } from "./handler";
+import type { MessageRepository } from "../message-repository";
+import { createEarliestAlarmScheduler } from "./scheduler";
 
 function createHandler() {
   const repository = {
     getProcessingMessageWithStartedAt: vi.fn(),
   };
   const messageQueue = {
-    failStuckProcessingMessage: vi
-      .fn<SessionMessageQueue["failStuckProcessingMessage"]>()
-      .mockResolvedValue(),
-    failStuckPendingMessage: vi.fn<() => Promise<void>>().mockResolvedValue(),
-    processMessageQueue: vi.fn<() => Promise<void>>().mockResolvedValue(),
+    failStuckProcessingMessage: vi.fn<() => Promise<void>>().mockResolvedValue(),
+    recoverStopConfirmationTimeout: vi.fn<() => Promise<void>>().mockResolvedValue(),
   };
   const lifecycleManager = {
-    handleAlarm: vi.fn<() => Promise<boolean>>().mockResolvedValue(true),
+    handleAlarm: vi.fn<() => Promise<void>>().mockResolvedValue(),
   };
-  const statusService = {
-    handleAutoArchiveAlarm: vi.fn<(_now: number) => Promise<void>>().mockResolvedValue(),
+  const alarmScheduler = {
+    scheduleAlarm: vi.fn<(timestamp: number) => Promise<void>>().mockResolvedValue(),
   };
   const now = vi.fn(() => 2000);
   const log = {
@@ -30,10 +28,10 @@ function createHandler() {
   } as unknown as Logger;
 
   const handler = createAlarmHandler({
-    repository,
+    repository: repository as unknown as MessageRepository,
     messageQueue,
     lifecycleManager,
-    statusService,
+    alarmScheduler,
     executionTimeoutMs: 1000,
     now,
     log,
@@ -44,7 +42,7 @@ function createHandler() {
     repository,
     messageQueue,
     lifecycleManager,
-    statusService,
+    alarmScheduler,
     now,
     log,
   };
@@ -52,21 +50,22 @@ function createHandler() {
 
 describe("createAlarmHandler", () => {
   it("delegates to lifecycle manager when no processing message exists", async () => {
-    const { handler, repository, messageQueue, lifecycleManager, statusService, now } =
+    const { handler, repository, messageQueue, lifecycleManager, alarmScheduler, now } =
       createHandler();
     repository.getProcessingMessageWithStartedAt.mockReturnValue(null);
 
     await handler.handle();
 
-    expect(now).toHaveBeenCalledTimes(1);
+    expect(now).not.toHaveBeenCalled();
+    expect(alarmScheduler.scheduleAlarm).not.toHaveBeenCalled();
     expect(messageQueue.failStuckProcessingMessage).not.toHaveBeenCalled();
-    expect(statusService.handleAutoArchiveAlarm).toHaveBeenCalledWith(2000);
+    expect(messageQueue.recoverStopConfirmationTimeout).toHaveBeenCalledOnce();
     expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
-    expect(messageQueue.processMessageQueue).toHaveBeenCalledTimes(1);
   });
 
   it("does not fail processing message when execution timeout is not reached", async () => {
-    const { handler, repository, messageQueue, lifecycleManager, log } = createHandler();
+    const { handler, repository, messageQueue, lifecycleManager, alarmScheduler, log } =
+      createHandler();
     repository.getProcessingMessageWithStartedAt.mockReturnValue({
       id: "message-1",
       started_at: 1500,
@@ -76,11 +75,53 @@ describe("createAlarmHandler", () => {
 
     expect(log.warn).not.toHaveBeenCalled();
     expect(messageQueue.failStuckProcessingMessage).not.toHaveBeenCalled();
+    expect(alarmScheduler.scheduleAlarm).toHaveBeenCalledWith(2500);
     expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
   });
 
-  it("fails the message and stops its sandbox when execution timeout is reached", async () => {
-    const { handler, repository, messageQueue, lifecycleManager, log } = createHandler();
+  it("keeps the execution deadline ahead of a later lifecycle check", async () => {
+    let currentAlarm: number | null = null;
+    const storage = {
+      getAlarm: vi.fn(async () => currentAlarm),
+      setAlarm: vi.fn(async (timestamp: number) => {
+        currentAlarm = timestamp;
+      }),
+    };
+    const alarmScheduler = createEarliestAlarmScheduler(storage);
+    const lifecycleManager = {
+      handleAlarm: vi.fn(async () => alarmScheduler.scheduleAlarm(5000)),
+    };
+    const repository = {
+      getProcessingMessageWithStartedAt: vi.fn(() => ({
+        id: "message-1",
+        started_at: 1500,
+      })),
+    };
+    const messageQueue = {
+      failStuckProcessingMessage: vi.fn<() => Promise<void>>().mockResolvedValue(),
+      recoverStopConfirmationTimeout: vi.fn<() => Promise<void>>().mockResolvedValue(),
+    };
+
+    const handler = createAlarmHandler({
+      repository: repository as unknown as MessageRepository,
+      messageQueue,
+      lifecycleManager,
+      alarmScheduler,
+      executionTimeoutMs: 1000,
+      now: () => 2000,
+      log: createHandler().log,
+    });
+
+    await handler.handle();
+
+    expect(currentAlarm).toBe(2500);
+    expect(storage.setAlarm).toHaveBeenCalledTimes(1);
+    expect(storage.setAlarm).toHaveBeenCalledWith(2500);
+  });
+
+  it("fails stuck processing message when execution timeout is reached", async () => {
+    const { handler, repository, messageQueue, lifecycleManager, alarmScheduler, log } =
+      createHandler();
     repository.getProcessingMessageWithStartedAt.mockReturnValue({
       id: "message-1",
       started_at: 500,
@@ -94,77 +135,8 @@ describe("createAlarmHandler", () => {
       elapsed_ms: 1500,
       timeout_ms: 1000,
     });
-    expect(messageQueue.failStuckProcessingMessage).toHaveBeenCalledWith({
-      type: "execution_timeout",
-      elapsedMs: 1500,
-    });
-    expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
-    expect(lifecycleManager.handleAlarm).toHaveBeenCalledWith({ executionTimedOut: true });
-    expect(messageQueue.processMessageQueue).toHaveBeenCalledTimes(1);
-  });
-
-  it("resumes after a coincident execution timeout and settled teardown", async () => {
-    const { handler, repository, messageQueue, lifecycleManager } = createHandler();
-    repository.getProcessingMessageWithStartedAt.mockReturnValue({
-      id: "message-1",
-      started_at: 500,
-    });
-    lifecycleManager.handleAlarm.mockResolvedValue(true);
-
-    await handler.handle();
-
     expect(messageQueue.failStuckProcessingMessage).toHaveBeenCalledTimes(1);
-    expect(lifecycleManager.handleAlarm).toHaveBeenCalledWith({ executionTimedOut: true });
-    expect(messageQueue.processMessageQueue).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps queued work paused when execution-timeout teardown does not settle", async () => {
-    const { handler, repository, messageQueue, lifecycleManager } = createHandler();
-    repository.getProcessingMessageWithStartedAt.mockReturnValue({
-      id: "message-1",
-      started_at: 500,
-    });
-    lifecycleManager.handleAlarm.mockResolvedValue(false);
-
-    await handler.handle();
-
-    expect(messageQueue.processMessageQueue).not.toHaveBeenCalled();
-  });
-
-  it("keeps queued work paused while provider teardown is unreconciled", async () => {
-    const { handler, repository, messageQueue, lifecycleManager } = createHandler();
-    repository.getProcessingMessageWithStartedAt.mockReturnValue(null);
-    lifecycleManager.handleAlarm.mockResolvedValue(false);
-
-    await handler.handle();
-
-    expect(messageQueue.processMessageQueue).not.toHaveBeenCalled();
-  });
-
-  it("always runs the pending-message watchdog before lifecycle handling", async () => {
-    const { handler, repository, messageQueue } = createHandler();
-    repository.getProcessingMessageWithStartedAt.mockReturnValue(null);
-
-    await handler.handle();
-
-    // Self-guarded, so it runs unconditionally; it decides internally whether to act.
-    expect(messageQueue.failStuckPendingMessage).toHaveBeenCalledTimes(1);
-  });
-
-  it("resumes queued work after lifecycle handling settles", async () => {
-    const { handler, repository, messageQueue, lifecycleManager } = createHandler();
-    repository.getProcessingMessageWithStartedAt.mockReturnValue(null);
-    const calls: string[] = [];
-    lifecycleManager.handleAlarm.mockImplementation(async () => {
-      calls.push("lifecycle");
-      return true;
-    });
-    messageQueue.processMessageQueue.mockImplementation(async () => {
-      calls.push("queue");
-    });
-
-    await handler.handle();
-
-    expect(calls).toEqual(["lifecycle", "queue"]);
+    expect(alarmScheduler.scheduleAlarm).not.toHaveBeenCalled();
+    expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
   });
 });

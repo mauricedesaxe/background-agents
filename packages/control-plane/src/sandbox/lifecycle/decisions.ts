@@ -9,8 +9,7 @@
  * then executes the appropriate side effects (API calls, broadcasts, etc.)
  */
 
-import type { SandboxStatus } from "../../types";
-import { durationMs, elapsed, type DurationMs, type EpochMs } from "../../time";
+import type { SandboxStatus } from "@open-inspect/shared/types/sessions";
 
 // ==================== Dead-Sandbox Policy ====================
 
@@ -21,14 +20,20 @@ import { durationMs, elapsed, type DurationMs, type EpochMs } from "../../time";
  * through to their own checks (e.g. token comparison) instead of locking out
  * every sandbox.
  */
-export const DEAD_SANDBOX_STATUSES: ReadonlySet<SandboxStatus> = new Set([
-  "stopped",
-  "stale",
-  "failed",
-]);
+const DEAD_SANDBOX_STATUSES: ReadonlySet<SandboxStatus> = new Set(["stopped", "stale", "failed"]);
 
 export function isDeadSandboxStatus(status: SandboxStatus): boolean {
   return DEAD_SANDBOX_STATUSES.has(status);
+}
+
+/**
+ * Whether a sandbox lifecycle state must reject bridge reconnects.
+ *
+ * Failed is intentionally reconnectable: a slow boot can outlive the
+ * connecting watchdog and then self-heal when its bridge arrives.
+ */
+export function isSandboxReconnectBlockedStatus(status: SandboxStatus): boolean {
+  return status === "stopped" || status === "stale";
 }
 
 // ==================== Circuit Breaker ====================
@@ -189,7 +194,6 @@ export type SpawnAction =
  * Evaluate what spawn action to take.
  *
  * This function encapsulates the complex spawn decision logic:
- * - Resume provider-owned state if available and sandbox is stopped/stale/failed
  * - Restore from snapshot if available and sandbox is stopped/stale/failed
  * - Skip if already spawning/connecting
  * - Skip if ready with active WebSocket
@@ -226,10 +230,18 @@ export function evaluateSpawnDecision(
 ): SpawnAction {
   const timeSinceLastSpawn = now - state.createdAt;
 
+  // In-memory flag first: it is set synchronously when a spawn/restore starts,
+  // but the persisted "spawning" status lands only after the first await. A
+  // second evaluation in that window must not pick resume/restore again, or
+  // concurrent prompts launch duplicate sandboxes.
+  if (isSpawningInMemory) {
+    return { action: "skip", reason: "spawn already in progress (in-memory flag)" };
+  }
+
   if (
     supportsPersistentResume &&
     state.providerObjectId &&
-    (state.status === "stopped" || state.status === "stale" || state.status === "failed")
+    (state.status === "stopped" || state.status === "stale")
   ) {
     return { action: "resume", providerObjectId: state.providerObjectId };
   }
@@ -283,11 +295,6 @@ export function evaluateSpawnDecision(
     };
   }
 
-  // Check in-memory flag for same-request protection
-  if (isSpawningInMemory) {
-    return { action: "skip", reason: "spawn already in progress (in-memory flag)" };
-  }
-
   // All checks passed - spawn a new sandbox
   return { action: "spawn" };
 }
@@ -298,51 +305,33 @@ export function evaluateSpawnDecision(
  * State for inactivity timeout evaluation.
  */
 export interface InactivityState {
-  /** When the session last did something (null if never active) */
-  lastActivityMs: EpochMs | null;
+  /** Last activity timestamp (null if never active) */
+  lastActivity: number | null;
   /** Current sandbox status */
   status: SandboxStatus;
-  /** Number of connected client WebSockets (the sandbox's own socket is excluded) */
+  /** Number of connected client WebSockets */
   connectedClientCount: number;
-  /** Whether a message is currently executing on the sandbox */
-  isProcessing: boolean;
 }
 
 /**
  * Inactivity timeout configuration.
  */
 export interface InactivityConfig {
-  /** Time before sandbox stops due to inactivity */
-  timeoutMs: DurationMs;
-  /** Additional time granted when clients are connected */
-  extensionMs: DurationMs;
-  /** Minimum interval between alarm checks */
-  minCheckIntervalMs: DurationMs;
+  /** Time in ms before sandbox stops due to inactivity (default: 10 minutes) */
+  timeoutMs: number;
+  /** Additional time granted when clients are connected (default: 5 minutes) */
+  extensionMs: number;
+  /** Minimum interval between alarm checks (default: 30s) */
+  minCheckIntervalMs: number;
 }
-
-/**
- * Idle time before a sandbox stops.
- *
- * Tuned for a provider that resumes in place: stopping early costs one resume
- * on the next prompt and loses nothing on disk, so the idle window is short.
- * A user who steps away mid-conversation is the case this bills for, and they
- * would rather wait out a resume than pay for an idle VM.
- */
-export const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
-
-/** Extra idle time granted while clients are still connected. */
-export const INACTIVITY_EXTENSION_MS = 2 * 60 * 1000;
-
-/** Floor on how often the inactivity alarm re-checks. */
-export const INACTIVITY_MIN_CHECK_INTERVAL_MS = 30 * 1000;
 
 /**
  * Default inactivity configuration.
  */
 export const DEFAULT_INACTIVITY_CONFIG: InactivityConfig = {
-  timeoutMs: durationMs(INACTIVITY_TIMEOUT_MS),
-  extensionMs: durationMs(INACTIVITY_EXTENSION_MS),
-  minCheckIntervalMs: durationMs(INACTIVITY_MIN_CHECK_INTERVAL_MS),
+  timeoutMs: 10 * 60 * 1000, // 10 minutes
+  extensionMs: 5 * 60 * 1000, // 5 minutes
+  minCheckIntervalMs: 30000, // 30 seconds
 };
 
 /**
@@ -350,8 +339,8 @@ export const DEFAULT_INACTIVITY_CONFIG: InactivityConfig = {
  */
 export type InactivityAction =
   | { action: "timeout"; shouldSnapshot: boolean }
-  | { action: "extend"; extensionMs: DurationMs; shouldWarn: boolean }
-  | { action: "schedule"; nextCheckMs: DurationMs };
+  | { action: "extend"; extensionMs: number; shouldWarn: boolean }
+  | { action: "schedule"; nextCheckMs: number };
 
 /**
  * Evaluate what action to take for inactivity timeout.
@@ -361,9 +350,6 @@ export type InactivityAction =
  * - Long enough for users to read/think between prompts
  * - Snapshots preserve all state, so resume is instant
  *
- * Idle time is bounded at timeoutMs + extensionMs. Past that a sandbox stops
- * even with clients connected, so an open browser tab cannot keep it alive.
- *
  * @param state - Current inactivity state
  * @param config - Inactivity timeout configuration
  * @param now - Current timestamp
@@ -372,20 +358,20 @@ export type InactivityAction =
  * @example
  * ```typescript
  * const decision = evaluateInactivityTimeout(
- *   { lastActivityMs: tenMinutesAgo, status: "ready", connectedClientCount: 1, isProcessing: false },
+ *   { lastActivity: now - 600001, status: "ready", connectedClientCount: 1 },
  *   DEFAULT_INACTIVITY_CONFIG,
- *   nowMs()
+ *   now
  * );
  * if (decision.action === "extend") {
  *   // Warn user and schedule next check
- *   await scheduleAlarm(addDuration(now, decision.extensionMs));
+ *   await scheduleAlarm(now + decision.extensionMs);
  * }
  * ```
  */
 export function evaluateInactivityTimeout(
   state: InactivityState,
   config: InactivityConfig,
-  now: EpochMs
+  now: number
 ): InactivityAction {
   // Skip for terminal states - they don't need inactivity monitoring
   if (isDeadSandboxStatus(state.status)) {
@@ -393,7 +379,7 @@ export function evaluateInactivityTimeout(
   }
 
   // No activity recorded yet - schedule a check
-  if (state.lastActivityMs == null) {
+  if (state.lastActivity == null) {
     return { action: "schedule", nextCheckMs: config.minCheckIntervalMs };
   }
 
@@ -402,43 +388,27 @@ export function evaluateInactivityTimeout(
     return { action: "schedule", nextCheckMs: config.minCheckIntervalMs };
   }
 
-  const inactiveTime = elapsed(state.lastActivityMs, now);
+  const inactiveTime = now - state.lastActivity;
 
   // Check if inactivity threshold exceeded
   if (inactiveTime >= config.timeoutMs) {
-    // Silence is not idleness while a message is in flight: a single long tool
-    // call (a test suite, an install) emits nothing that refreshes lastActivity,
-    // because `token` and `tool_result` deliberately don't. Stopping here would
-    // fail a healthy run. A genuinely stuck message is the execution timeout's
-    // job, and once it fails the message this branch releases.
-    if (state.isProcessing) {
-      return { action: "schedule", nextCheckMs: config.minCheckIntervalMs };
-    }
-
-    // If clients are still connected, they may be actively reviewing.
-    // Grant an extension and warn them: bounding by elapsed time rather than
-    // counting extensions keeps this stateless, and keeps a connected client
-    // from holding the sandbox open indefinitely.
-    //
-    // The grant is what's left of the window, not a fresh extensionMs. An alarm
-    // can arrive late, and handing a full extension to a late alarm would push
-    // the deadline out past the bound this branch exists to enforce.
-    const deadline = config.timeoutMs + config.extensionMs;
-    if (state.connectedClientCount > 0 && inactiveTime < deadline) {
+    // If clients are still connected, they may be actively reviewing
+    // Grant an extension and warn them
+    if (state.connectedClientCount > 0) {
       return {
         action: "extend",
-        extensionMs: durationMs(deadline - inactiveTime),
+        extensionMs: config.extensionMs,
         shouldWarn: true,
       };
     }
 
-    // No clients connected, or the extension is spent - timeout and snapshot
+    // No clients connected - timeout and snapshot
     return { action: "timeout", shouldSnapshot: true };
   }
 
   // Not yet timed out - schedule next check at remaining time (minimum interval)
   const remainingTime = Math.max(config.timeoutMs - inactiveTime, config.minCheckIntervalMs);
-  return { action: "schedule", nextCheckMs: durationMs(remainingTime) };
+  return { action: "schedule", nextCheckMs: remainingTime };
 }
 
 // ==================== Heartbeat Health ====================
@@ -636,8 +606,10 @@ export interface ExecutionTimeoutConfig {
   timeoutMs: number;
 }
 
-/** The control-plane deadline leaves headroom for the bridge to enforce and report its own prompt limit. */
-export const DEFAULT_EXECUTION_TIMEOUT_MS = 105 * 60 * 1000;
+/**
+ * Legacy fallback for sessions without a configured sandbox timeout.
+ */
+export const DEFAULT_EXECUTION_TIMEOUT_MS = 90 * 60 * 1000;
 
 /**
  * Result of execution timeout evaluation.

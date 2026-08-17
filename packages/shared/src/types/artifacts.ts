@@ -1,31 +1,22 @@
 import { z } from "zod";
-import { artifactTypeSchema } from "./statuses";
-import type { ArtifactType } from "./statuses";
 
-export const recordSchema = z.record(z.string(), z.unknown());
+export const artifactTypeSchema = z.enum(["pr", "screenshot", "video", "preview", "branch"]);
+export type ArtifactType = z.infer<typeof artifactTypeSchema>;
 
 // Artifact created by session
-export interface SessionArtifact {
-  id: string;
-  type: ArtifactType;
-  url: string | null;
-  metadata: Record<string, unknown> | null;
-  createdAt: number;
-  /**
-   * Last content change (epoch ms). Optional for rolling deploys — producers
-   * predating PR lifecycle tracking omit it; consumers fall back to createdAt.
-   */
-  updatedAt?: number;
-}
-
 export const sessionArtifactSchema = z.object({
   id: z.string(),
   type: artifactTypeSchema,
   url: z.string().nullable(),
-  metadata: recordSchema.nullable(),
+  metadata: z.record(z.string(), z.unknown()).nullable(),
   createdAt: z.number(),
+  /**
+   * Last content change (epoch ms). Optional for rolling deploys — producers
+   * predating PR lifecycle tracking omit it; consumers fall back to createdAt.
+   */
   updatedAt: z.number().optional(),
 });
+export type SessionArtifact = z.infer<typeof sessionArtifactSchema>;
 
 // ─── Pull request lifecycle ───────────────────────────────────────────────────
 
@@ -90,8 +81,8 @@ export interface ManualPullRequestArtifactMetadata {
 export interface ScreenshotArtifactMetadata {
   /** R2 object key */
   objectKey: string;
-  /** MIME type: image/png, image/jpeg, image/webp, image/svg+xml */
-  mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/svg+xml";
+  /** MIME type: image/png, image/jpeg, image/webp */
+  mimeType: "image/png" | "image/jpeg" | "image/webp";
   /** File size in bytes */
   sizeBytes: number;
   /** Viewport dimensions at capture time */
@@ -104,20 +95,6 @@ export interface ScreenshotArtifactMetadata {
   annotated?: boolean;
   /** Caption or description provided by the agent */
   caption?: string;
-}
-
-/**
- * Metadata stored on `board` artifacts. The artifact is the session's pointer to
- * an interactive tldraw whiteboard; the board document itself lives in the
- * `BoardRoom` Durable Object keyed by `boardId` and outlives the session's
- * active status. `url` on the artifact stays null — the board is reached over the
- * board sync WebSocket, not by fetching bytes.
- */
-export interface BoardArtifactMetadata {
-  /** Stable id keying the BoardRoom Durable Object. */
-  boardId: string;
-  /** Human-facing board name, rendered on the board card. */
-  title: string;
 }
 
 /** Metadata stored on video recording artifacts. */
@@ -167,17 +144,18 @@ export interface PullRequest {
   updatedAt: string;
 }
 
-export interface ArtifactResponse {
-  id: string;
-  type: ArtifactType;
-  url: string | null;
-  metadata: Record<string, unknown> | null;
-  createdAt: number;
-}
+/**
+ * The `/artifacts` list response is the session artifact shape verbatim — the
+ * producer serializes stored artifact rows, `updatedAt` included. It reuses
+ * `sessionArtifactSchema` rather than restating the fields so the two can never
+ * drift (a restated copy silently stripped `updatedAt`).
+ */
+export const listArtifactsResponseSchema = z.object({
+  artifacts: z.array(sessionArtifactSchema),
+});
 
-export interface ListArtifactsResponse {
-  artifacts: ArtifactResponse[];
-}
+export type ArtifactResponse = z.infer<typeof sessionArtifactSchema>;
+export type ListArtifactsResponse = z.infer<typeof listArtifactsResponseSchema>;
 
 export interface ToolCallSummary {
   tool: string;
@@ -190,17 +168,6 @@ export interface ArtifactInfo {
   label: string;
   metadata?: Record<string, unknown> | null;
 }
-
-/**
- * A media artifact id is carried as a path segment by the protected media
- * route, so the route and the extraction that publishes ids must agree on the
- * shape. An id accepted at extraction but rejected by the route would be
- * surfaced in the UI and then be permanently unfetchable.
- */
-export const mediaArtifactIdSchema = z
-  .string()
-  .min(1)
-  .regex(/^[A-Za-z0-9-]+$/);
 
 /** Message-scoped media that can be fetched from the protected media endpoint. */
 export interface MediaArtifactInfo {

@@ -2,17 +2,21 @@
  * Shared route primitives used by all route modules.
  */
 
+import { decodeRepositoryPathSegments } from "@open-inspect/shared/types/repositories";
 import type { CorrelationContext } from "../logger";
-import type { Principal } from "../auth/principal";
+import type { AuthenticationContext, Principal } from "../auth/principal";
 import type { RequestMetrics } from "../db/instrumented-d1";
 import type { SqlDatabase } from "../db/sql-database";
 import type { Env } from "../types";
 import type { Logger } from "../logger";
+import type { BackgroundJobDispatcher } from "../platform-ports";
+import type { BetterAuthRuntime, UserAuthRuntime } from "../auth/user/runtime";
 import {
   createSourceControlProviderFromEnv,
   SourceControlProviderError,
   type SourceControlProvider,
   type RepositoryAccessResult,
+  type SourceControlProviderName,
 } from "../source-control";
 
 /**
@@ -27,27 +31,136 @@ export type RequestContext = CorrelationContext & {
    * src/routes and src/webhooks.
    */
   db: SqlDatabase;
-  /** Worker ExecutionContext for waitUntil (background tasks). */
-  executionCtx?: ExecutionContext;
+  /** Request-scoped capability for scheduling background tasks. */
+  executionCtx: BackgroundJobDispatcher;
+  /** Lazy runtime dependency used by user-session authentication and credential access. */
+  getUserAuth?: () => BetterAuthRuntime;
+  /** Lazy normalized auth runtime used by server-only authentication composition routes. */
+  getUserAuthRuntime?: () => UserAuthRuntime;
   /**
    * The request's verified principal. Absent only on public routes and CORS
    * preflights — every authenticated request carries one.
    */
   principal?: Principal;
+  /** Authentication provenance, separate from the principal being authorized. */
+  authentication?: AuthenticationContext;
 };
 
 /**
  * Route configuration.
  */
-export interface Route {
+export interface RouteDefinition<Context extends RequestContext = RequestContext> {
   method: string;
   pattern: RegExp;
-  handler: (
-    request: Request,
-    env: Env,
-    match: RegExpMatchArray,
-    ctx: RequestContext
-  ) => Promise<Response>;
+  handler: (request: Request, env: Env, match: RegExpMatchArray, ctx: Context) => Promise<Response>;
+}
+
+type UserPrincipal = Extract<Principal, { kind: "user" }>;
+type SandboxPrincipal = Extract<Principal, { kind: "sandbox" }>;
+type ServicePrincipal = Extract<Principal, { kind: "service" }>;
+type WebServicePrincipal = Omit<ServicePrincipal, "service"> & { service: "web" };
+type UserOrServicePrincipal = Exclude<Principal, SandboxPrincipal>;
+
+type SandboxSessionBinding = {
+  getSessionId(match: RegExpMatchArray): string | null;
+};
+
+export type RouteAuthentication =
+  | { kind: "public" }
+  | { kind: "handler-authenticated" }
+  | { kind: "web-service" }
+  | { kind: "user" }
+  | { kind: "user-or-service" }
+  | ({ kind: "sandbox" } & SandboxSessionBinding)
+  | ({ kind: "user-or-service-with-sandbox-fallback" } & SandboxSessionBinding);
+
+export type RouteContext<Authentication extends RouteAuthentication> = RequestContext & {
+  principal: Authentication extends { kind: "user" }
+    ? UserPrincipal
+    : Authentication extends { kind: "sandbox" }
+      ? SandboxPrincipal
+      : Authentication extends { kind: "web-service" }
+        ? WebServicePrincipal
+        : Authentication extends { kind: "user-or-service" }
+          ? UserOrServicePrincipal
+          : Authentication extends { kind: "user-or-service-with-sandbox-fallback" }
+            ? Principal
+            : Principal | undefined;
+};
+
+export type UserRouteContext = RouteContext<{ kind: "user" }>;
+export type SandboxRouteContext = RouteContext<{ kind: "sandbox" } & SandboxSessionBinding>;
+
+export interface RoutePolicy {
+  authentication: RouteAuthentication;
+  supportedScmProviders: "all" | readonly SourceControlProviderName[];
+}
+
+export interface Route extends RouteDefinition, RoutePolicy {}
+
+const SESSION_ID_BINDING: SandboxSessionBinding = {
+  getSessionId: (match) => match.groups?.id ?? null,
+};
+
+export const GITHUB_USER_OR_SERVICE_ROUTE = {
+  authentication: { kind: "user-or-service" },
+  supportedScmProviders: ["github"],
+} as const satisfies RoutePolicy;
+
+export const SCM_AGNOSTIC_USER_OR_SERVICE_ROUTE = {
+  authentication: { kind: "user-or-service" },
+  supportedScmProviders: "all",
+} as const satisfies RoutePolicy;
+
+export const SCM_AGNOSTIC_HUMAN_USER_ROUTE = {
+  authentication: { kind: "user" },
+  supportedScmProviders: "all",
+} as const satisfies RoutePolicy;
+
+export const SCM_AGNOSTIC_WEB_SERVICE_ROUTE = {
+  authentication: { kind: "web-service" },
+  supportedScmProviders: "all",
+} as const satisfies RoutePolicy;
+
+export const SCM_AGNOSTIC_HANDLER_AUTHENTICATED_ROUTE = {
+  authentication: { kind: "handler-authenticated" },
+  supportedScmProviders: "all",
+} as const satisfies RoutePolicy;
+
+export const GITHUB_SANDBOX_FALLBACK_ROUTE = {
+  authentication: { kind: "user-or-service-with-sandbox-fallback", ...SESSION_ID_BINDING },
+  supportedScmProviders: ["github"],
+} as const satisfies RoutePolicy;
+
+export const SCM_AGNOSTIC_SANDBOX_FALLBACK_ROUTE = {
+  authentication: { kind: "user-or-service-with-sandbox-fallback", ...SESSION_ID_BINDING },
+  supportedScmProviders: "all",
+} as const satisfies RoutePolicy;
+
+export const SCM_CREDENTIALS_ROUTE = {
+  authentication: { kind: "sandbox", ...SESSION_ID_BINDING },
+  supportedScmProviders: ["github", "gitlab"],
+} as const satisfies RoutePolicy;
+
+export const SCM_AGNOSTIC_SANDBOX_ROUTE = {
+  authentication: { kind: "sandbox", ...SESSION_ID_BINDING },
+  supportedScmProviders: "all",
+} as const satisfies RoutePolicy;
+
+export function defineRoutes<const Policy extends RoutePolicy>(
+  policy: Policy,
+  routes: RouteDefinition<RouteContext<Policy["authentication"]>>[]
+): Route[] {
+  return routes.map((route) => defineRoute(policy, route));
+}
+
+export function defineRoute<const Policy extends RoutePolicy>(
+  policy: Policy,
+  route: RouteDefinition<RouteContext<Policy["authentication"]>>
+): Route {
+  const handler: Route["handler"] = (request, env, match, ctx) =>
+    route.handler(request, env, match, ctx as RouteContext<Policy["authentication"]>);
+  return { ...route, ...policy, handler };
 }
 
 /**
@@ -73,34 +186,6 @@ export function json(data: unknown, status = 200): Response {
  */
 export function error(message: string, status = 400): Response {
   return json({ error: message }, status);
-}
-
-/**
- * max_age_seconds for the image-maintenance routes (repo + environment
- * mark-stale/cleanup). Rejecting non-numbers matters: a null that fell
- * through to `null * 1000 = 0` would mark every building row stale or delete
- * every failed row.
- */
-export async function parseMaxAgeMs(
-  request: Request,
-  defaultMs: number
-): Promise<number | Response> {
-  let body: { max_age_seconds?: unknown };
-  try {
-    body = (await request.json()) as typeof body;
-  } catch {
-    body = {};
-  }
-
-  if (body.max_age_seconds === undefined) return defaultMs;
-  if (
-    typeof body.max_age_seconds !== "number" ||
-    !Number.isFinite(body.max_age_seconds) ||
-    body.max_age_seconds < 0
-  ) {
-    return error("max_age_seconds must be a non-negative number", 400);
-  }
-  return body.max_age_seconds * 1000;
 }
 
 /**
@@ -159,12 +244,16 @@ export async function parseJsonBody<T>(request: Request): Promise<T | Response> 
 export function extractRepoParams(
   match: RegExpMatchArray
 ): { owner: string; name: string } | Response {
-  const owner = match.groups?.owner;
-  const name = match.groups?.name;
-  if (!owner || !name) {
+  const encodedOwner = match.groups?.owner;
+  const encodedName = match.groups?.name;
+  if (!encodedOwner || !encodedName) {
     return error("Owner and name are required", 400);
   }
-  return { owner, name };
+  const repository = decodeRepositoryPathSegments(encodedOwner, encodedName);
+  if (!repository) {
+    return error("Owner and name must be valid repository path segments", 400);
+  }
+  return { owner: repository.repoOwner, name: repository.repoName };
 }
 
 /**

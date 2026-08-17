@@ -1,44 +1,14 @@
-import type { ArtifactRow, MessageRow } from "../types";
-import type { ArtifactResponse, ListEventsResponse } from "../../types";
-import type { SessionRepository } from "../repository";
+import type { ArtifactRow } from "../types";
+import type { SessionMessage } from "@open-inspect/shared/types/sessions";
+import type { ListEventsResponse } from "@open-inspect/shared/types/sandbox-events";
+import type { NormalizedArtifactResponse } from "../artifacts";
+import type { MessageRepository } from "../message-repository";
+import type { ArtifactRepository } from "../artifact-repository";
+import type { EventRepository } from "../event-repository";
 import type { SessionMessageQueue } from "../message-queue";
+import type { EnqueuePromptRequest } from "../enqueue-prompt-contract";
 import { SessionEventStream, type SessionEventListRequest } from "../event-stream";
-
-export interface EnqueuePromptRequest {
-  messageId?: string;
-  content: string;
-  authorId: string;
-  source: string;
-  model?: string;
-  reasoningEffort?: string;
-  attachments?: Array<{ type: string; name: string; url?: string }>;
-  callbackContext?: Record<string, unknown>;
-
-  // Identity enrichment (from router D1 lookup at prompt time)
-  authorDisplayName?: string;
-  authorEmail?: string;
-  authorLogin?: string;
-
-  // SCM token enrichment (from cross-provider identity resolution)
-  scmUserId?: string;
-  scmAccessTokenEncrypted?: string;
-  scmRefreshTokenEncrypted?: string;
-  scmTokenExpiresAt?: number;
-}
-
-export class PromptIdConflictError extends Error {
-  constructor() {
-    super("Message ID belongs to another prompt");
-    this.name = "PromptIdConflictError";
-  }
-}
-
-export class PromptEnqueueRejectedError extends Error {
-  constructor() {
-    super("Session no longer accepts prompts");
-    this.name = "PromptEnqueueRejectedError";
-  }
-}
+import { parseStoredSessionAttachments } from "../session-attachment-resolver";
 
 export type ListEventsRequest = SessionEventListRequest;
 
@@ -49,7 +19,9 @@ export interface ListMessagesRequest {
 }
 
 interface MessageServiceDeps {
-  repository: SessionRepository;
+  repository: MessageRepository;
+  eventRepository: EventRepository;
+  artifactRepository: ArtifactRepository;
   messageQueue: SessionMessageQueue;
   stopExecution: () => Promise<void>;
   parseArtifactMetadata: (
@@ -61,7 +33,7 @@ export class MessageService {
   private readonly eventStream: SessionEventStream;
 
   constructor(private readonly deps: MessageServiceDeps) {
-    this.eventStream = new SessionEventStream(deps.repository);
+    this.eventStream = new SessionEventStream(deps.eventRepository);
   }
 
   enqueuePrompt(request: EnqueuePromptRequest): Promise<{ messageId: string; status: "queued" }> {
@@ -77,17 +49,8 @@ export class MessageService {
     return this.eventStream.listEvents(request);
   }
 
-  listArtifacts(): {
-    artifacts: Array<{
-      id: string;
-      type: ArtifactRow["type"];
-      url: string | null;
-      metadata: Record<string, unknown> | null;
-      createdAt: number;
-      updatedAt: number;
-    }>;
-  } {
-    const artifacts = this.deps.repository.listArtifacts();
+  listArtifacts(): { artifacts: NormalizedArtifactResponse[] } {
+    const artifacts = this.deps.artifactRepository.listArtifacts();
     return {
       artifacts: artifacts.map((artifact) => ({
         id: artifact.id,
@@ -100,8 +63,8 @@ export class MessageService {
     };
   }
 
-  getArtifact(artifactId: string): { artifact: ArtifactResponse | null } {
-    const artifact = this.deps.repository.getArtifactById(artifactId);
+  getArtifact(artifactId: string): { artifact: NormalizedArtifactResponse | null } {
+    const artifact = this.deps.artifactRepository.getArtifactById(artifactId);
     if (!artifact) {
       return { artifact: null };
     }
@@ -119,7 +82,7 @@ export class MessageService {
   }
 
   listMessages(request: ListMessagesRequest): {
-    messages: MessageRow[];
+    messages: SessionMessage[];
     cursor: string | undefined;
     hasMore: boolean;
   } {
@@ -132,7 +95,17 @@ export class MessageService {
     if (hasMore) messages.pop();
 
     return {
-      messages,
+      messages: messages.map((message) => ({
+        id: message.id,
+        authorId: message.author_id,
+        content: message.content,
+        source: message.source,
+        attachments: parseStoredSessionAttachments(message.attachments) ?? null,
+        status: message.status,
+        createdAt: message.created_at,
+        startedAt: message.started_at,
+        completedAt: message.completed_at,
+      })),
       cursor: messages.length > 0 ? messages[messages.length - 1].created_at.toString() : undefined,
       hasMore,
     };

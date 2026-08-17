@@ -1,14 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
+import type { SessionDO } from "../../src/session/durable-object";
+import { encryptToken } from "../../src/auth/crypto";
 import {
   collectMessages,
   initNamedSession,
   openClientWs,
   openSandboxWs,
   seedSandboxAuth,
-  seedEvents,
-  seedMessage,
-  sendSandboxReady,
   queryDO,
   waitForSandboxStatus,
 } from "./helpers";
@@ -80,74 +79,23 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     expect(ws).toBeNull();
   });
 
-  it("upgrade while provider stop is settling returns retryable 409", async () => {
-    const name = `ws-sandbox-stopping-${Date.now()}`;
-    const { stub } = await initNamedSession(name);
-    await seedSandboxAuth(stub, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-      status: "ready",
-    });
-    await queryDO(stub, "UPDATE sandbox SET status = 'stopping'");
-
-    const { ws, response } = await openSandboxWs(name, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-    });
-
-    expect(response.status).toBe(409);
-    expect(ws).toBeNull();
-    const state = await queryDO<{ status: string }>(stub, "SELECT status FROM sandbox");
-    expect(state).toEqual([{ status: "stopping" }]);
-  });
-
-  it("late readiness cannot overwrite a provider stop in progress", async () => {
-    const name = `ws-sandbox-ready-during-stop-${Date.now()}`;
-    const { stub } = await initNamedSession(name);
-    await seedSandboxAuth(stub, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-      status: "ready",
-    });
-    const { ws } = await openSandboxWs(name, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-    });
-    ws!.accept();
-    await queryDO(stub, "UPDATE sandbox SET status = 'stopping'");
-
-    sendSandboxReady(ws!, SANDBOX_ID, "oc-test-session");
-    await expect
-      .poll(async () => {
-        const session = await queryDO<{ opencode_session_id: string | null }>(
-          stub,
-          "SELECT opencode_session_id FROM session"
-        );
-        return session[0]?.opencode_session_id;
-      })
-      .toBe("oc-test-session");
-
-    const state = await queryDO<{ status: string }>(stub, "SELECT status FROM sandbox");
-    expect(state).toEqual([{ status: "stopping" }]);
-    ws!.close();
-  });
-
-  it("sandbox remains connecting until the bridge verifies context", async () => {
+  it("sandbox connect sets status to ready", async () => {
     const name = `ws-sandbox-ready-${Date.now()}`;
     const { stub } = await initNamedSession(name);
+    // Model the production boot sequence: the sandbox connects while the
+    // lifecycle is still in "connecting", and the WS accept flips it to ready.
     await seedSandboxAuth(stub, {
       authToken: SANDBOX_TOKEN,
       sandboxId: SANDBOX_ID,
       status: "connecting",
     });
+
     const { ws } = await openSandboxWs(name, {
       authToken: SANDBOX_TOKEN,
       sandboxId: SANDBOX_ID,
     });
     expect(ws).not.toBeNull();
     ws!.accept();
-    await waitForSandboxStatus(stub, "connecting");
-    sendSandboxReady(ws!, SANDBOX_ID, "oc-test-session");
     await waitForSandboxStatus(stub, "ready");
 
     const stateRes = await stub.fetch("http://internal/internal/state");
@@ -157,61 +105,193 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     ws!.close();
   });
 
-  it("acknowledges and drops legacy checkpoint lifecycle events", async () => {
-    const name = `ws-sandbox-legacy-checkpoint-${Date.now()}`;
+  it("publishes sandbox access only after it becomes readable", async () => {
+    const name = `ws-sandbox-access-ready-${Date.now()}`;
     const { stub } = await initNamedSession(name);
     await seedSandboxAuth(stub, {
       authToken: SANDBOX_TOKEN,
       sandboxId: SANDBOX_ID,
       status: "connecting",
     });
+    const [codePassword, vncPassword, terminalToken] = await Promise.all([
+      encryptToken("code-secret", env.REPO_SECRETS_ENCRYPTION_KEY),
+      encryptToken("vnc-secret", env.REPO_SECRETS_ENCRYPTION_KEY),
+      encryptToken("terminal-token", env.REPO_SECRETS_ENCRYPTION_KEY),
+    ]);
+    await runInDurableObject(stub, (instance: SessionDO) => {
+      instance.ctx.storage.sql.exec(
+        `UPDATE sandbox
+         SET code_server_url = ?, code_server_password = ?, vnc_url = ?, vnc_password = ?,
+             ttyd_url = ?, ttyd_token = ?`,
+        "https://code.test",
+        codePassword,
+        "https://vnc.test",
+        vncPassword,
+        "https://terminal.test",
+        terminalToken
+      );
+    });
+    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
+    const collector = collectMessages(clientWs, {
+      until: (message) => message.type === "sandbox_access_changed",
+    });
+
     const { ws: sandboxWs } = await openSandboxWs(name, {
       authToken: SANDBOX_TOKEN,
       sandboxId: SANDBOX_ID,
     });
+    expect(sandboxWs).not.toBeNull();
     sandboxWs!.accept();
-    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
-    const sandboxMessages = collectMessages(sandboxWs!, {
-      until: (message) => message.type === "ack",
-    });
-    const clientMessages = collectMessages(clientWs, { timeoutMs: 200 });
 
-    sandboxWs!.send(
-      JSON.stringify({
-        type: "checkpoint",
-        checkpointStatus: "confirmed",
-        checkpointId: "cp-legacy",
-        attemptId: "cpa-legacy",
-        checksum: "a".repeat(64),
-        byteLength: 100,
-        ackId: "checkpoint:cp-legacy:confirmed",
-        sandboxId: SANDBOX_ID,
-        timestamp: Date.now() / 1000,
-      })
-    );
-
-    expect(await sandboxMessages).toContainEqual({
-      type: "ack",
-      ackId: "checkpoint:cp-legacy:confirmed",
+    const messages = await collector;
+    expect(messages.slice(-2).map((message) => message.type)).toEqual([
+      "sandbox_status",
+      "sandbox_access_changed",
+    ]);
+    const accessResponse = await stub.fetch("http://internal/internal/sandbox-access");
+    expect(accessResponse.status).toBe(200);
+    await expect(accessResponse.json()).resolves.toEqual({
+      codeServer: { url: "https://code.test", password: "code-secret" },
+      vnc: { url: "https://vnc.test", password: "vnc-secret" },
+      ttyd: { url: "https://terminal.test", token: "terminal-token" },
     });
-    const persisted = await queryDO<{ type: string }>(
-      stub,
-      "SELECT type FROM events WHERE type = 'checkpoint'"
-    );
-    expect(persisted).toEqual([]);
-    expect(
-      (await clientMessages).filter(
-        (message) =>
-          message.type === "sandbox_event" &&
-          (message.event as { type?: string } | undefined)?.type === "checkpoint"
-      )
-    ).toEqual([]);
 
     sandboxWs!.close();
     clientWs.close();
   });
 
-  it("failed sandbox can reconnect to its existing OpenCode session", async () => {
+  it("does not publish sandbox access for replacement bridges during provider startup", async () => {
+    const name = `ws-sandbox-access-spawning-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    await seedSandboxAuth(stub, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+      status: "spawning",
+    });
+    await runInDurableObject(stub, (instance: SessionDO) => {
+      const lifecycleManager = (
+        instance as unknown as {
+          lifecycleManager: { providerStartupPending: boolean };
+        }
+      ).lifecycleManager;
+      lifecycleManager.providerStartupPending = true;
+    });
+    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
+    const collector = collectMessages(clientWs, { timeoutMs: 100 });
+
+    const { ws: firstSandboxWs } = await openSandboxWs(name, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+    });
+    expect(firstSandboxWs).not.toBeNull();
+    firstSandboxWs!.accept();
+
+    const { ws: replacementSandboxWs } = await openSandboxWs(name, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+    });
+    expect(replacementSandboxWs).not.toBeNull();
+    replacementSandboxWs!.accept();
+
+    const messages = await collector;
+    expect(
+      messages.filter((message) => message.type === "sandbox_status" && message.status === "ready")
+    ).toHaveLength(2);
+    expect(messages).not.toContainEqual({ type: "sandbox_access_changed" });
+
+    replacementSandboxWs!.close();
+    clientWs.close();
+  });
+
+  it.each([1000, 1001])(
+    "allows the active sandbox to reconnect after close code %s",
+    async (closeCode) => {
+      const name = `ws-sandbox-reconnect-${closeCode}-${Date.now()}`;
+      const { stub } = await initNamedSession(name);
+      await seedSandboxAuth(stub, {
+        authToken: SANDBOX_TOKEN,
+        sandboxId: SANDBOX_ID,
+        status: "ready",
+      });
+
+      const { ws: firstWs } = await openSandboxWs(name, {
+        authToken: SANDBOX_TOKEN,
+        sandboxId: SANDBOX_ID,
+      });
+      expect(firstWs).not.toBeNull();
+      firstWs!.accept();
+
+      const closed = new Promise<void>((resolve) => {
+        firstWs!.addEventListener("close", () => resolve());
+      });
+      firstWs!.close(closeCode, closeCode === 1001 ? "Going away" : "Normal closure");
+      await closed;
+
+      const stateAfterClose = await stub.fetch("http://internal/internal/state");
+      const state = await stateAfterClose.json<{ sandbox: { status: string } }>();
+      expect(state.sandbox.status).toBe("ready");
+
+      const { ws: reconnectedWs, response } = await openSandboxWs(name, {
+        authToken: SANDBOX_TOKEN,
+        sandboxId: SANDBOX_ID,
+      });
+      expect(response.status).toBe(101);
+      expect(reconnectedWs).not.toBeNull();
+      reconnectedWs!.accept();
+      reconnectedWs!.close();
+    }
+  );
+
+  it("refreshes heartbeat on reconnect before an old disconnect alarm runs", async () => {
+    const name = `ws-sandbox-reconnect-heartbeat-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    await seedSandboxAuth(stub, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+      status: "ready",
+    });
+
+    const { ws: firstWs } = await openSandboxWs(name, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+    });
+    expect(firstWs).not.toBeNull();
+    firstWs!.accept();
+
+    const closed = new Promise<void>((resolve) => {
+      firstWs!.addEventListener("close", () => resolve());
+    });
+    firstWs!.close(1001, "Going away");
+    await closed;
+
+    const oldHeartbeat = Date.now() - 10 * 60 * 1000;
+    await runInDurableObject(stub, (instance: SessionDO) => {
+      instance.ctx.storage.sql.exec("UPDATE sandbox SET last_heartbeat = ?", oldHeartbeat);
+    });
+
+    const { ws: reconnectedWs, response } = await openSandboxWs(name, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+    });
+    expect(response.status).toBe(101);
+    expect(reconnectedWs).not.toBeNull();
+    reconnectedWs!.accept();
+
+    const sandboxAfterReconnect = await queryDO<{ last_heartbeat: number; status: string }>(
+      stub,
+      "SELECT last_heartbeat, status FROM sandbox"
+    );
+    expect(sandboxAfterReconnect[0].last_heartbeat).toBeGreaterThan(oldHeartbeat);
+
+    await runInDurableObject(stub, (instance: SessionDO) => instance.alarm());
+
+    const sandboxAfterAlarm = await queryDO<{ status: string }>(stub, "SELECT status FROM sandbox");
+    expect(sandboxAfterAlarm[0].status).toBe("ready");
+
+    reconnectedWs!.close();
+  });
+
+  it("failed sandbox can reconnect and self-heal to ready", async () => {
     const name = `ws-sandbox-selfheal-${Date.now()}`;
     const { stub } = await initNamedSession(name);
     // The WS upgrade gate deliberately admits "failed" sandboxes: a slow boot
@@ -229,225 +309,8 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     });
     expect(ws).not.toBeNull();
     ws!.accept();
-    sendSandboxReady(ws!, SANDBOX_ID, "oc-test-session");
     await waitForSandboxStatus(stub, "ready");
     ws!.close();
-  });
-
-  it("fails queued prompts without dispatch when context is unavailable", async () => {
-    const name = `ws-sandbox-context-unavailable-${Date.now()}`;
-    const { stub } = await initNamedSession(name);
-    await seedSandboxAuth(stub, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-      status: "connecting",
-    });
-    const participant = await queryDO<{ id: string }>(
-      stub,
-      "SELECT id FROM participants WHERE user_id = 'user-1'"
-    );
-    await seedMessage(stub, {
-      id: "interrupted-message",
-      authorId: participant[0].id,
-      content: "work interrupted before replacement",
-      source: "web",
-      status: "processing",
-      createdAt: Date.now() - 1000,
-      startedAt: Date.now() - 500,
-    });
-    const { ws: sandboxWs } = await openSandboxWs(name, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-    });
-    sandboxWs!.accept();
-    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
-    const queued = collectMessages(clientWs, {
-      until: (message) => message.type === "prompt_queued",
-    });
-    clientWs.send(JSON.stringify({ type: "prompt", content: "continue" }));
-    await queued;
-
-    const sandboxMessages = collectMessages(sandboxWs!, {
-      until: (message) => message.type === "ack",
-    });
-    const failed = collectMessages(clientWs, {
-      until: (message) =>
-        message.type === "sandbox_event" && message.event.type === "execution_complete",
-    });
-    const clientMessages = collectMessages(clientWs, { timeoutMs: 500 });
-    const unavailableEvent = JSON.stringify({
-      type: "context_unavailable",
-      sandboxId: SANDBOX_ID,
-      opencodeSessionId: "ses_missing",
-      error: "The expected OpenCode conversation is permanently unavailable",
-      ackId: "context_unavailable:attempt-1",
-      timestamp: Date.now() / 1000,
-    });
-    sandboxWs!.send(unavailableEvent);
-    sandboxWs!.send(unavailableEvent);
-
-    const controlMessages = await sandboxMessages;
-    expect(controlMessages.some((message) => message.type === "prompt")).toBe(false);
-    expect(controlMessages).toContainEqual({
-      type: "ack",
-      ackId: "context_unavailable:attempt-1",
-    });
-    expect(await failed).toContainEqual({
-      type: "sandbox_event",
-      event: expect.objectContaining({
-        type: "execution_complete",
-        success: false,
-        error: "The expected OpenCode conversation is permanently unavailable",
-      }),
-    });
-    const messages = await queryDO<{ status: string }>(stub, "SELECT status FROM messages");
-    expect(messages).toEqual([{ status: "failed" }, { status: "failed" }]);
-    expect((await clientMessages).filter((message) => message.type === "sandbox_error")).toEqual([
-      {
-        type: "sandbox_error",
-        error: "The expected OpenCode conversation is permanently unavailable",
-      },
-    ]);
-    await waitForSandboxStatus(stub, "stopped");
-
-    sandboxWs!.close();
-    clientWs.close();
-  });
-
-  it("finishes context-loss cleanup after the critical event was already stored", async () => {
-    const name = `ws-sandbox-context-replay-${Date.now()}`;
-    const { stub } = await initNamedSession(name);
-    await seedSandboxAuth(stub, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-      status: "connecting",
-    });
-    const participant = await queryDO<{ id: string }>(
-      stub,
-      "SELECT id FROM participants WHERE user_id = 'user-1'"
-    );
-    await seedMessage(stub, {
-      id: "interrupted-message",
-      authorId: participant[0].id,
-      content: "Continue",
-      source: "web",
-      status: "processing",
-      createdAt: Date.now() - 1_000,
-      startedAt: Date.now() - 500,
-    });
-    await seedEvents(stub, [
-      {
-        id: "context_unavailable:attempt-1",
-        type: "context_unavailable",
-        data: JSON.stringify({
-          type: "context_unavailable",
-          sandboxId: SANDBOX_ID,
-          opencodeSessionId: "ses_missing",
-          error: "The expected OpenCode conversation is permanently unavailable",
-          ackId: "context_unavailable:attempt-1",
-          timestamp: Date.now() / 1000,
-        }),
-        createdAt: Date.now() - 100,
-      },
-    ]);
-
-    const { ws: sandboxWs } = await openSandboxWs(name, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-    });
-    sandboxWs!.accept();
-    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
-    const queued = collectMessages(clientWs, {
-      until: (message) => message.type === "prompt_queued",
-    });
-    clientWs.send(JSON.stringify({ type: "prompt", content: "Retry after context loss" }));
-    await queued;
-    sandboxWs!.send(
-      JSON.stringify({
-        type: "context_unavailable",
-        sandboxId: SANDBOX_ID,
-        opencodeSessionId: "ses_missing",
-        error: "The expected OpenCode conversation is permanently unavailable",
-        ackId: "context_unavailable:attempt-1",
-        timestamp: Date.now() / 1000,
-      })
-    );
-
-    await waitForSandboxStatus(stub, "stopped");
-    const messages = await queryDO<{ content: string; status: string }>(
-      stub,
-      "SELECT content, status FROM messages ORDER BY created_at"
-    );
-    expect(messages).toEqual([
-      { content: "Continue", status: "failed" },
-      { content: "Retry after context loss", status: "pending" },
-    ]);
-
-    sandboxWs!.close();
-    clientWs.close();
-  });
-
-  it("fails closed when a fresh replacement cannot provide the expected conversation", async () => {
-    const name = `ws-sandbox-ready-mismatch-${Date.now()}`;
-    const { stub } = await initNamedSession(name);
-    await seedSandboxAuth(stub, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-      status: "connecting",
-    });
-    await queryDO(stub, "UPDATE session SET opencode_session_id = ?", "ses_expected");
-    const { ws: sandboxWs } = await openSandboxWs(name, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-    });
-    sandboxWs!.accept();
-    sendSandboxReady(sandboxWs!, SANDBOX_ID);
-    await waitForSandboxStatus(stub, "stopped");
-
-    const state = await queryDO<{ opencode_session_id: string }>(
-      stub,
-      "SELECT opencode_session_id FROM session"
-    );
-    expect(state).toEqual([{ opencode_session_id: "ses_expected" }]);
-    const events = await queryDO<{ type: string }>(
-      stub,
-      "SELECT type FROM events WHERE type = 'context_unavailable'"
-    );
-    expect(events).toEqual([{ type: "context_unavailable" }]);
-
-    sandboxWs!.close();
-  });
-
-  it("resumes when the same sandbox verifies the expected conversation", async () => {
-    const name = `ws-sandbox-ready-legacy-${Date.now()}`;
-    const { stub } = await initNamedSession(name);
-    await seedSandboxAuth(stub, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-      status: "connecting",
-    });
-    await queryDO(stub, "UPDATE session SET opencode_session_id = ?", "ses_expected");
-    const { ws: sandboxWs } = await openSandboxWs(name, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-    });
-    sandboxWs!.accept();
-    sandboxWs!.send(
-      JSON.stringify({
-        type: "ready",
-        sandboxId: SANDBOX_ID,
-        opencodeSessionId: "ses_expected",
-        timestamp: Date.now() / 1000,
-      })
-    );
-
-    await waitForSandboxStatus(stub, "ready");
-    const events = await queryDO<{ type: string }>(
-      stub,
-      "SELECT type FROM events WHERE type = 'context_unavailable'"
-    );
-    expect(events).toEqual([]);
-    sandboxWs!.close();
   });
 
   it("sandbox WS message is stored as event", async () => {
@@ -493,15 +356,89 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     ws!.close();
   });
 
+  it("preserves token segments around context compaction for replay", async () => {
+    const name = `ws-sandbox-compaction-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
+    await seedSandboxAuth(stub, { authToken: SANDBOX_TOKEN, sandboxId: SANDBOX_ID });
+    const { ws: sandboxWs } = await openSandboxWs(name, {
+      authToken: SANDBOX_TOKEN,
+      sandboxId: SANDBOX_ID,
+    });
+    expect(sandboxWs).not.toBeNull();
+    sandboxWs!.accept();
+
+    const collector = collectMessages(clientWs, {
+      until: (message) =>
+        message.type === "sandbox_event" &&
+        message.event.type === "token" &&
+        message.event.content === "After compaction",
+    });
+    const before = {
+      type: "token",
+      content: "Before compaction",
+      messageId: "msg-compaction-1",
+      sandboxId: SANDBOX_ID,
+      timestamp: 1,
+    } as const;
+    const compacted = {
+      type: "context_compacted",
+      messageId: "msg-compaction-1",
+      sandboxId: SANDBOX_ID,
+      timestamp: 2,
+    } as const;
+    const after = {
+      type: "token",
+      content: "After compaction",
+      messageId: "msg-compaction-1",
+      sandboxId: SANDBOX_ID,
+      timestamp: 3,
+    } as const;
+    sandboxWs!.send(JSON.stringify(before));
+    sandboxWs!.send(JSON.stringify(compacted));
+    sandboxWs!.send(JSON.stringify(after));
+
+    const messages = await collector;
+    expect(messages).toContainEqual({ type: "sandbox_event", event: compacted });
+    const events = await queryDO<{
+      id: string;
+      type: string;
+      data: string;
+      timeline_sequence: number;
+    }>(
+      stub,
+      "SELECT id, type, data, timeline_sequence FROM events WHERE message_id = ? ORDER BY timeline_sequence",
+      "msg-compaction-1"
+    );
+    expect(events.map(({ type, data }) => ({ type, event: JSON.parse(data) }))).toEqual([
+      { type: "token", event: before },
+      { type: "context_compacted", event: compacted },
+      { type: "token", event: after },
+    ]);
+    expect(events[0].id).toMatch(/^token:msg-compaction-1:/);
+    expect(events[2].id).toBe("token:msg-compaction-1");
+
+    const { ws: replayWs, messages: replayMessages } = await openClientWs(name, {
+      subscribe: true,
+      userId: "user-replay",
+    });
+    const subscribed = replayMessages.find((message) => message.type === "subscribed") as
+      | { timeline: { events: Array<{ event: unknown }> } }
+      | undefined;
+    expect(subscribed?.timeline.events.map(({ event }) => event)).toEqual([
+      before,
+      compacted,
+      after,
+    ]);
+
+    sandboxWs!.close();
+    clientWs.close();
+    replayWs.close();
+  });
+
   it("accepts step_finish messages with structured token usage", async () => {
     const name = `ws-sandbox-step-finish-${Date.now()}`;
     const { stub } = await initNamedSession(name);
-    await env.DB.prepare(
-      `INSERT INTO sessions (id, total_cost, usage_cost_baseline, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?)`
-    )
-      .bind(name, 0.5, 0.5, Date.now(), Date.now())
-      .run();
     const { ws: clientWs } = await openClientWs(name, { subscribe: true });
     await seedSandboxAuth(stub, { authToken: SANDBOX_TOKEN, sandboxId: SANDBOX_ID });
 
@@ -511,8 +448,6 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     });
     expect(sandboxWs).not.toBeNull();
     sandboxWs!.accept();
-    sendSandboxReady(sandboxWs!, SANDBOX_ID);
-    await waitForSandboxStatus(stub, "ready");
 
     const tokenUsage = {
       total: 223,
@@ -521,35 +456,25 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
       reasoning: 0,
       cache: { read: 0, write: 0 },
     };
-    const stepObservedAt = Date.now() - 60_000;
     const collector = collectMessages(clientWs, {
       until: (msg) =>
         msg.type === "sandbox_event" &&
         (msg.event as Record<string, unknown> | undefined)?.type === "step_finish",
-    });
-    const firstAckCollector = collectMessages(sandboxWs!, {
-      until: (msg) => msg.type === "ack" && msg.ackId === "step_finish:step-1",
     });
 
     sandboxWs!.send(
       JSON.stringify({
         type: "step_finish",
         messageId: "msg-step-finish-1",
-        stepId: "step-1",
-        ackId: "step_finish:step-1",
         cost: 0.001,
         tokens: tokenUsage,
         reason: "end_turn",
         sandboxId: SANDBOX_ID,
-        timestamp: stepObservedAt / 1000,
+        timestamp: Date.now(),
       })
     );
 
-    const [messages, firstAcknowledgements] = await Promise.all([collector, firstAckCollector]);
-    expect(firstAcknowledgements).toContainEqual({
-      type: "ack",
-      ackId: "step_finish:step-1",
-    });
+    const messages = await collector;
     const stepFinish = messages.find(
       (msg) =>
         msg.type === "sandbox_event" &&
@@ -558,61 +483,6 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
 
     expect(stepFinish).toBeDefined();
     expect((stepFinish!.event as { tokens: unknown }).tokens).toEqual(tokenUsage);
-    expect((stepFinish!.event as { stepId: unknown }).stepId).toBe("step-1");
-
-    const ackCollector = collectMessages(sandboxWs!, {
-      until: (msg) => msg.type === "ack" && msg.ackId === "step_finish:step-1",
-    });
-    sandboxWs!.send(
-      JSON.stringify({
-        type: "step_finish",
-        messageId: "msg-step-finish-1",
-        stepId: "step-1",
-        ackId: "step_finish:step-1",
-        cost: 0.001,
-        tokens: tokenUsage,
-        reason: "end_turn",
-        sandboxId: SANDBOX_ID,
-        timestamp: Date.now(),
-      })
-    );
-    const acknowledgements = await ackCollector;
-    expect(acknowledgements).toContainEqual({ type: "ack", ackId: "step_finish:step-1" });
-
-    const facts = await env.DB.prepare(
-      `SELECT observed_at, cost_estimate, total_tokens, input_tokens, output_tokens,
-              cache_read_tokens, cache_write_tokens
-       FROM session_usage_facts WHERE event_id = ?`
-    )
-      .bind("step-1")
-      .all();
-    expect(facts.results).toEqual([
-      {
-        observed_at: stepObservedAt,
-        cost_estimate: 0.001,
-        total_tokens: 223,
-        input_tokens: 219,
-        output_tokens: 4,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-      },
-    ]);
-
-    const totals = await env.DB.prepare(
-      `SELECT total_cost, total_tokens, input_tokens, output_tokens,
-              cache_read_tokens, cache_write_tokens
-       FROM sessions WHERE id = ?`
-    )
-      .bind(name)
-      .first();
-    expect(totals).toEqual({
-      total_cost: 0.501,
-      total_tokens: 223,
-      input_tokens: 219,
-      output_tokens: 4,
-      cache_read_tokens: 0,
-      cache_write_tokens: 0,
-    });
 
     sandboxWs!.close();
     clientWs.close();

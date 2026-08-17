@@ -13,20 +13,27 @@ export type {
   WebhookAutomationEvent,
   SlackAutomationEvent,
   TriggerSourceDefinition,
-} from "./types";
-export { TRIGGER_TYPE_TO_SOURCE, automationEventSchema } from "./types";
-
-// Condition system
-export type {
+  AutomationTriggerType,
   ConditionConfigMap,
   ConditionType,
   TriggerCondition,
-  ConditionHandler,
-  ConditionRegistry,
   JsonPathFilter,
   TextMatchValue,
   TriggerConfig,
-} from "./conditions";
+} from "./types";
+export {
+  TRIGGER_TYPE_TO_SOURCE,
+  automationEventSchema,
+  githubAutomationEventSchema,
+  linearAutomationEventSchema,
+  sentryAutomationEventSchema,
+  webhookAutomationEventSchema,
+  slackAutomationEventSchema,
+  triggerConfigSchema,
+} from "./types";
+
+// Condition system
+export type { ConditionHandler, ConditionRegistry } from "./conditions";
 export { matchesConditions, validateConditions } from "./conditions";
 
 // Registry
@@ -44,7 +51,14 @@ export {
   sentryConditions,
   normalizeSentryEvent,
   buildSentryContextBlock,
+  buildSentryIssueWebhookContextBlock,
+  buildSentryMetricContextBlock,
   verifySentrySignature,
+} from "./sentry";
+export type {
+  SentryIssueAlertPayload,
+  SentryIssueWebhookPayload,
+  SentryMetricAlertPayload,
 } from "./sentry";
 
 // Webhook source module
@@ -61,6 +75,8 @@ export {
 export {
   slackSource,
   normalizeSlackEvent,
+  buildSlackContextBlock,
+  slackChannelLabel,
   SLACK_TEXT_MAX_LENGTH,
   REGEX_PATTERN_MAX_LENGTH,
   ALLOWED_REGEX_FLAGS,

@@ -13,6 +13,7 @@ on:
       - "packages/modal-infra/**"
       - "packages/daytona-infra/**"
       - "packages/opencomputer-infra/**"
+      - "packages/e2b-infra/**"
       - "packages/sandbox-runtime/**"
       - "packages/shared/**"
       - "packages/web/**" # Web app deployed via Terraform when web_platform = "cloudflare"
@@ -29,6 +30,7 @@ on:
       - "packages/modal-infra/**"
       - "packages/daytona-infra/**"
       - "packages/opencomputer-infra/**"
+      - "packages/e2b-infra/**"
       - "packages/sandbox-runtime/**"
       - "packages/shared/**"
       - "packages/web/**"
@@ -96,8 +98,13 @@ jobs:
         run: terraform validate -no-color
         working-directory: ${{ env.TF_WORKING_DIR }}
 
+      - name: Terraform Tests
+        id: test
+        run: terraform test -filter=tests/auth_provider_configuration.tftest.hcl
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
       - name: Post Validation Results
-        if: github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request'
         uses: actions/github-script@v8
         with:
           script: |
@@ -113,6 +120,7 @@ jobs:
             | Format | ${{ steps.fmt.outcome == 'success' && '✅' || '⚠️' }} |
             | Init | ${{ steps.init.outcome == 'success' && '✅' || '❌' }} |
             | Validate | ${{ steps.validate.outcome == 'success' && '✅' || '❌' }} |
+            | Tests | ${{ steps.test.outcome == 'success' && '✅' || '❌' }} |
             ${planNote}
 
             *Pushed by: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
@@ -185,11 +193,6 @@ jobs:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TF_VAR_cloudflare_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           TF_VAR_cloudflare_worker_subdomain: ${{ secrets.CLOUDFLARE_WORKER_SUBDOMAIN }}
-          TF_VAR_cloudflare_custom_domain: ${{ secrets.CLOUDFLARE_CUSTOM_DOMAIN }}
-          TF_VAR_cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
-          TF_VAR_enable_service_bindings: ${{ secrets.ENABLE_SERVICE_BINDINGS }}
-          TF_VAR_tldraw_license_key: ${{ secrets.TLDRAW_LICENSE_KEY }}
-          TF_VAR_unsafe_allow_all_users: ${{ secrets.UNSAFE_ALLOW_ALL_USERS }}
           TF_VAR_vercel_api_token: "${{ secrets.VERCEL_API_TOKEN || '000000000000000000000000' }}"
           TF_VAR_vercel_team_id: "${{ secrets.VERCEL_TEAM_ID || 'unused' }}"
           TF_VAR_modal_token_id: ${{ secrets.MODAL_TOKEN_ID }}
@@ -208,7 +211,6 @@ jobs:
           TF_VAR_slack_bot_token: ${{ secrets.SLACK_BOT_TOKEN }}
           TF_VAR_slack_signing_secret: ${{ secrets.SLACK_SIGNING_SECRET }}
           TF_VAR_anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          TF_VAR_openai_api_key: ${{ secrets.OPENAI_API_KEY }}
           TF_VAR_token_encryption_key: ${{ secrets.TOKEN_ENCRYPTION_KEY }}
           TF_VAR_repo_secrets_encryption_key: ${{ secrets.REPO_SECRETS_ENCRYPTION_KEY }}
           TF_VAR_nextauth_secret: ${{ secrets.NEXTAUTH_SECRET }}
@@ -222,7 +224,6 @@ jobs:
           TF_VAR_github_webhook_secret: ${{ secrets.GH_WEBHOOK_SECRET }}
           TF_VAR_github_bot_username: ${{ secrets.GH_BOT_USERNAME }}
           TF_VAR_app_name: "${{ secrets.APP_NAME || 'Open-Inspect' }}"
-          TF_VAR_app_short_name: ${{ secrets.APP_SHORT_NAME }}
           TF_VAR_app_icon_url: ${{ secrets.APP_ICON_URL }}
           TF_VAR_enable_linear_bot: "${{ secrets.ENABLE_LINEAR_BOT || 'false' }}"
           TF_VAR_linear_client_id: ${{ secrets.LINEAR_CLIENT_ID }}
@@ -249,6 +250,11 @@ jobs:
           TF_VAR_opencomputer_template: ${{ secrets.OPENCOMPUTER_TEMPLATE }}
           TF_VAR_opencomputer_project_id: ${{ secrets.OPENCOMPUTER_PROJECT_ID }}
           TF_VAR_opencomputer_target: ${{ secrets.OPENCOMPUTER_TARGET }}
+          TF_VAR_e2b_api_key: ${{ secrets.E2B_API_KEY }}
+          TF_VAR_e2b_template_id: ${{ secrets.E2B_TEMPLATE_ID }}
+          TF_VAR_e2b_api_url: "${{ secrets.E2B_API_URL || 'https://api.e2b.app' }}"
+          TF_VAR_e2b_sandbox_timeout_seconds: "${{ secrets.E2B_SANDBOX_TIMEOUT_SECONDS || '7200' }}"
+          TF_VAR_e2b_auto_pause: "${{ secrets.E2B_AUTO_PAUSE || 'true' }}"
 
       - name: Post Plan Results
         uses: actions/github-script@v8
@@ -341,11 +347,6 @@ jobs:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TF_VAR_cloudflare_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           TF_VAR_cloudflare_worker_subdomain: ${{ secrets.CLOUDFLARE_WORKER_SUBDOMAIN }}
-          TF_VAR_cloudflare_custom_domain: ${{ secrets.CLOUDFLARE_CUSTOM_DOMAIN }}
-          TF_VAR_cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
-          TF_VAR_enable_service_bindings: ${{ secrets.ENABLE_SERVICE_BINDINGS }}
-          TF_VAR_tldraw_license_key: ${{ secrets.TLDRAW_LICENSE_KEY }}
-          TF_VAR_unsafe_allow_all_users: ${{ secrets.UNSAFE_ALLOW_ALL_USERS }}
           TF_VAR_vercel_api_token: "${{ secrets.VERCEL_API_TOKEN || '000000000000000000000000' }}"
           TF_VAR_vercel_team_id: "${{ secrets.VERCEL_TEAM_ID || 'unused' }}"
           TF_VAR_modal_token_id: ${{ secrets.MODAL_TOKEN_ID }}
@@ -364,7 +365,6 @@ jobs:
           TF_VAR_slack_bot_token: ${{ secrets.SLACK_BOT_TOKEN }}
           TF_VAR_slack_signing_secret: ${{ secrets.SLACK_SIGNING_SECRET }}
           TF_VAR_anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          TF_VAR_openai_api_key: ${{ secrets.OPENAI_API_KEY }}
           TF_VAR_token_encryption_key: ${{ secrets.TOKEN_ENCRYPTION_KEY }}
           TF_VAR_repo_secrets_encryption_key: ${{ secrets.REPO_SECRETS_ENCRYPTION_KEY }}
           TF_VAR_nextauth_secret: ${{ secrets.NEXTAUTH_SECRET }}
@@ -378,7 +378,6 @@ jobs:
           TF_VAR_github_webhook_secret: ${{ secrets.GH_WEBHOOK_SECRET }}
           TF_VAR_github_bot_username: ${{ secrets.GH_BOT_USERNAME }}
           TF_VAR_app_name: "${{ secrets.APP_NAME || 'Open-Inspect' }}"
-          TF_VAR_app_short_name: ${{ secrets.APP_SHORT_NAME }}
           TF_VAR_app_icon_url: ${{ secrets.APP_ICON_URL }}
           TF_VAR_enable_linear_bot: "${{ secrets.ENABLE_LINEAR_BOT || 'false' }}"
           TF_VAR_linear_client_id: ${{ secrets.LINEAR_CLIENT_ID }}
@@ -405,6 +404,11 @@ jobs:
           TF_VAR_opencomputer_template: ${{ secrets.OPENCOMPUTER_TEMPLATE }}
           TF_VAR_opencomputer_project_id: ${{ secrets.OPENCOMPUTER_PROJECT_ID }}
           TF_VAR_opencomputer_target: ${{ secrets.OPENCOMPUTER_TARGET }}
+          TF_VAR_e2b_api_key: ${{ secrets.E2B_API_KEY }}
+          TF_VAR_e2b_template_id: ${{ secrets.E2B_TEMPLATE_ID }}
+          TF_VAR_e2b_api_url: "${{ secrets.E2B_API_URL || 'https://api.e2b.app' }}"
+          TF_VAR_e2b_sandbox_timeout_seconds: "${{ secrets.E2B_SANDBOX_TIMEOUT_SECONDS || '7200' }}"
+          TF_VAR_e2b_auto_pause: "${{ secrets.E2B_AUTO_PAUSE || 'true' }}"
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
 

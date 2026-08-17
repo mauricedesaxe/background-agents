@@ -3,9 +3,11 @@
 import { useCallback, useEffect, useMemo, useState, type ClipboardEvent } from "react";
 import useSWR, { mutate } from "swr";
 import { toast } from "sonner";
+import { encodeRepositoryPathSegments } from "@open-inspect/shared/types/repositories";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { browserApiFetch, type BrowserApiPath } from "@/lib/browser-api-fetch";
 
 import { normalizeKey, parseMaybeEnvContent, type ParsedEnvEntry } from "@/lib/env-paste";
 
@@ -87,7 +89,7 @@ type SecretsScope = "repo" | "global" | "environment";
  * case here, not another conditional in the component body.
  */
 interface SecretsScopePolicy {
-  apiBase: string;
+  apiBase: BrowserApiPath;
   ready: boolean;
   description: string;
   emptyStateText: string;
@@ -125,8 +127,10 @@ function resolveScopePolicy(
       };
     case "repo": {
       const repoLabel = owner && name ? `${owner}/${name}` : "";
+      const repoPath =
+        owner && name ? encodeRepositoryPathSegments({ repoOwner: owner, repoName: name }) : "";
       return {
-        apiBase: `/api/repos/${owner}/${name}/secrets`,
+        apiBase: `/api/repos/${repoPath}/secrets`,
         ready: Boolean(owner && name),
         description: `Values are never shown after save. Secrets apply to ${repoLabel || "the selected repo"}.`,
         emptyStateText: "No secrets set for this repo.",
@@ -293,7 +297,7 @@ export function SecretsEditor({
     setError("");
 
     try {
-      const response = await fetch(`${apiBase}/${normalizedKey}`, {
+      const response = await browserApiFetch(`${apiBase}/${normalizedKey}`, {
         method: "DELETE",
       });
       const data = await response.json();
@@ -378,7 +382,7 @@ export function SecretsEditor({
         payload[entry.key] = entry.value;
       }
 
-      const response = await fetch(apiBase, {
+      const response = await browserApiFetch(apiBase, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ secrets: payload }),

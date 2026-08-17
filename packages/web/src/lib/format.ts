@@ -2,7 +2,7 @@
  * Utility functions for formatting display values
  */
 
-import { MODEL_OPTIONS, normalizeModelId } from "@open-inspect/shared";
+import { MODEL_OPTIONS, normalizeModelId } from "@open-inspect/shared/models";
 
 // Build a lookup map once at module level
 const MODEL_DISPLAY_NAMES = new Map<string, string>(
@@ -62,39 +62,4 @@ export async function copyToClipboard(text: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-/**
- * Format file path for display (show basename or last N characters)
- */
-export function formatFilePath(
-  filePath: string,
-  maxLength = 40
-): { display: string; full: string } {
-  if (!filePath) return { display: "", full: "" };
-
-  const parts = filePath.split("/");
-  const basename = parts[parts.length - 1];
-
-  if (basename.length <= maxLength) {
-    return { display: basename, full: filePath };
-  }
-
-  return {
-    display: basename.slice(0, maxLength - 3) + "...",
-    full: filePath,
-  };
-}
-
-/**
- * Format number with +/- prefix for diff stats
- */
-export function formatDiffStat(
-  additions: number,
-  deletions: number
-): { additions: string; deletions: string } {
-  return {
-    additions: additions > 0 ? `+${additions}` : "+0",
-    deletions: deletions > 0 ? `-${deletions}` : "-0",
-  };
 }

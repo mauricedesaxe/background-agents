@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { SELF, env, runInDurableObject } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import type { SourceControlProvider } from "../../src/source-control";
 import type { SessionDO } from "../../src/session/durable-object";
-import { initNamedSession, initSession, queryDO, seedMessage, seedSandboxAuth } from "./helpers";
+import { initNamedSession, initSession, queryDO, seedMessage, serviceFetch } from "./helpers";
 
 describe("POST /internal/create-pr", () => {
   it("returns 404 when session is not initialized", async () => {
@@ -136,7 +136,8 @@ describe("POST /internal/create-pr", () => {
           id: 99,
           webUrl: "https://github.com/acme/web-app/pull/99",
           apiUrl: "https://api.github.com/repos/acme/web-app/pulls/99",
-          state: "open" as const,
+          lifecycleState: "open" as const,
+          isDraft: false,
           sourceBranch: "open-inspect/test-session",
           targetBranch: "main",
         }),
@@ -216,7 +217,8 @@ describe("POST /internal/create-pr", () => {
           id: 42,
           webUrl: "https://github.com/acme/web-app/pull/42",
           apiUrl: "https://api.github.com/repos/acme/web-app/pulls/42",
-          state: "open" as const,
+          lifecycleState: "open" as const,
+          isDraft: false,
           sourceBranch: "open-inspect/test-session",
           targetBranch: "main",
         }),
@@ -268,9 +270,7 @@ describe("POST /internal/create-pr", () => {
     expect(artifacts[0]?.metadata).toContain('"number":42');
   });
 
-  it("returns 409 when a PR artifact already exists", async () => {
-    const { stub } = await initSession({ userId: "user-1" });
-
+  async function seedProcessingMessageForOwner(stub: DurableObjectStub, messageId: string) {
     const participants = await queryDO<{ id: string }>(
       stub,
       "SELECT id FROM participants WHERE user_id = ?",
@@ -280,9 +280,8 @@ describe("POST /internal/create-pr", () => {
     if (!ownerParticipantId) {
       throw new Error("Expected owner participant");
     }
-
     await seedMessage(stub, {
-      id: "msg-processing-2",
+      id: messageId,
       authorId: ownerParticipantId,
       content: "Create a PR",
       source: "web",
@@ -290,6 +289,58 @@ describe("POST /internal/create-pr", () => {
       createdAt: Date.now() - 1000,
       startedAt: Date.now() - 500,
     });
+  }
+
+  async function installSingleRepoMockProvider(stub: DurableObjectStub) {
+    await runInDurableObject(stub, (instance: SessionDO) => {
+      const mockProvider = {
+        name: "github",
+        generatePushAuth: async () => ({ authType: "app", token: "push-token" as const }),
+        getRepository: async () => ({
+          owner: "acme",
+          name: "web-app",
+          fullName: "acme/web-app",
+          defaultBranch: "main",
+          isPrivate: true,
+          providerRepoId: 12345,
+        }),
+        createPullRequest: async () => ({
+          id: 42,
+          webUrl: "https://github.com/acme/web-app/pull/42",
+          apiUrl: "https://api.github.com/repos/acme/web-app/pulls/42",
+          lifecycleState: "open" as const,
+          isDraft: false,
+          sourceBranch: "open-inspect/test-session",
+          targetBranch: "main",
+        }),
+        getPullRequest: async (config: { owner: string; name: string; number: number }) => ({
+          number: config.number,
+          url: `https://github.com/${config.owner}/${config.name}/pull/${config.number}`,
+          lifecycleState: "open" as const,
+          isDraft: false,
+          headBranch: "open-inspect/test-session",
+          baseBranch: "main",
+          repoOwner: config.owner,
+          repoName: config.name,
+        }),
+        buildGitPushSpec: (config: { targetBranch: string }) => ({
+          remoteUrl: "https://example.invalid/repo.git",
+          redactedRemoteUrl: "https://example.invalid/<redacted>.git",
+          refspec: `HEAD:refs/heads/${config.targetBranch}`,
+          targetBranch: config.targetBranch,
+          force: true,
+        }),
+      } as unknown as SourceControlProvider;
+
+      (
+        instance as unknown as { _sourceControlProvider: SourceControlProvider | null }
+      )._sourceControlProvider = mockProvider;
+    });
+  }
+
+  it("reuses an existing open PR recorded for the session branch", async () => {
+    const { stub } = await initSession({ userId: "user-1" });
+    await seedProcessingMessageForOwner(stub, "msg-processing-2");
 
     await runInDurableObject(stub, (instance: SessionDO) => {
       instance.ctx.storage.sql.exec(
@@ -302,6 +353,46 @@ describe("POST /internal/create-pr", () => {
         Date.now()
       );
     });
+    await installSingleRepoMockProvider(stub);
+
+    const res = await stub.fetch("http://internal/internal/create-pr", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: "Test PR",
+        body: "Body from integration test",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json<{ prNumber: number; prUrl: string; updated: boolean }>();
+    expect(body.prNumber).toBe(1);
+    expect(body.prUrl).toBe("https://github.com/acme/web-app/pull/1");
+    expect(body.updated).toBe(true);
+
+    const artifacts = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM artifacts WHERE type = 'pr'"
+    );
+    expect(artifacts).toHaveLength(1);
+  });
+
+  it("returns 409 when a legacy PR artifact has no number", async () => {
+    const { stub } = await initSession({ userId: "user-1" });
+    await seedProcessingMessageForOwner(stub, "msg-processing-legacy");
+
+    await runInDurableObject(stub, (instance: SessionDO) => {
+      instance.ctx.storage.sql.exec(
+        "INSERT INTO artifacts (id, type, url, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "artifact-pr-numberless",
+        "pr",
+        "https://github.com/acme/web-app/pull/1",
+        null,
+        Date.now(),
+        Date.now()
+      );
+    });
+    await installSingleRepoMockProvider(stub);
 
     const res = await stub.fetch("http://internal/internal/create-pr", {
       method: "POST",
@@ -375,11 +466,22 @@ describe("POST /internal/create-pr", () => {
               id: prCounter,
               webUrl: `https://github.com/${config.repository.owner}/${config.repository.name}/pull/${prCounter}`,
               apiUrl: `https://api.github.com/repos/${config.repository.owner}/${config.repository.name}/pulls/${prCounter}`,
-              state: "open" as const,
+              lifecycleState: "open" as const,
+              isDraft: false,
               sourceBranch: "open-inspect/test-session",
               targetBranch: "main",
             };
           },
+          getPullRequest: async (config: { owner: string; name: string; number: number }) => ({
+            number: config.number,
+            url: `https://github.com/${config.owner}/${config.name}/pull/${config.number}`,
+            lifecycleState: "open" as const,
+            isDraft: false,
+            headBranch: "open-inspect/test-session",
+            baseBranch: "main",
+            repoOwner: config.owner,
+            repoName: config.name,
+          }),
           buildManualPullRequestUrl: (config: {
             owner: string;
             name: string;
@@ -451,23 +553,20 @@ describe("POST /internal/create-pr", () => {
       expect(memberRows[0]?.branch_name).not.toBeNull();
       expect(memberRows[1]?.branch_name).toBe(memberRows[0]?.branch_name);
 
-      // The WebSocket session state surfaces each member's own PR URL.
-      const state = await runInDurableObject(stub, (instance: SessionDO) =>
-        (
-          instance as unknown as {
-            getSessionState(): Promise<{
-              repositories: Array<{ repoName: string; prUrl: string | null }>;
-            }>;
-          }
-        ).getSessionState()
-      );
+      // The canonical session snapshot surfaces each member's own PR URL.
+      const snapshot = await (
+        await stub.fetch("http://internal/internal/snapshot")
+      ).json<{
+        session: { repositories: Array<{ repoName: string; prUrl: string | null }> };
+      }>();
+      const state = snapshot.session;
       expect(state.repositories.map((repo) => repo.prUrl)).toEqual([
         "https://github.com/acme/web-app/pull/1",
         "https://github.com/acme/backend/pull/2",
       ]);
     });
 
-    it("returns 409 only for the member that already has a PR", async () => {
+    it("reuses a member's open PR and still creates fresh PRs for other members", async () => {
       const { stub } = await initSession({ userId: "user-1", ...multiRepoInit });
       await seedProcessingMessage(stub, "msg-multi-2");
       await installMockProvider(stub);
@@ -480,17 +579,22 @@ describe("POST /internal/create-pr", () => {
       });
       expect(first.status).toBe(200);
 
-      const duplicate = await postPr(stub, {
+      const again = await postPr(stub, {
         title: "Backend PR again",
         body: "desc",
         repoOwner: "acme",
         repoName: "backend",
       });
-      expect(duplicate.status).toBe(409);
-      const dupBody = await duplicate.json<{ error: string }>();
-      expect(dupBody.error).toBe(
-        "A pull request has already been created for acme/backend in this session."
+      expect(again.status).toBe(200);
+      const againBody = await again.json<{ prNumber: number; updated: boolean }>();
+      expect(againBody).toMatchObject({ prNumber: 1, updated: true });
+
+      // The follow-up reused the PR — no second backend artifact.
+      const backendArtifacts = await queryDO<{ id: string }>(
+        stub,
+        "SELECT id FROM artifacts WHERE type = 'pr'"
       );
+      expect(backendArtifacts).toHaveLength(1);
 
       const other = await postPr(stub, {
         title: "Web PR",
@@ -499,17 +603,16 @@ describe("POST /internal/create-pr", () => {
         repoName: "web-app",
       });
       expect(other.status).toBe(200);
+      const otherBody = await other.json<{ updated: boolean }>();
+      expect(otherBody.updated).toBe(false);
     });
 
     it("rejects an omitted target on a multi-repo session through the proxy route", async () => {
       const sessionName = `pr-target-400-${Date.now()}`;
-      const { stub } = await initNamedSession(sessionName, multiRepoInit);
-      const sandboxToken = `sandbox-token-${sessionName}`;
-      await seedSandboxAuth(stub, { authToken: sandboxToken, sandboxId: `sandbox-${sessionName}` });
+      await initNamedSession(sessionName, multiRepoInit);
 
-      const res = await SELF.fetch(`https://test.local/sessions/${sessionName}/pr`, {
+      const res = await serviceFetch(`https://test.local/sessions/${sessionName}/pr`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${sandboxToken}` },
         body: JSON.stringify({ title: "PR", body: "desc" }),
       });
 
@@ -522,13 +625,10 @@ describe("POST /internal/create-pr", () => {
 
     it("rejects a non-member target with 403 through the proxy route", async () => {
       const sessionName = `pr-target-403-${Date.now()}`;
-      const { stub } = await initNamedSession(sessionName, multiRepoInit);
-      const sandboxToken = `sandbox-token-${sessionName}`;
-      await seedSandboxAuth(stub, { authToken: sandboxToken, sandboxId: `sandbox-${sessionName}` });
+      await initNamedSession(sessionName, multiRepoInit);
 
-      const res = await SELF.fetch(`https://test.local/sessions/${sessionName}/pr`, {
+      const res = await serviceFetch(`https://test.local/sessions/${sessionName}/pr`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${sandboxToken}` },
         body: JSON.stringify({
           title: "PR",
           body: "desc",

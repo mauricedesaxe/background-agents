@@ -1,78 +1,53 @@
 import type { Logger } from "../../../logger";
-import { z } from "zod";
 import {
-  createBoardArtifactRequestSchema,
   createMediaArtifactRequestSchema,
-  sandboxEventSchema,
-  type BoardArtifactMetadata,
   type CreateMediaArtifactRequest,
-  type SessionArtifact,
-} from "@open-inspect/shared";
-import type { ParticipantRole, SandboxEvent } from "../../../types";
+} from "@open-inspect/shared/types/session-api";
+import type { SessionArtifact } from "@open-inspect/shared/types/artifacts";
+import { sandboxEventSchema, type SandboxEvent } from "@open-inspect/shared/types/sandbox-events";
+import type { ParticipantRole } from "@open-inspect/shared/types/sessions";
 import { isDeadSandboxStatus } from "../../../sandbox/lifecycle/decisions";
-import type { OpenAITokenRefreshResult } from "../../openai-token-refresh-service";
+import {
+  OpenAITokenNotConfiguredError,
+  OpenAITokenStorageError,
+  OpenAITokenUnauthorizedError,
+  OpenAITokenUpstreamError,
+  type OpenAIToken,
+} from "../../openai-token-refresh-service";
+import type { XaiTokenRefreshResult } from "../../xai-token-refresh-service";
 import type { ScmCredentialsResult } from "../../scm-credentials-service";
 import type { SessionMessenger } from "../../messenger";
-import type { SessionRepository } from "../../repository";
+import type { MessageRepository } from "../../message-repository";
+import type { ArtifactRepository } from "../../artifact-repository";
+import type { EventRepository } from "../../event-repository";
+import type { ParticipantRepository } from "../../participant-repository";
 import type { SandboxRow, SessionRow } from "../../types";
 import { assertArtifactType } from "../../artifacts";
 import { parseTunnelUrls } from "../../tunnel-urls";
+import { z } from "zod";
 
-interface AddParticipantRequest {
-  userId: string;
-  scmLogin?: string;
-  scmName?: string;
-  scmEmail?: string;
-  role?: string;
-}
+const addParticipantRequestSchema = z.object({
+  userId: z.string(),
+  scmLogin: z.string().optional(),
+  scmName: z.string().optional(),
+  scmEmail: z.string().optional(),
+  role: z.enum(["owner", "member"] satisfies [ParticipantRole, ParticipantRole]).optional(),
+});
 
-const processDiagnosticSchema = z
-  .object({
-    pid: z.number().int().positive().nullable(),
-    running: z.boolean(),
-    exitCode: z.number().int().nullable(),
-    treeRssBytes: z.number().int().nonnegative().nullable().optional(),
-  })
-  .strict();
-
-const supervisorHeartbeatSchema = z
-  .object({
-    sandboxId: z.string().min(1).max(200),
-    observedAt: z.number().int().nonnegative(),
-    sequence: z.number().int().nonnegative(),
-    bootMode: z.string().min(1).max(40),
-    bootPhase: z.string().min(1).max(40),
-    processes: z
-      .object({
-        supervisor: processDiagnosticSchema,
-        opencode: processDiagnosticSchema,
-        bridge: processDiagnosticSchema,
-      })
-      .strict(),
-    cgroup: z
-      .object({
-        memoryCurrentBytes: z.number().int().nonnegative().nullable(),
-        memoryMaxBytes: z.number().int().positive().nullable(),
-        highCount: z.number().int().nonnegative().nullable().optional(),
-        maxCount: z.number().int().nonnegative().nullable().optional(),
-        oomCount: z.number().int().nonnegative().nullable(),
-        oomKillCount: z.number().int().nonnegative().nullable(),
-      })
-      .strict(),
-  })
-  .strict();
+type AddParticipantRequest = z.infer<typeof addParticipantRequestSchema>;
 
 export interface SandboxHandlerDeps {
-  repository: Pick<
-    SessionRepository,
-    "createParticipant" | "createArtifact" | "createEvent" | "getProcessingMessage"
-  >;
+  messageRepository: MessageRepository;
+  eventRepository: EventRepository;
+  participantRepository: ParticipantRepository;
+  artifactRepository: ArtifactRepository;
   processSandboxEvent: (event: SandboxEvent) => Promise<void>;
   getSandbox: () => SandboxRow | null;
   isValidSandboxToken: (token: string | null, sandbox: SandboxRow | null) => Promise<boolean>;
   getSession: () => SessionRow | null;
-  refreshOpenAIToken: (session: SessionRow, log: Logger) => Promise<OpenAITokenRefreshResult>;
-  isOpenAISecretsConfigured: () => boolean;
+  refreshOpenAIToken: (session: SessionRow, log: Logger) => Promise<OpenAIToken>;
+  refreshXaiToken: (session: SessionRow, log: Logger) => Promise<XaiTokenRefreshResult>;
+  isManagedSecretsConfigured: () => boolean;
   getScmCredentials: (log: Logger) => Promise<ScmCredentialsResult>;
   messenger: SessionMessenger;
   generateId: () => string;
@@ -81,12 +56,11 @@ export interface SandboxHandlerDeps {
 
 export interface SandboxHandler {
   sandboxEvent: (request: Request) => Promise<Response>;
-  supervisorHeartbeat: (request: Request, log: Logger) => Promise<Response>;
   createMediaArtifact: (request: Request) => Promise<Response>;
-  createBoardArtifact: (request: Request) => Promise<Response>;
   addParticipant: (request: Request) => Promise<Response>;
   verifySandboxToken: (request: Request, log: Logger) => Promise<Response>;
   openaiTokenRefresh: (log: Logger) => Promise<Response>;
+  xaiTokenRefresh: (log: Logger) => Promise<Response>;
   scmCredentials: (log: Logger) => Promise<Response>;
   /** Return the sandbox's resolved tunnel URLs as a `{ [port]: url }` map. */
   tunnelUrls: (log: Logger) => Promise<Response>;
@@ -112,52 +86,6 @@ export function createSandboxHandler(deps: SandboxHandlerDeps): SandboxHandler {
       return Response.json({ status: "ok" });
     },
 
-    async supervisorHeartbeat(request: Request, log: Logger): Promise<Response> {
-      let raw: unknown;
-      try {
-        raw = await request.json();
-      } catch {
-        return Response.json({ error: "Invalid request body" }, { status: 400 });
-      }
-
-      const parsed = supervisorHeartbeatSchema.safeParse(raw);
-      if (!parsed.success) {
-        return Response.json({ error: "Invalid supervisor heartbeat" }, { status: 400 });
-      }
-
-      const sandbox = deps.getSandbox();
-      if (!sandbox) return Response.json({ error: "No sandbox" }, { status: 404 });
-      if (parsed.data.sandboxId !== sandbox.modal_sandbox_id) {
-        return Response.json({ error: "Sandbox ID mismatch" }, { status: 409 });
-      }
-
-      log.info("Supervisor heartbeat", {
-        event: "sandbox.supervisor_heartbeat",
-        sandbox_id: parsed.data.sandboxId,
-        observed_at: parsed.data.observedAt,
-        sequence: parsed.data.sequence,
-        boot_mode: parsed.data.bootMode,
-        boot_phase: parsed.data.bootPhase,
-        supervisor_pid: parsed.data.processes.supervisor.pid,
-        supervisor_running: parsed.data.processes.supervisor.running,
-        opencode_pid: parsed.data.processes.opencode.pid,
-        opencode_running: parsed.data.processes.opencode.running,
-        opencode_exit_code: parsed.data.processes.opencode.exitCode,
-        opencode_tree_rss_bytes: parsed.data.processes.opencode.treeRssBytes,
-        bridge_pid: parsed.data.processes.bridge.pid,
-        bridge_running: parsed.data.processes.bridge.running,
-        bridge_exit_code: parsed.data.processes.bridge.exitCode,
-        bridge_tree_rss_bytes: parsed.data.processes.bridge.treeRssBytes,
-        memory_current_bytes: parsed.data.cgroup.memoryCurrentBytes,
-        memory_max_bytes: parsed.data.cgroup.memoryMaxBytes,
-        memory_high_count: parsed.data.cgroup.highCount,
-        memory_max_count: parsed.data.cgroup.maxCount,
-        oom_count: parsed.data.cgroup.oomCount,
-        oom_kill_count: parsed.data.cgroup.oomKillCount,
-      });
-      return new Response(null, { status: 204 });
-    },
-
     async createMediaArtifact(request: Request): Promise<Response> {
       let raw: unknown;
       try {
@@ -181,7 +109,7 @@ export function createSandboxHandler(deps: SandboxHandlerDeps): SandboxHandler {
         return Response.json({ error: "artifactId and objectKey are required" }, { status: 400 });
       }
 
-      const processingMessage = deps.repository.getProcessingMessage();
+      const processingMessage = deps.messageRepository.getProcessingMessage();
       if (!processingMessage) {
         return Response.json({ error: "No active prompt" }, { status: 409 });
       }
@@ -198,7 +126,7 @@ export function createSandboxHandler(deps: SandboxHandlerDeps): SandboxHandler {
         updatedAt: now,
       };
 
-      deps.repository.createArtifact({
+      deps.artifactRepository.createArtifact({
         id: artifact.id,
         type: artifact.type,
         url: artifact.url,
@@ -217,7 +145,7 @@ export function createSandboxHandler(deps: SandboxHandlerDeps): SandboxHandler {
         timestamp: timestampSeconds,
       };
 
-      deps.repository.createEvent({
+      deps.eventRepository.createEvent({
         id: deps.generateId(),
         type: event.type,
         data: JSON.stringify(event),
@@ -231,7 +159,7 @@ export function createSandboxHandler(deps: SandboxHandlerDeps): SandboxHandler {
       return Response.json({ status: "ok", artifactId: artifact.id });
     },
 
-    async createBoardArtifact(request: Request): Promise<Response> {
+    async addParticipant(request: Request): Promise<Response> {
       let raw: unknown;
       try {
         raw = await request.json();
@@ -239,56 +167,23 @@ export function createSandboxHandler(deps: SandboxHandlerDeps): SandboxHandler {
         return Response.json({ error: "Invalid request body" }, { status: 400 });
       }
 
-      const parsed = createBoardArtifactRequestSchema.safeParse(raw);
-      if (!parsed.success) {
-        return Response.json(
-          { error: "artifactId, boardId and title are required" },
-          { status: 400 }
-        );
+      const result = addParticipantRequestSchema.safeParse(raw);
+      if (!result.success) {
+        return Response.json({ error: "Invalid participant body" }, { status: 400 });
       }
-      const body = parsed.data;
 
-      const now = deps.now();
-      const metadata: BoardArtifactMetadata = { boardId: body.boardId, title: body.title };
-      // The board document lives in the BoardRoom DO, reached over the board WS,
-      // so the artifact carries no URL. artifact_created is enough to surface the
-      // board on the web client (it upserts any artifact type); a board has no
-      // bytes to stream, so it needs no timeline `sandbox_event`.
-      const artifact: SessionArtifact = {
-        id: body.artifactId,
-        type: "board",
-        url: null,
-        metadata: metadata as unknown as Record<string, unknown>,
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      deps.repository.createArtifact({
-        id: artifact.id,
-        type: artifact.type,
-        url: artifact.url,
-        metadata: JSON.stringify(metadata),
-        createdAt: now,
-      });
-
-      deps.messenger.broadcast({ type: "artifact_created", artifact });
-
-      return Response.json({ status: "ok", artifactId: artifact.id });
-    },
-
-    async addParticipant(request: Request): Promise<Response> {
-      const body = (await request.json()) as AddParticipantRequest;
+      const body: AddParticipantRequest = result.data;
 
       const id = deps.generateId();
       const now = deps.now();
 
-      deps.repository.createParticipant({
+      deps.participantRepository.createParticipant({
         id,
         userId: body.userId,
         scmLogin: body.scmLogin ?? null,
         scmName: body.scmName ?? null,
         scmEmail: body.scmEmail ?? null,
-        role: (body.role ?? "member") as ParticipantRole,
+        role: body.role ?? "member",
         joinedAt: now,
       });
 
@@ -342,22 +237,54 @@ export function createSandboxHandler(deps: SandboxHandlerDeps): SandboxHandler {
         return Response.json({ error: "No session" }, { status: 404 });
       }
 
-      if (!deps.isOpenAISecretsConfigured()) {
+      if (!deps.isManagedSecretsConfigured()) {
         return Response.json({ error: "Secrets not configured" }, { status: 500 });
       }
 
-      const result = await deps.refreshOpenAIToken(session, log);
-      if (!result.ok) {
-        return Response.json({ error: result.error }, { status: result.status });
+      let token: OpenAIToken;
+      try {
+        token = await deps.refreshOpenAIToken(session, log);
+      } catch (error) {
+        if (error instanceof OpenAITokenNotConfiguredError) {
+          return Response.json({ error: error.message }, { status: 404 });
+        }
+        if (error instanceof OpenAITokenUnauthorizedError) {
+          return Response.json({ error: error.message }, { status: 401 });
+        }
+        if (error instanceof OpenAITokenStorageError) {
+          return Response.json({ error: error.message }, { status: 500 });
+        }
+        if (error instanceof OpenAITokenUpstreamError) {
+          return Response.json({ error: error.message }, { status: 502 });
+        }
+        throw error;
       }
 
       return Response.json(
         {
-          access_token: result.accessToken,
-          expires_in: result.expiresIn,
-          account_id: result.accountId,
+          access_token: token.accessToken,
+          expires_in: token.expiresIn,
+          account_id: token.accountId,
         },
-        { status: 200 }
+        { status: 200, headers: { "Cache-Control": "no-store" } }
+      );
+    },
+
+    async xaiTokenRefresh(log: Logger): Promise<Response> {
+      const session = deps.getSession();
+      if (!session) {
+        return Response.json({ error: "No session" }, { status: 404 });
+      }
+      if (!deps.isManagedSecretsConfigured()) {
+        return Response.json({ error: "Secrets not configured" }, { status: 500 });
+      }
+      const result = await deps.refreshXaiToken(session, log);
+      if (!result.ok) {
+        return Response.json({ error: result.error }, { status: result.status });
+      }
+      return Response.json(
+        { access_token: result.accessToken, expires_in: result.expiresIn },
+        { status: 200, headers: { "Cache-Control": "no-store" } }
       );
     },
 

@@ -1,7 +1,7 @@
 /**
  * Unit tests for SessionWebSocketManagerImpl.
  *
- * Uses fake DurableObjectState and mock SessionRepository to test
+ * Uses fake DurableObjectState and mock repositories to test
  * all WebSocket mechanics in isolation from the full DO.
  */
 
@@ -10,7 +10,11 @@ import { SessionWebSocketManagerImpl } from "./websocket-manager";
 import type { WebSocketManagerConfig } from "./websocket-manager";
 import type { Logger } from "../logger";
 import type { ClientInfo } from "../types";
-import type { SessionRepository, WsClientMappingResult } from "./repository";
+import type { SandboxRepository } from "./sandbox-repository";
+import type {
+  WsClientMappingRepository,
+  WsClientMappingResult,
+} from "./ws-client-mapping-repository";
 import type { SandboxRow } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -19,7 +23,6 @@ import type { SandboxRow } from "./types";
 
 /** Minimal fake WebSocket for testing. */
 function createFakeWebSocket(readyState = WebSocket.OPEN): WebSocket {
-  let attachment: unknown = null;
   return {
     readyState,
     send: vi.fn(),
@@ -43,10 +46,8 @@ function createFakeWebSocket(readyState = WebSocket.OPEN): WebSocket {
     accept: vi.fn(),
     serialize: vi.fn(),
     deserialize: vi.fn(),
-    serializeAttachment: vi.fn((value: unknown) => {
-      attachment = value;
-    }),
-    deserializeAttachment: vi.fn(() => attachment),
+    serializeAttachment: vi.fn(),
+    deserializeAttachment: vi.fn(),
   } as unknown as WebSocket;
 }
 
@@ -73,9 +74,7 @@ function createFakeCtx(): FakeCtx {
       return Array.from(sockets.keys());
     },
     setWebSocketAutoResponse: vi.fn(),
-    storage: {
-      setAlarm: vi.fn(),
-    },
+    storage: { setAlarm: vi.fn() },
     id: { toString: () => "test-do-id" },
     waitUntil: vi.fn(),
   } as unknown as DurableObjectState;
@@ -94,7 +93,7 @@ function createMockLogger(): Logger {
   };
 }
 
-/** Create a mock SessionRepository with configurable return values. */
+/** Create mock repositories with configurable return values. */
 function createMockRepository() {
   const mappings = new Map<string, WsClientMappingResult>();
   let sandboxRow: SandboxRow | null = null;
@@ -125,7 +124,7 @@ function createMockRepository() {
         scm_login: null,
       });
     },
-  } as unknown as SessionRepository;
+  } as unknown as SandboxRepository;
 
   return {
     repo,
@@ -170,10 +169,10 @@ function createSandboxRow(modalSandboxId: string): SandboxRow {
     last_activity: null,
     last_spawn_error: null,
     last_spawn_error_at: null,
-    stop_unreconciled_at: null,
-    stop_unreconciled_provider_id: null,
     code_server_url: null,
     code_server_password: null,
+    vnc_url: null,
+    vnc_password: null,
     tunnel_urls: null,
     ttyd_url: null,
     ttyd_token: null,
@@ -189,15 +188,15 @@ function createManager() {
   const mockRepo = createMockRepository();
   const log = createMockLogger();
 
-  const manager = new SessionWebSocketManagerImpl(fakeCtx.state, mockRepo.repo, log, TEST_CONFIG);
-
-  return {
-    manager,
-    sockets: fakeCtx.sockets,
-    state: fakeCtx.state,
-    mockRepo,
+  const manager = new SessionWebSocketManagerImpl(
+    fakeCtx.state,
+    mockRepo.repo,
+    mockRepo.repo as unknown as WsClientMappingRepository,
     log,
-  };
+    TEST_CONFIG
+  );
+
+  return { manager, sockets: fakeCtx.sockets, state: fakeCtx.state, mockRepo, log };
 }
 
 // ---------------------------------------------------------------------------
@@ -205,64 +204,6 @@ function createManager() {
 // ---------------------------------------------------------------------------
 
 describe("SessionWebSocketManagerImpl", () => {
-  it("reports sandbox socket presence without filtering or closing it", () => {
-    const { manager, sockets, mockRepo } = createManager();
-    const ws = createFakeWebSocket();
-    sockets.set(ws, ["sandbox"]);
-    mockRepo.setSandbox({ ...createSandboxRow("sb-1"), status: "connecting" });
-
-    expect(manager.hasSandboxSocket()).toBe(true);
-    expect(ws.close).not.toHaveBeenCalled();
-  });
-
-  it("preserves control-plane close provenance in the socket attachment", () => {
-    const { manager } = createManager();
-    const ws = createFakeWebSocket();
-    manager.acceptAndSetSandboxSocket(ws);
-
-    expect(manager.closeSandboxSocket(1012, "Stop confirmation timed out")).toBe(true);
-
-    expect(manager.getSandboxCloseInitiator(ws)).toBe("Stop confirmation timed out");
-    expect(manager.getSandboxCloseTrack(ws)).toBe("control_plane_teardown");
-    expect(ws.close).toHaveBeenCalledWith(1012, "Stop confirmation timed out");
-  });
-
-  it("does not close a replacement when a stale socket stop times out", () => {
-    const { manager } = createManager();
-    const stale = createFakeWebSocket();
-    const replacement = createFakeWebSocket();
-    manager.acceptAndSetSandboxSocket(stale);
-    manager.acceptAndSetSandboxSocket(replacement);
-
-    vi.mocked(replacement.close).mockClear();
-
-    expect(manager.closeSandboxSocketIfMatch(stale, 1012, "Stop confirmation timed out")).toBe(
-      false
-    );
-    expect(replacement.close).not.toHaveBeenCalled();
-  });
-
-  it("records socket errors separately from lifecycle teardown", () => {
-    const { manager, sockets } = createManager();
-    const ws = createFakeWebSocket();
-    sockets.set(ws, ["sandbox"]);
-    manager.acceptAndSetSandboxSocket(ws);
-
-    expect(manager.closeSandboxSocketIfMatch(ws, 1011, "Internal error", "socket_error")).toBe(
-      true
-    );
-    expect(manager.getSandboxCloseTrack(ws)).toBe("socket_error");
-  });
-
-  it("records socket errors after the socket starts closing", () => {
-    const { manager } = createManager();
-    const ws = createFakeWebSocket(WebSocket.CLOSING);
-    manager.acceptAndSetSandboxSocket(ws);
-
-    expect(manager.markSandboxSocketCloseIfMatch(ws, "Internal error", "socket_error")).toBe(true);
-    expect(manager.getSandboxCloseTrack(ws)).toBe("socket_error");
-  });
-
   describe("classify", () => {
     it("classifies sandbox socket with sandbox ID", () => {
       const { manager, sockets } = createManager();
@@ -389,7 +330,6 @@ describe("SessionWebSocketManagerImpl", () => {
 
       // Simulate hibernation: socket is in ctx but not in memory
       sockets.set(ws, ["sandbox", "sid:sb-1"]);
-      ws.serializeAttachment({ activeSandboxConnection: true });
       mockRepo.setSandbox(createSandboxRow("sb-1"));
 
       expect(manager.getSandboxSocket()).toBe(ws);
@@ -400,7 +340,6 @@ describe("SessionWebSocketManagerImpl", () => {
       const wrongWs = createFakeWebSocket();
 
       sockets.set(wrongWs, ["sandbox", "sid:wrong-id"]);
-      wrongWs.serializeAttachment({ activeSandboxConnection: true });
       mockRepo.setSandbox(createSandboxRow("correct-id"));
 
       expect(manager.getSandboxSocket()).toBeNull();
@@ -415,19 +354,6 @@ describe("SessionWebSocketManagerImpl", () => {
       expect(manager.getSandboxSocket()).toBeNull();
     });
 
-    it("withholds the existing socket while its provider stop is settling", () => {
-      const { manager, sockets, mockRepo } = createManager();
-      const ws = createFakeWebSocket();
-
-      sockets.set(ws, ["sandbox", "sid:sb-1"]);
-      const row = createSandboxRow("sb-1");
-      row.status = "stopping";
-      mockRepo.setSandbox(row);
-
-      expect(manager.getSandboxSocket()).toBeNull();
-      expect(ws.close).not.toHaveBeenCalled();
-    });
-
     it("returns null and closes zombie WS when sandbox status is stopped", () => {
       const { manager, sockets, mockRepo } = createManager();
       const ws = createFakeWebSocket();
@@ -437,6 +363,18 @@ describe("SessionWebSocketManagerImpl", () => {
       sockets.set(ws, ["sandbox", "sid:sb-1"]);
       const row = createSandboxRow("sb-1");
       row.status = "stopped";
+      mockRepo.setSandbox(row);
+
+      expect(manager.getSandboxSocket()).toBeNull();
+      expect(ws.close).toHaveBeenCalledWith(1000, "Sandbox terminated");
+    });
+
+    it("checks persisted terminal status before returning a cached open socket", () => {
+      const { manager, mockRepo } = createManager();
+      const ws = createFakeWebSocket();
+      manager.acceptAndSetSandboxSocket(ws, "sb-1");
+      const row = createSandboxRow("sb-1");
+      row.status = "stale";
       mockRepo.setSandbox(row);
 
       expect(manager.getSandboxSocket()).toBeNull();
@@ -470,36 +408,6 @@ describe("SessionWebSocketManagerImpl", () => {
     });
   });
 
-  describe("isCurrentSandboxSocket", () => {
-    it("rejects a stale connection after hibernation", () => {
-      const { manager } = createManager();
-      const stale = createFakeWebSocket();
-      const active = createFakeWebSocket();
-      manager.acceptAndSetSandboxSocket(stale, "sb-1");
-      manager.acceptAndSetSandboxSocket(active, "sb-1");
-      manager.clearSandboxSocket();
-
-      expect(manager.getSandboxSocket()).toBe(active);
-      expect(manager.isCurrentSandboxSocket(stale)).toBe(false);
-      expect(manager.isCurrentSandboxSocket(active)).toBe(true);
-    });
-
-    it("deactivates a hibernated socket when its replacement connects", () => {
-      const { manager } = createManager();
-      const stale = createFakeWebSocket();
-      const replacement = createFakeWebSocket();
-      manager.acceptAndSetSandboxSocket(stale, "sb-1");
-      manager.clearSandboxSocket();
-
-      manager.acceptAndSetSandboxSocket(replacement, "sb-1");
-      manager.clearSandboxSocket();
-
-      expect(manager.isCurrentSandboxSocket(stale)).toBe(false);
-      expect(manager.isCurrentSandboxSocket(replacement)).toBe(true);
-      expect(stale.close).toHaveBeenCalledWith(1000, "New sandbox connecting");
-    });
-  });
-
   describe("clearSandboxSocket", () => {
     it("clears the in-memory reference", () => {
       const { manager } = createManager();
@@ -511,6 +419,22 @@ describe("SessionWebSocketManagerImpl", () => {
       // Close the socket so hibernation recovery also fails,
       // confirming the cached ref was cleared.
       Object.defineProperty(ws, "readyState", { value: WebSocket.CLOSED });
+      expect(manager.getSandboxSocket()).toBeNull();
+    });
+  });
+
+  describe("detachSandboxSocket", () => {
+    it("clears and closes the cached sandbox socket even after status becomes terminal", () => {
+      const { manager, mockRepo } = createManager();
+      const ws = createFakeWebSocket();
+      manager.acceptAndSetSandboxSocket(ws, "sb-1");
+      const row = createSandboxRow("sb-1");
+      row.status = "stale";
+      mockRepo.setSandbox(row);
+
+      manager.detachSandboxSocket(1011, "Stop confirmation timed out");
+
+      expect(ws.close).toHaveBeenCalledWith(1011, "Stop confirmation timed out");
       expect(manager.getSandboxSocket()).toBeNull();
     });
   });

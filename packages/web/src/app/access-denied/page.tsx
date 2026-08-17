@@ -1,7 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import { useSearchParams } from "next/navigation";
+import Link from "next/link";
 import { Suspense } from "react";
 import { ErrorBanner } from "@/components/ui/error-banner";
 
@@ -9,9 +9,8 @@ function AccessDeniedContent() {
   const searchParams = useSearchParams();
   const error = searchParams.get("error");
 
-  // NextAuth passes error=AccessDenied when signIn callback returns false
   const message =
-    error === "AccessDenied"
+    error === "AccessDenied" || error === "access_denied"
       ? "Your account is not authorized to use this application."
       : "An error occurred during sign in. Please try again.";
 

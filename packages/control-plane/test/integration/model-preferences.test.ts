@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
-import { DEFAULT_ENABLED_MODELS } from "@open-inspect/shared";
+import { DEFAULT_ENABLED_MODELS } from "@open-inspect/shared/models";
 import { cleanD1Tables } from "./cleanup";
 import { serviceFetch } from "./helpers";
 
@@ -50,16 +50,6 @@ describe("Model preferences API", () => {
     expect(await response.json()).toEqual({
       enabledModels: ["openai/gpt-5.4", "anthropic/claude-sonnet-4-6"],
     });
-  });
-
-  it("accepts Opus 5 without changing unrelated stored preferences", async () => {
-    const stored = ["openai/gpt-5.4", "anthropic/claude-opus-5", "openrouter/x-ai/grok-4.5"];
-    await seedPreferences(stored);
-
-    const response = await serviceFetch("https://test.local/model-preferences");
-
-    expect(await response.json()).toEqual({ enabledModels: stored });
-    expect(await getStoredModels()).toEqual(stored);
   });
 
   it("returns defaults when all stored models have been removed", async () => {

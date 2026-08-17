@@ -3,10 +3,15 @@
 import { useMemo, useState } from "react";
 import useSWR, { mutate } from "swr";
 import { toast } from "sonner";
-import type { EnvironmentRepository } from "@open-inspect/shared";
+import {
+  encodeRepositoryPathSegments,
+  formatRepositoryFullName,
+} from "@open-inspect/shared/types/repositories";
+import type { EnvironmentRepository } from "@open-inspect/shared/types/environments";
 import { Button } from "@/components/ui/button";
 import { Combobox } from "@/components/ui/combobox";
 import { RepoIcon, ChevronDownIcon } from "@/components/ui/icons";
+import { browserApiFetch } from "@/lib/browser-api-fetch";
 
 interface RepoSecretsResponse {
   secrets: { key: string }[];
@@ -33,14 +38,12 @@ export function EnvironmentSecretsImport({
 
   const source = useMemo(
     () =>
-      repositories.find(
-        (repository) => `${repository.repoOwner}/${repository.repoName}` === sourceKey
-      ) ?? null,
+      repositories.find((repository) => formatRepositoryFullName(repository) === sourceKey) ?? null,
     [repositories, sourceKey]
   );
 
   const { data, isLoading } = useSWR<RepoSecretsResponse>(
-    source ? `/api/repos/${source.repoOwner}/${source.repoName}/secrets` : null
+    source ? `/api/repos/${encodeRepositoryPathSegments(source)}/secrets` : null
   );
   const sourceSecretKeys = data?.secrets?.map((secret) => secret.key) ?? [];
 
@@ -66,7 +69,7 @@ export function EnvironmentSecretsImport({
     setImporting(true);
 
     try {
-      const response = await fetch(`/api/environments/${environmentId}/secrets/import`, {
+      const response = await browserApiFetch(`/api/environments/${environmentId}/secrets/import`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

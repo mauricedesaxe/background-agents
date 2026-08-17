@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   applyTitleUpdate,
-  buildGroupedSessionList,
+  applySessionReadState,
+  buildSessionSearchValue,
   buildSessionsPageKey,
-  collectSessionAndDescendantIds,
   CURRENT_USER_CREATED_BY,
   isArchivedSessionListKey,
   isSessionListKey,
   isUnarchivedSessionListKey,
   type SessionListResponse,
 } from "./session-list";
-import type { Session } from "@open-inspect/shared";
+import type { Session } from "@open-inspect/shared/types/sessions";
 
 function session(id: string, overrides: Partial<Session> = {}): Session {
   return {
@@ -36,8 +36,14 @@ function session(id: string, overrides: Partial<Session> = {}): Session {
 describe("buildSessionsPageKey", () => {
   it("adds the current-user creator filter", () => {
     expect(
-      buildSessionsPageKey({ excludeStatus: "archived", createdBy: [CURRENT_USER_CREATED_BY] })
-    ).toBe("/api/sessions?limit=50&offset=0&excludeStatus=archived&createdBy=me");
+      buildSessionsPageKey({
+        excludeStatus: "archived",
+        excludeAutomationLineage: true,
+        createdBy: [CURRENT_USER_CREATED_BY],
+      })
+    ).toBe(
+      "/api/sessions?limit=50&offset=0&excludeStatus=archived&excludeAutomationLineage=true&createdBy=me"
+    );
   });
 
   it("adds repeated creator filters", () => {
@@ -50,17 +56,67 @@ describe("buildSessionsPageKey", () => {
       "/api/sessions?limit=50&offset=0&excludeStatus=archived&createdBy=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&createdBy=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     );
   });
+});
 
-  it("uses opaque cursors for tree pages without adding an offset", () => {
+describe("applySessionReadState", () => {
+  it("does not let an older mutation response overwrite a newer terminal message", () => {
+    const data: SessionListResponse = {
+      sessions: [
+        session("session-1", {
+          readState: {
+            unread: true,
+            latestMessageId: "message-b",
+          },
+        }),
+      ],
+      hasMore: false,
+    };
+
     expect(
-      buildSessionsPageKey({
-        excludeStatus: "archived",
-        mode: "tree",
-        cursor: "opaque/cursor+value",
+      applySessionReadState(data, "session-1", {
+        unread: false,
+        latestMessageId: "message-a",
+      })?.sessions[0].readState
+    ).toEqual({
+      unread: true,
+      latestMessageId: "message-b",
+    });
+    expect(
+      applySessionReadState(data, "session-1", {
+        unread: false,
+        latestMessageId: "message-b",
+      })?.sessions[0].readState
+    ).toEqual({
+      unread: false,
+      latestMessageId: "message-b",
+    });
+  });
+});
+
+describe("buildSessionSearchValue", () => {
+  it("includes every repository attached to a multi-repository session", () => {
+    const value = buildSessionSearchValue(
+      session("multi", {
+        title: "Update services",
+        repositories: [
+          {
+            repoOwner: "open-inspect",
+            repoName: "background-agents",
+            repoId: 1,
+            baseBranch: "main",
+          },
+          { repoOwner: "acme", repoName: "api", repoId: 2, baseBranch: "main" },
+        ],
       })
-    ).toBe(
-      "/api/sessions?limit=50&mode=tree&cursor=opaque%2Fcursor%2Bvalue&excludeStatus=archived"
     );
+
+    expect(value).toContain("Update services");
+    expect(value).toContain("open-inspect/background-agents");
+    expect(value).toContain("acme/api");
+  });
+
+  it("falls back to the scalar repository fields", () => {
+    expect(buildSessionSearchValue(session("legacy"))).toContain("open-inspect/background-agents");
   });
 });
 
@@ -102,17 +158,17 @@ describe("isArchivedSessionListKey", () => {
 });
 
 describe("applyTitleUpdate", () => {
-  it("replaces the title and updatedAt of the matching session", () => {
+  it("replaces only the title of the matching session", () => {
     const before: SessionListResponse = {
       sessions: [session("a"), session("b"), session("c")],
       hasMore: false,
     };
 
-    const after = applyTitleUpdate(before, "b", "Renamed", 9999);
+    const after = applyTitleUpdate(before, "b", "Renamed");
 
     expect(after?.sessions).toEqual([
       session("a"),
-      session("b", { title: "Renamed", updatedAt: 9999 }),
+      session("b", { title: "Renamed" }),
       session("c"),
     ]);
   });
@@ -123,13 +179,13 @@ describe("applyTitleUpdate", () => {
       hasMore: true,
     };
 
-    const after = applyTitleUpdate(before, "a", "New", 1);
+    const after = applyTitleUpdate(before, "a", "New");
 
     expect(after?.hasMore).toBe(true);
   });
 
   it("returns undefined when data is undefined (cache miss)", () => {
-    expect(applyTitleUpdate(undefined, "a", "New", 1)).toBeUndefined();
+    expect(applyTitleUpdate(undefined, "a", "New")).toBeUndefined();
   });
 
   it("leaves the list unchanged when sessionId does not match", () => {
@@ -138,7 +194,7 @@ describe("applyTitleUpdate", () => {
       hasMore: false,
     };
 
-    const after = applyTitleUpdate(before, "missing", "New", 9999);
+    const after = applyTitleUpdate(before, "missing", "New");
 
     expect(after?.sessions).toEqual(before.sessions);
   });
@@ -148,338 +204,10 @@ describe("applyTitleUpdate", () => {
       sessions: [session("a")],
       hasMore: false,
     };
-    const beforeSnapshot = JSON.parse(JSON.stringify(before));
+    const beforeSnapshot = structuredClone(before);
 
-    applyTitleUpdate(before, "a", "Mutated", 9999);
+    applyTitleUpdate(before, "a", "Mutated");
 
     expect(before).toEqual(beforeSnapshot);
-  });
-});
-
-describe("buildGroupedSessionList", () => {
-  const now = 10 * 24 * 60 * 60 * 1000;
-  const recent = now - 60_000;
-  const inactive = now - 8 * 24 * 60 * 60 * 1000;
-
-  it("shows manual and automatic root sessions in separate source views", () => {
-    const manual = session("manual", { updatedAt: recent });
-    const automatic = session("automatic", {
-      spawnSource: "automation",
-      updatedAt: recent - 1,
-    });
-    const child = session("child", {
-      parentSessionId: automatic.id,
-      spawnSource: "agent",
-      updatedAt: recent - 2,
-    });
-
-    const manualView = buildGroupedSessionList([manual, automatic, child], {
-      sourceFilter: "manual",
-      searchQuery: "",
-      now,
-    });
-    const automaticView = buildGroupedSessionList([manual, automatic, child], {
-      sourceFilter: "automatic",
-      searchQuery: "",
-      now,
-    });
-
-    expect(manualView.groups[0].activeSessions.map(({ id }) => id)).toEqual([manual.id]);
-    expect(automaticView.groups[0].activeSessions.map(({ id }) => id)).toEqual([automatic.id]);
-    expect(automaticView.childrenMap.get(automatic.id)?.map(({ id }) => id)).toEqual([child.id]);
-  });
-
-  it("groups roots by one, multiple, or no repositories", () => {
-    const grouped = buildGroupedSessionList(
-      [
-        session("single", { updatedAt: recent }),
-        session("multiple", {
-          updatedAt: recent - 1,
-          repositories: [
-            { repoOwner: "acme", repoName: "api", repoId: 1, baseBranch: "main" },
-            { repoOwner: "acme", repoName: "web", repoId: 2, baseBranch: "main" },
-          ],
-        }),
-        session("none", {
-          repoOwner: null,
-          repoName: null,
-          updatedAt: recent - 2,
-        }),
-      ],
-      { sourceFilter: "manual", searchQuery: "", now }
-    );
-
-    expect(grouped.groups.map(({ label }) => label)).toEqual([
-      "open-inspect/background-agents",
-      "Multiple repositories",
-      "No repository",
-    ]);
-  });
-
-  it("orders groups and sessions by active recency", () => {
-    const grouped = buildGroupedSessionList(
-      [
-        session("older-a", { repoName: "a", updatedAt: recent - 30 }),
-        session("newer-a", { repoName: "a", updatedAt: recent - 10 }),
-        session("newest-b", { repoName: "b", updatedAt: recent }),
-      ],
-      { sourceFilter: "manual", searchQuery: "", now }
-    );
-
-    expect(grouped.groups.map(({ label }) => label)).toEqual(["open-inspect/b", "open-inspect/a"]);
-    expect(grouped.groups[1].activeSessions.map(({ id }) => id)).toEqual(["newer-a", "older-a"]);
-  });
-
-  it("keeps inactive roots in active groups and hides inactive-only groups", () => {
-    const grouped = buildGroupedSessionList(
-      [
-        session("active", { repoName: "mixed", updatedAt: recent }),
-        session("old", { repoName: "mixed", updatedAt: inactive }),
-        session("hidden", { repoName: "inactive-only", updatedAt: inactive - 1 }),
-      ],
-      { sourceFilter: "manual", searchQuery: "", now }
-    );
-
-    expect(grouped.groups.map(({ label }) => label)).toEqual(["open-inspect/mixed"]);
-    expect(grouped.groups[0].inactiveSessions.map(({ id }) => id)).toEqual(["old"]);
-  });
-
-  it("reports no visible sessions when every group is inactive", () => {
-    const grouped = buildGroupedSessionList(
-      [session("hidden", { repoName: "inactive-only", updatedAt: inactive })],
-      { sourceFilter: "manual", searchQuery: "", now }
-    );
-
-    expect(grouped.groups).toEqual([]);
-    expect(grouped.hasFilteredSessions).toBe(false);
-  });
-
-  it("reveals a matching inactive-only group without promoting child sessions", () => {
-    const parent = session("parent", {
-      title: "Old parent",
-      repoName: "inactive-only",
-      updatedAt: inactive,
-    });
-    const child = session("child", {
-      title: "Matching child",
-      parentSessionId: parent.id,
-      spawnSource: "agent",
-      repoName: "different-child-repo",
-      updatedAt: inactive + 1,
-    });
-
-    const grouped = buildGroupedSessionList([parent, child], {
-      sourceFilter: "manual",
-      searchQuery: "matching",
-      now,
-    });
-
-    expect(grouped.groups.map(({ label }) => label)).toEqual(["open-inspect/inactive-only"]);
-    expect(grouped.groups[0].inactiveSessions.map(({ id }) => id)).toEqual([parent.id]);
-    expect(grouped.childrenMap.get(parent.id)?.map(({ id }) => id)).toEqual([child.id]);
-  });
-
-  it("matches a root session directly", () => {
-    const grouped = buildGroupedSessionList(
-      [session("matching", { title: "Matching root", updatedAt: recent })],
-      { sourceFilter: "manual", searchQuery: "matching root", now }
-    );
-
-    expect(grouped.groups[0].activeSessions.map(({ id }) => id)).toEqual(["matching"]);
-  });
-
-  it("does not parse the automatic title prefix", () => {
-    const grouped = buildGroupedSessionList(
-      [session("manual", { title: "[Auto] Manual session", updatedAt: recent })],
-      { sourceFilter: "automatic", searchQuery: "", now }
-    );
-
-    expect(grouped.groups).toEqual([]);
-    expect(grouped.hasFilteredSessions).toBe(false);
-  });
-
-  it("promotes a child whose parent is absent from the current page", () => {
-    const orphan = session("orphan", {
-      parentSessionId: "parent-on-later-page",
-      spawnSource: "agent",
-      updatedAt: recent,
-    });
-
-    const grouped = buildGroupedSessionList([orphan], {
-      sourceFilter: "manual",
-      searchQuery: "",
-      now,
-    });
-
-    expect(grouped.groups[0].activeSessions.map(({ id }) => id)).toEqual([orphan.id]);
-  });
-
-  it("keeps an old root active when its child is active recently", () => {
-    const parent = session("parent", { updatedAt: inactive });
-    const child = session("child", {
-      parentSessionId: parent.id,
-      spawnSource: "agent",
-      updatedAt: recent,
-    });
-
-    const grouped = buildGroupedSessionList([parent, child], {
-      sourceFilter: "manual",
-      searchQuery: "",
-      now,
-    });
-
-    expect(grouped.groups[0].activeSessions.map(({ id }) => id)).toEqual([parent.id]);
-  });
-
-  it("keeps an old root active when its child completed recently", () => {
-    const parent = session("parent", { updatedAt: inactive });
-    const child = session("child", {
-      parentSessionId: parent.id,
-      spawnSource: "agent",
-      status: "completed",
-      updatedAt: recent,
-    });
-
-    const grouped = buildGroupedSessionList([parent, child], {
-      sourceFilter: "manual",
-      searchQuery: "",
-      now,
-    });
-
-    expect(grouped.groups[0].activeSessions.map(({ id }) => id)).toEqual([parent.id]);
-  });
-
-  it("keeps a recent root active when its child is old", () => {
-    const parent = session("parent", { updatedAt: recent });
-    const child = session("child", {
-      parentSessionId: parent.id,
-      spawnSource: "agent",
-      updatedAt: inactive,
-    });
-
-    const grouped = buildGroupedSessionList([parent, child], {
-      sourceFilter: "manual",
-      searchQuery: "",
-      now,
-    });
-
-    expect(grouped.groups[0].activeSessions.map(({ id }) => id)).toEqual([parent.id]);
-  });
-
-  it("orders roots by newest activity anywhere in their subtrees", () => {
-    const oldParent = session("old-parent", { updatedAt: inactive });
-    const recentChild = session("recent-child", {
-      parentSessionId: oldParent.id,
-      spawnSource: "agent",
-      updatedAt: recent,
-    });
-    const newerRoot = session("newer-root", { updatedAt: recent - 1 });
-
-    const grouped = buildGroupedSessionList([newerRoot, oldParent, recentChild], {
-      sourceFilter: "manual",
-      searchQuery: "",
-      now,
-    });
-
-    expect(grouped.groups[0].activeSessions.map(({ id }) => id)).toEqual([
-      oldParent.id,
-      newerRoot.id,
-    ]);
-  });
-
-  it("classifies a tree from the root source and repository", () => {
-    const parent = session("parent", { repoName: "root-repo", updatedAt: inactive });
-    const child = session("child", {
-      parentSessionId: parent.id,
-      spawnSource: "automation",
-      repoName: "child-repo",
-      updatedAt: recent,
-    });
-
-    const manual = buildGroupedSessionList([parent, child], {
-      sourceFilter: "manual",
-      searchQuery: "",
-      now,
-    });
-    const automatic = buildGroupedSessionList([parent, child], {
-      sourceFilter: "automatic",
-      searchQuery: "",
-      now,
-    });
-
-    expect(manual.groups.map(({ label }) => label)).toEqual(["open-inspect/root-repo"]);
-    expect(automatic.groups).toEqual([]);
-  });
-
-  it("terminates subtree activity traversal on a cycle", () => {
-    const grouped = buildGroupedSessionList(
-      [
-        session("a", { parentSessionId: "b", updatedAt: recent }),
-        session("b", { parentSessionId: "a", updatedAt: inactive }),
-      ],
-      { sourceFilter: "manual", searchQuery: "", now }
-    );
-
-    expect(grouped.groups).toEqual([]);
-  });
-});
-
-describe("collectSessionAndDescendantIds", () => {
-  it("collects the session plus its children and grandchildren", () => {
-    const sessions = [
-      session("parent"),
-      session("child", { parentSessionId: "parent", spawnSource: "agent" }),
-      session("grandchild", { parentSessionId: "child", spawnSource: "agent" }),
-      session("unrelated"),
-    ];
-
-    const ids = collectSessionAndDescendantIds(sessions, "parent");
-
-    expect(ids).toEqual(new Set(["parent", "child", "grandchild"]));
-  });
-
-  it("follows parent links regardless of list ordering", () => {
-    // grandchild appears before its parent in the list.
-    const sessions = [
-      session("grandchild", { parentSessionId: "child" }),
-      session("child", { parentSessionId: "parent" }),
-      session("parent"),
-    ];
-
-    expect(collectSessionAndDescendantIds(sessions, "parent")).toEqual(
-      new Set(["parent", "child", "grandchild"])
-    );
-  });
-
-  it("does not gate on spawn source", () => {
-    const sessions = [
-      session("parent"),
-      session("child", { parentSessionId: "parent", spawnSource: "user" }),
-    ];
-
-    expect(collectSessionAndDescendantIds(sessions, "parent")).toEqual(
-      new Set(["parent", "child"])
-    );
-  });
-
-  it("returns just the id when it has no descendants", () => {
-    const sessions = [session("a"), session("b", { parentSessionId: "other" })];
-
-    expect(collectSessionAndDescendantIds(sessions, "a")).toEqual(new Set(["a"]));
-  });
-
-  it("returns just the id for an empty list", () => {
-    // Descendants not currently loaded are reconciled by the next server fetch.
-    expect(collectSessionAndDescendantIds([], "x")).toEqual(new Set(["x"]));
-  });
-
-  it("terminates on a parent-link cycle", () => {
-    // Corrupt data (a→b→a) must not infinite-loop the fixed-point walk.
-    const sessions = [
-      session("a", { parentSessionId: "b" }),
-      session("b", { parentSessionId: "a" }),
-    ];
-
-    expect(collectSessionAndDescendantIds(sessions, "a")).toEqual(new Set(["a", "b"]));
   });
 });

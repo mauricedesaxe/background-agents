@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { handleRequest } from "./router";
-import { signedServiceRequest, TEST_SERVICE_SECRETS } from "./router.test-support";
+import { handleRequest, routes } from "./router";
+import {
+  signedServiceRequest,
+  TEST_BACKGROUND_TASK_CONTEXT,
+  TEST_SERVICE_SECRETS,
+} from "./router.test-support";
+
+function routeFor(method: string, path: string) {
+  return routes.find((route) => route.method === method && route.pattern.test(path));
+}
 
 function createEnv(verifyStatus: number) {
   const fetch = vi
@@ -15,14 +23,12 @@ function createEnv(verifyStatus: number) {
   };
 
   const env = {
+    ...TEST_SERVICE_SECRETS,
     SCM_PROVIDER: "gitlab",
     GITLAB_ACCESS_TOKEN: "glpat-test",
     DB: {
       prepare: vi.fn(() => statement),
-      batch: vi.fn(async () => [
-        { results: [], meta: { changes: 0 } },
-        { results: [], meta: { changes: 1 } },
-      ]),
+      batch: vi.fn(),
       exec: vi.fn(),
       dump: vi.fn(),
     },
@@ -47,7 +53,8 @@ describe("router sandbox-token fallback", () => {
         method: "POST",
         headers: { Authorization: "Bearer valid-sandbox-token" },
       }),
-      env as never
+      env as never,
+      TEST_BACKGROUND_TASK_CONTEXT
     );
 
     expect(response.status).toBe(202);
@@ -61,7 +68,8 @@ describe("router sandbox-token fallback", () => {
         method: "POST",
         headers: { Authorization: "Bearer invalid-token" },
       }),
-      env as never
+      env as never,
+      TEST_BACKGROUND_TASK_CONTEXT
     );
 
     expect(response.status).toBe(401);
@@ -74,78 +82,94 @@ describe("router sandbox-token fallback", () => {
       new Request("https://test.local/analytics/summary", {
         headers: { Authorization: "Bearer invalid-token" },
       }),
-      env as never
+      env as never,
+      TEST_BACKGROUND_TASK_CONTEXT
     );
 
     expect(response.status).toBe(401);
     expect(doFetch).not.toHaveBeenCalled();
   });
 
-  it("rejects a valid service principal from a sandbox-only route", async () => {
+  it("does not fall back after a failed service credential attempt", async () => {
     const { env, doFetch } = createEnv(204);
-    const response = await handleRequest(
-      await signedServiceRequest("https://test.local/sessions/session-1/scm-credentials", {
-        method: "POST",
-        service: "slack-bot",
-      }),
-      { ...env, ...TEST_SERVICE_SECRETS } as never
-    );
-
-    expect(response.status).toBe(403);
-    expect(doFetch).not.toHaveBeenCalled();
-  });
-
-  it("accepts sandbox authentication on dual child GET routes", async () => {
-    const { env } = createEnv(204);
-    const response = await handleRequest(
-      new Request("https://test.local/sessions/session-1/children", {
+    const request = await signedServiceRequest(
+      "https://test.local/sessions/session-1/tunnel-urls",
+      {
+        service: "linear-bot",
         headers: { Authorization: "Bearer valid-sandbox-token" },
-      }),
-      env as never
+      }
     );
+    request.headers.set("X-OpenInspect-Service-Signature", "invalid");
 
-    expect(response.status).toBe(200);
+    const response = await handleRequest(request, env as never, TEST_BACKGROUND_TASK_CONTEXT);
+
+    expect(response.status).toBe(401);
+    expect(doFetch).not.toHaveBeenCalled();
   });
 });
 
-describe("auth token routes are SCM-agnostic", () => {
-  // Guards the isScmAgnosticRoute entry for /auth/tokens/*: dropping it would
-  // 501 exchange/refresh on non-GitHub deployments before the handlers run.
-  it.each(["exchange", "refresh"])(
-    "reaches /auth/tokens/%s under a gitlab provider",
-    async (route) => {
-      const statement = {
-        bind: vi.fn(function () {
-          return statement;
-        }),
-        first: vi.fn(async () => null),
-        all: vi.fn(async () => ({ results: [], meta: { changes: 0 } })),
-        run: vi.fn(async () => ({ results: [], meta: { changes: 0 } })),
-      };
-      const env = {
-        ...TEST_SERVICE_SECRETS,
-        SCM_PROVIDER: "gitlab",
-        DB: {
-          prepare: vi.fn(() => statement),
-          batch: vi.fn(async () => [
-            { results: [], meta: { changes: 0 } },
-            { results: [], meta: { changes: 1 } },
-          ]),
-          exec: vi.fn(),
-          dump: vi.fn(),
-        },
-      };
+describe("retired browser-auth routes", () => {
+  it.each([
+    ["POST", "/auth/tokens/exchange"],
+    ["POST", "/auth/tokens/refresh"],
+    ["PUT", "/provider-identities/github/583231"],
+  ])("does not expose %s %s", async (method, path) => {
+    const { env } = createEnv(401);
+    const response = await handleRequest(
+      new Request(`https://test.local${path}`, { method }),
+      env as never,
+      TEST_BACKGROUND_TASK_CONTEXT
+    );
 
-      const response = await handleRequest(
-        await signedServiceRequest(`https://test.local/auth/tokens/${route}`, {
-          method: "POST",
-          body: JSON.stringify({}),
-        }),
-        env as never
-      );
+    expect(response.status).toBe(404);
+  });
+});
 
-      // 400 = the handler's schema rejection; the SCM gate (501) did not fire.
-      expect(response.status).toBe(400);
-    }
-  );
+describe("managed skill browser authentication", () => {
+  it.each([
+    ["GET", "/skills", "user-or-service"],
+    ["POST", "/skills/preview", "user-or-service"],
+    ["GET", "/skills/skill_1", "user-or-service"],
+    ["GET", "/skill-profiles", "user-or-service"],
+    ["PATCH", "/skill-profiles/profile_1", "user-or-service"],
+    ["GET", "/sessions/session_1/skills", "user"],
+  ])("owns the browser authentication class for %s %s", (method, path, expectedKind) => {
+    expect(routeFor(method, path)?.authentication.kind).toBe(expectedKind);
+  });
+});
+
+describe("route-owned principal restrictions", () => {
+  it("rejects a non-web service on web-service routes", async () => {
+    const { env } = createEnv(401);
+    const request = await signedServiceRequest(
+      "https://test.local/internal/auth/sign-in-providers",
+      { service: "linear-bot" }
+    );
+
+    const response = await handleRequest(request, env as never, TEST_BACKGROUND_TASK_CONTEXT);
+
+    expect(response.status).toBe(401);
+  });
+
+  it("rejects a service principal on human-user routes", async () => {
+    const { env } = createEnv(401);
+    const info = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const request = await signedServiceRequest("https://test.local/sessions/session-1", {
+      service: "linear-bot",
+    });
+
+    const response = await handleRequest(request, env as never, TEST_BACKGROUND_TASK_CONTEXT);
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      error: "Human user authentication required",
+    });
+    const events = info.mock.calls.map(([line]) => JSON.parse(String(line)) as { event?: string });
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ event: "auth.principal" }),
+        expect.objectContaining({ event: "http.request", http_status: 403 }),
+      ])
+    );
+  });
 });

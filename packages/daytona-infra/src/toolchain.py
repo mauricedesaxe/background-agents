@@ -2,56 +2,30 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from daytona import CreateSnapshotParams, Daytona, Image, Resources
+from daytona import CreateSnapshotParams, Daytona, Image
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # OpenCode version to install.
 #
-# Pinned to 1.14.41 — the last release before opencode's Hono → Effect Schema
-# migration (landed across v1.14.42+, released 2026-05-09 onward) broke event
-# publishing on the legacy `/event` SSE endpoint. With newer versions the
-# bridge connects, posts the prompt, opencode processes it and records the
-# assistant response in the session store, but no `message.updated` /
-# `message.part.updated` / `session.idle` events are streamed back — so the
-# session shows execution_complete with no reply.
+# OpenCode restored `/event` stream context in 1.14.50 and fixed the remaining
+# eager-subscription race in 1.15.5. Keep the CLI and plugin on the same pin.
 #
-# Symptom in bridge logs: `prompt.run outcome=success duration_ms=35-367`,
-# which means `_stream_opencode_response_sse` returned with zero yielded
-# events. Tracked in #567.
-OPENCODE_VERSION = "1.14.41"
+# Never pin below 1.18.15 — see packages/modal-infra/src/images/base.py for why
+# (OpenCode's message-ID counter wraps and earlier releases order by ID string).
+OPENCODE_VERSION = "1.18.18"
 CODE_SERVER_VERSION = "4.109.5"
 AGENT_BROWSER_VERSION = "0.21.2"
-PLAYWRIGHT_MCP_VERSION = "0.0.79"  # deployment MCP config must run this same version; its bundled Playwright revision keys the browser cache
-# Railway CLI — provides the `railway` binary the railway MCP (`railway mcp`)
-# needs. stdio MCPs run a local binary, so it must live in the image.
-RAILWAY_CLI_VERSION = "5.26.0"
-# Jujutsu (jj) VCS — musl static binary from jj-vcs/jj releases; runs on this
-# Debian image with no extra deps. This puts jj on PATH; wiring it into the
-# git-based PR flow is a separate, non-image change.
-JJ_VERSION = "0.43.0"
-JJ_SHA256 = "59e5588583ac82b623239929368c65b90735931c0f26b5a16c1f04d5bb97643d"
 # Bump when changing image contents to invalidate the Daytona snapshot.
-# daytona-v2: install the SCM credential-helper shim and configure
-# git system-wide so per-request token brokerage matches the Modal base image.
-# -tldraw-jj: (historical) added tldraw-cli + chrome-headless-shell pre-warm and
-# the Jujutsu binary. tldraw-cli is now removed — diagrams are authored as JSON
-# records and posted to the interactive board endpoint (see the whiteboard
-# skill), so nothing renders tldraw in the sandbox.
-SANDBOX_VERSION = "daytona-v23-memory-headroom"
-
-# Resources baked into the base snapshot. Daytona applies these to every sandbox
-# created from it and rejects overriding them at create time.
-SANDBOX_CPU_CORES = 2
-SANDBOX_MEMORY_GIB = 8
-SANDBOX_DISK_GIB = 8
+SANDBOX_VERSION = "daytona-v6-vnc-opencode-1-18-18"
 
 
 def build_base_image(repo_root: Path) -> Image:
     """Build the Open-Inspect Daytona base image."""
-    sandbox_runtime_dir = (
-        repo_root / "packages" / "sandbox-runtime" / "src" / "sandbox_runtime"
-    )
+    sandbox_runtime_dir = repo_root / "packages" / "sandbox-runtime" / "src" / "sandbox_runtime"
 
     return (
         Image.base("python:3.12-slim-bookworm")
@@ -61,7 +35,8 @@ def build_base_image(repo_root: Path) -> Image:
             "openssh-client jq unzip libnss3 libnspr4 libatk1.0-0 "
             "libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 "
             "libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 "
-            "libpango-1.0-0 libcairo2 ffmpeg",
+            "libpango-1.0-0 libcairo2 ffmpeg xvfb fluxbox x11vnc "
+            "websockify novnc",
             "curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg "
             "| dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg",
             "echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] "
@@ -91,12 +66,6 @@ def build_base_image(repo_root: Path) -> Image:
             "rm /tmp/code-server.deb",
             f"npm install -g agent-browser@{AGENT_BROWSER_VERSION}",
             "agent-browser install",
-            f"npm install -g @playwright/mcp@{PLAYWRIGHT_MCP_VERSION}",
-            '"$(npm root -g)/@playwright/mcp/node_modules/.bin/playwright" install chromium',  # global install doesn't link the playwright bin; warms the cache so sessions skip the ~114MB download
-            f"npm install -g @railway/cli@{RAILWAY_CLI_VERSION}",
-            # Jujutsu (jj) static binary — retry download, sha256-verify, non-fatal.
-            f"n=0; until [ $n -ge 5 ]; do curl -fsSL -o /tmp/jj.tar.gz https://github.com/jj-vcs/jj/releases/download/v{JJ_VERSION}/jj-v{JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz && break; n=$((n+1)); sleep 3; done; "
-            f"if echo '{JJ_SHA256}  /tmp/jj.tar.gz' | sha256sum -c -; then tar -xzf /tmp/jj.tar.gz -C /usr/local/bin ./jj && chmod 0755 /usr/local/bin/jj; else echo 'WARN: jj download failed or checksum mismatch; jj not installed'; fi; rm -f /tmp/jj.tar.gz",
             "mkdir -p /workspace /app /tmp/opencode",
             # Install the SCM credential-helper shim and configure git
             # system-wide. The shim delegates to the Python helper module
@@ -104,7 +73,7 @@ def build_base_image(repo_root: Path) -> Image:
             # below. Mirror packages/modal-infra/src/images/base.py.
             "printf '%s\\n'"
             " '#!/bin/sh'"
-            ' \'exec python3 -m sandbox_runtime.credentials.git_credential_helper "$@"\''
+            " 'exec python3 -m sandbox_runtime.credentials.git_credential_helper \"$@\"'"
             " > /usr/local/bin/oi-git-credentials",
             "chmod 0755 /usr/local/bin/oi-git-credentials",
             "git config --system credential.helper /usr/local/bin/oi-git-credentials",
@@ -119,18 +88,10 @@ def build_base_image(repo_root: Path) -> Image:
                 "PATH": "/root/.bun/bin:/usr/local/bin:/usr/bin:/bin",
                 "PYTHONPATH": "/app",
                 "NODE_PATH": "/usr/lib/node_modules",
-                "PLAYWRIGHT_MCP_VERSION": PLAYWRIGHT_MCP_VERSION,
                 "SANDBOX_VERSION": SANDBOX_VERSION,
             }
         )
         .add_local_dir(str(sandbox_runtime_dir), "/app/sandbox_runtime")
-        # Install the agent harness by running the harness's own installer, which is the same
-        # script every other provider's image build calls. It runs after add_local_dir because
-        # that is what puts the script on the image; HOME is set explicitly because .env() above
-        # applies to the built image's runtime, not to this build step.
-        .run_commands(
-            "HOME=/root bash /app/sandbox_runtime/scripts/install-harness.sh --install",
-        )
         .workdir("/workspace")
     )
 
@@ -143,15 +104,6 @@ def create_base_snapshot(daytona: Daytona, repo_root: Path, snapshot_name: str) 
             name=snapshot_name,
             image=image,
             entrypoint=["python", "-m", "sandbox_runtime.entrypoint"],
-            # Daytona bakes resources into the snapshot; sandboxes created from
-            # it inherit these and cannot override them at create time. The
-            # provider defaults do not leave enough memory or disk for OpenCode
-            # and repository dependencies.
-            resources=Resources(
-                cpu=SANDBOX_CPU_CORES,
-                memory=SANDBOX_MEMORY_GIB,
-                disk=SANDBOX_DISK_GIB,
-            ),
         ),
         on_logs=lambda chunk: print(chunk, end="\n"),
     )

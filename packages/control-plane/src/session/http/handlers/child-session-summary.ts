@@ -1,21 +1,22 @@
+import type { ArtifactInfo } from "@open-inspect/shared/types/artifacts";
+import type {
+  ChildSessionDetail,
+  ChildSessionFinalResponse,
+  ChildSessionTrajectory,
+} from "@open-inspect/shared/types/session-api";
+import type { EventResponse } from "@open-inspect/shared/types/sandbox-events";
 import {
   buildAgentResponseFromEvents,
   getArtifactLabelFromArtifact,
-  type ArtifactInfo,
-  type ChildSessionDetail,
-  type ChildSessionFinalResponse,
-  type ChildSessionTrajectory,
-  type EventResponse,
-} from "@open-inspect/shared";
+} from "@open-inspect/shared/completion/extractor";
 import {
   encodeEventTimelineCursor,
   parseEventTimelineCursor,
   type EventTimelineCursor,
 } from "../../event-cursor";
 import type { ArtifactRow, EventRow, MessageRow, SandboxRow, SessionRow } from "../../types";
-import { SessionChildSummaryIncludes } from "../../contracts";
 
-const CHILD_SESSION_DETAIL_INCLUDES = Object.values(SessionChildSummaryIncludes);
+const CHILD_SESSION_DETAIL_INCLUDES = ["result", "trajectory"] as const;
 
 export const RECENT_EVENT_FETCH_LIMIT = 50;
 export const FINAL_RESPONSE_EVENT_PAGE_LIMIT = 200;
@@ -27,7 +28,7 @@ const MAX_TRAJECTORY_EVENT_LIMIT = 1000;
 const NOISY_RECENT_EVENT_TYPES = new Set(["token", "heartbeat", "step_start", "step_finish"]);
 const CHILD_SUMMARY_INCLUDE_VALUES = new Set<string>(CHILD_SESSION_DETAIL_INCLUDES);
 
-export interface ChildSummaryOptions {
+interface ChildSummaryOptions {
   includeFinalResponse: boolean;
   includeTrajectory: boolean;
   trajectoryLimit: number;
@@ -57,6 +58,7 @@ export interface BuildChildSessionDetailInput {
   publicSessionId: string;
   artifacts: ArtifactRow[];
   recentEventRows: EventRow[];
+  hasUnfinishedPrompt: boolean;
   parseArtifactMetadata: (
     artifact: Pick<ArtifactRow, "id" | "metadata">
   ) => Record<string, unknown> | null;
@@ -87,8 +89,8 @@ export function parseChildSummaryOptions(url?: URL): ChildSummaryOptionsResult {
     return { ok: false, error: includeValuesResult.error };
   }
 
-  const includeTrajectory = includeValuesResult.values.has(SessionChildSummaryIncludes.trajectory);
-  const includeFinalResponse = includeValuesResult.values.has(SessionChildSummaryIncludes.result);
+  const includeTrajectory = includeValuesResult.values.has("trajectory");
+  const includeFinalResponse = includeValuesResult.values.has("result");
   const trajectoryLimitResult = includeTrajectory
     ? parseLimit(
         url?.searchParams.get("trajectoryLimit"),
@@ -169,6 +171,7 @@ export function buildChildSessionDetail(input: BuildChildSessionDetailInput): Ch
       updatedAt: input.session.updated_at,
     },
     sandbox: input.sandbox ? { status: input.sandbox.status } : null,
+    hasUnfinishedPrompt: input.hasUnfinishedPrompt,
     artifacts: artifacts.map(({ row, metadata }) => ({
       type: row.type,
       url: row.url ?? "",

@@ -1,1 +1,0 @@
-ALTER TABLE sessions ADD COLUMN spawn_closed INTEGER NOT NULL DEFAULT 0;

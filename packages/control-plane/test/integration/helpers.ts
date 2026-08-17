@@ -1,13 +1,110 @@
 import { SELF, env, runInDurableObject } from "cloudflare:test";
-import { buildServiceAuthHeaders, type ServiceName } from "@open-inspect/shared";
-import type { SandboxStatus } from "../../src/types";
+import type { SandboxSettings } from "@open-inspect/shared/types/integrations";
+import { buildServiceAuthHeaders, type ServiceName } from "@open-inspect/shared/service-auth";
+import type { SandboxStatus } from "@open-inspect/shared/types/sessions";
 import type { SessionDO } from "../../src/session/durable-object";
 import { hashToken } from "../../src/auth/crypto";
+import { SessionIndexStore } from "../../src/db/session-index";
 
 const DEFAULT_WAIT_FOR_SANDBOX_STATUS_TIMEOUT_MS = 3000;
+const TEST_BROWSER_USER_ID = "11111111111111111111111111111111";
+const TEST_BROWSER_ACCOUNT_ID = "test-browser-account";
+const TEST_BROWSER_PROVIDER_SUBJECT = "583231";
+const TEST_BROWSER_SESSION_ID = "test-browser-session";
+const TEST_BROWSER_SESSION_TOKEN = "test-browser-session-token";
+const TEST_BROWSER_SESSION_COOKIE = "__Secure-openinspect.session_token";
+const TEST_NAMED_SESSION_DEFAULTS = {
+  repoOwner: "acme",
+  repoName: "web-app",
+  repoId: 12345,
+  userId: "user-1",
+} as const;
 
-const TEST_USER_ACCESS_TOKEN = "oi_at_integration-user";
+async function signCookieValue(value: string, secret: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = new Uint8Array(
+    await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value))
+  );
+  const signatureBase64 = btoa(String.fromCharCode(...signature));
+  return encodeURIComponent(`${value}.${signatureBase64}`);
+}
 
+/**
+ * Seed one real Better Auth user/account/session and return its signed cookie.
+ *
+ * Integration route tests exercise browser-owned endpoints, so their default
+ * web request must carry the same compound credential as production. Direct
+ * service-auth tests intentionally build their own bare sig1 requests.
+ */
+async function testBrowserSessionCookie(): Promise<string> {
+  const secret = env.BROWSER_AUTH_SECRET;
+  if (!secret) throw new Error("BROWSER_AUTH_SECRET is not configured for integration tests");
+
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const applicationTimestamp = now.getTime();
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO users
+         (id, display_name, email, email_verified, avatar_url, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      TEST_BROWSER_USER_ID,
+      "Integration Browser User",
+      "browser@test.local",
+      1,
+      null,
+      applicationTimestamp,
+      applicationTimestamp
+    ),
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO user_identities
+         (id, user_id, provider, provider_user_id, provider_login, provider_email,
+          provider_issuer, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      TEST_BROWSER_ACCOUNT_ID,
+      TEST_BROWSER_USER_ID,
+      "github",
+      TEST_BROWSER_PROVIDER_SUBJECT,
+      null,
+      null,
+      "https://github.com",
+      applicationTimestamp,
+      applicationTimestamp
+    ),
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO auth_sessions
+         (id, expiresAt, token, createdAt, updatedAt, ipAddress, userAgent, userId)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      TEST_BROWSER_SESSION_ID,
+      expiresAt.getTime(),
+      TEST_BROWSER_SESSION_TOKEN,
+      applicationTimestamp,
+      applicationTimestamp,
+      "127.0.0.1",
+      "integration-test",
+      TEST_BROWSER_USER_ID
+    ),
+  ]);
+
+  const signedToken = await signCookieValue(TEST_BROWSER_SESSION_TOKEN, secret);
+  return `${TEST_BROWSER_SESSION_COOKIE}=${signedToken}`;
+}
+
+/**
+ * Fetch a control-plane route with production-equivalent credentials. Web
+ * calls carry both sig1 and a Better Auth browser session; other services
+ * carry their service credential. Signs per request because sig1 binds method,
+ * URL, and body.
+ */
 export async function serviceFetch(
   url: string,
   init?: {
@@ -19,34 +116,7 @@ export async function serviceFetch(
   }
 ): Promise<Response> {
   const method = init?.method ?? "GET";
-  if (!init?.service) {
-    await env.DB.prepare(
-      `INSERT OR IGNORE INTO api_tokens
-       (id, token_hash, kind, user_id, provider, provider_user_id, family_id, created_at, expires_at)
-       VALUES (?, ?, 'web_session', ?, 'github', ?, ?, ?, ?)`
-    )
-      .bind(
-        "integration-user-token",
-        await hashToken(TEST_USER_ACCESS_TOKEN),
-        "integration-user",
-        "583231",
-        "integration-user-family",
-        Date.now(),
-        Date.now() + 60 * 60 * 1000
-      )
-      .run();
-    return SELF.fetch(url, {
-      method,
-      headers: {
-        ...(init?.body === undefined ? {} : { "Content-Type": "application/json" }),
-        ...init?.headers,
-        Authorization: `Bearer ${TEST_USER_ACCESS_TOKEN}`,
-      },
-      body: init?.body,
-    });
-  }
-
-  const service = init.service;
+  const service = init?.service ?? "web";
   const auth = await buildServiceAuthHeaders({
     service,
     secret: `test-service-secret-${service}`,
@@ -55,10 +125,12 @@ export async function serviceFetch(
     body: init?.body,
     actor: init?.actor,
   });
+  const browserCookie = service === "web" ? await testBrowserSessionCookie() : undefined;
   return SELF.fetch(url, {
     method,
     headers: {
       ...(init?.body === undefined ? {} : { "Content-Type": "application/json" }),
+      ...(browserCookie ? { Cookie: browserCookie } : {}),
       ...init?.headers,
       ...auth,
     },
@@ -85,6 +157,7 @@ export async function initSession(overrides?: {
   title?: string;
   model?: string;
   reasoningEffort?: string;
+  sandboxSettings?: SandboxSettings;
   userId?: string;
   scmLogin?: string;
 }) {
@@ -155,7 +228,8 @@ export async function seedEvents(
   await runInDurableObject(stub, (instance: SessionDO) => {
     for (const e of events) {
       instance.ctx.storage.sql.exec(
-        "INSERT INTO events (id, type, data, message_id, created_at) VALUES (?, ?, ?, ?, ?)",
+        `INSERT INTO events (id, type, data, message_id, created_at, timeline_sequence)
+         VALUES (?, ?, ?, ?, ?, (SELECT COALESCE(MAX(timeline_sequence), 0) + 1 FROM events))`,
         e.id,
         e.type,
         e.data,
@@ -200,8 +274,7 @@ export async function seedMessage(
 // ---------------------------------------------------------------------------
 
 /**
- * Create a session using idFromName() so the worker's /sessions/:name/ws
- * route can locate the DO via the same name. Returns stub + sessionName.
+ * Create a production-shaped named session: D1 index first, then the session DO.
  */
 export async function initNamedSession(
   sessionName: string,
@@ -218,24 +291,50 @@ export async function initNamedSession(
     }>;
     title?: string;
     model?: string;
+    reasoningEffort?: string;
     userId?: string;
+    canonicalUserId?: string;
     scmLogin?: string;
+    parentSessionId?: string;
+    spawnSource?: "user" | "agent" | "automation";
+    spawnDepth?: number;
+    sandboxSettings?: Record<string, unknown>;
   }
 ) {
-  const id = env.SESSION.idFromName(sessionName);
-  const stub = env.SESSION.get(id);
   const defaults = {
     sessionName,
-    repoOwner: "acme",
-    repoName: "web-app",
-    repoId: 12345,
-    userId: "user-1",
+    ...TEST_NAMED_SESSION_DEFAULTS,
     ...overrides,
   };
+  const now = Date.now();
+  await new SessionIndexStore(env.DB).create({
+    id: sessionName,
+    title: defaults.title ?? null,
+    repoOwner: defaults.repoOwner ?? null,
+    repoName: defaults.repoName ?? null,
+    model: defaults.model ?? "anthropic/claude-haiku-4-5",
+    reasoningEffort: defaults.reasoningEffort ?? null,
+    baseBranch: defaults.defaultBranch ?? "main",
+    status: "created",
+    parentSessionId: defaults.parentSessionId ?? null,
+    spawnSource: defaults.spawnSource ?? "user",
+    spawnDepth: defaults.spawnDepth ?? 0,
+    userId: defaults.canonicalUserId ?? defaults.userId,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  return initNamedSessionDO(sessionName, defaults);
+}
+
+/** Create only the named session DO for tests that manage the D1 row explicitly. */
+export async function initNamedSessionDO(sessionName: string, init: Record<string, unknown> = {}) {
+  const id = env.SESSION.idFromName(sessionName);
+  const stub = env.SESSION.get(id);
   const res = await stub.fetch("http://internal/internal/init", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(defaults),
+    body: JSON.stringify({ sessionName, ...TEST_NAMED_SESSION_DEFAULTS, ...init }),
   });
   if (res.status !== 200) throw new Error(`Init failed: ${res.status}`);
   return { stub, id, sessionName };
@@ -271,7 +370,11 @@ export function collectMessages(
  */
 export async function openClientWs(
   sessionName: string,
-  opts?: { subscribe?: boolean; userId?: string }
+  opts?: {
+    subscribe?: boolean;
+    userId?: string;
+    canonicalUserId?: string;
+  }
 ) {
   const response = await SELF.fetch(`https://test.local/sessions/${sessionName}/ws`, {
     headers: { Upgrade: "websocket" },
@@ -291,7 +394,10 @@ export async function openClientWs(
   const tokenRes = await stub.fetch("http://internal/internal/ws-token", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ userId: opts.userId ?? "user-1" }),
+    body: JSON.stringify({
+      userId: opts.userId ?? "user-1",
+      canonicalUserId: opts.canonicalUserId,
+    }),
   });
   const { token, participantId } = await tokenRes.json<{
     token: string;
@@ -333,21 +439,6 @@ export async function openSandboxWs(
     },
   });
   return { ws: response.webSocket ?? null, response };
-}
-
-export function sendSandboxReady(
-  ws: WebSocket,
-  sandboxId: string,
-  opencodeSessionId: string | null = null
-): void {
-  ws.send(
-    JSON.stringify({
-      type: "ready",
-      sandboxId,
-      opencodeSessionId,
-      timestamp: Date.now() / 1000,
-    })
-  );
 }
 
 /**

@@ -1,4 +1,8 @@
-import { type CodeServerSettings, type SandboxSettings } from "@open-inspect/shared";
+import type {
+  CodeServerSettings,
+  SandboxSettings,
+  VncSettings,
+} from "@open-inspect/shared/types/integrations";
 import { IntegrationSettingsStore } from "../db/integration-settings";
 import { createLogger } from "../logger";
 import type { RepoIdentity } from "./repository-target";
@@ -16,8 +20,7 @@ export async function resolveCodeServerEnabled(
   db: SqlDatabase | undefined,
   repoOwner: string | null,
   repoName: string | null,
-  environmentId?: string | null,
-  options: { strict?: boolean } = {}
+  environmentId?: string | null
 ): Promise<boolean> {
   if (!db) return false;
   if (!repoOwner || !repoName) return false;
@@ -35,8 +38,31 @@ export async function resolveCodeServerEnabled(
     if (enabledRepos !== null && !enabledRepos.includes(repo.toLowerCase())) return false;
     return true;
   } catch (e) {
-    if (options.strict) throw e;
     logger.warn("Failed to resolve code-server integration settings, defaulting to disabled", {
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return false;
+  }
+}
+
+/** Resolve whether browser VNC should be enabled for a repository session. */
+export async function resolveVncEnabled(
+  db: SqlDatabase | undefined,
+  repoOwner: string | null,
+  repoName: string | null,
+  environmentId?: string | null
+): Promise<boolean> {
+  if (!db || !repoOwner || !repoName) return false;
+  const repo = `${repoOwner}/${repoName}`;
+  try {
+    const store = new IntegrationSettingsStore(db);
+    const { enabledRepos, settings } = await store.getResolvedConfig("vnc", repo, environmentId);
+    const vncSettings = settings as VncSettings;
+    if (vncSettings.enabled !== true) return false;
+    if (enabledRepos !== null && !enabledRepos.includes(repo.toLowerCase())) return false;
+    return true;
+  } catch (e) {
+    logger.warn("Failed to resolve VNC integration settings, defaulting to disabled", {
       error: e instanceof Error ? e.message : String(e),
     });
     return false;
@@ -53,8 +79,7 @@ export async function resolveSandboxSettings(
   db: SqlDatabase | undefined,
   repoOwner: string | null,
   repoName: string | null,
-  environmentId?: string | null,
-  options: { strict?: boolean } = {}
+  environmentId?: string | null
 ): Promise<SandboxSettings> {
   if (!db) return {};
   if (!repoOwner || !repoName) {
@@ -63,7 +88,6 @@ export async function resolveSandboxSettings(
       const globalSettings = await store.getGlobal("sandbox");
       return (globalSettings?.defaults ?? {}) as SandboxSettings;
     } catch (e) {
-      if (options.strict) throw e;
       logger.warn("Failed to resolve global sandbox settings, using defaults", {
         error: e instanceof Error ? e.message : String(e),
       });
@@ -82,7 +106,6 @@ export async function resolveSandboxSettings(
     if (enabledRepos !== null && !enabledRepos.includes(repo.toLowerCase())) return {};
     return settings as SandboxSettings;
   } catch (e) {
-    if (options.strict) throw e;
     logger.warn("Failed to resolve sandbox settings, using defaults", {
       error: e instanceof Error ? e.message : String(e),
     });
@@ -96,6 +119,7 @@ export async function resolveSandboxSettings(
  */
 export interface SessionScopedSettings {
   codeServerEnabled: boolean;
+  vncEnabled: boolean;
   sandboxSettings: SandboxSettings;
 }
 
@@ -106,7 +130,7 @@ export interface SessionScopedSettings {
  * Per-feature scope rules (design §6.2), stated here in one place so callers
  * stop re-deriving them from the scalar mirror:
  *
- * - **Sandbox settings, code-server enablement, and the Slack agent-notify gate
+ * - **Sandbox settings, code-server/VNC enablement, and the Slack agent-notify gate
  *   resolve from the PRIMARY member** (the ordinal-0 mirror). These configure
  *   sandbox-wide singletons or are gating booleans, where an any-member-wins
  *   union would let one member silently override another member owner's
@@ -118,7 +142,7 @@ export interface SessionScopedSettings {
  *   separately in `McpServerStore.getDecryptedForSession`.
  * - **Environment-level overrides are the TOP layer** (design §13.5): when the
  *   session launches from a saved environment, that environment's sandbox and
- *   code-server overrides win over the primary member's; unset keys keep
+ *   code-server/VNC overrides win over the primary member's; unset keys keep
  *   inheriting from the primary/global layers, and `enabledRepos` allowlists
  *   stay evaluated against the primary.
  *
@@ -129,25 +153,23 @@ export interface SessionScopedSettings {
 export async function resolveSessionScopedSettings(
   db: SqlDatabase | undefined,
   members: readonly RepoIdentity[],
-  environmentId?: string | null,
-  options: { strict?: boolean } = {}
+  environmentId?: string | null
 ): Promise<SessionScopedSettings> {
   const primary = members[0] ?? null;
-  const [codeServerEnabled, sandboxSettings] = await Promise.all([
+  const [codeServerEnabled, vncEnabled, sandboxSettings] = await Promise.all([
     resolveCodeServerEnabled(
       db,
       primary?.repoOwner ?? null,
       primary?.repoName ?? null,
-      environmentId,
-      options
+      environmentId
     ),
+    resolveVncEnabled(db, primary?.repoOwner ?? null, primary?.repoName ?? null, environmentId),
     resolveSandboxSettings(
       db,
       primary?.repoOwner ?? null,
       primary?.repoName ?? null,
-      environmentId,
-      options
+      environmentId
     ),
   ]);
-  return { codeServerEnabled, sandboxSettings };
+  return { codeServerEnabled, vncEnabled, sandboxSettings };
 }

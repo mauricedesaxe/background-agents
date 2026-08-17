@@ -1,10 +1,10 @@
 # Available Models
 
 Open-Inspect exposes these models in the model picker and integration preferences. The default
-enabled set includes Anthropic and OpenAI models. OpenCode Zen, Z.AI Coding Plan, DeepSeek, and
-OpenRouter models are available but must be enabled in **Settings > Models**. Z.AI Coding Plan
-requires `ZHIPU_API_KEY`; DeepSeek requires `DEEPSEEK_API_KEY`; OpenRouter requires
-`OPENROUTER_API_KEY`.
+enabled set includes Anthropic and OpenAI models. xAI / SuperGrok, OpenCode Zen, Z.AI Coding Plan,
+and DeepSeek models are available but must be enabled in **Settings > Models**. SuperGrok requires
+managed xAI OAuth credentials; Z.AI Coding Plan requires `ZHIPU_API_KEY`; DeepSeek requires
+`DEEPSEEK_API_KEY`.
 
 ## Anthropic
 
@@ -12,7 +12,8 @@ requires `ZHIPU_API_KEY`; DeepSeek requires `DEEPSEEK_API_KEY`; OpenRouter requi
 | ----------------------------- | ----------------- | ---------------------------------- | ----------------------------- | -------------- |
 | `anthropic/claude-haiku-4-5`  | Claude Haiku 4.5  | Fast and efficient                 | high, max                     | max            |
 | `anthropic/claude-sonnet-4-5` | Claude Sonnet 4.5 | Balanced performance               | high, max                     | max            |
-| `anthropic/claude-sonnet-4-6` | Claude Sonnet 4.6 | Latest balanced, fast coding       | low, medium, high, max        | high           |
+| `anthropic/claude-sonnet-4-6` | Claude Sonnet 4.6 | Balanced, fast coding              | low, medium, high, max        | high           |
+| `anthropic/claude-sonnet-5`   | Claude Sonnet 5   | Latest Sonnet, adaptive thinking   | low, medium, high, xhigh, max | high           |
 | `anthropic/claude-opus-4-5`   | Claude Opus 4.5   | Most capable                       | high, max                     | max            |
 | `anthropic/claude-opus-4-6`   | Claude Opus 4.6   | Most capable, adaptive thinking    | low, medium, high, max        | high           |
 | `anthropic/claude-opus-4-7`   | Claude Opus 4.7   | Most capable, adaptive thinking    | low, medium, high, xhigh, max | high           |
@@ -35,12 +36,24 @@ setup instructions.
 | `openai/gpt-5.3-codex`       | GPT 5.3 Codex       | Latest codex                                 | low, medium, high, xhigh       | high           |
 | `openai/gpt-5.3-codex-spark` | GPT 5.3 Codex Spark | Low-latency codex variant                    | low, medium, high, xhigh       | high           |
 
+## xAI / SuperGrok
+
+Grok models require a SuperGrok OAuth refresh token and are disabled by default. See
+[Using Grok with a SuperGrok Subscription](GROK_MODELS.md) for setup and rollout instructions.
+
+| Model ID             | Display name   | Description                                     | Reasoning efforts | Default effort |
+| -------------------- | -------------- | ----------------------------------------------- | ----------------- | -------------- |
+| `xai/grok-4.5`       | Grok 4.5       | Grok for chat, coding, and agentic tools        | low, medium, high | high           |
+| `xai/grok-4.6`       | Grok 4.6       | Latest Grok for chat, coding, and agentic tools | low, medium, high | high           |
+| `xai/grok-build-0.1` | Grok Build 0.1 | Coding model for SuperGrok subscribers          | Not configurable  | N/A            |
+
 ## OpenCode Zen
 
 | Model ID                | Display name | Description   | Reasoning efforts | Default effort |
 | ----------------------- | ------------ | ------------- | ----------------- | -------------- |
 | `opencode/kimi-k2.5`    | Kimi K2.5    | Moonshot AI   | Not supported     | N/A            |
 | `opencode/kimi-k2.6`    | Kimi K2.6    | Moonshot AI   | Not supported     | N/A            |
+| `opencode/kimi-k3`      | Kimi K3      | Moonshot AI   | Not supported     | N/A            |
 | `opencode/minimax-m2.5` | MiniMax M2.5 | MiniMax       | Not supported     | N/A            |
 | `opencode/qwen3.7-max`  | Qwen3.7 Max  | Alibaba Cloud | Not supported     | N/A            |
 | `opencode/glm-5`        | GLM 5        | Z.ai 744B MoE | Not supported     | N/A            |
@@ -50,10 +63,10 @@ setup instructions.
 
 Z.AI Coding Plan models require `ZHIPU_API_KEY` as a global or repository secret.
 
-| Model ID                  | Display name | Description                 | Reasoning efforts | Default effort |
-| ------------------------- | ------------ | --------------------------- | ----------------- | -------------- |
-| `zai-coding-plan/glm-5.2` | GLM 5.2      | Z.AI Coding Plan. Text-only | Not supported     | N/A            |
-| `zai-coding-plan/glm-5.3` | GLM 5.3      | Z.AI Coding Plan. Text-only | Not supported     | N/A            |
+| Model ID                  | Display name | Description      | Reasoning efforts | Default effort |
+| ------------------------- | ------------ | ---------------- | ----------------- | -------------- |
+| `zai-coding-plan/glm-5.2` | GLM 5.2      | Z.AI Coding Plan | Not supported     | N/A            |
+| `zai-coding-plan/glm-5.3` | GLM 5.3      | Z.AI Coding Plan | Not supported     | N/A            |
 
 ## DeepSeek
 
@@ -63,19 +76,3 @@ DeepSeek models require `DEEPSEEK_API_KEY` as a global or repository secret.
 | ---------------------------- | ----------------- | ------------ | ----------------- | -------------- |
 | `deepseek/deepseek-v4-flash` | DeepSeek V4 Flash | Fast model   | Not supported     | N/A            |
 | `deepseek/deepseek-v4-pro`   | DeepSeek V4 Pro   | Most capable | Not supported     | N/A            |
-
-## OpenRouter
-
-OpenRouter models require `OPENROUTER_API_KEY` as a global or repository secret.
-
-| Model ID                                     | Display name           | Description                                        | Reasoning efforts              | Default effort |
-| -------------------------------------------- | ---------------------- | -------------------------------------------------- | ------------------------------ | -------------- |
-| `openrouter/google/gemini-3.1-flash-lite`    | Gemini 3.1 Flash Lite  | Google, fast and cheap. Multimodal                 | none, low, medium, high, xhigh | high           |
-| `openrouter/google/gemini-3.1-pro-preview`   | Gemini 3.1 Pro         | Google, most capable. Multimodal                   | none, low, medium, high, xhigh | high           |
-| `openrouter/x-ai/grok-4.3`                   | Grok 4.3               | xAI, balanced. Multimodal                          | Not supported                  | N/A            |
-| `openrouter/x-ai/grok-4.5`                   | Grok 4.5               | xAI, most capable. Multimodal                      | Not supported                  | N/A            |
-| `openrouter/deepseek/deepseek-v4-flash-0731` | DeepSeek V4 Flash 0731 | DeepSeek, fast and cheap agentic coding. Text-only | Not supported                  | N/A            |
-| `openrouter/deepseek/deepseek-v4-pro`        | DeepSeek V4 Pro        | DeepSeek, most capable. Text-only                  | Not supported                  | N/A            |
-| `openrouter/z-ai/glm-5.2`                    | GLM 5.2                | Z.ai. Text-only                                    | Not supported                  | N/A            |
-| `openrouter/moonshotai/kimi-k3`              | Kimi K3                | Moonshot AI. Multimodal                            | Not supported                  | N/A            |
-| `openrouter/minimax/minimax-m3`              | MiniMax M3             | MiniMax. Multimodal                                | Not supported                  | N/A            |

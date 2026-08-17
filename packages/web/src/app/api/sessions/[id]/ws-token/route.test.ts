@@ -1,19 +1,15 @@
 import type { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("next-auth", () => ({
-  getServerSession: vi.fn(),
-}));
-
-vi.mock("@/lib/auth", () => ({
-  authOptions: {},
+vi.mock("@/lib/server-auth-session", () => ({
+  getServerAuthSession: vi.fn(),
 }));
 
 vi.mock("@/lib/control-plane", () => ({
   controlPlaneUserFetch: vi.fn(),
 }));
 
-import { getServerSession } from "next-auth";
+import { getServerAuthSession } from "@/lib/server-auth-session";
 import { controlPlaneUserFetch } from "@/lib/control-plane";
 import { POST } from "./route";
 
@@ -36,7 +32,7 @@ describe("ws-token API route", () => {
   });
 
   it("returns 401 when the session is missing", async () => {
-    vi.mocked(getServerSession).mockResolvedValue(null);
+    vi.mocked(getServerAuthSession).mockResolvedValue(null);
 
     const response = await POST(request(), params("sess1"));
 
@@ -44,15 +40,13 @@ describe("ws-token API route", () => {
     expect(controlPlaneUserFetch).not.toHaveBeenCalled();
   });
 
-  it("omits request-controlled SCM identity for a GitHub user", async () => {
-    vi.mocked(getServerSession).mockResolvedValue({
+  it("does not copy profile data into the websocket token request", async () => {
+    vi.mocked(getServerAuthSession).mockResolvedValue({
       user: {
-        id: "12345",
-        login: "ada",
+        id: "0123456789abcdef0123456789abcdef",
         name: "Ada Lovelace",
         email: "ada@example.com",
         image: "https://avatars.githubusercontent.com/u/12345",
-        provider: "github",
       },
     } as never);
     vi.mocked(controlPlaneUserFetch).mockResolvedValue(
@@ -66,19 +60,16 @@ describe("ws-token API route", () => {
       "/sessions/sess1/ws-token",
       expect.objectContaining({ method: "POST" })
     );
-    expect(sentBody()).toEqual({
-      authName: "Ada Lovelace",
-    });
+    expect(sentBody()).toEqual({});
   });
 
-  it("omits scm* entirely for a Google user — identity comes from the Bearer principal", async () => {
-    vi.mocked(getServerSession).mockResolvedValue({
+  it("uses the same empty body regardless of sign-in provider", async () => {
+    vi.mocked(getServerAuthSession).mockResolvedValue({
       user: {
-        id: "google-sub-1",
+        id: "fedcba9876543210fedcba9876543210",
         name: "Pat PM",
         email: "pm@gmail.com",
         image: "https://lh3.googleusercontent.com/a/pat",
-        provider: "google",
       },
     } as never);
     vi.mocked(controlPlaneUserFetch).mockResolvedValue(
@@ -88,6 +79,6 @@ describe("ws-token API route", () => {
     const response = await POST(request(), params("sess2"));
 
     expect(response.status).toBe(200);
-    expect(sentBody()).toEqual({ authName: "Pat PM" });
+    expect(sentBody()).toEqual({});
   });
 });

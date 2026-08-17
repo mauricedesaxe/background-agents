@@ -57,7 +57,7 @@ async function main() {
   const mimeType = getMimeType(resolvedFilePath);
 
   if (!mimeType) {
-    throw new Error("upload-media.js only supports .png, .jpg, .jpeg, .webp, .svg, and .mp4 files");
+    throw new Error("upload-media.js only supports .png, .jpg, .jpeg, .webp, and .mp4 files");
   }
 
   const artifactType = parsed.artifactType ?? "screenshot";
@@ -220,8 +220,6 @@ function getMimeType(filePath) {
       return "image/jpeg";
     case ".webp":
       return "image/webp";
-    case ".svg":
-      return "image/svg+xml";
     case ".mp4":
       return "video/mp4";
     default:

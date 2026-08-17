@@ -1,85 +1,61 @@
-import { isCanonicalUserId, type SessionStatus } from "@open-inspect/shared";
-import { z } from "zod";
 import {
-  SessionIndexStore,
-  type SessionListCursor,
-  type SessionReadUpdate,
-} from "../db/session-index";
-import { error, json, parsePattern, type RequestContext, type Route } from "./shared";
-import { epochMs } from "../time";
+  parseSessionListQuery,
+  SESSION_LIST_CURRENT_USER,
+} from "@open-inspect/shared/session-list-query";
+import {
+  sessionInboxCategorySchema,
+  type SessionInboxCategory,
+  type SessionInboxPage,
+  type SessionInboxSnapshot,
+} from "@open-inspect/shared/types/session-inbox";
+import { sessionReadActionSchema } from "@open-inspect/shared/types/sessions";
+import { isCanonicalUserId } from "@open-inspect/shared/user-id";
+import { SessionIndexStore } from "../db/session-index";
+import {
+  error,
+  defineRoute,
+  GITHUB_USER_OR_SERVICE_ROUTE,
+  json,
+  parseJsonBody,
+  parsePattern,
+  SCM_AGNOSTIC_HUMAN_USER_ROUTE,
+  type RequestContext,
+  type Route,
+  type UserRouteContext,
+} from "./shared";
 import type { Env } from "../types";
-import { createMediaObjectStorage } from "../storage/object-storage";
-import { SessionInternalPaths } from "../session/contracts";
-import { createSessionRuntimeClient } from "../session/runtime-client";
+import { createLogger } from "../logger";
+import { encodeSessionInboxCursor, parseSessionInboxCursor } from "../db/session-inbox-cursor";
 
-const SESSION_STATUSES: SessionStatus[] = [
-  "created",
-  "active",
-  "completed",
-  "failed",
-  "archived",
-  "cancelled",
-];
-const sessionListCursorSchema = z.tuple([z.number().int().nonnegative(), z.string().min(1)]);
+const log = createLogger("session-read-state");
+const SESSION_INBOX_LIMIT = 20;
 
-function encodeSessionListCursor(cursor: SessionListCursor): string {
-  const bytes = new TextEncoder().encode(JSON.stringify([cursor.updatedAt, cursor.id]));
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-}
-
-function parseSessionListCursor(value: string): SessionListCursor | null {
-  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
-
-  try {
-    const base64 = value.replaceAll("-", "+").replaceAll("_", "/");
-    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
-    const binary = atob(padded);
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    const decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
-    const parsed = sessionListCursorSchema.safeParse(JSON.parse(decoded));
-    if (!parsed.success) return null;
-    return { updatedAt: epochMs(parsed.data[0]), id: parsed.data[1] };
-  } catch {
-    return null;
-  }
-}
-
-function parseSessionStatus(value: string | null): SessionStatus | undefined {
-  if (!value) return undefined;
-  return SESSION_STATUSES.includes(value as SessionStatus) ? (value as SessionStatus) : undefined;
-}
-
-function parseCreatedByFilters(searchParams: URLSearchParams): string[] | Response {
-  const values = searchParams.getAll("createdBy");
+function parseCreatedByFilters(
+  values: readonly string[],
+  principal: RequestContext["principal"]
+): string[] | Response {
   const userIds: string[] = [];
   const seen = new Set<string>();
 
   for (const value of values) {
-    if (!isCanonicalUserId(value)) {
+    const userId =
+      value === SESSION_LIST_CURRENT_USER
+        ? principal?.kind === "user"
+          ? principal.userId
+          : null
+        : value;
+
+    if (!isCanonicalUserId(userId)) {
       return error("Invalid createdBy", 400);
     }
 
-    if (!seen.has(value)) {
-      seen.add(value);
-      userIds.push(value);
+    if (!seen.has(userId)) {
+      seen.add(userId);
+      userIds.push(userId);
     }
   }
 
   return userIds;
-}
-
-function parsePaginationLimit(value: string | null): number {
-  const parsed = Number.parseInt(value ?? "50", 10);
-  if (!Number.isFinite(parsed)) return 50;
-  return Math.min(Math.max(parsed, 1), 100);
-}
-
-function parsePaginationOffset(value: string | null): number {
-  const parsed = Number.parseInt(value ?? "0", 10);
-  if (!Number.isFinite(parsed)) return 0;
-  return Math.max(parsed, 0);
 }
 
 async function handleListSessions(
@@ -89,94 +65,162 @@ async function handleListSessions(
   ctx: RequestContext
 ): Promise<Response> {
   const url = new URL(request.url);
-  const limit = parsePaginationLimit(url.searchParams.get("limit"));
-  const offset = parsePaginationOffset(url.searchParams.get("offset"));
-  const modeParam = url.searchParams.get("mode");
-  const mode = modeParam === null || modeParam === "flat" ? "flat" : modeParam;
-  const cursorParam = url.searchParams.get("cursor");
-  const statusParam = url.searchParams.get("status");
-  const excludeStatusParam = url.searchParams.get("excludeStatus");
-  const status = parseSessionStatus(statusParam);
-  const excludeStatus = parseSessionStatus(excludeStatusParam);
-  const createdByUserIds = parseCreatedByFilters(url.searchParams);
+  const parsedQuery = parseSessionListQuery(url.searchParams);
+  if (!parsedQuery.success) return error(`Invalid ${parsedQuery.invalidParam}`, 400);
 
-  if (mode !== "flat" && mode !== "tree") {
-    return error("Invalid mode", 400);
-  }
-
-  const cursor =
-    mode === "tree" && cursorParam !== null ? parseSessionListCursor(cursorParam) : undefined;
-  if (mode === "tree" && cursorParam !== null && !cursor) {
-    return error("Invalid cursor", 400);
-  }
-
-  if (statusParam && !status) {
-    return error("Invalid status", 400);
-  }
-
-  if (excludeStatusParam && !excludeStatus) {
-    return error("Invalid excludeStatus", 400);
-  }
+  const { createdBy, status, excludeStatus, excludeAutomationLineage, limit, offset } =
+    parsedQuery.data;
+  const createdByUserIds = parseCreatedByFilters(createdBy, ctx.principal);
 
   if (createdByUserIds instanceof Response) {
     return createdByUserIds;
   }
 
   const store = new SessionIndexStore(ctx.db);
-  const viewerUserId = ctx.principal?.kind === "user" ? ctx.principal.user.canonicalUserId : null;
+  const listStartedAt = Date.now();
+  const viewerUserId = ctx.principal?.kind === "user" ? ctx.principal.userId : undefined;
   const result = await store.list({
     status,
     excludeStatus,
+    excludeAutomationLineage,
     createdByUserIds,
     limit,
     offset,
-    mode,
-    cursor: cursor ?? undefined,
-    viewerUserId: viewerUserId ?? undefined,
+    viewerUserId,
   });
+  if (viewerUserId) {
+    log.info("session_read_state.decorated", {
+      event: "session_read_state.decorated",
+      session_count: result.sessions.length,
+      duration_ms: Date.now() - listStartedAt,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+  }
 
-  return json({
+  const response = json({
     sessions: result.sessions,
     hasMore: result.hasMore,
-    ...(mode === "tree"
-      ? { nextCursor: result.nextCursor ? encodeSessionListCursor(result.nextCursor) : null }
-      : {}),
   });
+  if (viewerUserId) {
+    response.headers.set("Cache-Control", "private, no-store");
+  }
+  return response;
 }
 
-async function handleUpdateReadState(
+async function handleListSessionInbox(
+  request: Request,
+  _env: Env,
+  _match: RegExpMatchArray,
+  ctx: UserRouteContext
+): Promise<Response> {
+  const searchParams = new URL(request.url).searchParams;
+  const categoryValue = searchParams.get("category");
+  const category =
+    categoryValue === null ? null : sessionInboxCategorySchema.safeParse(categoryValue);
+  if (category && !category.success) return error("Invalid category", 400);
+  const cursor = searchParams.get("cursor");
+  if (cursor === "") return error("Invalid cursor", 400);
+  if (cursor !== null && category === null) return error("Category required for pagination", 400);
+  const mine = searchParams.get("mine");
+  if (mine !== null && mine !== "true") return error("Invalid mine", 400);
+  const parsedCursor = parseSessionInboxCursor(cursor);
+  if (!parsedCursor.ok) return error(parsedCursor.error, 400);
+
+  const startedAt = Date.now();
+  const store = new SessionIndexStore(ctx.db);
+  const commonOptions = {
+    limit: SESSION_INBOX_LIMIT,
+    createdByUserIds: mine === "true" ? [ctx.principal.userId] : [],
+    excludeAutomationLineage: mine === "true",
+    viewerUserId: ctx.principal.userId,
+  };
+
+  if (category === null) {
+    const snapshot = await store.listInboxSnapshot(commonOptions);
+    const categories = Object.fromEntries(
+      (Object.keys(snapshot) as SessionInboxCategory[]).map((inboxCategory) => [
+        inboxCategory,
+        encodeInboxPage(snapshot[inboxCategory]),
+      ])
+    ) as Record<SessionInboxCategory, SessionInboxPage>;
+    const body: SessionInboxSnapshot = { categories };
+    const response = json(body);
+    response.headers.set("Cache-Control", "private, no-store");
+    return response;
+  }
+
+  const result = await store.listInbox({
+    ...commonOptions,
+    category: category.data,
+    cursor: parsedCursor.cursor,
+  });
+  const nextCursor = result.nextCursor ? encodeSessionInboxCursor(result.nextCursor) : null;
+  const response = json({
+    items: result.items,
+    hasMore: result.hasMore,
+    nextCursor,
+  });
+  response.headers.set("Cache-Control", "private, no-store");
+  log.info("session_inbox.listed", {
+    event: "session_inbox.listed",
+    category: category.data,
+    hierarchy_count: result.items.length,
+    session_count: result.items.reduce(
+      (count, item) => count + 1 + item.descendantSessions.length,
+      0
+    ),
+    duration_ms: Date.now() - startedAt,
+    request_id: ctx.request_id,
+    trace_id: ctx.trace_id,
+  });
+  return response;
+}
+
+function encodeInboxPage(
+  result: Awaited<ReturnType<SessionIndexStore["listInbox"]>>
+): SessionInboxPage {
+  return {
+    items: result.items,
+    hasMore: result.hasMore,
+    nextCursor: result.nextCursor ? encodeSessionInboxCursor(result.nextCursor) : null,
+  };
+}
+
+async function handlePatchReadState(
   request: Request,
   _env: Env,
   match: RegExpMatchArray,
-  ctx: RequestContext
+  ctx: UserRouteContext
 ): Promise<Response> {
   const sessionId = match.groups?.id;
   if (!sessionId) return error("Session ID required");
 
-  const userId = ctx.principal?.kind === "user" ? ctx.principal.user.canonicalUserId : null;
-  if (!userId) return error("User identity required", 403);
+  const unparsedBody = await parseJsonBody<unknown>(request);
+  if (unparsedBody instanceof Response) return unparsedBody;
+  const parsedBody = sessionReadActionSchema.safeParse(unparsedBody);
+  if (!parsedBody.success) return error("Invalid session read action", 400);
+  const body = parsedBody.data;
 
-  let body: { action?: unknown; messageId?: unknown };
-  try {
-    body = (await request.json()) as { action?: unknown; messageId?: unknown };
-  } catch {
-    return error("Invalid request body", 400);
-  }
-  if (body.action !== "viewed" && body.action !== "mark_read" && body.action !== "mark_unread") {
-    return error("Invalid read-state action", 400);
-  }
-  if (body.action === "viewed" && typeof body.messageId !== "string") {
-    return error("Viewed output message ID required", 400);
-  }
+  const store = new SessionIndexStore(ctx.db);
+  const visibleSession = await store.getVisibleForUser(sessionId, ctx.principal.userId);
+  if (!visibleSession) return error("Session not found", 404);
 
-  const update: SessionReadUpdate =
-    body.action === "viewed"
-      ? { action: body.action, messageId: body.messageId as string }
-      : { action: body.action };
+  const result = await store.updateReadState(ctx.principal.userId, sessionId, body);
+  if (!result) return error("Session not found", 404);
 
-  const unread = await new SessionIndexStore(ctx.db).updateReadState(sessionId, userId, update);
-  if (unread === null) return error("Session not found", 404);
-  return json({ sessionId, unread });
+  const response = json(result);
+  response.headers.set("Cache-Control", "private, no-store");
+  log.info("session_read_state.updated", {
+    event: "session_read_state.updated",
+    session_id: sessionId,
+    action: body.action,
+    outcome: result.outcome,
+    unread: result.unread,
+    request_id: ctx.request_id,
+    trace_id: ctx.trace_id,
+  });
+  return response;
 }
 
 async function handleDeleteSession(
@@ -187,33 +231,32 @@ async function handleDeleteSession(
 ): Promise<Response> {
   const sessionId = match.groups?.id;
   if (!sessionId) return error("Session ID required");
-  const userId = ctx.principal?.kind === "user" ? ctx.principal.user.canonicalUserId : null;
-  if (!userId) return error("User identity required", 403);
-
-  const archiveResponse = await createSessionRuntimeClient(env, ctx).fetch(
-    sessionId,
-    SessionInternalPaths.archive,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId }),
-    }
-  );
-  if (!archiveResponse.ok) return archiveResponse;
 
   const sessionStore = new SessionIndexStore(ctx.db);
-  await createMediaObjectStorage(env).deletePrefix(`sessions/${sessionId}/`);
   await sessionStore.delete(sessionId);
 
   return json({ status: "deleted", sessionId });
 }
 
 export const sessionIndexRoutes: Route[] = [
-  { method: "GET", pattern: parsePattern("/sessions"), handler: handleListSessions },
-  {
+  defineRoute(GITHUB_USER_OR_SERVICE_ROUTE, {
+    method: "GET",
+    pattern: parsePattern("/sessions"),
+    handler: handleListSessions,
+  }),
+  defineRoute(SCM_AGNOSTIC_HUMAN_USER_ROUTE, {
+    method: "GET",
+    pattern: parsePattern("/sessions/inbox"),
+    handler: handleListSessionInbox,
+  }),
+  defineRoute(SCM_AGNOSTIC_HUMAN_USER_ROUTE, {
     method: "PATCH",
     pattern: parsePattern("/sessions/:id/read-state"),
-    handler: handleUpdateReadState,
-  },
-  { method: "DELETE", pattern: parsePattern("/sessions/:id"), handler: handleDeleteSession },
+    handler: handlePatchReadState,
+  }),
+  defineRoute(GITHUB_USER_OR_SERVICE_ROUTE, {
+    method: "DELETE",
+    pattern: parsePattern("/sessions/:id"),
+    handler: handleDeleteSession,
+  }),
 ];

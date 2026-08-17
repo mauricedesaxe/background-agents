@@ -1,14 +1,26 @@
-import { escapeMrkdwnText, postMessage, updateMessage } from "@open-inspect/shared";
+import {
+  escapeMrkdwnText,
+  getMessageDetails,
+  postMessage,
+  updateMessage,
+} from "@open-inspect/shared/slack";
+import { toImageAttachments, type SlackImageAttachment } from "../attachments";
+import { collectForwardedMessages } from "../forwarded-messages";
+import { createLogger } from "../logger";
 import {
   buildWorkingMessageBlocks,
   scheduleStartingStatus,
   type BackgroundTaskScheduler,
 } from "../messages/blocks";
+import { formatAttributedRequest } from "../messages/context";
 import { deletePendingRequest, getPendingRequest } from "../pending-requests/pending-request-store";
 import { startSessionAndSendPrompt } from "../sessions/session-launcher";
 import { resolveTargetValue } from "../target-clarification";
 import { targetLabel } from "../targets";
 import type { Env } from "../types";
+import { resolveSlackActorIdentity } from "../user-identity";
+
+const log = createLogger("target-selection");
 
 export async function handleTargetSelection(
   selectedValue: string,
@@ -31,7 +43,16 @@ export async function handleTargetSelection(
     return;
   }
 
-  const { message, userId, previousMessages, channelName, channelDescription } = pendingData;
+  const {
+    message,
+    userId,
+    previousMessages,
+    channelName,
+    channelDescription,
+    imageOnly,
+    sourceMessage,
+    unattributedPrompt,
+  } = pendingData;
   const target = await resolveTargetValue(env, selectedValue, traceId);
   if (!target) {
     await postMessage(
@@ -43,6 +64,41 @@ export async function handleTargetSelection(
     return;
   }
 
+  // Pending requests persist only the source-message locator; re-fetch the
+  // files from Slack now that the target is known.
+  let images: SlackImageAttachment[] = [];
+  if (sourceMessage) {
+    const lookup = await getMessageDetails(
+      env.SLACK_BOT_TOKEN,
+      channel,
+      sourceMessage.ts,
+      sourceMessage.threadTs
+    );
+    if (lookup.ok) {
+      // The pending prompt already preserves any forwarded-message text, but
+      // its images live on the attachment and are re-fetched here like the rest.
+      const forwarded = collectForwardedMessages(lookup.attachments);
+      images = toImageAttachments([...lookup.files, ...forwarded.files], traceId);
+    } else {
+      log.warn("slack.attachment.file_lookup_failed", {
+        trace_id: traceId,
+        channel,
+        message_ts: sourceMessage.ts,
+        slack_error: lookup.error,
+      });
+    }
+    if (imageOnly && images.length === 0) {
+      // The request had no text: without its images there is nothing to run.
+      await postMessage(
+        env.SLACK_BOT_TOKEN,
+        channel,
+        "Sorry, I couldn't retrieve the attached image(s) from Slack, so I didn't start on this request. Please try again.",
+        { thread_ts: threadKey }
+      );
+      return;
+    }
+  }
+
   const label = escapeMrkdwnText(targetLabel(target));
   scheduleStartingStatus(scheduleBackground, env, channel, threadKey, traceId);
   const ackResult = await postMessage(env.SLACK_BOT_TOKEN, channel, `Working on *${label}*...`, {
@@ -50,12 +106,17 @@ export async function handleTargetSelection(
     blocks: buildWorkingMessageBlocks(label),
   });
   const ackTs = ackResult.ok ? ackResult.ts : undefined;
+  const actor = await resolveSlackActorIdentity(env.SLACK_BOT_TOKEN, userId);
+  // Records written before deferred attribution already contain deliverable text.
+  const messageText = unattributedPrompt
+    ? formatAttributedRequest(actor.senderLabel, message, unattributedPrompt.forwardedMessages)
+    : message;
   const sessionResult = await startSessionAndSendPrompt(env, {
     target,
     channel,
     threadTs: threadKey,
-    messageText: message,
-    userId,
+    messageText,
+    actor,
     // The original message ts isn't persisted with the pending request, so
     // the "Working on..." ack — or the interaction message when the ack post
     // fails — marks where interim thread context resumes.
@@ -63,6 +124,8 @@ export async function handleTargetSelection(
     previousMessages,
     channelName,
     channelDescription,
+    images,
+    imageOnly,
     traceId,
   });
   if (!sessionResult) return;

@@ -87,13 +87,14 @@ if needed.
 
 ### What's Stored in a Session
 
-| Data          | Description                                       |
-| ------------- | ------------------------------------------------- |
-| Messages      | Prompts you've sent and their metadata            |
-| Events        | Tool calls, token streams, status updates         |
-| Artifacts     | PRs created, screenshots captured                 |
-| Participants  | Users who have joined the session                 |
-| Sandbox state | Reference to the current sandbox and its snapshot |
+| Data               | Description                                       |
+| ------------------ | ------------------------------------------------- |
+| Messages           | Prompts you've sent and their metadata            |
+| Prompt attachments | Images uploaded with web or Slack prompts         |
+| Events             | Tool calls, token streams, status updates         |
+| Artifacts          | PRs created, screenshots captured                 |
+| Participants       | Users who have joined the session                 |
+| Sandbox state      | Reference to the current sandbox and its snapshot |
 
 Each session gets its own SQLite database in a Cloudflare Durable Object, ensuring isolation and
 high performance even with hundreds of concurrent sessions.
@@ -185,6 +186,11 @@ gets its own lightweight database that can handle hundreds of events per second 
 other sessions. The WebSocket Hibernation API keeps connections alive during idle periods without
 incurring compute costs.
 
+Sandbox lifecycle state is authoritative across WebSocket reconnects. Losing the sandbox WebSocket
+does not stop the sandbox: the bridge reconnects while the control plane schedules a heartbeat check
+in case the process is actually gone. Explicit lifecycle paths such as inactivity and stale
+heartbeat persist `stopped` or `stale` before closing the connection, which prevents reconnection.
+
 ### Data Plane (Sandbox Backends)
 
 The data plane is where code actually runs. Each session gets an isolated sandbox with a full
@@ -206,11 +212,12 @@ Open-Inspect supports these sandbox backends:
   API
 - **OpenComputer**: template-based sandboxes with checkpoint-backed prebuilt-image builds via the
   OpenComputer REST API
+- **E2B**: template-based sandboxes with persistent pause/resume via direct E2B REST API calls
 
 Prebuilt-image builds are supported on Modal, Vercel, and OpenComputer. Saved filesystem state can
-be restored on those same providers for session resumes; Daytona uses persistent sandboxes instead.
-For Daytona, the control plane stops the sandbox on inactivity or stale heartbeat, then resumes that
-same sandbox later with the same logical sandbox ID and auth token.
+be restored on those same providers for session resumes; Daytona and E2B use persistent sandboxes
+instead. For Daytona and E2B, the control plane stops or pauses the sandbox on inactivity or stale
+heartbeat, then resumes that same sandbox later.
 
 ### Clients
 
@@ -220,7 +227,8 @@ can make HTTP requests and maintain WebSocket connections can participate.
 **Current clients:**
 
 - **Web**: Next.js app with real-time streaming, session management, and settings
-- **Slack**: Bot that responds to @mentions and direct messages, classifies repos, and posts results
+- **Slack**: Bot that responds to @mentions and direct messages, forwards supported image
+  attachments, classifies repos, and posts results
 - **GitHub**: Bot that reviews PRs and responds to PR `@mentions`
 - **Linear**: Agent workflow that starts sessions from Linear issue activity
 
@@ -267,19 +275,18 @@ When restoring from a previous snapshot:
 ```
 ┌─────────────┐    ┌────────────┐    ┌─────────────┐    ┌───────┐
 │  Restore    │───▶│ Quick Sync │───▶│ Start Script│───▶│ Ready │
-│  Snapshot   │    │(fetch only)│    │ (optional)  │    │       │
+│  Snapshot   │    │ (git pull) │    │ (optional)  │    │       │
 └─────────────┘    └────────────┘    └─────────────┘    └───────┘
 ```
 
 1. **Restore snapshot**: The selected snapshot-capable provider restores the filesystem from a saved
    snapshot or checkpoint
-2. **Quick sync**: Fetches the remote tracking ref without changing local commits or files
+2. **Quick sync**: Pulls latest changes (usually just a few commits)
 3. **Start script**: Runs `.openinspect/start.sh` for runtime startup (if present)
 4. **Ready**: Sandbox is ready almost instantly
 
-Snapshots include installed dependencies, built artifacts, and workspace state. Local commits, dirty
-tracked files, and untracked files remain unchanged during restore. This is why follow-up prompts in
-an existing session are much faster than the first prompt.
+Snapshots include installed dependencies, built artifacts, and workspace state. This is why
+follow-up prompts in an existing session are much faster than the first prompt.
 
 ### Prebuilt Image Start
 
@@ -391,6 +398,31 @@ Prompt 1 (processing) ──▶ Prompt 2 (queued) ──▶ Prompt 3 (queued)
 This lets you send follow-up thoughts while the agent works. Prompts are processed in order.
 
 You can also stop the current execution if the agent is going down the wrong path.
+
+### Parent-to-Child Follow-Ups
+
+An agent that created a child with `spawn-child` can continue that same child session with
+`send-child-prompt`. The follow-up enters the child's normal durable queue:
+
+```text
+Child prompt 1 (processing) ──▶ Parent follow-up (queued) ──▶ Child continues
+```
+
+The follow-up does not interrupt active work. Completed and failed children can resume, restoring
+their compatible sandbox snapshot when available. Cancelled children remain terminal, and archived
+children must be explicitly unarchived before they can accept prompts.
+
+The parent token is never exchanged for the child's sandbox token. The control plane authenticates
+the parent session, verifies the direct parent-child relationship in D1, verifies it again in the
+child Durable Object, and attributes the queued prompt to the child owner with source `agent`.
+
+`send-child-prompt` returns after the prompt is durably queued. The parent calls `get-child-status`
+when it needs the follow-up result. An earlier completed response is labeled as such while newer
+child work is still running.
+
+The runtime tool is installed when a sandbox starts from a runtime image that includes it. A parent
+restored from a snapshot created before this capability shipped keeps the older captured runtime and
+will not see `send-child-prompt` until it starts in a fresh sandbox built from the newer runtime.
 
 ---
 
@@ -543,6 +575,7 @@ was built for internal use where all employees have access to company repositori
 | User OAuth Token   | Create PRs, identify users                 | Repos the user has access to     |
 | Sandbox Auth Token | Authenticate sandbox → control plane calls | Single session                   |
 | WebSocket Token    | Authenticate client connections            | Single session                   |
+| Managed LLM Token  | Short-lived OpenAI or xAI model access     | Provider account + secret scope  |
 
 Fresh and prebuilt-image sandboxes fetch git credentials on demand through the control plane instead
 of relying on a token embedded in the environment or remote URL. Snapshot restores may still receive
@@ -568,12 +601,19 @@ per-environment scope. A session receives global secrets plus its **session targ
 - Injected into sandboxes at startup
 - Never exposed to clients (only key names are visible)
 
+Managed OpenAI and xAI OAuth refresh tokens are a stricter case: they remain control-plane-only and
+are replaced with non-secret provider markers before sandbox creation. The sandbox uses its session
+auth token to request short-lived model access from a provider-specific broker. Refresh-token
+rotation is persisted back to the global, repository, or environment scope that supplied it. See
+[Using OpenAI Models](./OPENAI_MODELS.md) and
+[Using Grok with a SuperGrok Subscription](./GROK_MODELS.md).
+
 > **Daytona and Vercel users**: LLM API keys (e.g., `ANTHROPIC_API_KEY` for Claude models) must be
 > added as global secrets. Modal injects these automatically via its own secrets mechanism.
 >
-> **Opt-in model providers**: DeepSeek models require `DEEPSEEK_API_KEY`, Z.AI Coding Plan models
-> require `ZHIPU_API_KEY`, and OpenRouter models require `OPENROUTER_API_KEY`, as a global secret
-> with any sandbox provider.
+> **Opt-in model providers**: DeepSeek models require `DEEPSEEK_API_KEY`, and Z.AI Coding Plan
+> models require `ZHIPU_API_KEY`, as a global secret with any sandbox provider. SuperGrok models
+> require managed xAI OAuth credentials and must be enabled under **Settings > Models**.
 
 See [Secrets Management](./SECRETS.md) for setup instructions.
 
@@ -588,4 +628,5 @@ See [Secrets Management](./SECRETS.md) for setup instructions.
 ## What's Next
 
 - **[Getting Started](./GETTING_STARTED.md)**: Deploy your own instance
+- **[Managed Skills](./MANAGED_SKILLS.md)**: Create and select reusable agent instructions
 - **[Debugging Playbook](./DEBUGGING_PLAYBOOK.md)**: Troubleshoot issues with structured logs

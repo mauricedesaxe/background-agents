@@ -2,11 +2,14 @@
 
 import { useCallback, useMemo, useState } from "react";
 import {
+  parseRepositoryFullName,
+  type RepositoryInput,
+} from "@open-inspect/shared/types/repositories";
+import {
   MAX_ENVIRONMENT_NAME_LENGTH,
   MAX_ENVIRONMENT_DESCRIPTION_LENGTH,
   type Environment,
-  type RepositoryInput,
-} from "@open-inspect/shared";
+} from "@open-inspect/shared/types/environments";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -15,10 +18,8 @@ import { Combobox } from "@/components/ui/combobox";
 import { BranchIcon, ChevronDownIcon, RepoIcon } from "@/components/ui/icons";
 import { useBranches } from "@/hooks/use-branches";
 import { useRepos, type Repo } from "@/hooks/use-repos";
-import {
-  RepositoryMultiSelect,
-  repositorySelectionKey,
-} from "@/components/repository-multi-select";
+import { RepositoryMultiSelect } from "@/components/repository-multi-select";
+import { repositorySelectionKey } from "@/lib/repository-selection";
 import { supportsRepoImages } from "@/lib/sandbox-provider";
 
 export interface EnvironmentFormValues {
@@ -116,8 +117,10 @@ export function EnvironmentForm({
       description: description.trim() ? description.trim() : null,
       prebuildEnabled,
       repositories: selectedKeys.map((key) => {
-        const [repoOwner = "", repoName = ""] = key.split("/");
-        const entry: RepositoryInput = { repoOwner, repoName };
+        const entry: RepositoryInput = parseRepositoryFullName(key) ?? {
+          repoOwner: "",
+          repoName: "",
+        };
         const branch = branchByKey[key]?.trim();
         if (branch) entry.baseBranch = branch;
         return entry;
@@ -168,13 +171,19 @@ export function EnvironmentForm({
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-foreground mb-1.5">Repositories</label>
+        <label
+          htmlFor="environment-repositories"
+          className="block text-sm font-medium text-foreground mb-1.5"
+        >
+          Repositories
+        </label>
         <RepositoryMultiSelect
           repos={repos}
           loadingRepos={loadingRepos}
           selected={selectedKeys}
           onChange={handleSelectionChange}
           disabled={submitting}
+          triggerId="environment-repositories"
           triggerLabel={triggerLabel}
           triggerClassName="w-full"
         />
@@ -271,8 +280,11 @@ function EnvironmentRepositoryRow({
   onRemove: () => void;
   disabled: boolean;
 }) {
-  const [repoOwner = "", repoName = ""] = repositoryKey.split("/");
-  const { branches, loading: loadingBranches } = useBranches(repoOwner, repoName);
+  const repository = parseRepositoryFullName(repositoryKey);
+  const { branches, loading: loadingBranches } = useBranches(
+    repository?.repoOwner ?? "",
+    repository?.repoName ?? ""
+  );
 
   return (
     <div className="flex flex-wrap items-center gap-2 border border-border-muted px-3 py-2">

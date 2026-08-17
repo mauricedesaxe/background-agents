@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { ParentSessionSpawnRejectedError, SessionIndexStore } from "./session-index";
+import type { SpawnSource } from "@open-inspect/shared/types/sessions";
+import { SessionIndexStore } from "./session-index";
 import type { SessionEntry } from "./session-index";
-import { epochMs } from "../time";
 
 type SessionRow = {
   id: string;
@@ -12,9 +12,9 @@ type SessionRow = {
   reasoning_effort: string | null;
   base_branch: string | null;
   status: string;
-  spawn_closed: number;
   parent_session_id: string | null;
-  spawn_source: "user" | "agent" | "automation";
+  root_session_id: string;
+  spawn_source: SpawnSource;
   spawn_depth: number;
   automation_id: string | null;
   automation_run_id: string | null;
@@ -24,11 +24,6 @@ type SessionRow = {
   active_duration_ms: number;
   message_count: number;
   pr_count: number;
-  total_tokens: number;
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_tokens: number;
-  cache_write_tokens: number;
   environment_id: string | null;
   created_at: number;
   updated_at: number;
@@ -44,18 +39,16 @@ type SessionRepositoryRow = {
 };
 
 const QUERY_PATTERNS = {
-  INSERT_SESSION: /^INSERT INTO sessions/,
+  INSERT_SESSION: /^INSERT OR IGNORE INTO sessions/,
   INSERT_SESSION_REPO: /^INSERT INTO session_repositories/,
   SELECT_SESSION_REPOS: /^SELECT \* FROM session_repositories WHERE session_id IN/,
   SELECT_PR_SUMMARIES: /FROM session_pull_requests WHERE session_id IN/,
   DELETE_SESSION_REPOS: /^DELETE FROM session_repositories WHERE session_id = \?$/,
   SELECT_BY_ID: /^SELECT \* FROM sessions WHERE id = \?$/,
+  SELECT_EXISTS: /^SELECT 1 AS ok FROM sessions WHERE id = \?$/,
   SELECT_COUNT: /^SELECT COUNT\(\*\) as count FROM sessions\b/,
-  SELECT_LIST:
-    /^(?:WITH RECURSIVE archived_subtrees\b.*)?SELECT \* FROM sessions\b.*ORDER BY updated_at DESC LIMIT/,
-  SELECT_TREE: /^WITH RECURSIVE .*base_candidates AS .*SELECT sessions\.\*, CASE/,
+  SELECT_LIST: /^SELECT \* FROM sessions\b.*ORDER BY updated_at DESC LIMIT/,
   UPDATE_STATUS: /^UPDATE sessions SET status = \?/,
-  RESTORE_ARCHIVED_SESSION: /^UPDATE sessions SET status = 'active', spawn_closed = 0/,
   UPDATE_UPDATED_AT: /^UPDATE sessions SET updated_at = \?/,
   UPDATE_TITLE: /^UPDATE sessions SET title = \?/,
   UPDATE_TITLE_IF_NEWER:
@@ -64,11 +57,8 @@ const QUERY_PATTERNS = {
   DELETE_SESSION: /^DELETE FROM sessions WHERE id = \?$/,
   SELECT_BY_PARENT:
     /^SELECT \* FROM sessions WHERE parent_session_id = \? ORDER BY created_at DESC$/,
-  SELECT_DESCENDANTS: /^WITH RECURSIVE descendants/,
-  ARCHIVE_DESCENDANTS: /^WITH RECURSIVE subtree.*status = CASE/,
-  CLOSE_SPAWNING: /^WITH RECURSIVE subtree.*UPDATE sessions SET spawn_closed/,
+  SELECT_ACTIVE_DESCENDANTS: /^WITH RECURSIVE descendants/,
   SELECT_1_CHILD: /^SELECT 1 FROM sessions WHERE id = \? AND parent_session_id = \?$/,
-  SELECT_CAN_INITIALIZE: /^SELECT spawn_closed FROM sessions WHERE id = \?$/,
   SELECT_SPAWN_DEPTH: /^SELECT spawn_depth FROM sessions WHERE id = \?$/,
 } as const;
 
@@ -89,7 +79,7 @@ class FakeD1Database {
   async batch(statements: FakePreparedStatement[]) {
     const results = [];
     for (const statement of statements) {
-      results.push(await statement.executeBatch());
+      results.push(await statement.run());
     }
     return results;
   }
@@ -100,6 +90,11 @@ class FakeD1Database {
     if (QUERY_PATTERNS.SELECT_BY_ID.test(normalized)) {
       const id = args[0] as string;
       return this.rows.get(id) ?? null;
+    }
+
+    if (QUERY_PATTERNS.SELECT_EXISTS.test(normalized)) {
+      const id = args[0] as string;
+      return this.rows.has(id) ? { ok: 1 } : null;
     }
 
     if (QUERY_PATTERNS.SELECT_COUNT.test(normalized)) {
@@ -116,11 +111,6 @@ class FakeD1Database {
       return null;
     }
 
-    if (QUERY_PATTERNS.SELECT_CAN_INITIALIZE.test(normalized)) {
-      const row = this.rows.get(args[0] as string);
-      return row ? { spawn_closed: row.spawn_closed } : null;
-    }
-
     if (QUERY_PATTERNS.SELECT_SPAWN_DEPTH.test(normalized)) {
       const id = args[0] as string;
       const row = this.rows.get(id);
@@ -132,54 +122,6 @@ class FakeD1Database {
 
   all(query: string, args: unknown[]) {
     const normalized = normalizeQuery(query);
-
-    if (QUERY_PATTERNS.SELECT_TREE.test(normalized)) {
-      const allArgs = [...args];
-      const limit = allArgs.pop() as number;
-      const candidateLimit = allArgs.pop() as number;
-      let filtered = this.applyWhereConditions(normalized, allArgs);
-      if (normalized.includes("updated_at < ? OR (updated_at = ? AND id < ?)")) {
-        const [updatedAt, , id] = allArgs.slice(-3) as [number, number, string];
-        filtered = filtered.filter(
-          (row) => row.updated_at < updatedAt || (row.updated_at === updatedAt && row.id < id)
-        );
-      }
-
-      const candidates = filtered
-        .sort((a, b) => b.updated_at - a.updated_at || b.id.localeCompare(a.id))
-        .slice(0, candidateLimit);
-      const base = candidates.slice(0, limit);
-      const pageIds = new Set(base.map((row) => row.id));
-      const pending = base
-        .map((row) => row.parent_session_id)
-        .filter((id): id is string => id !== null);
-      while (pending.length > 0) {
-        const id = pending.pop()!;
-        if (pageIds.has(id)) continue;
-        const ancestor = this.rows.get(id);
-        if (!ancestor) continue;
-        pageIds.add(id);
-        if (ancestor.parent_session_id) pending.push(ancestor.parent_session_id);
-      }
-
-      const allowedIds = new Set(
-        this.applyWhereConditions(
-          normalized.startsWith("WITH RECURSIVE archived_subtrees")
-            ? "WITH RECURSIVE archived_subtrees SELECT * FROM sessions"
-            : "SELECT * FROM sessions",
-          []
-        ).map((row) => row.id)
-      );
-      const baseIds = new Set(base.map((row) => row.id));
-      return Array.from(pageIds)
-        .filter((id) => allowedIds.has(id))
-        .map((id) => ({
-          ...this.rows.get(id)!,
-          is_base: baseIds.has(id) ? 1 : 0,
-          candidate_count: candidates.length,
-        }))
-        .sort((a, b) => b.updated_at - a.updated_at || b.id.localeCompare(a.id));
-    }
 
     if (QUERY_PATTERNS.SELECT_LIST.test(normalized)) {
       // Parse WHERE conditions and LIMIT/OFFSET from args
@@ -207,21 +149,24 @@ class FakeD1Database {
       return children;
     }
 
-    if (QUERY_PATTERNS.SELECT_DESCENDANTS.test(normalized)) {
+    if (QUERY_PATTERNS.SELECT_ACTIVE_DESCENDANTS.test(normalized)) {
+      const terminalStatuses = new Set(["completed", "failed", "archived", "cancelled"]);
       const descendants: Array<{ row: SessionRow; depth: number }> = [];
       let parents = [args[0] as string];
-      const visited = new Set(parents);
       let depth = 1;
-      while (parents.length > 0) {
-        const children = Array.from(this.rows.values()).filter(
-          (row) => parents.includes(row.parent_session_id ?? "") && !visited.has(row.id)
+      // Mirrors the CTE's MAX_DESCENDANT_DEPTH cycle guard.
+      while (parents.length > 0 && depth <= 10) {
+        const children = Array.from(this.rows.values()).filter((row) =>
+          parents.includes(row.parent_session_id ?? "")
         );
         descendants.push(...children.map((row) => ({ row, depth })));
-        children.forEach((row) => visited.add(row.id));
         parents = children.map((row) => row.id);
         depth += 1;
       }
-      return descendants.sort((a, b) => b.depth - a.depth).map(({ row }) => ({ id: row.id }));
+      return descendants
+        .filter(({ row }) => !terminalStatuses.has(row.status))
+        .sort((a, b) => b.depth - a.depth)
+        .map(({ row }) => ({ id: row.id }));
     }
 
     if (QUERY_PATTERNS.SELECT_SESSION_REPOS.test(normalized)) {
@@ -253,6 +198,9 @@ class FakeD1Database {
         baseBranch,
         status,
         parentSessionId,
+        rootParentId,
+        topLevelRootId,
+        parentRootLookupId,
         spawnSource,
         spawnDepth,
         automationId,
@@ -262,11 +210,12 @@ class FakeD1Database {
         environmentId,
         createdAt,
         updatedAt,
-        requiredParentId,
-        checkedParentId,
       ] = args as [
         string,
         string | null,
+        string | null,
+        string | null,
+        string,
         string | null,
         string | null,
         string,
@@ -283,53 +232,40 @@ class FakeD1Database {
         string | null,
         number,
         number,
-        string | null,
-        string | null,
       ];
-      if (this.rows.has(id)) {
-        throw new Error("UNIQUE constraint failed: sessions.id");
+      // INSERT OR IGNORE — skip if exists
+      const inserted = !this.rows.has(id);
+      if (inserted) {
+        const rootSessionId = rootParentId
+          ? (this.rows.get(parentRootLookupId!)?.root_session_id ?? id)
+          : topLevelRootId;
+        this.rows.set(id, {
+          id,
+          title,
+          repo_owner: repoOwner,
+          repo_name: repoName,
+          model,
+          reasoning_effort: reasoningEffort,
+          base_branch: baseBranch,
+          status,
+          parent_session_id: parentSessionId,
+          root_session_id: rootSessionId,
+          spawn_source: spawnSource,
+          spawn_depth: spawnDepth,
+          automation_id: automationId,
+          automation_run_id: automationRunId,
+          scm_login: scmLogin,
+          user_id: userId,
+          total_cost: 0,
+          active_duration_ms: 0,
+          message_count: 0,
+          pr_count: 0,
+          environment_id: environmentId,
+          created_at: createdAt,
+          updated_at: updatedAt,
+        });
       }
-      const parent = requiredParentId ? this.rows.get(requiredParentId) : null;
-      if (
-        requiredParentId !== checkedParentId ||
-        (requiredParentId &&
-          (!parent ||
-            parent.spawn_closed !== 0 ||
-            ["completed", "failed", "archived", "cancelled"].includes(parent.status)))
-      ) {
-        return { meta: { changes: 0 } };
-      }
-      this.rows.set(id, {
-        id,
-        title,
-        repo_owner: repoOwner,
-        repo_name: repoName,
-        model,
-        reasoning_effort: reasoningEffort,
-        base_branch: baseBranch,
-        status,
-        spawn_closed: 0,
-        parent_session_id: parentSessionId,
-        spawn_source: spawnSource,
-        spawn_depth: spawnDepth,
-        automation_id: automationId,
-        automation_run_id: automationRunId,
-        scm_login: scmLogin,
-        user_id: userId,
-        total_cost: 0,
-        active_duration_ms: 0,
-        message_count: 0,
-        pr_count: 0,
-        total_tokens: 0,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        environment_id: environmentId,
-        created_at: createdAt,
-        updated_at: updatedAt,
-      });
-      return { meta: { changes: 1 } };
+      return { meta: { changes: inserted ? 1 : 0 } };
     }
 
     if (QUERY_PATTERNS.UPDATE_STATUS.test(normalized)) {
@@ -341,50 +277,6 @@ class FakeD1Database {
         return { meta: { changes: 1 } };
       }
       return { meta: { changes: 0 } };
-    }
-
-    if (QUERY_PATTERNS.RESTORE_ARCHIVED_SESSION.test(normalized)) {
-      const [updatedAt, id, maxUpdatedAt] = args as [number, string, number];
-      const row = this.rows.get(id);
-      if (row && row.updated_at <= maxUpdatedAt) {
-        row.status = "active";
-        row.spawn_closed = 0;
-        row.updated_at = updatedAt;
-        return { meta: { changes: 1 } };
-      }
-      return { meta: { changes: 0 } };
-    }
-
-    if (
-      QUERY_PATTERNS.ARCHIVE_DESCENDANTS.test(normalized) ||
-      QUERY_PATTERNS.CLOSE_SPAWNING.test(normalized)
-    ) {
-      const [rootId, , , archivedAt] = args as [string, string?, string?, number?];
-      const archivesDescendants = QUERY_PATTERNS.ARCHIVE_DESCENDANTS.test(normalized);
-      let currentIds = [rootId];
-      const visited = new Set<string>();
-      while (currentIds.length > 0) {
-        const nextIds: string[] = [];
-        for (const id of currentIds) {
-          if (visited.has(id)) continue;
-          visited.add(id);
-          const row = this.rows.get(id);
-          if (row) {
-            row.spawn_closed = 1;
-            if (archivesDescendants && id !== rootId) {
-              row.status = "archived";
-              row.updated_at = Math.max(row.updated_at + 1, archivedAt ?? 0);
-            }
-          }
-          nextIds.push(
-            ...Array.from(this.rows.values())
-              .filter((candidate) => candidate.parent_session_id === id)
-              .map((candidate) => candidate.id)
-          );
-        }
-        currentIds = nextIds;
-      }
-      return { meta: { changes: visited.size } };
     }
 
     if (QUERY_PATTERNS.UPDATE_TITLE_IF_NEWER.test(normalized)) {
@@ -418,7 +310,6 @@ class FakeD1Database {
         number | null,
         string,
       ];
-      if (!this.rows.has(sessionId)) return { meta: { changes: 0 } };
       this.repositoryRows.push({
         session_id: sessionId,
         position,
@@ -455,7 +346,7 @@ class FakeD1Database {
       ];
       const row = this.rows.get(id);
       if (row) {
-        row.total_cost = Math.max(row.total_cost, totalCost);
+        row.total_cost = totalCost;
         row.active_duration_ms = activeDurationMs;
         row.message_count = messageCount;
         row.pr_count = prCount;
@@ -481,31 +372,8 @@ class FakeD1Database {
     let rows = Array.from(this.rows.values());
     let argIdx = 0;
 
-    if (query.startsWith("WITH RECURSIVE archived_subtrees")) {
-      const archivedSubtreeIds = new Set(
-        rows.filter((row) => row.status === "archived").map((row) => row.id)
-      );
-      let changed = true;
-      while (changed) {
-        changed = false;
-        for (const row of rows) {
-          if (
-            !archivedSubtreeIds.has(row.id) &&
-            row.parent_session_id &&
-            archivedSubtreeIds.has(row.parent_session_id)
-          ) {
-            archivedSubtreeIds.add(row.id);
-            changed = true;
-          }
-        }
-      }
-      rows = rows.filter((row) => !archivedSubtreeIds.has(row.id));
-    }
-
     // Parse WHERE conditions
-    const listSelectIndex = query.lastIndexOf("SELECT * FROM sessions");
-    const selectQuery = listSelectIndex >= 0 ? query.slice(listSelectIndex) : query;
-    const whereMatch = selectQuery.match(/WHERE (.+?)(?:ORDER|LIMIT|$)/);
+    const whereMatch = query.match(/WHERE (.+?)(?:ORDER|LIMIT|$)/);
     if (whereMatch) {
       const conditions = whereMatch[1].trim();
 
@@ -528,6 +396,15 @@ class FakeD1Database {
       if (conditions.includes("status != ?")) {
         const statusVal = args[argIdx++] as string;
         rows = rows.filter((r) => r.status !== statusVal);
+      }
+
+      if (conditions.includes("automation_id IS NULL")) {
+        rows = rows.filter(
+          (row) =>
+            row.automation_id === null &&
+            row.spawn_source !== "automation" &&
+            row.spawn_source !== "github-bot"
+        );
       }
 
       if (conditions.includes("EXISTS (SELECT 1 FROM session_repositories")) {
@@ -589,13 +466,6 @@ class FakePreparedStatement {
   async run() {
     return this.db.run(this.query, this.bound);
   }
-
-  async executeBatch() {
-    if (QUERY_PATTERNS.SELECT_DESCENDANTS.test(normalizeQuery(this.query))) {
-      return { results: this.db.all(this.query, this.bound) };
-    }
-    return this.run();
-  }
 }
 
 function makeSession(overrides: Partial<SessionEntry> = {}): SessionEntry {
@@ -640,11 +510,6 @@ describe("SessionIndexStore", () => {
         scmLogin: null,
         userId: null,
         totalCost: 0,
-        totalTokens: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
         activeDurationMs: 0,
         messageCount: 0,
         prCount: 0,
@@ -677,40 +542,20 @@ describe("SessionIndexStore", () => {
       );
     });
 
-    it("rejects a conflicting session replay", async () => {
+    it("throws instead of silently skipping a duplicate insert", async () => {
       const session = makeSession();
       await store.create(session);
 
-      await expect(store.create(makeSession({ model: "openai/gpt-5.2" }))).rejects.toThrow(
-        "belongs to another session"
+      await expect(store.create(makeSession({ title: "Different Title" }))).rejects.toThrow(
+        "Session index insert was skipped"
       );
 
       const result = await store.get("test-id");
       expect(result?.title).toBe("Test Session");
     });
 
-    it("accepts replay after the session title changes", async () => {
-      const session = makeSession();
-      await store.create(session);
-      await store.updateTitle(session.id, "Generated title");
-
-      await expect(store.create(session)).resolves.toBeUndefined();
-    });
-
-    it("accepts a matching session insert replay", async () => {
-      const session = makeSession();
-      await store.create(session);
-
-      await expect(store.create(session)).resolves.toBeUndefined();
-      expect(await store.get("test-id")).toMatchObject({
-        id: "test-id",
-        title: "Test Session",
-        model: session.model,
-      });
-    });
-
     it("stores parent fields when provided", async () => {
-      await store.create(makeSession({ id: "parent-1", status: "active" }));
+      await store.create(makeSession({ id: "parent-1" }));
       const session = makeSession({
         id: "child-1",
         parentSessionId: "parent-1",
@@ -723,22 +568,6 @@ describe("SessionIndexStore", () => {
       expect(result?.parentSessionId).toBe("parent-1");
       expect(result?.spawnSource).toBe("agent");
       expect(result?.spawnDepth).toBe(1);
-    });
-
-    it("atomically rejects a child whose parent is terminal", async () => {
-      await store.create(makeSession({ id: "parent-1", status: "cancelled" }));
-
-      await expect(
-        store.create(
-          makeSession({
-            id: "child-1",
-            parentSessionId: "parent-1",
-            spawnSource: "agent",
-            spawnDepth: 1,
-          })
-        )
-      ).rejects.toBeInstanceOf(ParentSessionSpawnRejectedError);
-      await expect(store.get("child-1")).resolves.toBeNull();
     });
 
     it("stores userId when provided", async () => {
@@ -772,6 +601,15 @@ describe("SessionIndexStore", () => {
     });
   });
 
+  describe("exists", () => {
+    it("returns whether the session exists without loading it", async () => {
+      await store.create(makeSession());
+
+      await expect(store.exists("test-id")).resolves.toBe(true);
+      await expect(store.exists("nonexistent")).resolves.toBe(false);
+    });
+  });
+
   describe("list", () => {
     it("returns sessions sorted by updatedAt descending", async () => {
       await store.create(makeSession({ id: "old", updatedAt: 1000 }));
@@ -802,36 +640,6 @@ describe("SessionIndexStore", () => {
       expect(result.sessions.map((s) => s.id)).toEqual(["c", "a"]);
     });
 
-    it("hides stale active descendants of archived sessions", async () => {
-      await store.create(makeSession({ id: "archived-parent", status: "active", updatedAt: 1000 }));
-      await store.create(
-        makeSession({
-          id: "stale-child",
-          status: "active",
-          parentSessionId: "archived-parent",
-          spawnSource: "agent",
-          spawnDepth: 1,
-          updatedAt: 2000,
-        })
-      );
-      await store.create(
-        makeSession({
-          id: "stale-grandchild",
-          status: "active",
-          parentSessionId: "stale-child",
-          spawnSource: "agent",
-          spawnDepth: 2,
-          updatedAt: 2500,
-        })
-      );
-      await store.create(makeSession({ id: "unrelated", status: "active", updatedAt: 3000 }));
-      await store.updateStatus("archived-parent", "archived", 4000);
-
-      const result = await store.list({ excludeStatus: "archived" });
-
-      expect(result.sessions.map((session) => session.id)).toEqual(["unrelated"]);
-    });
-
     it("filters by creator user ids", async () => {
       await store.create(makeSession({ id: "alice-old", userId: "alice", updatedAt: 1000 }));
       await store.create(makeSession({ id: "bob", userId: "bob", updatedAt: 3000 }));
@@ -842,6 +650,66 @@ describe("SessionIndexStore", () => {
 
       expect(result.sessions.map((s) => s.id)).toEqual(["alice-new", "alice-old"]);
       expect(result.hasMore).toBe(false);
+    });
+
+    it("filters automation lineage before pagination", async () => {
+      await store.create(makeSession({ id: "manual-new", spawnSource: "user", updatedAt: 4000 }));
+      await store.create(
+        makeSession({
+          id: "automation",
+          spawnSource: "automation",
+          automationId: "automation-1",
+          automationRunId: "run-1",
+          updatedAt: 3000,
+        })
+      );
+      await store.create(
+        makeSession({
+          id: "automation-child",
+          parentSessionId: "automation",
+          spawnSource: "agent",
+          automationId: "automation-1",
+          automationRunId: "run-1",
+          updatedAt: 3500,
+        })
+      );
+      await store.create(makeSession({ id: "manual-old", spawnSource: "user", updatedAt: 2000 }));
+      await store.delete("automation");
+
+      const result = await store.list({ excludeAutomationLineage: true, limit: 2 });
+
+      expect(result.sessions.map((session) => session.id)).toEqual(["manual-new", "manual-old"]);
+      expect(result.hasMore).toBe(false);
+    });
+
+    it("excludes github-bot sessions from lineage-filtered lists even when created by the user", async () => {
+      await store.create(
+        makeSession({ id: "web", spawnSource: "user", userId: "alice", updatedAt: 4000 })
+      );
+      await store.create(
+        makeSession({
+          id: "auto-review",
+          spawnSource: "github-bot",
+          userId: "alice",
+          updatedAt: 3000,
+        })
+      );
+      await store.create(
+        makeSession({ id: "slack", spawnSource: "slack-bot", userId: "alice", updatedAt: 2000 })
+      );
+
+      const filtered = await store.list({
+        excludeAutomationLineage: true,
+        createdByUserIds: ["alice"],
+      });
+      expect(filtered.sessions.map((session) => session.id)).toEqual(["web", "slack"]);
+
+      const unfiltered = await store.list({ createdByUserIds: ["alice"] });
+      expect(unfiltered.sessions.map((session) => session.id)).toEqual([
+        "web",
+        "auto-review",
+        "slack",
+      ]);
     });
 
     it("trims and lowercases repo filters", async () => {
@@ -907,103 +775,6 @@ describe("SessionIndexStore", () => {
       const page3 = await store.list({ limit: 2, offset: 4 });
       expect(page3.sessions).toHaveLength(1);
       expect(page3.hasMore).toBe(false);
-    });
-
-    it("paginates tree base rows deterministically while returning complete ancestor closure", async () => {
-      await store.create(makeSession({ id: "grandparent", updatedAt: 100 }));
-      await store.create(
-        makeSession({
-          id: "parent",
-          parentSessionId: "grandparent",
-          spawnSource: "agent",
-          spawnDepth: 1,
-          updatedAt: 200,
-        })
-      );
-      await store.create(
-        makeSession({
-          id: "child",
-          parentSessionId: "parent",
-          spawnSource: "agent",
-          spawnDepth: 2,
-          updatedAt: 500,
-        })
-      );
-      await store.create(makeSession({ id: "tie-a", updatedAt: 400 }));
-      await store.create(makeSession({ id: "tie-z", updatedAt: 400 }));
-      await store.create(makeSession({ id: "filler", updatedAt: 300 }));
-      await store.create(makeSession({ id: "other", updatedAt: 150 }));
-
-      const page1 = await store.list({ mode: "tree", limit: 3 });
-      expect(page1.sessions.map((session) => session.id)).toEqual([
-        "child",
-        "tie-z",
-        "tie-a",
-        "parent",
-        "grandparent",
-      ]);
-      expect(page1.hasMore).toBe(true);
-      expect(page1.nextCursor).toEqual({ updatedAt: 400, id: "tie-a" });
-
-      const page2 = await store.list({ mode: "tree", limit: 3, cursor: page1.nextCursor! });
-      expect(page2.sessions.map((session) => session.id)).toEqual([
-        "filler",
-        "parent",
-        "other",
-        "grandparent",
-      ]);
-      expect(page2.nextCursor).toEqual({ updatedAt: 150, id: "other" });
-
-      const page3 = await store.list({ mode: "tree", limit: 3, cursor: page2.nextCursor! });
-      expect(page3.sessions.map((session) => session.id)).toEqual(["grandparent"]);
-      expect(page3.hasMore).toBe(false);
-      expect(page3.nextCursor).toBeNull();
-    });
-
-    it("returns required tree ancestors outside the creator filter", async () => {
-      await store.create(makeSession({ id: "bob-parent", userId: "bob", updatedAt: 100 }));
-      await store.create(
-        makeSession({
-          id: "alice-child",
-          parentSessionId: "bob-parent",
-          spawnSource: "agent",
-          spawnDepth: 1,
-          userId: "alice",
-          updatedAt: 200,
-        })
-      );
-
-      const result = await store.list({
-        mode: "tree",
-        createdByUserIds: ["alice"],
-        limit: 1,
-      });
-
-      expect(result.sessions.map((session) => session.id)).toEqual(["alice-child", "bob-parent"]);
-      expect(result.hasMore).toBe(false);
-    });
-
-    it("excludes archived subtrees from tree base rows and closure", async () => {
-      await store.create(makeSession({ id: "archived-root", updatedAt: 100 }));
-      await store.create(
-        makeSession({
-          id: "stale-child",
-          parentSessionId: "archived-root",
-          spawnSource: "agent",
-          spawnDepth: 1,
-          updatedAt: 500,
-        })
-      );
-      await store.create(makeSession({ id: "visible", updatedAt: 300 }));
-      await store.updateStatus("archived-root", "archived", 600);
-
-      const result = await store.list({
-        mode: "tree",
-        excludeStatus: "archived",
-        limit: 10,
-      });
-
-      expect(result.sessions.map((session) => session.id)).toEqual(["visible"]);
     });
 
     it("derives hasMore without counting", async () => {
@@ -1162,9 +933,8 @@ describe("SessionIndexStore", () => {
       });
     });
 
-    describe("archiveDescendants", () => {
-      it("archives the full descendant tree and closes it to new children", async () => {
-        await store.updateStatus("child-2", "active");
+    describe("listActiveDescendantIds", () => {
+      it("returns active descendants deepest-first through terminal ancestors", async () => {
         await store.create(
           makeSession({
             id: "grandchild-1",
@@ -1175,98 +945,14 @@ describe("SessionIndexStore", () => {
           })
         );
 
-        await store.archiveDescendants(parentId, epochMs(5000));
-
-        expect((await store.get(parentId))?.status).not.toBe("archived");
-        expect((await store.get("child-1"))?.status).toBe("archived");
-        expect((await store.get("child-2"))?.status).toBe("archived");
-        expect((await store.get("grandchild-1"))?.status).toBe("archived");
-        await expect(
-          store.create(
-            makeSession({
-              id: "late-child",
-              parentSessionId: parentId,
-              spawnSource: "agent",
-              spawnDepth: 1,
-            })
-          )
-        ).rejects.toBeInstanceOf(ParentSessionSpawnRejectedError);
-      });
-
-      it("reopens the archived parent when it is restored", async () => {
-        await store.archiveDescendants(parentId, epochMs(5000));
-
-        await store.restoreArchivedSession(parentId, epochMs(6000));
-
-        await expect(
-          store.create(
-            makeSession({
-              id: "new-child",
-              parentSessionId: parentId,
-              spawnSource: "agent",
-              spawnDepth: 1,
-            })
-          )
-        ).resolves.toBeUndefined();
-      });
-    });
-
-    describe("closeSpawningAndListDescendantIds", () => {
-      it("closes the subtree and returns every descendant deepest-first", async () => {
-        await store.updateStatus("child-2", "active");
-        await store.create(
-          makeSession({
-            id: "grandchild-1",
-            status: "active",
-            parentSessionId: "child-2",
-            spawnSource: "agent",
-            spawnDepth: 2,
-          })
-        );
-        await store.updateStatus("child-2", "completed");
-
-        await expect(store.closeSpawningAndListDescendantIds(parentId)).resolves.toEqual([
+        await expect(store.listActiveDescendantIds(parentId)).resolves.toEqual([
           "grandchild-1",
           "child-1",
-          "child-2",
         ]);
-
-        await expect(
-          store.create(
-            makeSession({
-              id: "late-child",
-              parentSessionId: "grandchild-1",
-              spawnSource: "agent",
-              spawnDepth: 3,
-            })
-          )
-        ).rejects.toBeInstanceOf(ParentSessionSpawnRejectedError);
       });
 
-      it("closes a session that has no descendants", async () => {
-        await expect(store.closeSpawningAndListDescendantIds("child-1")).resolves.toEqual([]);
-        await expect(
-          store.create(
-            makeSession({
-              id: "late-child",
-              parentSessionId: "child-1",
-              spawnSource: "agent",
-              spawnDepth: 2,
-            })
-          )
-        ).rejects.toBeInstanceOf(ParentSessionSpawnRejectedError);
-      });
-    });
-
-    describe("countActiveChildren", () => {
-      it("excludes completed/failed/archived/cancelled", async () => {
-        const count = await store.countActiveChildren(parentId);
-        expect(count).toBe(1); // child-1 is "created", child-2 is "completed"
-      });
-
-      it("returns 0 when no children exist", async () => {
-        const count = await store.countActiveChildren("no-children");
-        expect(count).toBe(0);
+      it("returns an empty array when no descendants exist", async () => {
+        await expect(store.listActiveDescendantIds("no-children")).resolves.toEqual([]);
       });
     });
 

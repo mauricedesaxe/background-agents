@@ -1,11 +1,16 @@
 import useSWR from "swr";
-import { useSession } from "next-auth/react";
-import type { McpServerConfig, McpServerMetadata } from "@open-inspect/shared";
+import { useAuthSession } from "@/lib/auth-session";
+import { browserApiFetch } from "@/lib/browser-api-fetch";
+import type {
+  CreateMcpServerRequest,
+  McpServerMetadata,
+  UpdateMcpServerRequest,
+} from "@open-inspect/shared/types/integrations";
 
 const MCP_SERVERS_KEY = "/api/mcp-servers";
 
 export function useMcpServers() {
-  const { data: session } = useSession();
+  const { data: session } = useAuthSession();
 
   const { data, isLoading, mutate } = useSWR<McpServerMetadata[]>(session ? MCP_SERVERS_KEY : null);
 
@@ -16,10 +21,8 @@ export function useMcpServers() {
   };
 }
 
-export async function createMcpServer(
-  config: Omit<McpServerConfig, "id">
-): Promise<McpServerMetadata> {
-  const response = await fetch(MCP_SERVERS_KEY, {
+export async function createMcpServer(config: CreateMcpServerRequest): Promise<McpServerMetadata> {
+  const response = await browserApiFetch(MCP_SERVERS_KEY, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
@@ -33,9 +36,9 @@ export async function createMcpServer(
 
 export async function updateMcpServer(
   id: string,
-  patch: Partial<McpServerConfig>
+  patch: UpdateMcpServerRequest
 ): Promise<McpServerMetadata> {
-  const response = await fetch(`${MCP_SERVERS_KEY}/${id}`, {
+  const response = await browserApiFetch(`${MCP_SERVERS_KEY}/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
@@ -48,7 +51,7 @@ export async function updateMcpServer(
 }
 
 export async function deleteMcpServer(id: string): Promise<void> {
-  const response = await fetch(`${MCP_SERVERS_KEY}/${id}`, {
+  const response = await browserApiFetch(`${MCP_SERVERS_KEY}/${id}`, {
     method: "DELETE",
   });
   if (!response.ok) {

@@ -16,5 +16,6 @@ export * from "./logger";
 export * from "./cache-store";
 export * from "./app-name";
 export * from "./user-id";
+export * from "./browser-auth-routes";
+export * from "./sign-in-provider";
 export * from "./slack";
-export * from "./upstream-exchange";
