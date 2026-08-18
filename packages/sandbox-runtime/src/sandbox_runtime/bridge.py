@@ -939,7 +939,21 @@ class AgentBridge:
 
                     raise RuntimeError("OpenCode event stream ended before compaction completed")
         except TimeoutError:
-            await self._send_compaction_failure(request_id, "Context compaction timed out")
+            if self.http_client and self.opencode_session_id:
+                await self.http_client.post(
+                    f"{self.opencode_base_url}/session/{self.opencode_session_id}/abort",
+                    json={"reason": "compaction_timeout"},
+                )
+            raise RuntimeError(
+                f"Context compaction timed out after {self.COMPACTION_MAX_DURATION:.0f}s"
+            ) from None
+        except asyncio.CancelledError:
+            if self.http_client and self.opencode_session_id:
+                await self.http_client.post(
+                    f"{self.opencode_base_url}/session/{self.opencode_session_id}/abort",
+                    json={"reason": "compaction_cancelled"},
+                )
+            raise
 
     async def _send_terminal_event_and_refresh(self, event: dict[str, Any]) -> None:
         await self._send_event(event)
