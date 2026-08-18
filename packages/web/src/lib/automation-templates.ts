@@ -487,78 +487,32 @@ export const automationTemplates: AutomationTemplate[] = [
     id: "diagnose-betterstack-incident",
     title: "Diagnose Better Stack incidents",
     description:
-      "When a Better Stack incident starts, pull it, diagnose from logs and code, " +
+      "When a Better Stack incident starts, pull it, query logs, diagnose from the codebase, " +
       "write a repro test, and open a GitHub issue with a proposed fix.",
     categories: ["incidents"],
     primaryOutput: "pr",
-    setupNote:
-      "Requires BETTERSTACK_INCIDENT_API_TOKEN as a repo secret. " +
-      "Optional: BETTERSTACK_CLICKHOUSE_HOST, BETTERSTACK_CLICKHOUSE_USER, " +
-      "BETTERSTACK_CLICKHOUSE_PASSWORD for log queries (skips gracefully when absent).",
     prefill: {
       name: "Diagnose Better Stack incidents",
       triggerType: "webhook",
       instructions:
         "A Better Stack incident was reported; the webhook payload is prepended above. " +
         "Your job: diagnose it, reproduce it, and report it.\n\n" +
-        "Credentials are injected as environment variables. " +
-        "BETTERSTACK_INCIDENT_API_TOKEN is required. " +
-        "BETTERSTACK_CLICKHOUSE_HOST, BETTERSTACK_CLICKHOUSE_USER, and " +
-        "BETTERSTACK_CLICKHOUSE_PASSWORD are optional for log querying.\n\n" +
-        "1. PULL THE INCIDENT\n" +
-        "Use curl to GET https://uptime.betterstack.com/api/v3/incidents/<id> " +
-        "and its timeline at /api/v3/incidents/<id>/timeline. " +
-        "Authorization: Bearer $BETTERSTACK_INCIDENT_API_TOKEN.\n\n" +
-        "2. QUERY LOGS (skip gracefully when ClickHouse credentials are absent)\n" +
-        "If BETTERSTACK_CLICKHOUSE_HOST is set, use curl to query the ClickHouse " +
-        "endpoint for errors around the incident timestamp on the reported route:\n" +
-        "  curl -u $BETTERSTACK_CLICKHOUSE_USER:$BETTERSTACK_CLICKHOUSE_PASSWORD \\\n" +
-        '    -H "Content-type: plain/text" \\\n' +
-        "    -X POST https://$BETTERSTACK_CLICKHOUSE_HOST \\\n" +
-        '    -d "SELECT dt, raw FROM remote(<table>_logs) ' +
-        "WHERE dt BETWEEN '<start>' AND '<end>' ORDER BY dt DESC LIMIT 20\"\n" +
-        "Look for JSONExtract(raw, 'level', 'Nullable(String)') = 'error' rows.\n" +
-        "When the credentials are absent, skip this step and diagnose from the " +
-        "incident description alone, which already contains the route, release, " +
-        "timestamp, and user description.\n\n" +
-        "3. DIAGNOSE\n" +
-        "From available evidence, locate the failing code path. Identify the root " +
-        "cause with file references (path:line). If the incident description " +
-        "mentions a route, search the codebase for the corresponding handler.\n\n" +
-        "4. REPRODUCE\n" +
-        "Write a focused Playwright e2e test that reproduces the exact reported " +
-        "behaviour. Place it at test/e2e/auto/repro-<slug>.e2e.ts. Run it and " +
-        "confirm it FAILS with the reported error before any fix is applied.\n\n" +
-        "5. TEST A FIX\n" +
-        "Apply the minimal code change that you believe fixes the bug. Re-run the " +
-        "repro test and note whether it passes. NEVER commit the fix. NEVER open a " +
-        "PR. Discard the fix after the test. Keep the repro test file in the working " +
-        "tree.\n\n" +
-        "6. SEARCH FOR EXISTING ISSUES\n" +
-        'Search GitHub issues (open AND closed) with `gh issue list --search "..."` ' +
-        'and `gh issue list --state closed --search "..."`. Look for matching ' +
-        "route, error message, or symptoms. If found, note the issue number.\n\n" +
-        "7. REPORT\n" +
-        "If no existing issue found: create one with `gh issue create`. Use labels " +
-        '"bug" and "auto-diagnosed". Structure the body:\n' +
-        "  ## Diagnosis\n" +
-        "  <root cause, file references, evidence>\n" +
-        "  ## Reproduction\n" +
-        "  <steps or test file path, the failing output>\n" +
-        "  ## Proposed fix\n" +
-        "  <description of the fix, whether it resolved the reproduction>\n" +
-        "  ## Incident\n" +
-        "  <Better Stack incident link>\n" +
-        "If an existing issue was found, comment the same diagnosis on it with " +
-        "`gh issue comment <number>`, plus a note that this incident appears to be " +
-        "the same bug.\n\n" +
-        "8. CLOSE THE LOOP\n" +
-        "Comment on the Better Stack incident with curl POST to " +
-        "/api/v3/incidents/<id>/comments:\n" +
-        "  Diagnosed and filed as <GitHub issue URL>. TLDR: <one-line diagnosis>.\n\n" +
-        "If at any step you cannot proceed (no evidence, cannot reproduce, search " +
-        "inconclusive), report what you found and what is missing. A partial " +
-        "diagnosis with honest gaps is better than silence.",
+        "1. Pull the incident details and timeline from Better Stack.\n" +
+        "2. Query logs and traces around the incident timestamp for the reported route.\n" +
+        "3. Diagnose the root cause against the codebase with file references.\n" +
+        "4. Write a Playwright e2e repro test (test/e2e/auto/repro-<slug>.e2e.ts). " +
+        "Run it and confirm it fails with the reported error before any fix.\n" +
+        "5. Try a fix. Re-run the repro. Note whether it passes. NEVER commit the fix. " +
+        "NEVER open a PR. Discard the fix after the test.\n" +
+        "6. Search GitHub issues (open and closed) for the same bug. " +
+        "If found, comment your diagnosis and proposed fix there. " +
+        'If not, open a new issue labelled "bug" and "auto-diagnosed" ' +
+        "with the diagnosis, repro steps, proposed fix, and incident link. " +
+        "Match the repo's existing issue style.\n" +
+        "7. Comment on the Better Stack incident with a TLDR and the GitHub issue link. " +
+        "Do not acknowledge or resolve the incident — that is a human decision.\n\n" +
+        "If any step hits a dead end, report what you found and what is missing. " +
+        "A partial diagnosis with honest gaps is better than silence.",
     },
   },
 ];
