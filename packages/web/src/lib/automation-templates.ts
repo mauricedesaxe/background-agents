@@ -494,6 +494,21 @@ export const automationTemplates: AutomationTemplate[] = [
     prefill: {
       name: "Diagnose Better Stack incidents",
       triggerType: "webhook",
+      triggerConfig: {
+        conditions: [
+          {
+            type: "jsonpath",
+            operator: "all_match",
+            value: [
+              {
+                path: "$.incident.status",
+                comparison: "eq",
+                value: "Started",
+              },
+            ],
+          },
+        ],
+      },
       instructions:
         "A Better Stack incident was reported; the webhook payload is prepended above. " +
         "Your job: diagnose it, reproduce it, and report it.\n\n" +
