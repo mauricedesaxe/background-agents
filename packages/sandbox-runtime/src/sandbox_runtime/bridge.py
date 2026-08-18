@@ -18,7 +18,8 @@ import os
 import re
 import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
@@ -150,6 +151,97 @@ class SessionTerminatedError(Exception):
     """
 
     pass
+
+
+class EventPump:
+    """Buffers prompt events and drains them to a sink on a separate task.
+
+    The prompt consumer used to `await` the WebSocket send for every event
+    inline, so a slow send stalled the loop that reads OpenCode's SSE stream.
+    That backpressure filled OpenCode's send buffer until it severed the
+    connection (an incomplete chunked read). This decouples the two: the
+    producer `enqueue`s events without blocking, and the pump task drains them
+    to the sink as fast as the sink allows, so the SSE reader keeps draining.
+
+    Single producer (the prompt loop) and single consumer (the pump task) run
+    on one event loop, so the deque needs no lock. On overflow the oldest
+    droppable event is evicted first (a token's content is cumulative, so a
+    later token replaces it losslessly), then any other non-critical event,
+    then the oldest event, purely to bound memory. Critical events are never
+    dropped.
+    """
+
+    def __init__(
+        self,
+        sink: Callable[[dict[str, Any]], Awaitable[None]],
+        *,
+        max_buffered: int,
+        critical_types: set[str],
+        droppable_types: set[str],
+    ) -> None:
+        self._sink = sink
+        self._max_buffered = max_buffered
+        self._critical_types = critical_types
+        self._droppable_types = droppable_types
+        self._buffer: deque[dict[str, Any]] = deque()
+        self._wakeup = asyncio.Event()
+        self._closed = False
+        self._dropped = 0
+        self._task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._run())
+
+    def enqueue(self, event: dict[str, Any]) -> None:
+        """Buffer an event for delivery. Never blocks the caller."""
+        if len(self._buffer) >= self._max_buffered:
+            self._evict_one()
+        self._buffer.append(event)
+        self._wakeup.set()
+
+    def _evict_one(self) -> None:
+        if self._drop_first(lambda t: t in self._droppable_types):
+            return
+        if self._drop_first(lambda t: t not in self._critical_types):
+            return
+        self._buffer.popleft()
+        self._dropped += 1
+
+    def _drop_first(self, predicate: Callable[[str], bool]) -> bool:
+        for i, buffered in enumerate(self._buffer):
+            if predicate(buffered.get("type", "")):
+                del self._buffer[i]
+                self._dropped += 1
+                return True
+        return False
+
+    async def _run(self) -> None:
+        while True:
+            while self._buffer:
+                await self._sink(self._buffer.popleft())
+            if self._closed:
+                return
+            self._wakeup.clear()
+            if not self._buffer:
+                await self._wakeup.wait()
+
+    async def aclose(self) -> int:
+        """Drain every buffered event to the sink, then stop. Returns drop count.
+
+        Awaiting this before sending a terminal event guarantees the terminal
+        event lands after everything already produced.
+        """
+        self._closed = True
+        self._wakeup.set()
+        if self._task is not None:
+            await self._task
+            self._task = None
+        return self._dropped
+
+    def cancel(self) -> None:
+        """Stop the pump without draining. Idempotent; safe after aclose."""
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
 
 
 class AgentBridge:
