@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from daytona import CreateSnapshotParams, Daytona, Image
+from daytona import CreateSnapshotParams, Daytona, Image, Resources
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -20,7 +20,7 @@ OPENCODE_VERSION = "1.18.18"
 CODE_SERVER_VERSION = "4.109.5"
 AGENT_BROWSER_VERSION = "0.21.2"
 # Bump when changing image contents to invalidate the Daytona snapshot.
-SANDBOX_VERSION = "daytona-v6-vnc-opencode-1-18-18"
+SANDBOX_VERSION = "daytona-v7-8gb-vnc-opencode-1-18-18"
 
 
 def build_base_image(repo_root: Path) -> Image:
@@ -107,6 +107,7 @@ def create_base_snapshot(daytona: Daytona, repo_root: Path, snapshot_name: str) 
             name=snapshot_name,
             image=image,
             entrypoint=["python", "-m", "sandbox_runtime.entrypoint"],
+            resources=Resources(cpu=2, memory=8, disk=8),  # snapshot-fixed; default 1/1/3 can't boot the ~3.6 GiB image
         ),
         on_logs=lambda chunk: print(chunk, end="\n"),
     )
