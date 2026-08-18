@@ -25,9 +25,14 @@ def isolate_runtime_file_paths(tmp_path, monkeypatch):
     themselves; this fixture is the backstop that keeps every other test off
     the real files.
     """
+    redirect_runtime_file_paths(tmp_path, monkeypatch)
+
+
+def redirect_runtime_file_paths(tmp_path, monkeypatch):
     manifest_path = str(tmp_path / "oi-repo-manifest.json")
     boot_warnings_path = str(tmp_path / "oi-boot-warnings.jsonl")
     tunnel_env_path = str(tmp_path / ".tunnels.env")
+    monkeypatch.setattr("sandbox_runtime.bridge.tempfile.tempdir", str(tmp_path))
     monkeypatch.setattr("sandbox_runtime.repository_boot.REPO_MANIFEST_FILE_PATH", manifest_path)
     monkeypatch.setattr("sandbox_runtime.bridge.REPO_MANIFEST_FILE_PATH", manifest_path)
     monkeypatch.setattr("sandbox_runtime.boot_warnings.BOOT_WARNINGS_FILE_PATH", boot_warnings_path)
