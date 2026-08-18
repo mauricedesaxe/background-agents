@@ -17,7 +17,13 @@ import { MAX_UNFINISHED_PROMPTS } from "@open-inspect/shared/types/prompts";
 import type { ClientInfo } from "../types";
 import type { SourceControlProviderName } from "../source-control";
 import type { SandboxLifecycle } from "../sandbox/lifecycle/manager";
-import type { ParticipantRow, PromptGitIdentity, SandboxCommand, SandboxRow, SessionRow } from "./types";
+import type {
+  ParticipantRow,
+  PromptGitIdentity,
+  SandboxCommand,
+  SandboxRow,
+  SessionRow,
+} from "./types";
 import type { SessionCoreRepository } from "./session-core-repository";
 import type { ParticipantRepository } from "./participant-repository";
 import { STOP_CONFIRMATION_TIMEOUT_MS, type MessageRepository } from "./message-repository";

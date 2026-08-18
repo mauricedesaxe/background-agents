@@ -2730,10 +2730,8 @@ describe("SandboxLifecycleManager", () => {
       expect(retryAttempt.sandboxId).not.toBe(firstAttempt.sandboxId);
       expect(vi.mocked(storage.updateSandboxForSpawn)).toHaveBeenCalledTimes(2);
       expect(alarmScheduler.alarms).toEqual([
-        vi
-          .mocked(storage.updateSandboxForSpawn)
-          .mock.calls.at(-1)![0]
-          .createdAt + DEFAULT_LIFECYCLE_CONFIG.connectingTimeout.timeoutMs,
+        vi.mocked(storage.updateSandboxForSpawn).mock.calls.at(-1)![0].createdAt +
+          DEFAULT_LIFECYCLE_CONFIG.connectingTimeout.timeoutMs,
       ]);
       expect(storage.calls).toContain("updateSandboxStatus:connecting");
       expect(storage.calls).not.toContain("updateSandboxStatus:failed");

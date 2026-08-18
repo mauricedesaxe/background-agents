@@ -101,8 +101,8 @@ describe("createAlarmHandler", () => {
     };
     const messageQueue = {
       failStuckProcessingMessage: vi.fn<() => Promise<void>>().mockResolvedValue(),
-    failStuckPendingMessage: vi.fn<() => Promise<boolean>>().mockResolvedValue(false),
-    processMessageQueue: vi.fn<() => Promise<void>>().mockResolvedValue(),
+      failStuckPendingMessage: vi.fn<() => Promise<boolean>>().mockResolvedValue(false),
+      processMessageQueue: vi.fn<() => Promise<void>>().mockResolvedValue(),
       recoverStopConfirmationTimeout: vi.fn<() => Promise<void>>().mockResolvedValue(),
     };
 
