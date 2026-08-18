@@ -607,6 +607,9 @@ class OpenCodeServer:
                 except TimeoutError:
                     self.log.warn("opencode.stop_timeout")
 
+    def pid(self) -> int | None:
+        return self._opencode_process.pid if self._opencode_process else None
+
     def exit_code(self) -> int | None:
         """Return OpenCode's exit code, or None while absent/running."""
         return self._opencode_process.returncode if self._opencode_process else None

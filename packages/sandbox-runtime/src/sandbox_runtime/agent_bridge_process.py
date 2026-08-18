@@ -89,6 +89,9 @@ class AgentBridgeProcess:
                 except TimeoutError:
                     self.log.warn("bridge.stop_timeout")
 
+    def pid(self) -> int | None:
+        return self._process.pid if self._process else None
+
     def exit_code(self) -> int | None:
         return self._process.returncode if self._process else None
 

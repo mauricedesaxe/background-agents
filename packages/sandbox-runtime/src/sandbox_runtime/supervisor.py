@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import time
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import httpx
 
 from .constants import BOOT_WARNINGS_FILE_PATH, IMAGE_BUILD_EXECUTION_TIMEOUT_ENV_VAR
+from .diagnostics import read_cgroup_memory_diagnostics, read_process_tree_rss_bytes
 from .repo_image_callback import RepoImageBuildCallback
 from .runtime_config import BootMode, RuntimeConfig
 
@@ -40,6 +42,12 @@ class SandboxSupervisor:
     BACKOFF_BASE = 2.0
     BACKOFF_MAX = 60.0
 
+    SUPERVISOR_OOM_SCORE_ADJ = -900
+    BRIDGE_OOM_SCORE_ADJ = -700
+    OPENCODE_OOM_SCORE_ADJ = -500
+    SUPERVISOR_HEARTBEAT_INTERVAL_SECONDS = 30.0
+    SUPERVISOR_HEARTBEAT_TIMEOUT_SECONDS = 5.0
+
     def __init__(
         self,
         config: RuntimeConfig,
@@ -66,6 +74,9 @@ class SandboxSupervisor:
         self.boot_mode = BootMode.FRESH
         self._desktop_restart_task: asyncio.Task[bool] | None = None
         self._repository_boot_result: RepositoryBootResult | None = None
+        self.boot_phase = "initializing"
+        self.supervisor_heartbeat_sequence = 0
+        self._heartbeat_task: asyncio.Task[None] | None = None
 
     @staticmethod
     def installed_philosophy_path() -> Path:
@@ -108,6 +119,94 @@ class SandboxSupervisor:
             "section before acting on it.",
             "",
         ]
+
+    def _set_oom_score_adj(self, pid: int, score: int, *, name: str) -> None:
+        """Bias the Linux OOM killer for a managed child process.
+
+        Writing a negative value to /proc/<pid>/oom_score_adj makes the kernel
+        prefer other processes when memory runs out. Lowering the value below
+        the current one requires privilege (root / CAP_SYS_RESOURCE); if we
+        can't, we log and continue rather than fail the boot.
+        """
+        try:
+            Path(f"/proc/{pid}/oom_score_adj").write_text(str(score))
+            self.log.info("oom.score_adj_set", component=name, pid=pid, score=score)
+        except OSError as e:
+            self.log.warn(
+                "oom.score_adj_failed", component=name, pid=pid, score=score, error=str(e)
+            )
+
+    def _process_diagnostic(self, pid_fn, exit_code_fn) -> dict:
+        pid = pid_fn()
+        running = exit_code_fn() is None
+        return {
+            "pid": pid,
+            "running": running,
+            "exitCode": exit_code_fn(),
+            "treeRssBytes": read_process_tree_rss_bytes(pid if running else None),
+        }
+
+    async def _send_supervisor_heartbeat(self) -> None:
+        session_id = str(self.config.session_config.get("session_id") or "")
+        if not self.config.control_plane_url or not session_id or not self.config.sandbox_token:
+            return
+
+        memory = read_cgroup_memory_diagnostics()
+        self.supervisor_heartbeat_sequence += 1
+        payload = {
+            "sandboxId": self.config.sandbox_id,
+            "observedAt": int(time.time() * 1000),
+            "sequence": self.supervisor_heartbeat_sequence,
+            "bootMode": self.boot_mode.value,
+            "bootPhase": self.boot_phase,
+            "processes": {
+                "supervisor": {
+                    "pid": os.getpid(),
+                    "running": True,
+                    "exitCode": None,
+                },
+                "opencode": self._process_diagnostic(
+                    self.opencode_server.pid, self.opencode_server.exit_code
+                ),
+                "bridge": self._process_diagnostic(
+                    self.agent_bridge.pid, self.agent_bridge.exit_code
+                ),
+            },
+            "cgroup": {
+                "memoryCurrentBytes": memory.memory_current_bytes,
+                "memoryMaxBytes": memory.memory_max_bytes,
+                "highCount": memory.high_count,
+                "maxCount": memory.max_count,
+                "oomCount": memory.oom_count,
+                "oomKillCount": memory.oom_kill_count,
+            },
+        }
+        url = f"{self.config.control_plane_url}/sessions/{session_id}/supervisor-heartbeat"
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.SUPERVISOR_HEARTBEAT_TIMEOUT_SECONDS
+            ) as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {self.config.sandbox_token}"},
+                    json=payload,
+                )
+            if response.status_code >= 400:
+                self.log.warn(
+                    "supervisor.heartbeat_rejected",
+                    http_status=response.status_code,
+                )
+        except Exception as error:
+            self.log.warn("supervisor.heartbeat_failed", error_type=type(error).__qualname__)
+
+    async def _supervisor_heartbeat_loop(self) -> None:
+        while not self.shutdown_event.is_set():
+            await self._send_supervisor_heartbeat()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self.shutdown_event.wait(),
+                    timeout=self.SUPERVISOR_HEARTBEAT_INTERVAL_SECONDS,
+                )
 
     async def _report_fatal_error(self, message: str) -> None:
         self.log.error("supervisor.fatal", error_message=message)
@@ -181,6 +280,9 @@ class SandboxSupervisor:
             self._repository_boot_result.repositories,
             self._repository_boot_result.workdir,
         )
+        self._set_oom_score_adj(
+            self.opencode_server.pid(), self.OPENCODE_OOM_SCORE_ADJ, name="opencode"
+        )
         return restart_count
 
     async def _handle_bridge_exit(self, restart_count: int) -> int:
@@ -213,6 +315,7 @@ class SandboxSupervisor:
         if await self._wait_for_shutdown(delay):
             return restart_count
         await self.agent_bridge.start()
+        self._set_oom_score_adj(self.agent_bridge.pid(), self.BRIDGE_OOM_SCORE_ADJ, name="bridge")
         return restart_count
 
     async def _handle_code_server_exit(self, restart_count: int) -> int:
@@ -397,6 +500,7 @@ class SandboxSupervisor:
 
         opencode_ready = False
         try:
+            self._set_oom_score_adj(os.getpid(), self.SUPERVISOR_OOM_SCORE_ADJ, name="supervisor")
             if self.boot_mode is BootMode.BUILD:
                 boot_result = await self._run_image_build_execution(expected_tunnel_ports)
                 if self.shutdown_event.is_set():
@@ -447,7 +551,13 @@ class SandboxSupervisor:
 
             await self.opencode_server.start(boot_result.repositories, boot_result.workdir)
             opencode_ready = True
+            self._set_oom_score_adj(
+                self.opencode_server.pid(), self.OPENCODE_OOM_SCORE_ADJ, name="opencode"
+            )
             await self.agent_bridge.start()
+            self._set_oom_score_adj(
+                self.agent_bridge.pid(), self.BRIDGE_OOM_SCORE_ADJ, name="bridge"
+            )
             self.log.info(
                 "sandbox.startup",
                 repo_owner=self.config.repo_owner,
@@ -462,6 +572,8 @@ class SandboxSupervisor:
                 duration_ms=int((time.time() - startup_start) * 1000),
                 outcome="success",
             )
+            self.boot_phase = "monitoring"
+            self._heartbeat_task = asyncio.create_task(self._supervisor_heartbeat_loop())
             await self.monitor_processes()
         except ImageBuildExecutionCancelled:
             self.log.info("image_build.cancelled", reason="shutdown_requested")
@@ -500,5 +612,10 @@ class SandboxSupervisor:
         await self.web_terminal.stop()
         await self.code_server.stop()
         await self.browser_desktop.stop()
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self.boot_phase = "shutting_down"
+            self._heartbeat_task.cancel()
+            await asyncio.gather(self._heartbeat_task, return_exceptions=True)
+        self._heartbeat_task = None
         await self.opencode_server.stop()
         self.log.info("supervisor.shutdown_complete")
