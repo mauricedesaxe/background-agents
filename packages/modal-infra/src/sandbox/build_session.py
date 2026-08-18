@@ -6,7 +6,10 @@ from typing import cast
 
 import modal
 
-from sandbox_runtime.constants import IMAGE_BUILD_EXECUTION_TIMEOUT_ENV_VAR
+from sandbox_runtime.constants import (
+    DEFAULT_BUILD_TIMEOUT_SECONDS,
+    IMAGE_BUILD_EXECUTION_TIMEOUT_ENV_VAR,
+)
 from sandbox_runtime.log_config import get_logger
 from sandbox_runtime.modal_image_build_start import (
     MODAL_IMAGE_BUILD_START_ARGUMENT,
@@ -29,8 +32,6 @@ from .vcs_env import inject_vcs_env_vars
 log = get_logger("build_session")
 
 # Mirrors packages/shared/src/types/integrations.ts; guarded by a contract test.
-DEFAULT_BUILD_TIMEOUT_SECONDS = 1800
-MAX_BUILD_TIMEOUT_SECONDS = 3600
 LAUNCH_PROTOCOL_TAG = "openinspect_launch_protocol"
 
 # Keys scrubbed from user env vars before a build sandbox launches — the

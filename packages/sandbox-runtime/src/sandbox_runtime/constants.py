@@ -7,6 +7,9 @@ DEFAULT_BIN_INSTALL_DIR = "/usr/local/bin"
 
 # Sandbox lifetime and the env contract used to pass it to the bridge.
 DEFAULT_SANDBOX_TIMEOUT_SECONDS = 7200
+DEFAULT_BUILD_TIMEOUT_SECONDS = 1800
+MAX_BUILD_TIMEOUT_SECONDS = 3600
+BUILD_FUNCTION_TIMEOUT_MARGIN_SECONDS = 300
 SANDBOX_TIMEOUT_ENV_VAR = "SANDBOX_TIMEOUT_SECONDS"
 MAX_SNAPSHOT_RESERVE_SECONDS = 900
 SNAPSHOT_RESERVE_FRACTION = 0.25
@@ -64,3 +67,10 @@ BOOT_WARNINGS_FILE_PATH = "/tmp/oi-boot-warnings.jsonl"
 # layout has a single authority. JSON: {"repositories": [{owner, name, branch,
 # path}]}. Mirrored as a string literal in plugins/inspect-plugin.js.
 REPO_MANIFEST_FILE_PATH = "/tmp/oi-repo-manifest.json"
+
+
+def build_function_timeout_seconds(build_timeout_seconds: int) -> int:
+    return (
+        min(build_timeout_seconds, MAX_BUILD_TIMEOUT_SECONDS)
+        + BUILD_FUNCTION_TIMEOUT_MARGIN_SECONDS
+    )

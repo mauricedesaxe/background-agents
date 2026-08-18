@@ -107,3 +107,15 @@ def verify_internal_token(auth_header: str | None, secret: str | None = None) ->
 
     # Constant-time comparison to prevent timing attacks
     return hmac.compare_digest(signature, expected_signature)
+
+
+def generate_internal_token(secret: str | None = None) -> str:
+    if secret is None:
+        secret = require_secret()
+    timestamp_str = str(int(time.time() * 1000))
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        timestamp_str.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{timestamp_str}.{signature}"
