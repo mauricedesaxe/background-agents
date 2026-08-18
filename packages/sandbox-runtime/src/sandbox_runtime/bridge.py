@@ -358,7 +358,7 @@ class AgentBridge:
             log=self.log,
         )
 
-        self.http_client = httpx.AsyncClient()
+        self.http_client: httpx.AsyncClient | None = None
         # Prompt SSE translator; created on first prompt so that
         # sse_inactivity_timeout stays overridable until streaming starts.
         self._prompt_stream: OpenCodePromptStream | None = None
@@ -427,6 +427,7 @@ class AgentBridge:
         """
         self.log.info("bridge.run_start")
 
+        self.http_client = httpx.AsyncClient()
         await self._load_session_id()
         reconnect_attempts = 0
         run_outcome = "shutdown"
@@ -489,6 +490,8 @@ class AgentBridge:
                 timeout_seconds=self.DIFF_REFRESH_SHUTDOWN_TIMEOUT_SECONDS
             )
             await self.opencode_client.aclose()
+            if self.http_client:
+                await self.http_client.aclose()
             self.log.info(
                 "bridge.run_complete",
                 outcome=run_outcome,
