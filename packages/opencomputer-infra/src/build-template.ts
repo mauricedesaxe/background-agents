@@ -212,6 +212,11 @@ function buildImage(options: Pick<BuildOptions, "repoRoot" | "builderMemoryMb">)
     );
 
   image = addRuntimeDir(image, runtimeDir);
+
+  image = image.runCommands(
+    `sudo env HOME=${SANDBOX_HOME} XDG_CONFIG_HOME=${SANDBOX_HOME}/.config bash ${SANDBOX_APP_DIR}/sandbox_runtime/scripts/install-harness.sh --install`
+  );
+
   image = image
     .addLocalFile(join(runtimeDir, "gh-wrapper.sh"), "/usr/local/bin/gh")
     .runCommands(

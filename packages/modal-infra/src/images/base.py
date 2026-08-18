@@ -181,6 +181,15 @@ base_image = (
         "agent-browser install",
         "agent-browser --version",
     )
+    .add_local_file(
+        str(SANDBOX_RUNTIME_DIR / "scripts" / "install-harness.sh"),
+        remote_path="/tmp/install-harness.sh",
+        copy=True,
+    )
+    .run_commands(
+        "HOME=/root bash /tmp/install-harness.sh --install",
+        "rm /tmp/install-harness.sh",
+    )
     # Create working directories
     .run_commands(
         "mkdir -p /workspace",

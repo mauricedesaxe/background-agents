@@ -122,6 +122,9 @@ class RepositoryBoot:
                     "",
                 ]
             )
+        from .supervisor import SandboxSupervisor
+
+        lines.extend(SandboxSupervisor._harness_manifest_lines())
         lines.extend(
             [
                 "To open a pull request, call the `create-pull-request` tool once per repository "

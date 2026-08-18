@@ -67,6 +67,48 @@ class SandboxSupervisor:
         self._desktop_restart_task: asyncio.Task[bool] | None = None
         self._repository_boot_result: RepositoryBootResult | None = None
 
+    @staticmethod
+    def installed_philosophy_path() -> Path:
+        """Where install-harness.sh left the philosophy for OpenCode to read.
+
+        Resolves ``${XDG_CONFIG_HOME:-$HOME/.config}/opencode`` exactly as the harness's
+        install.sh does, rather than hardcoding /root: the providers disagree on the sandbox's
+        home directory, and opencomputer sets XDG_CONFIG_HOME explicitly. Resolving it
+        differently here would point the agent at a file that isn't there.
+        """
+        xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+        config_root = Path(xdg_config_home) if xdg_config_home else Path.home() / ".config"
+        return config_root / "opencode" / "rules" / "PHILOSOPHY.md"
+
+    @classmethod
+    def _harness_manifest_lines(cls) -> list[str]:
+        """The harness pointer appended to every workspace AGENTS.md.
+
+        The image installs the harness with the harness's own install.sh, so the skills, the
+        reviewer agents and the philosophy are the ones a laptop gets. This says where the
+        philosophy landed and little else: OpenCode loads it into the main loop from
+        opencode.json already, but a subagent inherits neither the global AGENTS.md nor the
+        rules, so a subagent handed a ``§N`` needs a path it can open.
+        """
+        philosophy = cls.installed_philosophy_path()
+        if not philosophy.is_file():
+            return []
+
+        return [
+            "## The harness",
+            "",
+            "The `lazar-` and `matt-` skills, the reviewer agents, and the philosophy are "
+            "installed globally in this sandbox, so they are the ones a laptop runs.",
+            "",
+            "**`/matt-ask-matt` is the router.** Ask it which skill fits the situation rather "
+            "than guessing from the skill list.",
+            "",
+            f"The philosophy is at `{philosophy}`. Subagents inherit neither the global "
+            "AGENTS.md nor the rules, so a subagent handed a `§N` opens that file and reads the "
+            "section before acting on it.",
+            "",
+        ]
+
     async def _report_fatal_error(self, message: str) -> None:
         self.log.error("supervisor.fatal", error_message=message)
         if not self.config.control_plane_url:

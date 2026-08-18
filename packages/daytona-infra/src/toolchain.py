@@ -92,6 +92,9 @@ def build_base_image(repo_root: Path) -> Image:
             }
         )
         .add_local_dir(str(sandbox_runtime_dir), "/app/sandbox_runtime")
+        .run_commands(
+            "HOME=/root bash /app/sandbox_runtime/scripts/install-harness.sh --install",
+        )
         .workdir("/workspace")
     )
 
