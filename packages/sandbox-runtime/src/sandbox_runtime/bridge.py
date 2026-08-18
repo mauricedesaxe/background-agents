@@ -16,6 +16,7 @@ import json
 import math
 import os
 import re
+import secrets
 import tempfile
 import time
 from collections import deque
@@ -24,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
+import httpx
 import websockets
 from websockets import ClientConnection, State
 from websockets.exceptions import InvalidStatus
@@ -257,6 +259,7 @@ class AgentBridge:
     """
 
     HEARTBEAT_INTERVAL = 30.0
+    HTTP_CONNECT_TIMEOUT = 30.0
     RECONNECT_BACKOFF_BASE = 2.0
     RECONNECT_MAX_DELAY = 60.0
     SSE_INACTIVITY_TIMEOUT = 120.0
@@ -265,6 +268,10 @@ class AgentBridge:
     GIT_PUSH_TIMEOUT_SECONDS = 300.0
     GIT_PUSH_TERMINATE_GRACE_SECONDS = 5.0
     DIFF_REFRESH_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+    SESSION_VERIFY_TIMEOUT_SECONDS = 10.0
+    SESSION_VERIFY_BACKOFF_BASE_SECONDS = 2.0
+    SESSION_VERIFY_BACKOFF_MAX_SECONDS = 30.0
+    COMPACTION_MAX_DURATION = 300.0
 
     def __init__(
         self,
@@ -326,6 +333,11 @@ class AgentBridge:
 
         # Session state
         self.opencode_session_id: str | None = None
+        self.opencode_session_error: str | None = None
+        self.provided_opencode_session_id: str | None = (
+            os.environ.get("OPENCODE_SESSION_ID") or None
+        )
+        self._context_unavailable_ack_id = f"context_unavailable:{secrets.token_hex(8)}"
         self.session_id_file = Path(tempfile.gettempdir()) / "opencode-session-id"
         self.repo_path = Path("/workspace")
         # Supervisor-written canonical repo manifest; push targeting resolves
@@ -346,12 +358,14 @@ class AgentBridge:
             log=self.log,
         )
 
+        self.http_client = httpx.AsyncClient()
         # Prompt SSE translator; created on first prompt so that
         # sse_inactivity_timeout stays overridable until streaming starts.
         self._prompt_stream: OpenCodePromptStream | None = None
 
         # Track the current prompt task so _handle_stop can cancel it
         self._current_prompt_task: asyncio.Task[None] | None = None
+        self._current_compaction_task: asyncio.Task[None] | None = None
         self.diff_refresh = SessionDiffRefreshWorker(
             client=ControlPlaneDiffClient(
                 control_plane_url=self.control_plane_url,
@@ -383,6 +397,7 @@ class AgentBridge:
             "type": "ready",
             "sandboxId": self.sandbox_id,
             "opencodeSessionId": self.opencode_session_id,
+            "contextStatus": ("existing" if self.opencode_session_id else "fresh"),
             "repositories": [
                 {
                     "position": position,
@@ -573,7 +588,17 @@ class AgentBridge:
                         reconnect_attempt_count=self._reconnect_attempt_count,
                     )
                     await self.event_forwarder.bind(ws)
-                    await self._send_event(self._build_ready_event())
+                    if self.opencode_session_error and self.opencode_session_id:
+                        await self._send_event(
+                            {
+                                "type": "context_unavailable",
+                                "opencodeSessionId": self.opencode_session_id,
+                                "error": self.opencode_session_error,
+                                "ackId": self._context_unavailable_ack_id,
+                            }
+                        )
+                    else:
+                        await self._send_event(self._build_ready_event())
                     await self._drain_boot_warnings()
 
                     heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -745,6 +770,37 @@ class AgentBridge:
             await self._handle_push(cmd)
         elif cmd_type == "refresh_diff":
             self.diff_refresh.request(None)
+        elif cmd_type == "compact_context":
+            request_id = str(cmd.get("requestId") or "unknown")
+            if self._current_prompt_task and not self._current_prompt_task.done():
+                await self._send_compaction_failure(
+                    request_id, "Context can only be compacted while the session is idle"
+                )
+                return None
+            if self._current_compaction_task and not self._current_compaction_task.done():
+                await self._send_compaction_failure(
+                    request_id, "Context compaction is already in progress"
+                )
+                return None
+
+            task = asyncio.create_task(self._handle_context_compaction(cmd))
+            self._current_compaction_task = task
+
+            def handle_compaction_exception(
+                completed: asyncio.Task[None], rid: str = request_id
+            ) -> None:
+                if self._current_compaction_task is completed:
+                    self._current_compaction_task = None
+                if completed.cancelled():
+                    asyncio.create_task(
+                        self._send_compaction_failure(rid, "Context compaction was cancelled")
+                    )
+                elif exc := completed.exception():
+                    asyncio.create_task(self._send_compaction_failure(rid, str(exc)))
+
+            task.add_done_callback(handle_compaction_exception)
+            return None
+
         elif cmd_type == "ack":
             ack_id = cmd.get("ackId")
             if ack_id and self.event_forwarder.acknowledge(ack_id):
@@ -752,6 +808,135 @@ class AgentBridge:
         else:
             self.log.debug("bridge.unknown_command", cmd_type=cmd_type)
         return None
+
+    async def _parse_sse_stream(
+        self,
+        response: httpx.Response,
+        timeout_ctx: asyncio.Timeout | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        buffer = ""
+        async for chunk in response.aiter_text():
+            buffer += chunk
+            if timeout_ctx is not None:
+                timeout_ctx.reschedule(
+                    asyncio.get_running_loop().time() + self.sse_inactivity_timeout
+                )
+            while "\n\n" in buffer:
+                event_str, buffer = buffer.split("\n\n", 1)
+                data_lines: list[str] = []
+                for line in event_str.split("\n"):
+                    if line.startswith("data:"):
+                        data_content = line[5:].lstrip()
+                        if data_content:
+                            data_lines.append(data_content)
+                if data_lines:
+                    try:
+                        raw_data = "\n".join(data_lines)
+                        event = json.loads(raw_data)
+                        yield event
+                    except json.JSONDecodeError as e:
+                        self.log.debug("bridge.sse_parse_error", exc=e)
+
+    @staticmethod
+    def _extract_error_message(error: object) -> str | None:
+        """Extract message from OpenCode NamedError: { name, data: { message } }."""
+        if isinstance(error, dict):
+            data = error.get("data")
+            if isinstance(data, dict) and "message" in data:
+                return str(data["message"])
+            message = error.get("message") or error.get("name")
+            return str(message) if message else None
+        return str(error) if error else None
+
+    async def _send_compaction_failure(self, request_id: str, error: str) -> None:
+        self.log.error(
+            "context.compaction.complete",
+            request_id=request_id,
+            outcome="failure",
+            error=error,
+        )
+        await self._send_event(
+            {
+                "type": "context_compaction_failed",
+                "requestId": request_id,
+                "error": error,
+            }
+        )
+
+    async def _handle_context_compaction(self, cmd: dict[str, Any]) -> None:
+        request_id = str(cmd.get("requestId") or "unknown")
+        model = str(cmd.get("model") or "")
+        if self.opencode_session_error:
+            await self._send_compaction_failure(request_id, self.opencode_session_error)
+            return
+        if not self.opencode_session_id:
+            raise RuntimeError("OpenCode session is not ready")
+        if "/" not in model:
+            raise RuntimeError("Compaction model must include a provider")
+
+        provider_id, model_id = model.split("/", 1)
+        sse_url = f"{self.opencode_base_url}/event"
+        summarize_url = f"{self.opencode_base_url}/session/{self.opencode_session_id}/summarize"
+        started_at = time.time()
+        self.log.info(
+            "context.compaction.start",
+            request_id=request_id,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+
+        try:
+            async with asyncio.timeout(self.COMPACTION_MAX_DURATION):
+                async with self.http_client.stream(
+                    "GET",
+                    sse_url,
+                    timeout=httpx.Timeout(None, connect=self.HTTP_CONNECT_TIMEOUT, read=None),
+                ) as sse_response:
+                    if sse_response.status_code != 200:
+                        raise RuntimeError(
+                            f"OpenCode event stream failed with status {sse_response.status_code}"
+                        )
+
+                    response = await self.http_client.post(
+                        summarize_url,
+                        json={"providerID": provider_id, "modelID": model_id},
+                        timeout=None,
+                    )
+                    if response.status_code != 200:
+                        detail = getattr(response, "text", "")
+                        raise RuntimeError(
+                            f"OpenCode summarize failed with status {response.status_code}"
+                            + (f": {detail}" if detail else "")
+                        )
+
+                    async for event in self._parse_sse_stream(sse_response):
+                        event_type = event.get("type")
+                        props = event.get("properties", {})
+                        if not isinstance(props, dict):
+                            continue
+                        if props.get("sessionID") != self.opencode_session_id:
+                            continue
+                        if event_type == "session.compacted":
+                            await self._send_event(
+                                {
+                                    "type": "context_compacted",
+                                    "requestId": request_id,
+                                }
+                            )
+                            self.log.info(
+                                "context.compaction.complete",
+                                request_id=request_id,
+                                outcome="success",
+                                duration_ms=int((time.time() - started_at) * 1000),
+                            )
+                            return
+                        if event_type == "session.error":
+                            error = self._extract_error_message(props.get("error", {}))
+                            raise RuntimeError(error or "OpenCode context compaction failed")
+
+                    raise RuntimeError("OpenCode event stream ended before compaction completed")
+        except TimeoutError:
+            await self._send_compaction_failure(request_id, "Context compaction timed out")
 
     async def _send_terminal_event_and_refresh(self, event: dict[str, Any]) -> None:
         await self._send_event(event)
@@ -924,6 +1109,8 @@ class AgentBridge:
         self.log.info("bridge.shutdown_requested")
         if self._current_prompt_task and not self._current_prompt_task.done():
             self._current_prompt_task.cancel()
+        if self._current_compaction_task and not self._current_compaction_task.done():
+            self._current_compaction_task.cancel()
         self.shutdown_event.set()
 
     async def _handle_push(self, cmd: dict[str, Any]) -> None:
@@ -1140,28 +1327,90 @@ class AgentBridge:
         await self.git_signing.refresh(user)
 
     async def _load_session_id(self) -> None:
-        """Load OpenCode session ID from file if it exists."""
-        if self.session_id_file.exists():
+        """Load OpenCode session ID and verify it still exists in OpenCode.
+
+        Prefers an env-supplied session (from a previous run that heeds a
+        resume) over the on-disk cache, then verifies the session still exists
+        via OpenCode. A missing expected session blocks prompts rather than
+        silently becoming a blank conversation.
+        """
+        candidate = None
+        source = None
+        if self.provided_opencode_session_id:
+            candidate = self.provided_opencode_session_id
+            source = "env"
+        elif self.session_id_file.exists():
             try:
-                self.opencode_session_id = self.session_id_file.read_text().strip()
-                self.log.info(
-                    "opencode.session.ensure",
-                    opencode_session_id=self.opencode_session_id,
-                    action="loaded",
-                )
-
-                try:
-                    if not await self.opencode_client.session_exists(self.opencode_session_id):
-                        self.log.info(
-                            "opencode.session.invalid",
-                            opencode_session_id=self.opencode_session_id,
-                        )
-                        self.opencode_session_id = None
-                except Exception:
-                    self.opencode_session_id = None
-
+                candidate = self.session_id_file.read_text().strip() or None
+                source = "file"
             except Exception as e:
                 self.log.error("opencode.session.load_error", exc=e)
+                return
+
+        if not candidate:
+            return
+
+        self.opencode_session_id = candidate
+        self.log.info(
+            "opencode.session.ensure",
+            opencode_session_id=self.opencode_session_id,
+            action="loaded",
+            source=source,
+        )
+
+        error_message = (
+            f"OpenCode session {self.opencode_session_id} is unavailable; "
+            "refusing to continue without its conversation context"
+        )
+        attempt = 0
+        delay_seconds = self.SESSION_VERIFY_BACKOFF_BASE_SECONDS
+        while not self.shutdown_event.is_set():
+            attempt += 1
+            verification_error = None
+            verification_status = None
+            try:
+                resp = await self.http_client.get(
+                    f"{self.opencode_base_url}/session/{self.opencode_session_id}",
+                    timeout=self.SESSION_VERIFY_TIMEOUT_SECONDS,
+                )
+            except httpx.RequestError as error:
+                verification_error = error
+            else:
+                verification_status = resp.status_code
+                if resp.status_code == 200:
+                    return
+                if resp.status_code == 404:
+                    self.log.error(
+                        "opencode.session.invalid",
+                        opencode_session_id=self.opencode_session_id,
+                        source=source,
+                        status_code=resp.status_code,
+                    )
+                    self.opencode_session_error = error_message
+                    return
+                if resp.status_code < 500 and resp.status_code not in (408, 425, 429):
+                    raise RuntimeError(
+                        f"OpenCode session verification rejected with HTTP {resp.status_code}"
+                    )
+
+            self.log.warn(
+                "opencode.session.verify_retry",
+                exc=verification_error,
+                opencode_session_id=self.opencode_session_id,
+                source=source,
+                status_code=verification_status,
+                attempt=attempt,
+                delay_s=delay_seconds,
+            )
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self.shutdown_event.wait(),
+                    timeout=delay_seconds,
+                )
+            delay_seconds = min(
+                delay_seconds * 2,
+                self.SESSION_VERIFY_BACKOFF_MAX_SECONDS,
+            )
 
     async def _save_session_id(self) -> None:
         """Save OpenCode session ID to file for persistence."""
