@@ -81,6 +81,7 @@ def test_ready_event_reports_fixed_baselines_without_a_capability_gate(tmp_path:
         "type": "ready",
         "sandboxId": "sandbox-1",
         "opencodeSessionId": None,
+        "contextStatus": "fresh",
         "repositories": [
             {
                 "position": 0,
