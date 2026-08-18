@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
-from daytona import CreateSnapshotParams, Daytona, Image
+from daytona import CreateSnapshotParams, Daytona, Image, Resources
+from daytona.common.errors import DaytonaNotFoundError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -20,7 +22,7 @@ OPENCODE_VERSION = "1.18.18"
 CODE_SERVER_VERSION = "4.109.5"
 AGENT_BROWSER_VERSION = "0.21.2"
 # Bump when changing image contents to invalidate the Daytona snapshot.
-SANDBOX_VERSION = "daytona-v6-vnc-opencode-1-18-18"
+SANDBOX_VERSION = "daytona-v7-8gb-vnc-opencode-1-18-18"
 
 
 def build_base_image(repo_root: Path) -> Image:
@@ -99,11 +101,40 @@ def build_base_image(repo_root: Path) -> Image:
 def create_base_snapshot(daytona: Daytona, repo_root: Path, snapshot_name: str) -> None:
     """Create the named base snapshot from the current repo contents."""
     image = build_base_image(repo_root)
-    daytona.snapshot.create(
-        CreateSnapshotParams(
-            name=snapshot_name,
-            image=image,
-            entrypoint=["python", "-m", "sandbox_runtime.entrypoint"],
-        ),
-        on_logs=lambda chunk: print(chunk, end="\n"),
-    )
+    try:
+        daytona.snapshot.create(
+            CreateSnapshotParams(
+                name=snapshot_name,
+                image=image,
+                entrypoint=["python", "-m", "sandbox_runtime.entrypoint"],
+                resources=Resources(
+                    cpu=2, memory=8, disk=8
+                ),  # snapshot-fixed; default 1/1/3 can't boot the ~3.6 GiB image
+            ),
+            on_logs=lambda chunk: print(chunk, end="\n"),
+        )
+    except DaytonaNotFoundError:
+        if not _snapshot_is_active(daytona, snapshot_name):
+            raise
+
+
+def _snapshot_is_active(daytona: Daytona, snapshot_name: str) -> bool:
+    """Report whether the named snapshot finished building and went active.
+
+    A --force rebuild deletes and recreates the same-named snapshot back to back,
+    and the SDK's post-create poll can 404 on a transient build ref during that
+    race even though the snapshot itself builds fine. Re-checking by name tells a
+    real failure apart from that spurious 404.
+    """
+    for _ in range(30):
+        try:
+            snap = daytona.snapshot.get(snapshot_name)
+        except DaytonaNotFoundError:
+            return False
+        state = str(getattr(snap.state, "value", snap.state)).lower()
+        if state == "active":
+            return True
+        if state in ("error", "build_failed", "removing"):
+            return False
+        time.sleep(2)
+    return False
