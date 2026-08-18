@@ -6,7 +6,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { DaytonaRestClient, DaytonaApiError, type DaytonaRestConfig } from "./daytona-rest-client";
+import {
+  DaytonaRestClient,
+  DaytonaNotFoundError,
+  DaytonaApiError,
+  daytonaSandboxResponseSchema,
+  daytonaSignedPreviewUrlResponseSchema,
+  type DaytonaRestConfig,
+} from "./daytona-rest-client";
 
 // ==================== Helpers ====================
 
@@ -15,7 +22,7 @@ const defaultConfig: DaytonaRestConfig = {
   apiKey: "test-api-key",
   baseSnapshot: "base-snapshot-v1",
   autoStopIntervalMinutes: 120,
-  autoArchiveIntervalMinutes: 1440,
+  autoArchiveIntervalMinutes: 10080,
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -98,7 +105,7 @@ describe("DaytonaRestClient", () => {
         env: { FOO: "bar" },
         labels: { key: "value" },
         autoStopInterval: 120,
-        autoArchiveInterval: 1440,
+        autoArchiveInterval: 10080,
         public: false,
       };
 
@@ -127,6 +134,16 @@ describe("DaytonaRestClient", () => {
         expect.objectContaining({ method: "GET" })
       );
       expect(result).toEqual({ id: "sb-1", state: "stopped", recoverable: true });
+    });
+
+    it("rejects malformed sandbox response bodies", async () => {
+      const client = new DaytonaRestClient(defaultConfig);
+      fetchSpy.mockResolvedValue(jsonResponse({ id: "sb-1" }));
+
+      await expect(client.getSandbox("sb-1")).rejects.toMatchObject({
+        name: "DaytonaApiError",
+        message: "Invalid Daytona API response",
+      });
     });
   });
 
@@ -158,17 +175,29 @@ describe("DaytonaRestClient", () => {
     });
   });
 
-  describe("archiveSandbox", () => {
-    it("sends POST /sandbox/{id}/archive", async () => {
+  describe("deleteSandbox", () => {
+    it("sends DELETE /sandbox/{id}", async () => {
       const client = new DaytonaRestClient(defaultConfig);
-      fetchSpy.mockResolvedValue(emptyResponse(200));
+      fetchSpy.mockResolvedValue(emptyResponse(204));
 
-      await client.archiveSandbox("sb-1");
+      await client.deleteSandbox("sb-1");
 
       expect(fetchSpy).toHaveBeenCalledWith(
-        "https://daytona.test/api/sandbox/sb-1/archive",
-        expect.objectContaining({ method: "POST" })
+        "https://daytona.test/api/sandbox/sb-1",
+        expect.objectContaining({ method: "DELETE" })
       );
+    });
+
+    it("combines a caller abort signal with the request timeout", async () => {
+      const client = new DaytonaRestClient(defaultConfig);
+      const controller = new AbortController();
+      controller.abort();
+      fetchSpy.mockResolvedValue(emptyResponse(204));
+
+      await client.deleteSandbox("sb-1", controller.signal);
+
+      expect(fetchSpy.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+      expect(fetchSpy.mock.calls[0][1].signal.aborted).toBe(true);
     });
   });
 
@@ -199,25 +228,99 @@ describe("DaytonaRestClient", () => {
       );
       expect(result.url).toBe("https://preview.test/abc");
     });
+
+    it("rejects malformed signed preview URL response bodies", async () => {
+      const client = new DaytonaRestClient(defaultConfig);
+      fetchSpy.mockResolvedValue(jsonResponse({ url: null }));
+
+      await expect(client.getSignedPreviewUrl("sb-1", 8080, 3900)).rejects.toMatchObject({
+        name: "DaytonaApiError",
+        message: "Invalid Daytona API response",
+      });
+    });
+  });
+
+  // Endpoints that return a value must produce one or fail. A success that
+  // carries no parsable body used to fall through as `undefined`, handing
+  // callers a value that violated the declared return type.
+  describe("required response bodies", () => {
+    it("rejects a success with no body", async () => {
+      const client = new DaytonaRestClient(defaultConfig);
+      fetchSpy.mockResolvedValue(emptyResponse(200));
+
+      await expect(client.getSandbox("sb-1")).rejects.toMatchObject({
+        name: "DaytonaApiError",
+        message: "Invalid Daytona API response",
+      });
+    });
+
+    it("rejects a non-JSON success body", async () => {
+      const client = new DaytonaRestClient(defaultConfig);
+      fetchSpy.mockResolvedValue(new Response("OK", { status: 200 }));
+
+      await expect(client.createSandbox({ name: "test", snapshot: "snap" })).rejects.toMatchObject({
+        name: "DaytonaApiError",
+      });
+    });
+
+    it("reports invalid JSON as an API error rather than a parser error", async () => {
+      const client = new DaytonaRestClient(defaultConfig);
+      fetchSpy.mockResolvedValue(
+        new Response('{"url": ', { status: 200, headers: { "content-type": "application/json" } })
+      );
+
+      await expect(client.getSignedPreviewUrl("sb-1", 8080, 3900)).rejects.toMatchObject({
+        name: "DaytonaApiError",
+        message: "Invalid Daytona API response",
+      });
+    });
+
+    it("parses a JSON body that arrives without a JSON content type", async () => {
+      const client = new DaytonaRestClient(defaultConfig);
+      fetchSpy.mockResolvedValue(
+        new Response(JSON.stringify({ id: "sb-1", state: "started" }), { status: 200 })
+      );
+
+      await expect(client.getSandbox("sb-1")).resolves.toEqual({ id: "sb-1", state: "started" });
+    });
+
+    it("commands ignore whatever a success body contains", async () => {
+      const client = new DaytonaRestClient(defaultConfig);
+      fetchSpy.mockResolvedValue(jsonResponse({ unexpected: "payload" }));
+
+      await expect(client.startSandbox("sb-1")).resolves.toBeUndefined();
+      await expect(client.recoverSandbox("sb-1")).resolves.toBeUndefined();
+    });
+  });
+
+  describe("response schemas", () => {
+    it("parses a valid sandbox response with an optional recoverable flag", () => {
+      expect(
+        daytonaSandboxResponseSchema.safeParse({
+          id: "sb-1",
+          state: "started",
+          recoverable: false,
+        }).success
+      ).toBe(true);
+    });
+
+    it("rejects a partial sandbox response", () => {
+      expect(daytonaSandboxResponseSchema.safeParse({ id: "sb-1" }).success).toBe(false);
+    });
+
+    it("parses a valid signed preview URL response", () => {
+      expect(
+        daytonaSignedPreviewUrlResponseSchema.safeParse({ url: "https://preview.test/abc" }).success
+      ).toBe(true);
+    });
   });
 
   describe("error classification", () => {
     it("throws DaytonaNotFoundError on 404", async () => {
-      const infoSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
       const client = new DaytonaRestClient(defaultConfig);
-      fetchSpy.mockResolvedValue(
-        new Response("private provider detail", {
-          status: 404,
-          headers: { "x-request-id": "daytona-request-404" },
-        })
-      );
+      fetchSpy.mockResolvedValue(new Response("not found", { status: 404 }));
 
-      await expect(client.getSandbox("missing")).rejects.toMatchObject({
-        name: "DaytonaNotFoundError",
-        message: "Daytona API resource not found: /sandbox/missing",
-      });
-      expect(JSON.stringify(infoSpy.mock.calls)).not.toContain("private provider detail");
-      expect(JSON.stringify(infoSpy.mock.calls)).toContain("daytona-request-404");
+      await expect(client.getSandbox("missing")).rejects.toThrow(DaytonaNotFoundError);
     });
 
     it("throws DaytonaApiError on 500", async () => {
@@ -244,63 +347,6 @@ describe("DaytonaRestClient", () => {
         expect(e).toBeInstanceOf(DaytonaApiError);
         expect((e as DaytonaApiError).status).toBe(502);
       }
-    });
-
-    it("records Daytona rate-limit headers without logging the response body", async () => {
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-      const client = new DaytonaRestClient(defaultConfig);
-      fetchSpy.mockResolvedValue(
-        new Response("account quota details", {
-          status: 429,
-          headers: {
-            "retry-after": "17",
-            "x-request-id": "daytona-request-123",
-            "x-ratelimit-limit": "60",
-            "x-ratelimit-remaining": "0",
-            "x-ratelimit-reset": "1786554000",
-          },
-        })
-      );
-
-      await expect(client.startSandbox("sb-1")).rejects.toMatchObject({
-        status: 429,
-        message: "Daytona API request failed with HTTP 429",
-      });
-
-      const records = errorSpy.mock.calls.map(
-        ([line]) => JSON.parse(String(line)) as Record<string, unknown>
-      );
-      expect(records).toContainEqual(
-        expect.objectContaining({
-          event: "daytona.api_error",
-          http_method: "POST",
-          http_path: "/sandbox/sb-1/start",
-          http_status: 429,
-          retry_after: "17",
-          provider_request_id: "daytona-request-123",
-          rate_limit_limit: "60",
-          rate_limit_remaining: "0",
-          rate_limit_reset: "1786554000",
-        })
-      );
-      expect(JSON.stringify(records)).not.toContain("account quota details");
-    });
-
-    it("records a retried state transition below error level", async () => {
-      const infoSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-      const client = new DaytonaRestClient(defaultConfig);
-      fetchSpy.mockResolvedValue(new Response("state change in progress", { status: 409 }));
-
-      await expect(client.stopSandbox("sb-1")).rejects.toMatchObject({ status: 409 });
-
-      const infoRecords = infoSpy.mock.calls.map(
-        ([line]) => JSON.parse(String(line)) as Record<string, unknown>
-      );
-      expect(infoRecords).toContainEqual(
-        expect.objectContaining({ event: "daytona.api_error", http_status: 409 })
-      );
-      expect(errorSpy).not.toHaveBeenCalled();
     });
 
     it("throws DaytonaApiError on 401", async () => {

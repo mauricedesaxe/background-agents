@@ -1,24 +1,24 @@
-import {
-  getValidModelOrDefault,
-  isValidReasoningEffort,
-  type RepositoryRef,
-} from "@open-inspect/shared";
+import type { RepositoryRef, RepositoryPair } from "@open-inspect/shared/types/repositories";
+import { getValidModelOrDefault, isValidReasoningEffort } from "@open-inspect/shared/models";
+import type { CreateSessionResponse } from "@open-inspect/shared/types/session-api";
 import { generateId } from "../auth/crypto";
+import { resolveGitHubCredentialAuthority } from "../source-control/github-credential-authority";
 import { applyIdentityEnforcement, resolveCanonicalUserId } from "../auth/identity-enforcement";
 import { resolveEnvironmentTarget, resolveSessionRepositories } from "../repos/resolve";
+import { resolveScmProviderFromEnv } from "../source-control";
 import { EnvironmentStore } from "../db/environments";
 import { UserStore } from "../db/user-store";
 import { createLogger } from "../logger";
 import { parseCreateSessionInput } from "../session/create-session-input";
 import { initializeSession, type SessionInitInput } from "../session/initialize";
-import { resolveGitHubEnrichment } from "../session/identity";
+import { resolveGitHubEnrichmentForRequest } from "../session/identity";
 import { resolveSessionScopedSettings } from "../session/integration-settings-resolution";
-import type { CreateSessionResponse, Env } from "../types";
+import { resolveManagedSkills, SkillResolutionError } from "../session/skill-resolution";
+import type { Env } from "../types";
 import {
   normalizeOptionalRepositoryPair,
   RepositoryPairValidationError,
-  type RepositoryPair,
-} from "@open-inspect/shared";
+} from "@open-inspect/shared/types/repositories";
 import {
   error,
   json,
@@ -26,6 +26,8 @@ import {
   resolveRepoOrError,
   type RequestContext,
   type Route,
+  GITHUB_USER_OR_SERVICE_ROUTE,
+  defineRoutes,
 } from "./shared";
 
 const logger = createLogger("router:session-create");
@@ -85,10 +87,7 @@ async function handleCreateSession(
     // (design §7.6); environment_id records provenance on the session.
     const envInputs = await resolveEnvironmentTarget(
       new EnvironmentStore(ctx.db),
-      body.environmentId,
-      body.branch && body.branchRepository
-        ? { ...body.branchRepository, branch: body.branch }
-        : undefined
+      body.environmentId
     );
     repositories = await resolveSessionRepositories(env, envInputs, ctx, logger);
     environmentId = body.environmentId;
@@ -127,32 +126,35 @@ async function handleCreateSession(
   if (resolution instanceof Response) return resolution;
   const resolvedUserId = resolution.userId;
 
-  let scmLogin: string | undefined;
-  let scmName: string | undefined;
-  let scmEmail: string | undefined;
+  const githubDeployment = resolveScmProviderFromEnv(env.SCM_PROVIDER) === "github";
+  let scmLogin = body.scmLogin;
+  let scmName = body.scmName;
+  let scmEmail = body.scmEmail;
+  // SCM credentials never arrive in the body; enrichment below fills them
+  // from the token store via the canonical user.
   let scmTokenExpiresAt: number | undefined;
   let scmUserId: string | undefined;
   let scmTokenEncrypted: string | null = null;
   let scmRefreshTokenEncrypted: string | null = null;
 
-  const githubDeployment = (env.SCM_PROVIDER ?? "github") === "github";
-
-  // This intentionally applies even when the session was authenticated via a
-  // non-GitHub provider (e.g. Google): if the canonical user has ALSO linked a
-  // verified-email GitHub identity, enrichment surfaces THAT identity's token so
-  // the same human keeps GitHub-attributed commits/PRs. resolveGitHubEnrichment
-  // keys off the linked `provider === "github"` identity, never the Google
-  // credential; a user with no linked GitHub identity gets null here and falls
-  // back to the App bot. The invariant is "a Google credential is never used as
-  // an SCM credential", not "a Google-authenticated session carries no SCM state".
+  // Browser sessions resolve a linked GitHub identity/token through Better
+  // Auth only when SCM enrichment is needed. Transitional callers retain the
+  // legacy D1 lookup. A user without a linked GitHub account uses the GitHub
+  // App bot fallback; account linking is intentionally deferred.
   if (githubDeployment) {
     try {
-      const enrichment = await resolveGitHubEnrichment(env, ctx.db, userStore, resolvedUserId);
+      const enrichment = await resolveGitHubEnrichmentForRequest(
+        env,
+        ctx.db,
+        userStore,
+        resolvedUserId,
+        await resolveGitHubCredentialAuthority(ctx, request.headers)
+      );
       if (enrichment) {
         scmUserId = enrichment.scmUserId;
-        scmLogin = enrichment.scmLogin;
-        scmName = enrichment.displayName;
-        scmEmail = enrichment.email;
+        scmLogin ??= enrichment.scmLogin;
+        scmName ??= enrichment.displayName;
+        scmEmail ??= enrichment.email;
         scmTokenEncrypted = enrichment.accessTokenEncrypted ?? null;
         scmRefreshTokenEncrypted = enrichment.refreshTokenEncrypted ?? null;
         scmTokenExpiresAt = enrichment.tokenExpiresAt;
@@ -176,7 +178,7 @@ async function handleCreateSession(
   // two are the same repo by the row-0-mirrors-scalars invariant. Launching
   // from a saved environment layers its overrides on top (design §13.5).
   const scopeMembers = repositories ?? (repoOwner && repoName ? [{ repoOwner, repoName }] : []);
-  const { codeServerEnabled, sandboxSettings } = await resolveSessionScopedSettings(
+  const { codeServerEnabled, vncEnabled, sandboxSettings } = await resolveSessionScopedSettings(
     ctx.db,
     scopeMembers,
     environmentId
@@ -184,13 +186,29 @@ async function handleCreateSession(
 
   const sessionId = generateId();
 
+  let managedSkillsManifest;
+  try {
+    managedSkillsManifest = await resolveManagedSkills(
+      ctx.db,
+      {
+        repositories: scopeMembers,
+        environmentId,
+      },
+      body.skillSelection ?? { mode: "all" },
+      resolvedUserId
+    );
+  } catch (e) {
+    if (e instanceof SkillResolutionError) return error(e.message, e.status);
+    throw e;
+  }
+
   const input: SessionInitInput = {
     sessionId,
     repoOwner,
     repoName,
     repoId,
     defaultBranch,
-    branch: body.environmentId ? undefined : body.branch,
+    branch: body.branch,
     repositories,
     environmentId,
     title: body.title,
@@ -206,8 +224,10 @@ async function handleCreateSession(
     scmRefreshTokenEncrypted,
     scmTokenExpiresAt,
     codeServerEnabled,
+    vncEnabled,
     sandboxSettings,
     spawnSource,
+    managedSkillsManifest,
   };
 
   try {
@@ -229,10 +249,10 @@ async function handleCreateSession(
   return json(result, 201);
 }
 
-export const sessionCreateRoutes: Route[] = [
+export const sessionCreateRoutes: Route[] = defineRoutes(GITHUB_USER_OR_SERVICE_ROUTE, [
   {
     method: "POST",
     pattern: parsePattern("/sessions"),
     handler: handleCreateSession,
   },
-];
+]);

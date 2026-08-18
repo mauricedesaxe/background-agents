@@ -3,9 +3,13 @@
  * Extracted from index.ts for modularity.
  */
 
+import {
+  createSessionResponseSchema,
+  type LinearCallbackContext,
+} from "@open-inspect/shared/types/session-api";
+import { z } from "zod";
 import type {
   Env,
-  LinearCallbackContext,
   LinearIssueDetails,
   AgentSessionWebhook,
   AgentSessionWebhookIssue,
@@ -35,6 +39,17 @@ import {
 import { getUserPreferences, lookupIssueSession, storeIssueSession } from "./kv-store";
 
 const log = createLogger("handler");
+
+const sessionEventsSummaryResponseSchema = z.object({
+  events: z.array(
+    z.object({
+      type: z.literal("token"),
+      data: z.object({
+        content: z.string(),
+      }),
+    })
+  ),
+});
 
 export function escapeHtml(s: string): string {
   return s
@@ -162,8 +177,11 @@ async function createSession(
     return { ok: false, status: response.status, body };
   }
 
-  const result = (await response.json()) as { sessionId: string };
-  return { ok: true, sessionId: result.sessionId };
+  const result = createSessionResponseSchema.safeParse(await response.json().catch(() => null));
+  if (!result.success) {
+    return { ok: false, status: response.status, body: "invalid response" };
+  }
+  return { ok: true, sessionId: result.data.sessionId };
 }
 
 // ─── Sub-handlers ────────────────────────────────────────────────────────────
@@ -233,6 +251,7 @@ async function handleStop(webhook: AgentSessionWebhook, env: Env, traceId: strin
           session_id: existingSession.sessionId,
           error: e instanceof Error ? e : new Error(String(e)),
         });
+        return;
       }
       await env.LINEAR_KV.delete(`issue:${issueId}`);
     }
@@ -246,8 +265,39 @@ async function handleStop(webhook: AgentSessionWebhook, env: Env, traceId: strin
   });
 }
 
-function getNewSessionActorUserId(webhook: AgentSessionWebhook): string | undefined {
-  return webhook.agentSession.comment?.userId ?? webhook.agentSession.creatorId ?? undefined;
+/**
+ * The comments and actor driving a new session. A "prompted" event that
+ * reaches new-session handling is a reply to an elicitation — no
+ * issue→session mapping existed, so no session was ever created. The reply
+ * text lives on the agent activity and drives target resolution, while the
+ * session comment remains the original instruction. Its author is the replier
+ * — not necessarily the user whose comment created the elicitation.
+ */
+function getNewSessionInput(webhook: AgentSessionWebhook): {
+  resolutionComment: { body: string } | undefined;
+  instructionComment: { body: string } | undefined;
+  clarificationReply: { body: string } | undefined;
+  actorUserId: string | undefined;
+} {
+  const instructionComment = webhook.agentSession.comment;
+  const sessionActor = instructionComment?.userId ?? webhook.agentSession.creatorId ?? undefined;
+  const replyBody =
+    webhook.action === "prompted" ? webhook.agentActivity?.content?.body?.trim() : undefined;
+  if (replyBody) {
+    const clarificationReply = { body: replyBody };
+    return {
+      resolutionComment: clarificationReply,
+      instructionComment,
+      clarificationReply,
+      actorUserId: webhook.agentActivity?.userId ?? sessionActor,
+    };
+  }
+  return {
+    resolutionComment: instructionComment,
+    instructionComment,
+    clarificationReply: undefined,
+    actorUserId: sessionActor,
+  };
 }
 
 function shouldTransitionIssueOnStart(webhook: AgentSessionWebhook): boolean {
@@ -365,22 +415,19 @@ async function handleFollowUp(
 
   let sessionContextSummary = "";
   try {
-    const eventsUrl = `https://internal/sessions/${existingSession.sessionId}/events?limit=20`;
+    const eventsUrl = `https://internal/sessions/${existingSession.sessionId}/events?type=token&limit=20`;
     const eventsRes = await signedControlPlaneFetch(env, {
       method: "GET",
       url: eventsUrl,
       traceId,
     });
     if (eventsRes.ok) {
-      const eventsData = (await eventsRes.json()) as {
-        events: Array<{ type: string; data: Record<string, unknown> }>;
-      };
-      const recentTokens = eventsData.events.filter((e) => e.type === "token").slice(-1);
-      if (recentTokens.length > 0) {
-        const lastContent = String(recentTokens[0].data.content ?? "");
-        if (lastContent) {
-          sessionContextSummary = lastContent.slice(0, 500);
-        }
+      const eventsData = sessionEventsSummaryResponseSchema.safeParse(await eventsRes.json());
+      const latestContent = eventsData.success
+        ? eventsData.data.events[0]?.data.content
+        : undefined;
+      if (latestContent) {
+        sessionContextSummary = latestContent.slice(0, 500);
       }
     }
   } catch {
@@ -436,7 +483,12 @@ async function handleNewSession(
 ): Promise<void> {
   const startTime = Date.now();
   const agentSessionId = webhook.agentSession.id;
-  const comment = webhook.agentSession.comment;
+  const {
+    resolutionComment,
+    instructionComment,
+    clarificationReply,
+    actorUserId: sessionActorUserId,
+  } = getNewSessionInput(webhook);
   const orgId = webhook.organizationId;
 
   const client = await getAgentSessionLinearClient({
@@ -476,7 +528,7 @@ async function handleNewSession(
     issue,
     labelNames,
     projectInfo,
-    comment,
+    comment: resolutionComment,
     traceId,
   });
   if (!resolved) return;
@@ -506,7 +558,6 @@ async function handleNewSession(
   let userReasoningEffort: string | undefined;
   let actorDisplayName: string | undefined;
   let actorEmail: string | undefined;
-  const sessionActorUserId = getNewSessionActorUserId(webhook);
   if (sessionActorUserId) {
     const prefs = await getUserPreferences(env, sessionActorUserId);
     if (prefs?.model) {
@@ -605,9 +656,9 @@ async function handleNewSession(
   // ─── Build and send prompt ────────────────────────────────────────────
 
   // Prefer Linear's promptContext (includes issue, comments, guidance)
-  let prompt = webhook.agentSession.promptContext
-    ? buildPromptContextPrompt(webhook.agentSession.promptContext)
-    : buildPrompt(issue, issueDetails, comment);
+  let prompt = webhook.promptContext
+    ? buildPromptContextPrompt(webhook.promptContext)
+    : buildPrompt(issue, issueDetails, instructionComment, clarificationReply);
 
   if (integrationConfig.issueSessionInstructions) {
     prompt += `\n\n## Additional Instructions\n\n${integrationConfig.issueSessionInstructions}`;
@@ -687,7 +738,11 @@ export async function handleAgentSessionEvent(
   });
 
   // Stop handling
-  if (webhook.action === "stopped" || webhook.action === "cancelled") {
+  if (
+    webhook.agentActivity?.signal === "stop" ||
+    webhook.action === "stopped" ||
+    webhook.action === "cancelled"
+  ) {
     return handleStop(webhook, env, traceId);
   }
 
@@ -711,7 +766,8 @@ export async function handleAgentSessionEvent(
 export function buildPrompt(
   issue: { identifier: string; title: string; description?: string | null; url: string },
   issueDetails: LinearIssueDetails | null,
-  comment?: { body: string } | null
+  comment?: { body: string } | null,
+  clarificationReply?: { body: string } | null
 ): string {
   const parts: string[] = [
     `Linear Issue: ${issue.identifier}`,
@@ -779,6 +835,19 @@ export function buildPrompt(
         source: "linear_agent_instruction",
         author: "unknown",
         content: comment.body,
+      })
+    );
+  }
+
+  if (clarificationReply?.body) {
+    parts.push(
+      "",
+      "---",
+      "**Repository clarification:**",
+      buildUntrustedUserContentBlock({
+        source: "linear_repository_clarification",
+        author: "unknown",
+        content: clarificationReply.body,
       })
     );
   }

@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { z } from "zod";
-import { emitAgentActivity, fetchUser, linearGraphQL } from "./linear-client";
+import {
+  emitAgentActivity,
+  fetchIssueDetails,
+  fetchUser,
+  getRepoSuggestions,
+  linearGraphQL,
+  postIssueComment,
+} from "./linear-client";
 import type { LinearApiClient } from "./linear-client";
 
 const client: LinearApiClient = {
@@ -24,58 +30,28 @@ describe("linearGraphQL", () => {
     vi.unstubAllGlobals();
   });
 
-  it("parses a valid operation response at the HTTP boundary", async () => {
+  it("rejects a GraphQL response that is not an object", async () => {
+    mockFetchResponse([]);
+
+    await expect(linearGraphQL(client, "query { viewer { id } }", {})).rejects.toThrow(
+      "Linear GraphQL error: unexpected response shape"
+    );
+  });
+
+  it("rejects a null GraphQL response", async () => {
+    mockFetchResponse(null);
+
+    await expect(linearGraphQL(client, "query { viewer { id } }", {})).rejects.toThrow(
+      "Linear GraphQL error: unexpected response shape"
+    );
+  });
+
+  it("returns the envelope for a well-formed GraphQL response", async () => {
     mockFetchResponse({ data: { viewer: { id: "user-1" } } });
 
-    const result = await linearGraphQL(
-      client,
-      "query ViewerIdentity { viewer { id } }",
-      {},
-      z.object({ data: z.object({ viewer: z.object({ id: z.string() }) }) })
-    );
-
-    expect(result).toEqual({ data: { viewer: { id: "user-1" } } });
-  });
-
-  it("names the operation without exposing a malformed response", async () => {
-    mockFetchResponse({ data: { viewer: { id: "secret-response-value" } } });
-
-    const request = linearGraphQL(
-      client,
-      "query ViewerIdentity { viewer { id } }",
-      {},
-      z.object({ data: z.object({ viewer: z.object({ id: z.number() }) }) })
-    );
-
-    await expect(request).rejects.toThrow("Linear ViewerIdentity response validation failed");
-    await expect(request).rejects.not.toThrow("secret-response-value");
-  });
-
-  it("names a GraphQL error without exposing its response message", async () => {
-    mockFetchResponse({ errors: [{ message: "secret-upstream-message" }] });
-
-    const request = linearGraphQL(
-      client,
-      "query ViewerIdentity { viewer { id } }",
-      {},
-      z.object({ data: z.object({ viewer: z.object({ id: z.string() }) }) })
-    );
-
-    await expect(request).rejects.toThrow("Linear ViewerIdentity GraphQL error");
-    await expect(request).rejects.not.toThrow("secret-upstream-message");
-  });
-
-  it("rejects a malformed GraphQL error envelope", async () => {
-    mockFetchResponse({ errors: [{}] });
-
-    const request = linearGraphQL(
-      client,
-      "query ViewerIdentity { viewer { id } }",
-      {},
-      z.object({ data: z.object({ viewer: z.object({ id: z.string() }) }) })
-    );
-
-    await expect(request).rejects.toThrow("Linear ViewerIdentity response validation failed");
+    await expect(linearGraphQL(client, "query { viewer { id } }", {})).resolves.toEqual({
+      data: { viewer: { id: "user-1" } },
+    });
   });
 });
 
@@ -147,6 +123,95 @@ describe("fetchUser", () => {
     const result = await fetchUser(client, "user-1");
     expect(result).toBeNull();
   });
+
+  it("returns null when the user payload is malformed", async () => {
+    mockFetchResponse({ data: { user: { id: "user-1", email: "alice@example.com" } } });
+
+    const result = await fetchUser(client, "user-1");
+    expect(result).toBeNull();
+  });
+});
+
+describe("fetchIssueDetails", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns issue details with nullable fields", async () => {
+    mockFetchResponse({
+      data: {
+        issue: {
+          id: "issue-1",
+          identifier: "ENG-1",
+          title: "Fix bug",
+          description: null,
+          url: "https://linear.app/acme/issue/ENG-1",
+          priority: 2,
+          priorityLabel: "High",
+          labels: { nodes: [{ id: "label-1", name: "bug" }] },
+          project: null,
+          assignee: null,
+          team: { id: "team-1", key: "ENG", name: "Engineering" },
+          comments: { nodes: [{ body: "please fix", user: null }] },
+        },
+      },
+    });
+
+    await expect(fetchIssueDetails(client, "issue-1")).resolves.toEqual({
+      id: "issue-1",
+      identifier: "ENG-1",
+      title: "Fix bug",
+      description: null,
+      url: "https://linear.app/acme/issue/ENG-1",
+      priority: 2,
+      priorityLabel: "High",
+      labels: [{ id: "label-1", name: "bug" }],
+      project: null,
+      assignee: null,
+      team: { id: "team-1", key: "ENG", name: "Engineering" },
+      comments: [{ body: "please fix", user: null }],
+    });
+  });
+
+  it("returns null when the issue payload is malformed", async () => {
+    mockFetchResponse({ data: { issue: { id: "issue-1", title: "missing fields" } } });
+
+    await expect(fetchIssueDetails(client, "issue-1")).resolves.toBeNull();
+  });
+});
+
+describe("getRepoSuggestions", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns parsed repo suggestions", async () => {
+    mockFetchResponse({
+      data: {
+        issueRepositorySuggestions: {
+          suggestions: [{ repositoryFullName: "acme/api", confidence: 0.92 }],
+        },
+      },
+    });
+
+    await expect(getRepoSuggestions(client, "issue-1", "agent-1", [])).resolves.toEqual([
+      { repositoryFullName: "acme/api", confidence: 0.92 },
+    ]);
+  });
+
+  it("returns an empty list when suggestions are null", async () => {
+    mockFetchResponse({ data: { issueRepositorySuggestions: null } });
+
+    await expect(getRepoSuggestions(client, "issue-1", "agent-1", [])).resolves.toEqual([]);
+  });
+
+  it("returns an empty list when suggestions are malformed", async () => {
+    mockFetchResponse({
+      data: { issueRepositorySuggestions: { suggestions: [{ repositoryFullName: "acme/api" }] } },
+    });
+
+    await expect(getRepoSuggestions(client, "issue-1", "agent-1", [])).resolves.toEqual([]);
+  });
 });
 
 describe("emitAgentActivity", () => {
@@ -165,5 +230,67 @@ describe("emitAgentActivity", () => {
         body: "Finished",
       })
     ).resolves.toBe(false);
+  });
+});
+
+describe("postIssueComment", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns success from a valid comment mutation response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ data: { commentCreate: { success: true } } }),
+      })
+    );
+
+    await expect(postIssueComment("token", "issue-1", "hello")).resolves.toEqual({
+      success: true,
+    });
+  });
+
+  it("returns false when the nullable comment mutation result is absent", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ data: { commentCreate: null } }),
+      })
+    );
+
+    await expect(postIssueComment("token", "issue-1", "hello")).resolves.toEqual({
+      success: false,
+    });
+  });
+
+  it("returns false when the comment mutation response is malformed", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ data: { commentCreate: { success: "yes" } } }),
+      })
+    );
+
+    await expect(postIssueComment("token", "issue-1", "hello")).resolves.toEqual({
+      success: false,
+    });
+  });
+
+  it("returns false when the comment mutation response is not valid JSON", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.reject(new SyntaxError("Unexpected token")),
+      })
+    );
+
+    await expect(postIssueComment("token", "issue-1", "hello")).resolves.toEqual({
+      success: false,
+    });
   });
 });

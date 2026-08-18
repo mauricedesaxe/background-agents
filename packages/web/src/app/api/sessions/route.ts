@@ -1,50 +1,17 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
-import { buildAuthDisplay } from "@/lib/build-auth-identity";
+import { getServerAuthSession } from "@/lib/server-auth-session";
 import { controlPlaneUserFetch } from "@/lib/control-plane";
-import {
-  buildControlPlanePath,
-  SESSION_CONTROL_PLANE_QUERY_PARAMS,
-} from "@/lib/control-plane-query";
-import { resolveCurrentUserId } from "@/lib/current-user";
-import { CURRENT_USER_CREATED_BY } from "@/lib/session-list";
+import { SESSION_LIST_QUERY_PARAMS } from "@open-inspect/shared/session-list-query";
+import { buildControlPlanePath } from "@/lib/control-plane-query";
 
 export async function GET(request: NextRequest) {
   const routeStart = Date.now();
 
-  const session = await getServerSession(authOptions);
-  const authMs = Date.now() - routeStart;
-
-  if (!session) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
   try {
     const searchParams = new URLSearchParams(request.nextUrl.searchParams);
 
-    const createdByValues = searchParams.getAll("createdBy");
-    if (createdByValues.includes(CURRENT_USER_CREATED_BY)) {
-      const resolved = await resolveCurrentUserId(session.user);
-      if (!resolved.ok) {
-        return NextResponse.json(resolved.body, { status: resolved.status });
-      }
-
-      searchParams.delete("createdBy");
-      for (const value of createdByValues) {
-        searchParams.append(
-          "createdBy",
-          value === CURRENT_USER_CREATED_BY ? resolved.userId : value
-        );
-      }
-    }
-
-    const path = buildControlPlanePath(
-      "/sessions",
-      searchParams,
-      SESSION_CONTROL_PLANE_QUERY_PARAMS
-    );
+    const path = buildControlPlanePath("/sessions", searchParams, SESSION_LIST_QUERY_PARAMS);
 
     const fetchStart = Date.now();
     const response = await controlPlaneUserFetch(path);
@@ -52,11 +19,12 @@ export async function GET(request: NextRequest) {
     const data = await response.json();
     const totalMs = Date.now() - routeStart;
 
-    console.log(
-      `[sessions:GET] total=${totalMs}ms auth=${authMs}ms fetch=${fetchMs}ms status=${response.status}`
-    );
+    console.log(`[sessions:GET] total=${totalMs}ms fetch=${fetchMs}ms status=${response.status}`);
 
-    return NextResponse.json(data, { status: response.status });
+    return NextResponse.json(data, {
+      status: response.status,
+      headers: { "Cache-Control": "private, no-store" },
+    });
   } catch (error) {
     console.error("Failed to fetch sessions:", error);
     return NextResponse.json({ error: "Failed to fetch sessions" }, { status: 500 });
@@ -64,7 +32,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await getServerSession(authOptions);
+  const session = await getServerAuthSession();
   if (!session) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -72,13 +40,8 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
 
-    // Explicitly pick allowed fields from the client body. Identity
-    // (userId/spawnSource/authProvider/authUserId/SCM credentials) is derived
-    // by the control plane from the authenticated Bearer principal and is
-    // rejected in the body under strict enforcement — send only the
-    // display/attribution blocks, which stay body-carried by design.
-    const user = session.user;
-
+    // Explicitly pick allowed fields from the client body. Identity and SCM
+    // provenance derive from authenticated control-plane state.
     const sessionBody = {
       repoOwner: body.repoOwner,
       repoName: body.repoName,
@@ -91,7 +54,7 @@ export async function POST(request: NextRequest) {
       // side): a named environment or an ad-hoc repository list.
       environmentId: body.environmentId,
       repositories: body.repositories,
-      ...buildAuthDisplay(user),
+      skillSelection: body.skillSelection,
     };
 
     const response = await controlPlaneUserFetch("/sessions", {

@@ -1,261 +1,39 @@
-import type { Session } from "@open-inspect/shared";
-import { formatRepoLabel, NO_REPOSITORY_LABEL } from "./repo-label";
-import { isInactiveSession } from "./time";
+import {
+  DEFAULT_SESSION_LIST_LIMIT,
+  DEFAULT_SESSION_LIST_OFFSET,
+  serializeSessionListQuery,
+  SESSION_LIST_CURRENT_USER,
+  type SessionListQuery,
+} from "@open-inspect/shared/session-list-query";
+import type { Session } from "@open-inspect/shared/types/sessions";
+import type { BrowserApiPath } from "./browser-api-fetch";
+import { formatRepoLabel } from "./repo-label";
 
-export const SESSIONS_PAGE_SIZE = 50;
-export const SESSIONS_API_PATH = "/api/sessions";
-export const CURRENT_USER_CREATED_BY = "me";
+export const SESSIONS_PAGE_SIZE = DEFAULT_SESSION_LIST_LIMIT;
+const COMMAND_MENU_SESSIONS_LIMIT = 100;
+const SESSIONS_API_PATH = "/api/sessions";
+export const CURRENT_USER_CREATED_BY = SESSION_LIST_CURRENT_USER;
 export const SIDEBAR_SESSIONS_KEY = buildSessionsPageKey({
   excludeStatus: "archived",
-  mode: "tree",
+  limit: SESSIONS_PAGE_SIZE,
+  offset: 0,
+});
+export const COMMAND_MENU_SESSIONS_KEY = buildSessionsPageKey({
+  excludeStatus: "archived",
+  limit: COMMAND_MENU_SESSIONS_LIMIT,
 });
 
 export interface SessionListResponse {
   sessions: Session[];
   hasMore: boolean;
-  nextCursor?: string | null;
 }
 
-export type SessionSourceFilter = "manual" | "automatic";
-
-export interface SessionRepositoryGroup {
-  key: string;
-  label: string;
-  activeSessions: Session[];
-  inactiveSessions: Session[];
-}
-
-export interface GroupedSessionList {
-  groups: SessionRepositoryGroup[];
-  childrenMap: Map<string, Session[]>;
-  hasFilteredSessions: boolean;
-}
-
-const MULTIPLE_REPOSITORIES_KEY = "multiple-repositories";
-const MULTIPLE_REPOSITORIES_LABEL = "Multiple repositories";
-const NO_REPOSITORY_KEY = "no-repository";
-
-export function buildGroupedSessionList(
-  sessions: Session[],
-  {
-    sourceFilter,
-    searchQuery,
-    now,
-  }: { sourceFilter: SessionSourceFilter; searchQuery: string; now: number }
-): GroupedSessionList {
-  const sorted = sessions
-    .filter((session) => session.status !== "archived")
-    .sort((a, b) => sessionActivity(b) - sessionActivity(a));
-  const sessionsById = new Map(sorted.map((session) => [session.id, session]));
-  const allChildren = new Map<string, Session[]>();
-  const roots: Session[] = [];
-
-  for (const session of sorted) {
-    if (!session.parentSessionId || !sessionsById.has(session.parentSessionId)) {
-      roots.push(session);
-      continue;
-    }
-
-    const siblings = allChildren.get(session.parentSessionId) ?? [];
-    siblings.push(session);
-    allChildren.set(session.parentSessionId, siblings);
-  }
-
-  const treeActivities = new Map<string, number>();
-  for (const session of sorted) {
-    subtreeActivity(session.id, sessionsById, allChildren, treeActivities, new Set());
-  }
-  roots.sort((a, b) => (treeActivities.get(b.id) ?? 0) - (treeActivities.get(a.id) ?? 0));
-
-  const query = searchQuery.trim().toLowerCase();
-  const visibleIds = new Set<string>();
-  const filteredRoots = roots.filter((root) => {
-    const isAutomatic = root.spawnSource === "automation";
-    if ((sourceFilter === "automatic") !== isAutomatic) return false;
-
-    if (!query) {
-      addSubtreeIds(root.id, allChildren, visibleIds, new Set());
-      return true;
-    }
-
-    return addMatchingSubtreeIds(root.id, query, sessionsById, allChildren, visibleIds, new Set());
+export function buildSessionsPageKey(options: SessionListQuery = {}): BrowserApiPath {
+  const searchParams = serializeSessionListQuery({
+    ...options,
+    limit: options.limit ?? DEFAULT_SESSION_LIST_LIMIT,
+    offset: options.offset ?? DEFAULT_SESSION_LIST_OFFSET,
   });
-  const childrenMap = visibleChildrenMap(allChildren, visibleIds);
-  const groupsByKey = new Map<string, SessionRepositoryGroup>();
-
-  for (const root of filteredRoots) {
-    const { key, label } = repositoryGroup(root);
-    const group = groupsByKey.get(key) ?? {
-      key,
-      label,
-      activeSessions: [],
-      inactiveSessions: [],
-    };
-
-    if (isInactiveSession(treeActivities.get(root.id) ?? sessionActivity(root), now)) {
-      group.inactiveSessions.push(root);
-    } else {
-      group.activeSessions.push(root);
-    }
-    groupsByKey.set(key, group);
-  }
-
-  const groups = [...groupsByKey.values()]
-    .filter((group) => group.activeSessions.length > 0 || query.length > 0)
-    .sort((a, b) => groupActivity(b, treeActivities) - groupActivity(a, treeActivities));
-
-  return {
-    groups,
-    childrenMap,
-    hasFilteredSessions: groups.length > 0,
-  };
-}
-
-function sessionActivity(session: Session) {
-  return session.updatedAt || session.createdAt;
-}
-
-function subtreeActivity(
-  sessionId: string,
-  sessionsById: Map<string, Session>,
-  childrenMap: Map<string, Session[]>,
-  activities: Map<string, number>,
-  visiting: Set<string>
-): number {
-  const known = activities.get(sessionId);
-  if (known !== undefined) return known;
-
-  const session = sessionsById.get(sessionId);
-  const ownActivity = session ? sessionActivity(session) : 0;
-  if (visiting.has(sessionId)) return ownActivity;
-
-  visiting.add(sessionId);
-  let activity = ownActivity;
-  for (const child of childrenMap.get(sessionId) ?? []) {
-    activity = Math.max(
-      activity,
-      subtreeActivity(child.id, sessionsById, childrenMap, activities, visiting)
-    );
-  }
-  visiting.delete(sessionId);
-  activities.set(sessionId, activity);
-  return activity;
-}
-
-function addSubtreeIds(
-  sessionId: string,
-  childrenMap: Map<string, Session[]>,
-  visibleIds: Set<string>,
-  visitedIds: Set<string>
-) {
-  if (visitedIds.has(sessionId)) return;
-  visitedIds.add(sessionId);
-  visibleIds.add(sessionId);
-  for (const child of childrenMap.get(sessionId) ?? []) {
-    addSubtreeIds(child.id, childrenMap, visibleIds, visitedIds);
-  }
-}
-
-function addMatchingSubtreeIds(
-  sessionId: string,
-  query: string,
-  sessionsById: Map<string, Session>,
-  childrenMap: Map<string, Session[]>,
-  visibleIds: Set<string>,
-  visitedIds: Set<string>
-): boolean {
-  if (visitedIds.has(sessionId)) return false;
-  visitedIds.add(sessionId);
-
-  const children = childrenMap.get(sessionId) ?? [];
-  const matchingChildren = children.filter((child) =>
-    addMatchingSubtreeIds(child.id, query, sessionsById, childrenMap, visibleIds, visitedIds)
-  );
-  const session = sessionsById.get(sessionId);
-  const matches = session ? sessionMatchesQuery(session, query) : false;
-  if (!matches && matchingChildren.length === 0) return false;
-
-  visibleIds.add(sessionId);
-  return true;
-}
-
-function sessionMatchesQuery(session: Session, query: string) {
-  if (session.title?.toLowerCase().includes(query)) return true;
-  return sessionRepositories(session).some((repo) =>
-    formatRepoLabel(repo.repoOwner, repo.repoName).toLowerCase().includes(query)
-  );
-}
-
-function visibleChildrenMap(allChildren: Map<string, Session[]>, visibleIds: Set<string>) {
-  const visibleChildren = new Map<string, Session[]>();
-  for (const [parentId, children] of allChildren) {
-    if (!visibleIds.has(parentId)) continue;
-    const visible = children.filter((child) => visibleIds.has(child.id));
-    if (visible.length > 0) visibleChildren.set(parentId, visible);
-  }
-  return visibleChildren;
-}
-
-function repositoryGroup(session: Session) {
-  const repositories = sessionRepositories(session);
-  if (repositories.length > 1) {
-    return { key: MULTIPLE_REPOSITORIES_KEY, label: MULTIPLE_REPOSITORIES_LABEL };
-  }
-  if (repositories.length === 0) {
-    return { key: NO_REPOSITORY_KEY, label: NO_REPOSITORY_LABEL };
-  }
-  const label = formatRepoLabel(repositories[0].repoOwner, repositories[0].repoName);
-  return { key: `repository:${label}`, label };
-}
-
-function sessionRepositories(session: Session) {
-  if (session.repositories?.length) return session.repositories;
-  if (!session.repoOwner || !session.repoName) return [];
-  return [{ repoOwner: session.repoOwner, repoName: session.repoName }];
-}
-
-function groupActivity(group: SessionRepositoryGroup, treeActivities: Map<string, number>) {
-  const newest = group.activeSessions[0] ?? group.inactiveSessions[0];
-  return newest ? (treeActivities.get(newest.id) ?? sessionActivity(newest)) : 0;
-}
-
-export function buildSessionsPageKey({
-  limit = SESSIONS_PAGE_SIZE,
-  offset = 0,
-  mode = "flat",
-  cursor,
-  status,
-  excludeStatus,
-  createdBy,
-}: {
-  limit?: number;
-  offset?: number;
-  mode?: "flat" | "tree";
-  cursor?: string | null;
-  status?: string;
-  excludeStatus?: string;
-  createdBy?: readonly string[];
-}) {
-  const searchParams = new URLSearchParams({ limit: String(limit) });
-
-  if (mode === "tree") {
-    searchParams.set("mode", mode);
-    if (cursor) searchParams.set("cursor", cursor);
-  } else {
-    searchParams.set("offset", String(offset));
-  }
-
-  if (status) {
-    searchParams.set("status", status);
-  }
-
-  if (excludeStatus) {
-    searchParams.set("excludeStatus", excludeStatus);
-  }
-
-  for (const userId of createdBy ?? []) {
-    searchParams.append("createdBy", userId);
-  }
 
   return `${SESSIONS_API_PATH}?${searchParams.toString()}`;
 }
@@ -286,29 +64,37 @@ export function isArchivedSessionListKey(key: unknown): key is string {
 export function applyTitleUpdate(
   data: SessionListResponse | undefined,
   sessionId: string,
-  title: string,
-  updatedAt: number
+  title: string | null
 ): SessionListResponse | undefined {
   if (!data) return data;
   return {
     ...data,
     sessions: data.sessions.map((session) =>
-      session.id === sessionId ? { ...session, title, updatedAt } : session
+      session.id === sessionId ? { ...session, title } : session
     ),
   };
 }
 
-export function applyUnreadUpdate(
+export function applySessionReadState(
   data: SessionListResponse | undefined,
   sessionId: string,
-  unread: boolean
+  readState: Session["readState"]
 ): SessionListResponse | undefined {
   if (!data) return data;
   return {
     ...data,
-    sessions: data.sessions.map((session) =>
-      session.id === sessionId ? { ...session, unread } : session
-    ),
+    sessions: data.sessions.map((session) => {
+      if (session.id !== sessionId) return session;
+      if (!readState) return session;
+      const currentMessageId = session.readState?.latestMessageId;
+      if (currentMessageId !== undefined && currentMessageId !== readState.latestMessageId) {
+        return session;
+      }
+      return {
+        ...session,
+        readState,
+      };
+    }),
   };
 }
 
@@ -329,32 +115,35 @@ export function removeSessionFromList(sessions: Session[], sessionId: string) {
   return sessions.filter((session) => session.id !== sessionId);
 }
 
+export function buildSessionSearchValue(session: Session): string {
+  const repositoryLabels = session.repositories?.length
+    ? session.repositories.map((repository) =>
+        formatRepoLabel(repository.repoOwner, repository.repoName)
+      )
+    : [formatRepoLabel(session.repoOwner, session.repoName)];
+
+  return [session.id, session.title, ...repositoryLabels].filter(Boolean).join(" ");
+}
+
 /**
- * Collect a session id and all of its descendants (children, grandchildren, …)
- * from a flat session list, following `parentSessionId` links.
- *
- * Archiving a parent cascades to its child/sub-task sessions on the server
- * (they all become `archived`), so the sidebar must drop the whole subtree, not
- * just the archived row — otherwise the children linger as orphaned "sub-task"
- * entries until the next full refetch. Iterates to a fixed point so any nesting
- * depth and child ordering are handled; descendants not currently loaded are
- * reconciled by the next server-truth fetch.
+ * The session-detail route for a list entry, carrying the repo and title as
+ * query params so the destination page can render its header before the
+ * session payload loads.
  */
-export function collectSessionAndDescendantIds(
-  sessions: Session[],
-  sessionId: string
-): Set<string> {
-  const ids = new Set<string>([sessionId]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const session of sessions) {
-      if (ids.has(session.id)) continue;
-      if (session.parentSessionId && ids.has(session.parentSessionId)) {
-        ids.add(session.id);
-        changed = true;
-      }
-    }
+export function buildSessionHref(
+  session: Pick<Session, "id" | "title" | "repoOwner" | "repoName">
+) {
+  const query: Record<string, string> = {};
+  if (session.repoOwner && session.repoName) {
+    query.repoOwner = session.repoOwner;
+    query.repoName = session.repoName;
   }
-  return ids;
+  if (session.title) {
+    query.title = session.title;
+  }
+
+  return {
+    pathname: `/session/${session.id}`,
+    query,
+  };
 }

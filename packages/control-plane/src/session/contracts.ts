@@ -6,11 +6,14 @@
 export const SessionInternalPaths = {
   init: "/internal/init",
   state: "/internal/state",
+  snapshot: "/internal/snapshot",
+  sandboxAccess: "/internal/sandbox-access",
   prompt: "/internal/prompt",
   stop: "/internal/stop",
   sandboxEvent: "/internal/sandbox-event",
-  supervisorHeartbeat: "/internal/supervisor-heartbeat",
   createMediaArtifact: "/internal/create-media-artifact",
+  createBoardArtifact: "/internal/create-board-artifact",
+  attachments: "/internal/attachments",
   participants: "/internal/participants",
   events: "/internal/events",
   artifacts: "/internal/artifacts",
@@ -21,34 +24,28 @@ export const SessionInternalPaths = {
   pullRequestArtifactSnapshot: "/internal/pull-request-artifact-snapshot",
   pullRequestsRefresh: "/internal/pull-requests-refresh",
   wsToken: "/internal/ws-token",
-  // Verify a browser ws-token for board access. The participant table lives in
-  // this DO, so the board WS handler round-trips here before forwarding the
-  // upgrade to the BoardRoom DO.
   verifyWsToken: "/internal/verify-ws-token",
-  // Persist a board artifact (and broadcast artifact_created) for a board the
-  // agent created. The board document itself lives in the BoardRoom DO.
-  createBoardArtifact: "/internal/create-board-artifact",
   archive: "/internal/archive",
-  unarchive: "/internal/unarchive",
-  // Trusted DO-to-DO archive used by the parent→child archive cascade. Unlike
-  // `archive` it runs no participant check (the caller is always another
-  // SessionDO, never a client) and stops any in-flight execution so the
-  // archived status sticks instead of being reconciled back to active/completed.
   archiveCascade: "/internal/archive-cascade",
+  unarchive: "/internal/unarchive",
+  expireDraft: "/internal/expire-draft",
   verifySandboxToken: "/internal/verify-sandbox-token",
   openaiTokenRefresh: "/internal/openai-token-refresh",
+  xaiTokenRefresh: "/internal/xai-token-refresh",
   scmCredentials: "/internal/scm-credentials",
   tunnelUrls: "/internal/tunnel-urls",
   spawnContext: "/internal/spawn-context",
+  activePromptAuthor: "/internal/active-prompt-author",
   childSummary: "/internal/child-summary",
+  parentPrompt: "/internal/parent-prompt",
   updateTitle: "/internal/update-title",
   cancel: "/internal/cancel",
   childSessionUpdate: "/internal/child-session-update",
-} as const;
-
-export const SessionChildSummaryIncludes = {
-  result: "result",
-  trajectory: "trajectory",
+  diffState: "/internal/diff-state",
+  diffStore: "/internal/diff-store",
+  diffFailure: "/internal/diff-failure",
+  diffResolveFile: "/internal/diff-resolve-file",
+  diffRetry: "/internal/diff-retry",
 } as const;
 
 export type SessionInternalPath = (typeof SessionInternalPaths)[keyof typeof SessionInternalPaths];

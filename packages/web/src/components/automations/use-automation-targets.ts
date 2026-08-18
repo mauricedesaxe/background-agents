@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useMemo, useEffect, useState } from "react";
-import { MAX_AUTOMATION_REPOSITORIES, type AutomationRepositoryInput } from "@open-inspect/shared";
-import { parseRepoFullName } from "@/lib/session-target";
+import { parseRepositoryFullName } from "@open-inspect/shared/types/repositories";
+import { MAX_AUTOMATION_REPOSITORIES } from "@open-inspect/shared/types/automations";
+import type { AutomationRepositoryInput } from "@open-inspect/shared/types/automations";
 import {
   type AutomationSessionTarget,
   type SelectionMode,
@@ -41,8 +42,8 @@ export interface UseAutomationTargetsResult {
   targetCount: number;
   /** Whether the selection is exactly one repository (the branch-pickable shape). */
   usesSingleRepository: boolean;
-  /** Owner/name of the sole selected repository, for the branch fetch. */
-  selectedRepository: { owner: string; name: string } | null;
+  /** Structured identity of the sole selected repository, for the branch fetch. */
+  selectedRepository: { repoOwner: string; repoName: string } | null;
   multipleSelectionEnabled: boolean;
   baseBranch: string;
   setBaseBranch: (branch: string) => void;
@@ -134,7 +135,7 @@ export function useAutomationTargets(
   const targetCount = selectedTargets.length;
   const usesSingleRepository = selectedTargets.length === 1 && selectedTargets[0].kind === "repo";
   const selectedRepository = usesSingleRepository
-    ? parseRepoFullName(selectedRepoNames[0] ?? "")
+    ? parseRepositoryFullName(selectedRepoNames[0] ?? "")
     : null;
 
   const toggleRepository = useCallback(

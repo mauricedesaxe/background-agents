@@ -1,4 +1,4 @@
-import { applyMentionPolicy } from "@open-inspect/shared";
+import { applyMentionPolicy } from "@open-inspect/shared/slack";
 
 /**
  * Strip Slack user mention tokens (e.g. <@U12345>) from text and collapse
@@ -12,7 +12,10 @@ export function stripMentions(text: string): string {
 /**
  * Returns true if a Slack message event should be dispatched as a DM.
  * Filters out subtypes (bot_message, message_changed, message_deleted, etc.)
- * to prevent processing bot replies and edit/delete notifications.
+ * to prevent processing bot replies and edit/delete notifications. Messages
+ * with file uploads arrive as the `file_share` subtype and may carry no text,
+ * so they dispatch on their files instead; a forwarded message with no comment
+ * likewise carries its content in `attachments` and no text at all.
  */
 export function isDmDispatchable(event: {
   type: string;
@@ -22,12 +25,17 @@ export function isDmDispatchable(event: {
   channel?: string;
   ts?: string;
   user?: string;
+  files?: unknown[];
+  attachments?: unknown[];
 }): boolean {
+  const subtypeOk = !event.subtype || event.subtype === "file_share";
+  const hasContent =
+    !!event.text || (event.files?.length ?? 0) > 0 || (event.attachments?.length ?? 0) > 0;
   return (
     event.type === "message" &&
-    !event.subtype &&
+    subtypeOk &&
     event.channel_type === "im" &&
-    !!event.text &&
+    hasContent &&
     !!event.channel &&
     !!event.ts &&
     !!event.user
@@ -49,7 +57,12 @@ function mentionsUser(text: string, userId: string): boolean {
  *
  * This is the structural pre-filter the bot applies before normalizing and
  * forwarding to the control plane. It drops:
- * - non-`message` events and any subtype (edits, joins, bot posts, …)
+ * - non-`message` events and any subtype other than `file_share` (edits, joins,
+ *   bot posts, …). A message that carries an attachment arrives as `file_share`
+ *   but is otherwise an ordinary message, and dropping it made the request that
+ *   opens a thread invisible whenever it came with a file. Only its text
+ *   triggers — the attachment is not forwarded to the session (matching
+ *   automation thread replies).
  * - DM (`im`) and group-DM (`mpim`) channels — handled by the DM path
  * - messages from the bot itself
  * - messages that @mention the bot — those are explicit requests dispatched by
@@ -73,7 +86,7 @@ export function isChannelTriggerCandidate(
   botUserId: string
 ): boolean {
   if (event.type !== "message") return false;
-  if (event.subtype) return false;
+  if (event.subtype && event.subtype !== "file_share") return false;
   if (event.bot_id) return false;
   if (event.channel_type !== "channel" && event.channel_type !== "group") return false;
   if (!event.text || !event.channel || !event.ts || !event.user) return false;

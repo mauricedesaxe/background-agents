@@ -5,22 +5,22 @@ The supervisor derives the repository list once from SESSION_CONFIG
 writes it to REPO_MANIFEST_FILE_PATH. Every other consumer — the bridge's
 push targeting and the JS create-pull-request tool — reads that manifest
 instead of re-deriving the ``/workspace/<repo_name>`` convention, so the
-checkout layout has exactly one owner.
+checkout layout has exactly one authority.
 """
 
 import json
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .constants import REPO_MANIFEST_FILE_PATH
 
-# GitHub owner/repo identifiers: a single path segment with no separators.
-# Leading dots are legal (a repo can be named ".github"); "." and ".." are
-# rejected separately below.
+# A single path segment with no separators. Leading dots are legal (a repo can
+# be named ".github"); "." and ".." are rejected separately below.
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_GIT_SHA_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 
 
 class RepoConfigError(ValueError):
@@ -40,6 +40,7 @@ class RepoEntry:
     name: str
     branch: str
     path: Path
+    base_sha: str | None = None
 
 
 def is_safe_repo_segment(value: str) -> bool:
@@ -47,15 +48,38 @@ def is_safe_repo_segment(value: str) -> bool:
     return bool(_SAFE_SEGMENT_RE.match(value)) and value not in (".", "..")
 
 
+def is_safe_repo_owner(value: str) -> bool:
+    """True when ``value`` is a namespace path of safe segments.
+
+    An owner may be a single segment (GitHub, ``octocat``) or a nested
+    namespace (GitLab subgroups, ``group/subgroup``). The owner is never used
+    as a filesystem path — checkout directories derive from repo_name — so a
+    ``/`` between safe segments is fine; this only rejects empty segments and
+    traversal ("", "..", "a//b", "/etc", "a/") that could poison the clone URL.
+    """
+    parts = value.split("/")
+    return len(parts) >= 1 and all(is_safe_repo_segment(part) for part in parts)
+
+
 def _require_safe(*, owner: str, name: str) -> None:
-    for label, value in (("repo_owner", owner), ("repo_name", name)):
-        if not is_safe_repo_segment(value):
-            raise RepoConfigError(f"unsafe {label} {value!r}: not a single path segment")
+    if not is_safe_repo_owner(owner):
+        raise RepoConfigError(f"unsafe repo_owner {owner!r}: not a safe namespace path")
+    if not is_safe_repo_segment(name):
+        raise RepoConfigError(f"unsafe repo_name {name!r}: not a single path segment")
 
 
 def _str_field(item: Mapping[str, Any], key: str) -> str:
     """A JSON field coerced to a stripped string ("" for null/missing)."""
     return str(item.get(key) or "").strip()
+
+
+def _optional_git_sha(item: Mapping[str, Any], key: str) -> str | None:
+    value = _str_field(item, key)
+    if not value:
+        return None
+    if not _GIT_SHA_RE.fullmatch(value):
+        raise RepoConfigError(f"invalid {key}")
+    return value
 
 
 def parse_repositories(
@@ -68,18 +92,19 @@ def parse_repositories(
 ) -> list[RepoEntry]:
     """Build the ordered repository list from SESSION_CONFIG or the scalar env.
 
-    Checkout paths derive from repo_name, so owners/names must be safe single
-    path segments and names must be unique (case-insensitive — checkout paths
-    would collide). The control plane enforces both at create time, so a
-    violation here means a corrupt or tampered config: RepoConfigError, and
-    the boot must not proceed. Entries missing owner or name are skipped.
+    Checkout paths derive from repo_name, so owners must be safe namespace
+    paths, names must be safe single path segments, and names must be unique
+    (case-insensitive — checkout paths would collide). The control plane
+    enforces these constraints at create time, so a violation here means a
+    corrupt or tampered config: RepoConfigError, and the boot must not proceed.
+    Entries missing owner or name are skipped.
     """
     raw = session_config.get("repositories")
     entries: list[RepoEntry] = []
     seen_names: set[str] = set()
-    if isinstance(raw, list):
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
         for item in raw:
-            if not isinstance(item, dict):
+            if not isinstance(item, Mapping):
                 continue
             owner = _str_field(item, "repo_owner")
             name = _str_field(item, "repo_name")
@@ -91,8 +116,15 @@ def parse_repositories(
                 raise RepoConfigError(f"duplicate repo_name {name!r}: checkout paths would collide")
             seen_names.add(name_key)
             branch = _str_field(item, "branch") or "main"
+            base_sha = _optional_git_sha(item, "base_sha")
             entries.append(
-                RepoEntry(owner=owner, name=name, branch=branch, path=workspace_path / name)
+                RepoEntry(
+                    owner=owner,
+                    name=name,
+                    branch=branch,
+                    path=workspace_path / name,
+                    base_sha=base_sha,
+                )
             )
     if entries:
         return entries
@@ -104,6 +136,7 @@ def parse_repositories(
                 name=scalar_name,
                 branch=scalar_branch,
                 path=workspace_path / scalar_name,
+                base_sha=_optional_git_sha(session_config, "base_sha"),
             )
         ]
     return []
@@ -112,9 +145,9 @@ def parse_repositories(
 def find_repo_entry(entries: Iterable[RepoEntry], owner: str, name: str) -> RepoEntry | None:
     """Find a repository by identity, case-insensitively.
 
-    GitHub owner/name identifiers are case-insensitive, but the returned
-    entry carries the canonical casing (and checkout path) — callers must
-    use the entry's fields, never the lookup arguments.
+    Repository identities are matched case-insensitively, but the returned
+    entry carries the canonical casing (and checkout path) — callers must use
+    the entry's fields, never the lookup arguments.
     """
     owner_key = owner.lower()
     name_key = name.lower()
@@ -129,11 +162,64 @@ def dump_repo_manifest(repositories: list[RepoEntry]) -> str:
     return json.dumps(
         {
             "repositories": [
-                {"owner": r.owner, "name": r.name, "branch": r.branch, "path": str(r.path)}
+                {
+                    "owner": r.owner,
+                    "name": r.name,
+                    "branch": r.branch,
+                    "path": str(r.path),
+                    **({"baseSha": r.base_sha} if r.base_sha else {}),
+                }
                 for r in repositories
             ]
         }
     )
+
+
+def _manifest_entries(data: object) -> list[RepoEntry]:
+    raw = data.get("repositories") if isinstance(data, dict) else None
+    entries: list[RepoEntry] = []
+    try:
+        if isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                owner = _str_field(item, "owner")
+                name = _str_field(item, "name")
+                path_value = _str_field(item, "path")
+                if not owner or not name or not path_value:
+                    continue
+                branch = _str_field(item, "branch") or "main"
+                entries.append(
+                    RepoEntry(
+                        owner=owner,
+                        name=name,
+                        branch=branch,
+                        path=Path(path_value),
+                        base_sha=_optional_git_sha(item, "baseSha"),
+                    )
+                )
+    except RepoConfigError:
+        return []
+    return entries
+
+
+def read_repo_manifest(path: str | Path = REPO_MANIFEST_FILE_PATH) -> list[RepoEntry]:
+    """Read a complete supervisor manifest or reject it as unusable."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        raise RepoConfigError("repository manifest is missing or invalid") from None
+
+    raw = data.get("repositories") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        raise RepoConfigError("repository manifest must contain a repository list")
+
+    entries = _manifest_entries(data)
+    if len(entries) != len(raw):
+        raise RepoConfigError("repository manifest contains an incomplete entry")
+    for entry in entries:
+        _require_safe(owner=entry.owner, name=entry.name)
+    return entries
 
 
 def load_repo_manifest(path: str | Path = REPO_MANIFEST_FILE_PATH) -> list[RepoEntry]:
@@ -142,17 +228,4 @@ def load_repo_manifest(path: str | Path = REPO_MANIFEST_FILE_PATH) -> list[RepoE
         data = json.loads(Path(path).read_text())
     except (OSError, ValueError):
         return []
-    raw = data.get("repositories") if isinstance(data, dict) else None
-    entries: list[RepoEntry] = []
-    if isinstance(raw, list):
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            owner = _str_field(item, "owner")
-            name = _str_field(item, "name")
-            path_value = _str_field(item, "path")
-            if not owner or not name or not path_value:
-                continue
-            branch = _str_field(item, "branch") or "main"
-            entries.append(RepoEntry(owner=owner, name=name, branch=branch, path=Path(path_value)))
-    return entries
+    return _manifest_entries(data)

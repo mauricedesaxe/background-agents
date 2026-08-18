@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback } from "react";
+import { browserApiFetch } from "@/lib/browser-api-fetch";
 import { WS_URL } from "@/lib/ws-url";
 import { BoardCanvas, useBoardSync } from "./board-canvas";
 
@@ -25,7 +26,7 @@ export interface BoardEditorProps {
  */
 export default function BoardEditor({ sessionId, boardId }: BoardEditorProps) {
   const uri = useCallback(async () => {
-    const res = await fetch(`/api/sessions/${sessionId}/ws-token`, { method: "POST" });
+    const res = await browserApiFetch(`/api/sessions/${sessionId}/ws-token`, { method: "POST" });
     if (!res.ok) {
       throw new Error("Failed to authenticate board connection");
     }

@@ -8,19 +8,12 @@
 
 import type { Logger } from "../logger";
 import type { ClientInfo } from "../types";
-import type { SessionRepository, WsClientMappingResult } from "./repository";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/** The two kinds of WebSocket connections the DO manages. */
-export type WsKind = "client" | "sandbox";
-
-/** Result of parsing a WebSocket's Cloudflare hibernation tags. */
-export type ParsedTags =
-  | { kind: "sandbox"; sandboxId?: string }
-  | { kind: "client"; wsId?: string };
+import type { ConnectionClassification } from "./ports";
+import type { SandboxRepository } from "./sandbox-repository";
+import type {
+  WsClientMappingRepository,
+  WsClientMappingResult,
+} from "./ws-client-mapping-repository";
 
 /** Configuration for the WebSocket manager. */
 export interface WebSocketManagerConfig {
@@ -42,37 +35,19 @@ export interface SessionWebSocketManager {
   acceptAndSetSandboxSocket(ws: WebSocket, sandboxId?: string): { replaced: boolean };
 
   /** Parse a WebSocket's tags to determine its kind and identity. */
-  classify(ws: WebSocket): ParsedTags;
+  classify(ws: WebSocket): ConnectionClassification;
 
   /**
    * Get the active sandbox socket, recovering from hibernation if needed.
    * Validates sandbox ID against the repository during hibernation recovery.
    */
   getSandboxSocket(): WebSocket | null;
-  hasSandboxSocket(): boolean;
-  markSandboxSocketClose(
-    reason: string,
-    track?: "control_plane_teardown" | "socket_error"
-  ): boolean;
-  markSandboxSocketCloseIfMatch(
-    ws: WebSocket,
-    reason: string,
-    track?: "control_plane_teardown" | "socket_error"
-  ): boolean;
-  closeSandboxSocket(code: number, reason: string): boolean;
-  closeSandboxSocketIfMatch(
-    ws: WebSocket,
-    code: number,
-    reason: string,
-    track?: "control_plane_teardown" | "socket_error"
-  ): boolean;
-  getSandboxCloseInitiator(ws: WebSocket): string | null;
-  getSandboxCloseTrack(ws: WebSocket): "control_plane_teardown" | "socket_error" | null;
-
-  isCurrentSandboxSocket(ws: WebSocket): boolean;
 
   /** Clear the in-memory sandbox socket reference. */
   clearSandboxSocket(): void;
+
+  /** Clear and close all active sandbox sockets without consulting persisted dispatch status. */
+  detachSandboxSocket(code: number, reason: string): void;
 
   /** Clear sandbox socket only if ws matches current reference. Returns true if it was the active socket. */
   clearSandboxSocketIfMatch(ws: WebSocket): boolean;
@@ -87,6 +62,10 @@ export interface SessionWebSocketManager {
   /** Persist ws-to-participant mapping for hibernation survival. */
   persistClientMapping(wsId: string, participantId: string, clientId: string): void;
 
+  setClientSynchronizing(ws: WebSocket, synchronizing: boolean): void;
+  isClientSynchronizing(ws: WebSocket): boolean;
+  isClientAuthenticated(ws: WebSocket): boolean;
+
   /** Check if a wsId has a persisted mapping (used by auth timeout). */
   hasPersistedMapping(wsId: string): boolean;
 
@@ -99,7 +78,6 @@ export interface SessionWebSocketManager {
   ): void;
 
   enforceAuthTimeout(ws: WebSocket, wsId: string): Promise<void>;
-  enableAutoPingPong(): void;
   getAuthenticatedClients(): IterableIterator<ClientInfo>;
   getConnectedClientCount(): number;
 }
@@ -110,11 +88,13 @@ export interface SessionWebSocketManager {
 
 export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
   private clients = new Map<WebSocket, ClientInfo>();
+  private synchronizingClients = new Set<WebSocket>();
   private sandboxWs: WebSocket | null = null;
 
   constructor(
     private readonly ctx: DurableObjectState,
-    private readonly repository: SessionRepository,
+    private readonly sandboxRepository: SandboxRepository,
+    private readonly wsClientMappingRepository: WsClientMappingRepository,
     private readonly log: Logger,
     private readonly config: WebSocketManagerConfig
   ) {}
@@ -130,19 +110,16 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
   acceptAndSetSandboxSocket(ws: WebSocket, sandboxId?: string): { replaced: boolean } {
     const tags = ["sandbox", ...(sandboxId ? [`sid:${sandboxId}`] : [])];
     this.ctx.acceptWebSocket(ws, tags);
-    ws.serializeAttachment({ activeSandboxConnection: true });
 
     let replaced = false;
-    for (const existing of this.ctx.getWebSockets()) {
-      if (existing === ws || this.classify(existing).kind !== "sandbox") continue;
-      existing.serializeAttachment({ activeSandboxConnection: false });
+    if (this.sandboxWs && this.sandboxWs !== ws) {
       try {
-        if (existing.readyState === WebSocket.OPEN) {
-          existing.close(1000, "New sandbox connecting");
+        if (this.sandboxWs.readyState === WebSocket.OPEN) {
+          this.sandboxWs.close(1000, "New sandbox connecting");
           replaced = true;
         }
       } catch {
-        continue;
+        // Ignore errors closing old WebSocket
       }
     }
 
@@ -154,7 +131,7 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
   // Classification
   // -------------------------------------------------------------------------
 
-  classify(ws: WebSocket): ParsedTags {
+  classify(ws: WebSocket): ConnectionClassification {
     const tags = this.ctx.getTags(ws);
     if (tags.includes("sandbox")) {
       const sidTag = tags.find((t) => t.startsWith("sid:"));
@@ -169,13 +146,16 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
   // -------------------------------------------------------------------------
 
   getSandboxSocket(): WebSocket | null {
-    const sandbox = this.repository.getSandbox();
+    const sandbox = this.sandboxRepository.getSandbox();
+    const expectedSandboxId = sandbox?.modal_sandbox_id;
+
     // If the sandbox is in a terminal state, don't re-adopt stale WebSockets.
     // After inactivity timeout or heartbeat stale, the DO closes the WS and sets
     // status to stopped/stale, but the close handshake may not complete before
     // hibernation. On wake, the zombie WS still appears OPEN — skip it.
     const terminalStatuses = ["stopped", "failed", "stale"];
     if (sandbox && terminalStatuses.includes(sandbox.status)) {
+      this.sandboxWs = null;
       // Close any lingering sandbox WebSockets so they don't persist
       for (const ws of this.ctx.getWebSockets()) {
         const parsed = this.classify(ws);
@@ -185,19 +165,16 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
       }
       return null;
     }
-    if (sandbox && sandbox.status !== "ready") return null;
 
     if (this.sandboxWs?.readyState === WebSocket.OPEN) {
       return this.sandboxWs;
     }
 
-    const expectedSandboxId = sandbox?.modal_sandbox_id;
+    // Hibernation recovery: scan all WebSockets, validate sandbox identity
 
     for (const ws of this.ctx.getWebSockets()) {
       const parsed = this.classify(ws);
       if (parsed.kind !== "sandbox" || ws.readyState !== WebSocket.OPEN) continue;
-      const attachment = ws.deserializeAttachment() as { activeSandboxConnection?: boolean } | null;
-      if (!attachment?.activeSandboxConnection) continue;
 
       if (expectedSandboxId && parsed.sandboxId && parsed.sandboxId !== expectedSandboxId) {
         this.log.debug("Skipping WS with wrong sandbox ID", {
@@ -215,95 +192,18 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
     return null;
   }
 
-  hasSandboxSocket(): boolean {
-    return Array.from(this.ctx.getWebSockets()).some(
-      (ws) => this.classify(ws).kind === "sandbox" && ws.readyState === WebSocket.OPEN
-    );
-  }
-
-  closeSandboxSocket(code: number, reason: string): boolean {
-    const ws = this.getRawActiveSandboxSocket();
-    if (!ws) return false;
-    return this.closeSandboxSocketIfMatch(ws, code, reason);
-  }
-
-  markSandboxSocketClose(
-    reason: string,
-    track: "control_plane_teardown" | "socket_error" = "control_plane_teardown"
-  ): boolean {
-    const ws = this.getRawActiveSandboxSocket();
-    return ws ? this.markSandboxSocketCloseIfMatch(ws, reason, track) : false;
-  }
-
-  markSandboxSocketCloseIfMatch(
-    ws: WebSocket,
-    reason: string,
-    track: "control_plane_teardown" | "socket_error" = "control_plane_teardown"
-  ): boolean {
-    if (!this.isCurrentSandboxSocket(ws)) return false;
-    const attachment = this.readSandboxAttachment(ws);
-    ws.serializeAttachment({
-      ...attachment,
-      controlPlaneCloseReason: reason,
-      controlPlaneCloseTrack: track,
-    });
-    return true;
-  }
-
-  closeSandboxSocketIfMatch(
-    ws: WebSocket,
-    code: number,
-    reason: string,
-    track: "control_plane_teardown" | "socket_error" = "control_plane_teardown"
-  ): boolean {
-    if (!this.markSandboxSocketCloseIfMatch(ws, reason, track)) return false;
-    if (ws.readyState !== WebSocket.OPEN) return false;
-    this.close(ws, code, reason);
-    this.clearSandboxSocketIfMatch(ws);
-    return true;
-  }
-
-  getSandboxCloseInitiator(ws: WebSocket): string | null {
-    return this.readSandboxAttachment(ws).controlPlaneCloseReason ?? null;
-  }
-
-  getSandboxCloseTrack(ws: WebSocket): "control_plane_teardown" | "socket_error" | null {
-    return this.readSandboxAttachment(ws).controlPlaneCloseTrack ?? null;
-  }
-
-  private getRawActiveSandboxSocket(): WebSocket | null {
-    if (this.sandboxWs?.readyState === WebSocket.OPEN) return this.sandboxWs;
-    return (
-      Array.from(this.ctx.getWebSockets()).find((candidate) => {
-        if (this.classify(candidate).kind !== "sandbox") return false;
-        if (candidate.readyState !== WebSocket.OPEN) return false;
-        return this.readSandboxAttachment(candidate).activeSandboxConnection === true;
-      }) ?? null
-    );
-  }
-
-  private readSandboxAttachment(ws: WebSocket): {
-    activeSandboxConnection?: boolean;
-    controlPlaneCloseReason?: string;
-    controlPlaneCloseTrack?: "control_plane_teardown" | "socket_error";
-  } {
-    return (
-      (ws.deserializeAttachment() as {
-        activeSandboxConnection?: boolean;
-        controlPlaneCloseReason?: string;
-        controlPlaneCloseTrack?: "control_plane_teardown" | "socket_error";
-      } | null) ?? {}
-    );
-  }
-
-  isCurrentSandboxSocket(ws: WebSocket): boolean {
-    if (this.sandboxWs !== null) return this.sandboxWs === ws;
-    const attachment = ws.deserializeAttachment() as { activeSandboxConnection?: boolean } | null;
-    return attachment?.activeSandboxConnection === true;
-  }
-
   clearSandboxSocket(): void {
     this.sandboxWs = null;
+  }
+
+  detachSandboxSocket(code: number, reason: string): void {
+    const sockets = new Set<WebSocket>();
+    if (this.sandboxWs) sockets.add(this.sandboxWs);
+    for (const ws of this.ctx.getWebSockets()) {
+      if (this.classify(ws).kind === "sandbox") sockets.add(ws);
+    }
+    this.sandboxWs = null;
+    for (const ws of sockets) this.close(ws, code, reason);
   }
 
   clearSandboxSocketIfMatch(ws: WebSocket): boolean {
@@ -341,11 +241,11 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
   recoverClientMapping(ws: WebSocket): WsClientMappingResult | null {
     const parsed = this.classify(ws);
     if (parsed.kind !== "client" || !parsed.wsId) return null;
-    return this.repository.getWsClientMapping(parsed.wsId);
+    return this.wsClientMappingRepository.getWsClientMapping(parsed.wsId);
   }
 
   persistClientMapping(wsId: string, participantId: string, clientId: string): void {
-    this.repository.upsertWsClientMapping({
+    this.wsClientMappingRepository.upsertWsClientMapping({
       wsId,
       participantId,
       clientId,
@@ -353,8 +253,21 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
     });
   }
 
+  setClientSynchronizing(ws: WebSocket, synchronizing: boolean): void {
+    if (synchronizing) this.synchronizingClients.add(ws);
+    else this.synchronizingClients.delete(ws);
+  }
+
+  isClientSynchronizing(ws: WebSocket): boolean {
+    return this.synchronizingClients.has(ws);
+  }
+
+  isClientAuthenticated(ws: WebSocket): boolean {
+    return this.isAuthenticated(ws, this.classify(ws));
+  }
+
   hasPersistedMapping(wsId: string): boolean {
-    return this.repository.hasWsClientMapping(wsId);
+    return this.wsClientMappingRepository.hasWsClientMapping(wsId);
   }
 
   // -------------------------------------------------------------------------
@@ -408,10 +321,10 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
    * Check whether a client socket has authentication evidence,
    * either in-memory or via persisted DB mapping (post-hibernation).
    */
-  private isAuthenticated(ws: WebSocket, parsed: ParsedTags): boolean {
+  private isAuthenticated(ws: WebSocket, parsed: ConnectionClassification): boolean {
     if (this.clients.has(ws)) return true;
     if (parsed.kind === "client" && parsed.wsId) {
-      return this.repository.hasWsClientMapping(parsed.wsId);
+      return this.wsClientMappingRepository.hasWsClientMapping(parsed.wsId);
     }
     return false;
   }
@@ -425,6 +338,7 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
 
     if (ws.readyState !== WebSocket.OPEN) return;
     if (this.clients.has(ws)) return;
+    if (this.synchronizingClients.has(ws)) return;
     if (this.hasPersistedMapping(wsId)) return;
 
     this.log.warn("ws.connect", {
@@ -435,15 +349,6 @@ export class SessionWebSocketManagerImpl implements SessionWebSocketManager {
       timeout_ms: this.config.authTimeoutMs,
     });
     this.close(ws, 4008, "Authentication timeout");
-  }
-
-  enableAutoPingPong(): void {
-    this.ctx.setWebSocketAutoResponse(
-      new WebSocketRequestResponsePair(
-        JSON.stringify({ type: "ping" }),
-        JSON.stringify({ type: "pong", timestamp: Date.now() })
-      )
-    );
   }
 
   getAuthenticatedClients(): IterableIterator<ClientInfo> {

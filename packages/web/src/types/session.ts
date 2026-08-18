@@ -1,9 +1,9 @@
 import type {
   PullRequestDisplayStatus,
-  SandboxEvent as SharedSandboxEvent,
   ScreenshotArtifactMetadata,
   VideoArtifactMetadata,
-} from "@open-inspect/shared";
+} from "@open-inspect/shared/types/artifacts";
+import type { SandboxEvent as SharedSandboxEvent } from "@open-inspect/shared/types/sandbox-events";
 
 // Session-related type definitions
 
@@ -12,9 +12,6 @@ export interface Artifact {
   type: "pr" | "screenshot" | "video" | "preview" | "branch" | "board";
   url: string | null;
   metadata?: (Partial<ScreenshotArtifactMetadata> | Partial<VideoArtifactMetadata>) & {
-    // Board artifacts (interactive tldraw whiteboards).
-    boardId?: string;
-    title?: string;
     prNumber?: number;
     prState?: PullRequestDisplayStatus;
     mode?: "manual_pr";
@@ -24,6 +21,8 @@ export interface Artifact {
     provider?: string;
     filename?: string;
     previewStatus?: "active" | "outdated" | "stopped";
+    boardId?: string;
+    title?: string;
     // Repo a PR/branch artifact belongs to in a multi-repo session. Absent on
     // artifacts written before multi-repo support → they belong to the primary.
     repoOwner?: string;
@@ -40,10 +39,4 @@ export interface Task {
   content: string;
   status: "pending" | "in_progress" | "completed";
   activeForm?: string;
-}
-
-export interface FileChange {
-  filename: string;
-  additions: number;
-  deletions: number;
 }

@@ -1,7 +1,7 @@
-import type { SessionRepository } from "../../repository";
+import type { ParticipantRepository } from "../../participant-repository";
 
 export interface ParticipantsHandlerDeps {
-  repository: Pick<SessionRepository, "listParticipants">;
+  repository: ParticipantRepository;
 }
 
 export interface ParticipantsHandler {
@@ -17,6 +17,9 @@ export function createParticipantsHandler(deps: ParticipantsHandlerDeps): Partic
         participants: participants.map((participant) => ({
           id: participant.id,
           userId: participant.user_id,
+          ...(participant.canonical_user_id
+            ? { canonicalUserId: participant.canonical_user_id }
+            : {}),
           scmLogin: participant.scm_login,
           scmName: participant.scm_name,
           role: participant.role,

@@ -1,4 +1,5 @@
-import type { CreateSessionRequest, RepositoryRef } from "@open-inspect/shared";
+import type { CreateSessionRequest } from "@open-inspect/shared/types/session-api";
+import type { RepositoryRef } from "@open-inspect/shared/types/repositories";
 import type { Env } from "../types";
 import type { Logger } from "../logger";
 import type { SourceControlProvider } from "../source-control";
@@ -25,8 +26,7 @@ export type SessionRepositoryResolutionInput = NonNullable<
  */
 export async function resolveEnvironmentTarget(
   store: EnvironmentStore,
-  environmentId: string,
-  branchOverride?: { repoOwner: string; repoName: string; branch: string }
+  environmentId: string
 ): Promise<SessionRepositoryResolutionInput[]> {
   const environment = await store.getById(environmentId);
   if (!environment) {
@@ -39,30 +39,11 @@ export async function resolveEnvironmentTarget(
     // user mistake.
     throw new HttpError(`Environment has no repositories: ${environmentId}`, 500);
   }
-  const resolved = repositories.map((repo) => ({
+  return repositories.map((repo) => ({
     repoOwner: repo.repo_owner,
     repoName: repo.repo_name,
-    baseBranch:
-      branchOverride &&
-      repo.repo_owner.toLowerCase() === branchOverride.repoOwner.toLowerCase() &&
-      repo.repo_name.toLowerCase() === branchOverride.repoName.toLowerCase()
-        ? branchOverride.branch
-        : repo.base_branch,
+    baseBranch: repo.base_branch,
   }));
-  if (
-    branchOverride &&
-    !resolved.some(
-      (repo) =>
-        repo.repoOwner.toLowerCase() === branchOverride.repoOwner.toLowerCase() &&
-        repo.repoName.toLowerCase() === branchOverride.repoName.toLowerCase()
-    )
-  ) {
-    throw new HttpError(
-      `Environment does not contain repository: ${branchOverride.repoOwner}/${branchOverride.repoName}`,
-      400
-    );
-  }
-  return resolved;
 }
 
 interface ResolutionOutcome {

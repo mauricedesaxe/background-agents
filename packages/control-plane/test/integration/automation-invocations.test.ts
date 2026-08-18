@@ -64,7 +64,7 @@ function makeChild(automationId: string, overrides?: Partial<AutomationRunRow>):
   return {
     id: `run-${Math.random().toString(36).slice(2, 10)}`,
     automation_id: automationId,
-    invocation_id: null,
+    invocation_id: `inv-child-${Math.random().toString(36).slice(2, 10)}`,
     session_id: null,
     status: "starting",
     skip_reason: null,
@@ -82,41 +82,6 @@ function makeChild(automationId: string, overrides?: Partial<AutomationRunRow>):
   };
 }
 
-/** Insert a LEGACY-shaped run via raw SQL: only pre-0030 columns, so the new
- *  columns take their NULL defaults exactly as rows written by old code do. */
-async function seedLegacyRun(run: {
-  id: string;
-  automation_id: string;
-  session_id?: string | null;
-  status: string;
-  skip_reason?: string | null;
-  failure_reason?: string | null;
-  scheduled_at: number;
-  started_at?: number | null;
-  completed_at?: number | null;
-  created_at: number;
-}): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO automation_runs
-     (id, automation_id, session_id, status, skip_reason, failure_reason,
-      scheduled_at, started_at, completed_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  )
-    .bind(
-      run.id,
-      run.automation_id,
-      run.session_id ?? null,
-      run.status,
-      run.skip_reason ?? null,
-      run.failure_reason ?? null,
-      run.scheduled_at,
-      run.started_at ?? null,
-      run.completed_at ?? null,
-      run.created_at
-    )
-    .run();
-}
-
 async function countRows(table: string, where = "1=1"): Promise<number> {
   const row = await env.DB.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${where}`).first<{
     count: number;
@@ -126,46 +91,6 @@ async function countRows(table: string, where = "1=1"): Promise<number> {
 
 describe("automation invocations (D1 integration)", () => {
   beforeEach(cleanD1Tables);
-
-  it("preserves repository capture order for one-shot session targets", async () => {
-    const store = new AutomationStore(env.DB);
-    await store.create(makeAutomation({ id: "once-repository-order", trigger_type: "once" }));
-    await store.replaceRepositories("once-repository-order", [
-      { repo_owner: "acme", repo_name: "web", repo_id: 1, base_branch: "main" },
-      { repo_owner: "acme", repo_name: "api", repo_id: 2, base_branch: "develop" },
-    ]);
-
-    const repositories = await store.getRepositoriesForAutomation("once-repository-order");
-
-    expect(repositories.map((repository) => repository.repo_name)).toEqual(["web", "api"]);
-    expect(repositories.map((repository) => repository.position)).toEqual([0, 1]);
-  });
-
-  // ─── 0030 invocation_id backfill ────────────────────────────────────────────
-
-  describe("0030 invocation_id backfill", () => {
-    it("links legacy runs (invocation_id IS NULL) to an invocation of themselves", async () => {
-      const store = new AutomationStore(env.DB);
-      await store.create(makeAutomation({ id: "auto-link" }));
-      await seedLegacyRun({
-        id: "run-legacy",
-        automation_id: "auto-link",
-        status: "completed",
-        scheduled_at: 1_000,
-        completed_at: 1_500,
-        created_at: 1_000,
-      });
-      expect(await countRows("automation_runs", "invocation_id IS NULL")).toBe(1);
-
-      // 0030's link step: every pre-invocation run adopts its own id.
-      await env.DB.prepare(
-        "UPDATE automation_runs SET invocation_id = id WHERE invocation_id IS NULL"
-      ).run();
-
-      expect(await countRows("automation_runs", "invocation_id IS NULL")).toBe(0);
-      expect(await countRows("automation_runs", "invocation_id = id")).toBe(1);
-    });
-  });
 
   // ─── Derived status ────────────────────────────────────────────────────────
 
@@ -319,118 +244,6 @@ describe("automation invocations (D1 integration)", () => {
   // ─── Guarded insert batch semantics (real D1 — meta.changes inside batch) ──
 
   describe("insertInvocationGuarded", () => {
-    it("claims a due one-shot once and consumes its schedule atomically", async () => {
-      const store = new AutomationStore(env.DB);
-      const now = Date.now();
-      const dueAt = now - 1_000;
-      await store.create(
-        makeAutomation({
-          id: "once-claim",
-          trigger_type: "once",
-          schedule_cron: null,
-          next_run_at: dueAt,
-          user_id: "user-owner",
-        })
-      );
-      const first = await store.insertInvocationGuarded({
-        invocation: makeInvocation("once-claim", {
-          id: "once-invocation",
-          source: "schedule",
-          scheduled_at: dueAt,
-        }),
-        children: [
-          makeChild("once-claim", {
-            id: "once-run",
-            invocation_id: "once-invocation",
-            session_id: "once-session",
-            scheduled_at: dueAt,
-            prompt_content: "captured prompt",
-            repository_set: JSON.stringify([
-              { repoOwner: "acme", repoName: "web", repoId: 1, baseBranch: "main" },
-            ]),
-          }),
-        ],
-        overlapScope: { kind: "automation" },
-        consumeOnce: { dueAt, now },
-      });
-
-      expect(first.inserted).toBe(true);
-      expect(await store.getById("once-claim")).toMatchObject({ enabled: 0, next_run_at: null });
-      expect(await store.getRunById("once-claim", "once-run")).toMatchObject({
-        session_id: "once-session",
-        status: "starting",
-        prompt_content: "captured prompt",
-        repository_set: JSON.stringify([
-          { repoOwner: "acme", repoName: "web", repoId: 1, baseBranch: "main" },
-        ]),
-      });
-
-      const duplicate = await store.insertInvocationGuarded({
-        invocation: makeInvocation("once-claim", {
-          id: "duplicate-invocation",
-          source: "schedule",
-          scheduled_at: dueAt,
-        }),
-        children: [makeChild("once-claim", { id: "duplicate-run", scheduled_at: dueAt })],
-        overlapScope: { kind: "automation" },
-        consumeOnce: { dueAt, now },
-      });
-      expect(duplicate.inserted).toBe(false);
-      expect(await countRows("automation_invocations", "automation_id = 'once-claim'")).toBe(1);
-    });
-
-    it("lets cancellation win only before a one-shot claim", async () => {
-      const store = new AutomationStore(env.DB);
-      const now = Date.now();
-      const dueAt = now - 1_000;
-      await store.create(
-        makeAutomation({
-          id: "once-cancelled",
-          trigger_type: "once",
-          schedule_cron: null,
-          next_run_at: dueAt,
-          user_id: "user-owner",
-        })
-      );
-      expect(await store.cancelOnce("once-cancelled", "user-owner")).toBe(true);
-      const afterCancel = await store.insertInvocationGuarded({
-        invocation: makeInvocation("once-cancelled", {
-          source: "schedule",
-          scheduled_at: dueAt,
-        }),
-        children: [makeChild("once-cancelled", { scheduled_at: dueAt })],
-        overlapScope: { kind: "automation" },
-        consumeOnce: { dueAt, now },
-      });
-      expect(afterCancel.inserted).toBe(false);
-
-      await store.create(
-        makeAutomation({
-          id: "once-started",
-          trigger_type: "once",
-          schedule_cron: null,
-          next_run_at: dueAt,
-          user_id: "user-owner",
-        })
-      );
-      await store.insertInvocationGuarded({
-        invocation: makeInvocation("once-started", {
-          id: "started-invocation",
-          source: "schedule",
-          scheduled_at: dueAt,
-        }),
-        children: [
-          makeChild("once-started", {
-            invocation_id: "started-invocation",
-            scheduled_at: dueAt,
-          }),
-        ],
-        overlapScope: { kind: "automation" },
-        consumeOnce: { dueAt, now },
-      });
-      expect(await store.cancelOnce("once-started", "user-owner")).toBe(false);
-    });
-
     it("inserts invocation + children + advances the schedule in one batch", async () => {
       const store = new AutomationStore(env.DB);
       await store.create(makeAutomation({ id: "auto-g1", next_run_at: 1_000 }));

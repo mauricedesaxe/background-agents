@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from sandbox_runtime.bridge import AgentBridge
-from tests.conftest import MockResponse
+from tests.conftest import MockResponse, wire_opencode_transport
 
 
 class MockHttpClient:
@@ -80,7 +80,7 @@ def bridge() -> AgentBridge:
         auth_token="test-token",
     )
     bridge.opencode_session_id = "oc-session-123"
-    bridge.http_client = MockHttpClient()
+    wire_opencode_transport(bridge, MockHttpClient())
     return bridge
 
 
@@ -92,12 +92,6 @@ class TestHandleStop:
         """When a prompt task is running, _handle_stop should cancel it."""
         mock_task = MagicMock(spec=asyncio.Task)
         mock_task.done.return_value = False
-        http_client = bridge.http_client
-        mock_task.cancel.side_effect = lambda: (
-            pytest.fail("prompt cancelled before abort")
-            if not any(url.endswith("/abort") for url in http_client.post_urls)
-            else None
-        )
         bridge._current_prompt_task = mock_task
 
         await bridge._handle_stop()

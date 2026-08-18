@@ -1,17 +1,33 @@
-import type { VideoArtifactMetadata } from "@open-inspect/shared";
+import type { VideoArtifactMetadata } from "@open-inspect/shared/types/artifacts";
+import {
+  SESSION_ATTACHMENT_IMAGE_MAX_BYTES,
+  SESSION_ATTACHMENT_IMAGE_MIME_TYPES,
+  type SessionAttachmentMimeType,
+} from "@open-inspect/shared/types/session-attachments";
+
+export { SESSION_ATTACHMENT_IMAGE_MAX_BYTES };
 
 export const SCREENSHOT_MAX_BYTES = 10 * 1024 * 1024;
 export const SCREENSHOT_UPLOAD_LIMIT_PER_SESSION = 100;
 export const VIDEO_MAX_BYTES = 100 * 1024 * 1024;
 export const VIDEO_UPLOAD_LIMIT_PER_SESSION = 20;
-export const VIDEO_MAX_DURATION_MS = 90_000;
-export const VIDEO_TIMESTAMP_TOLERANCE_MS = 1_000;
+const VIDEO_MAX_DURATION_MS = 90_000;
+const VIDEO_TIMESTAMP_TOLERANCE_MS = 1_000;
+
+// Allows multipart boundaries and headers while rejecting oversized requests
+// before request.formData() buffers them when Content-Length is available.
+export const SESSION_ATTACHMENT_MAX_REQUEST_BYTES = SESSION_ATTACHMENT_IMAGE_MAX_BYTES + 128 * 1024;
+export const SESSION_ATTACHMENT_LIMIT_PER_SESSION = 100;
+export const SESSION_ATTACHMENT_TOTAL_BYTES_PER_SESSION = 500 * 1024 * 1024;
+// Attachments never referenced by a message after this long are pruned (R2
+// object + record) the next time the session records an attachment.
+export const SESSION_ATTACHMENT_UNREFERENCED_TTL_MS = 24 * 60 * 60 * 1000;
+export const SESSION_ATTACHMENT_CLEANUP_CLAIM_TTL_MS = 5 * 60 * 1000;
 
 const SCREENSHOT_EXTENSIONS = {
   "image/png": "png",
   "image/jpeg": "jpg",
   "image/webp": "webp",
-  "image/svg+xml": "svg",
 } as const;
 
 const VIDEO_EXTENSIONS = {
@@ -72,36 +88,7 @@ export function detectScreenshotFileType(bytes: Uint8Array): ScreenshotFileType 
     return { mimeType: "image/webp", extension: "webp" };
   }
 
-  // SVG is text, not a binary format, so it has no magic-byte signature. Decode the
-  // leading bytes as UTF-8 and look for an `<svg` root tag, tolerating a leading BOM,
-  // whitespace, and an optional XML prolog / DOCTYPE / comment before the root element.
-  if (isSvgMarkup(bytes)) {
-    return { mimeType: "image/svg+xml", extension: "svg" };
-  }
-
   return null;
-}
-
-// Only decode a bounded prefix — the SVG root element appears near the start, and this
-// keeps the check cheap for large files.
-const SVG_SNIFF_MAX_BYTES = 1024;
-const SVG_ROOT_PATTERN = /<svg[\s/>]/i;
-
-function isSvgMarkup(bytes: Uint8Array): boolean {
-  if (bytes.length === 0) return false;
-  // Strip a UTF-8 BOM if present so the prolog/root check starts at the real content.
-  let start = 0;
-  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
-    start = 3;
-  }
-  const slice = bytes.subarray(start, start + SVG_SNIFF_MAX_BYTES);
-  // A NUL byte in the sniff window means this is binary, not SVG text. This rejects
-  // raster payloads that happen to contain the "<svg" byte sequence.
-  if (slice.includes(0x00)) return false;
-  // Decode non-fatally so a multi-byte character truncated at the sniff boundary does
-  // not cause a false rejection; the root `<svg` tag is ASCII and appears near the start.
-  const text = new TextDecoder("utf-8").decode(slice);
-  return SVG_ROOT_PATTERN.test(text);
 }
 
 export function detectVideoFileType(bytes: Uint8Array): VideoFileType | null {
@@ -114,6 +101,57 @@ export function detectVideoFileType(bytes: Uint8Array): VideoFileType | null {
   }
 
   return null;
+}
+
+export type SessionAttachmentFileType = {
+  mimeType: SessionAttachmentMimeType;
+  extension: string;
+};
+
+const SESSION_ATTACHMENT_MIME_TYPES: ReadonlySet<string> = new Set(
+  SESSION_ATTACHMENT_IMAGE_MIME_TYPES
+);
+
+export function isSupportedSessionAttachmentMimeType(
+  value: string
+): value is SessionAttachmentMimeType {
+  return SESSION_ATTACHMENT_MIME_TYPES.has(value);
+}
+
+export function sessionAttachmentRequestExceedsLimit(request: Request): boolean {
+  const raw = request.headers.get("Content-Length");
+  if (!raw || !/^\d+$/.test(raw)) return false;
+  return Number(raw) > SESSION_ATTACHMENT_MAX_REQUEST_BYTES;
+}
+
+/**
+ * Detect user-attached prompt images by magic bytes. This is intentionally
+ * separate from the agent screenshot/recording detectors: session attachments do
+ * not support videos in the initial attachment release.
+ */
+export function detectSessionAttachmentFileType(
+  bytes: Uint8Array
+): SessionAttachmentFileType | null {
+  const image = detectScreenshotFileType(bytes);
+  if (image) {
+    return { mimeType: image.mimeType, extension: image.extension };
+  }
+
+  // GIF87a / GIF89a
+  if (
+    bytes.length >= 6 &&
+    hasPrefix(bytes, [0x47, 0x49, 0x46, 0x38]) &&
+    (bytes[4] === 0x37 || bytes[4] === 0x39) &&
+    bytes[5] === 0x61
+  ) {
+    return { mimeType: "image/gif", extension: "gif" };
+  }
+
+  return null;
+}
+
+export function buildSessionAttachmentObjectKey(sessionId: string, attachmentId: string): string {
+  return `sessions/${sessionId}/attachments/${attachmentId}`;
 }
 
 export function buildMediaObjectKey(

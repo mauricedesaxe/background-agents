@@ -6,7 +6,12 @@
  * matching `SERVICE_AUTH_SECRET_<SERVICE>` (see TEST_SERVICE_SECRETS).
  */
 
-import { buildServiceAuthHeaders, type ServiceName } from "@open-inspect/shared";
+import { buildServiceAuthHeaders, type ServiceName } from "@open-inspect/shared/service-auth";
+import type { BackgroundJobDispatcher } from "./platform-ports";
+
+export const TEST_BACKGROUND_TASK_CONTEXT: BackgroundJobDispatcher = {
+  submit: () => {},
+};
 
 /** Per-service secrets for unit-test env fixtures, mirrored by signedServiceRequest. */
 export const TEST_SERVICE_SECRETS = {
@@ -14,7 +19,6 @@ export const TEST_SERVICE_SECRETS = {
   SERVICE_AUTH_SECRET_SLACK_BOT: "test-service-secret-slack-bot",
   SERVICE_AUTH_SECRET_GITHUB_BOT: "test-service-secret-github-bot",
   SERVICE_AUTH_SECRET_LINEAR_BOT: "test-service-secret-linear-bot",
-  SERVICE_AUTH_SECRET_MODAL: "test-service-secret-modal",
 } as const;
 
 export async function signedServiceRequest(

@@ -17,8 +17,12 @@ from __future__ import annotations
 import os
 import subprocess
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
-from sandbox_runtime.entrypoint import GH_WRAPPER_BODY
+import pytest
+
+from sandbox_runtime import repository_sync
+from sandbox_runtime.repository_sync import GH_WRAPPER_BODY, RepositorySynchronizer
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -104,3 +108,35 @@ def test_falls_through_when_helper_fails(tmp_path: Path) -> None:
     out = _run(wrapper, {"VCS_HOST": "github.com", "GITHUB_TOKEN": "stale_token"})
     assert "GH_TOKEN=\n" in out
     assert "GITHUB_TOKEN=stale_token" in out
+
+
+def test_runtime_installs_canonical_wrapper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_gh = tmp_path / "real-gh"
+    real_gh.touch()
+    real_gh.chmod(0o755)
+    wrapper = tmp_path / "gh"
+    monkeypatch.setattr(repository_sync, "GH_WRAPPER_REAL_PATH", str(real_gh))
+    monkeypatch.setattr(repository_sync, "GH_WRAPPER_INSTALL_PATH", wrapper)
+
+    synchronizer = RepositorySynchronizer("github.com", MagicMock())
+    synchronizer._install_gh_wrapper()
+
+    assert wrapper.read_text() == GH_WRAPPER_BODY
+    assert os.access(wrapper, os.X_OK)
+
+
+def test_runtime_fails_when_wrapper_cannot_be_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_gh = tmp_path / "real-gh"
+    real_gh.touch()
+    real_gh.chmod(0o755)
+    wrapper = tmp_path / "missing" / "gh"
+    monkeypatch.setattr(repository_sync, "GH_WRAPPER_REAL_PATH", str(real_gh))
+    monkeypatch.setattr(repository_sync, "GH_WRAPPER_INSTALL_PATH", wrapper)
+
+    synchronizer = RepositorySynchronizer("github.com", MagicMock())
+    with pytest.raises(RuntimeError, match="Cannot install authenticated gh wrapper"):
+        synchronizer._install_gh_wrapper()

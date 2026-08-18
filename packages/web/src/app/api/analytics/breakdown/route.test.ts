@@ -1,18 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("next-auth", () => ({
-  getServerSession: vi.fn(),
-}));
-
-vi.mock("@/lib/auth", () => ({
-  authOptions: {},
-}));
-
 vi.mock("@/lib/control-plane", () => ({
   controlPlaneUserFetch: vi.fn(),
 }));
 
-import { getServerSession } from "next-auth";
 import { controlPlaneUserFetch } from "@/lib/control-plane";
 import { GET } from "./route";
 
@@ -21,8 +12,10 @@ describe("analytics breakdown API route", () => {
     vi.resetAllMocks();
   });
 
-  it("returns 401 when the user session is missing", async () => {
-    vi.mocked(getServerSession).mockResolvedValue(null);
+  it("passes through an upstream unauthorized response", async () => {
+    vi.mocked(controlPlaneUserFetch).mockResolvedValue(
+      Response.json({ error: "Unauthorized" }, { status: 401 })
+    );
 
     const response = await GET(
       new Request("http://localhost/api/analytics/breakdown?days=30&by=user") as never
@@ -33,7 +26,6 @@ describe("analytics breakdown API route", () => {
   });
 
   it("forwards only days and by query params", async () => {
-    vi.mocked(getServerSession).mockResolvedValue({ user: { id: "user-1" } } as never);
     vi.mocked(controlPlaneUserFetch).mockResolvedValue(
       Response.json({ entries: [] }, { status: 200 })
     );
@@ -48,7 +40,6 @@ describe("analytics breakdown API route", () => {
   });
 
   it("returns 500 when the control plane request throws", async () => {
-    vi.mocked(getServerSession).mockResolvedValue({ user: { id: "user-1" } } as never);
     vi.mocked(controlPlaneUserFetch).mockRejectedValue(new Error("boom"));
 
     const response = await GET(new Request("http://localhost/api/analytics/breakdown") as never);

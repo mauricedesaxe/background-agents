@@ -1,18 +1,28 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
-import { buildAuthDisplay } from "@/lib/build-auth-identity";
+import { getServerAuthSession } from "@/lib/server-auth-session";
 import { controlPlaneUserFetch } from "@/lib/control-plane";
 import { buildControlPlanePath } from "@/lib/control-plane-query";
 
+const AUTOMATION_LIST_QUERY_PARAMS = [
+  "search",
+  "limit",
+  "cursor",
+  "repoOwner",
+  "repoName",
+] as const;
+
 export async function GET(request: NextRequest) {
-  const session = await getServerSession(authOptions);
+  const session = await getServerAuthSession();
   if (!session?.user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const path = buildControlPlanePath("/automations", request.nextUrl.searchParams);
+  const path = buildControlPlanePath(
+    "/automations",
+    request.nextUrl.searchParams,
+    AUTOMATION_LIST_QUERY_PARAMS
+  );
 
   try {
     const response = await controlPlaneUserFetch(path);
@@ -25,7 +35,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await getServerSession(authOptions);
+  const session = await getServerAuthSession();
   if (!session?.user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -33,15 +43,8 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
 
-    // Explicitly pick allowed fields from the client body (the same pattern
-    // as the sessions route). Creator identity is derived by the control
-    // plane from the Bearer principal and rejected in the body — send only
-    // the automation definition plus the display/attribution blocks: auth*
-    // display for BOTH GitHub and Google, while the GitHub-only scm*
-    // attribution block is empty for Google — so a Google sub never reaches
-    // the SCM path (F1/F2).
-    const user = session.user;
-
+    // Explicitly pick allowed fields from the client body. Creator identity
+    // and SCM provenance derive from authenticated control-plane state.
     const automationBody = {
       name: body.name,
       instructions: body.instructions,
@@ -55,7 +58,6 @@ export async function POST(request: NextRequest) {
       sentryClientSecret: body.sentryClientSecret,
       repositories: body.repositories,
       environmentIds: body.environmentIds,
-      ...buildAuthDisplay(user),
     };
 
     const response = await controlPlaneUserFetch("/automations", {

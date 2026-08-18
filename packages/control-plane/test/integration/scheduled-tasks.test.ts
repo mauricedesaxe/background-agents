@@ -35,13 +35,7 @@ async function call(
     db: env.DB,
     principal: {
       kind: "user",
-      user: {
-        provider: "github",
-        providerUserId: "42",
-        canonicalUserId: "usr_owner",
-        participantUserId: "usr_owner",
-      },
-      tokenId: "token-1",
+      userId: "usr_owner",
     },
     metrics: {
       d1Queries: [],

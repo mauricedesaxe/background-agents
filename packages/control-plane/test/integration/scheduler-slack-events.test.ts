@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import { AutomationStore, type AutomationRow } from "../../src/db/automation-store";
 import { SlackChannelStore } from "../../src/db/slack-channel-store";
-import type { SlackAutomationEvent } from "@open-inspect/shared";
+import type { SlackAutomationEvent } from "@open-inspect/shared/triggers";
 import { cleanD1Tables } from "./cleanup";
 import { makeRunRow, seedRun, fetchRuns } from "./run-helpers";
 
@@ -82,7 +82,8 @@ async function seedSlackAutomation(
 ): Promise<string> {
   const id = `auto-slack-${Math.random().toString(36).slice(2, 8)}`;
   await store.create(makeAutomation({ id, ...overrides }));
-  await new SlackChannelStore(env.DB).setSlackChannels(id, ["C1"]);
+  const channels = new SlackChannelStore(env.DB);
+  await env.DB.batch(channels.bindChannelStatements(id, ["C1"]));
   return id;
 }
 
@@ -106,7 +107,7 @@ describe("SchedulerDO /internal/event — slack (integration)", () => {
     const runs = await fetchRuns(id);
     expect(runs.length).toBeGreaterThanOrEqual(1);
     // The firing keys and message coordinates live on the invocation.
-    const invocation = await store.getInvocationById(runs[0]!.invocation_id!);
+    const invocation = await store.getInvocationById(runs[0]!.invocation_id);
     expect(invocation!.trigger_key).toBe(event.triggerKey);
     const metadata = JSON.parse(invocation!.trigger_metadata!);
     expect(metadata.channel).toBe("C1");

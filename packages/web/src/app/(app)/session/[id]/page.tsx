@@ -1,85 +1,114 @@
 "use client";
 
-import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { mutate } from "swr";
 import useSWRMutation from "swr/mutation";
-import { Suspense, useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useSessionSocket } from "@/hooks/use-session-socket";
+import { useSessionSkills } from "@/hooks/use-session-skills";
 import { SessionTimeline } from "@/components/session-timeline";
 import { MediaLightbox } from "@/components/media-lightbox";
 import { SessionHeader } from "@/components/session-header";
 import { SessionDetailsOverlay } from "@/components/session-details-overlay";
 import { SessionPromptComposer } from "@/components/session-prompt-composer";
+import { QueuedPromptStack } from "@/components/queued-prompt-stack";
 import { SessionRightSidebar } from "@/components/session-right-sidebar";
-import { BoardOverlay, type OpenBoard } from "@/components/board-overlay";
-import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
+import {
+  Group as PanelGroup,
+  Panel,
+  Separator as PanelResizeHandle,
+  useDefaultLayout,
+} from "react-resizable-panels";
 import { TerminalPanel } from "@/components/terminal-panel";
 import { archiveSession } from "@/lib/archive-session";
+import { browserApiFetch, type BrowserApiPath } from "@/lib/browser-api-fetch";
 import {
-  applyUnreadUpdate,
   isArchivedSessionListKey,
-  isSessionListKey,
   isUnarchivedSessionListKey,
   removeSessionFromList,
   type SessionListResponse,
 } from "@/lib/session-list";
 import { useMediaQuery } from "@/hooks/use-media-query";
-import { DEFAULT_MODEL, getDefaultReasoningEffort } from "@open-inspect/shared";
+import { DEFAULT_MODEL, getDefaultReasoningEffort } from "@open-inspect/shared/models";
 import { resolveModelPreference, type ModelPreference } from "@/lib/model-selection";
 import { useEnabledModels } from "@/hooks/use-enabled-models";
 import type { ComboboxGroup } from "@/components/ui/combobox";
-import { appendTranscript } from "@/lib/transcription";
-import { updateSessionReadState } from "@/lib/session-read-state";
+import { useSessionDiffs } from "@/hooks/use-session-diffs";
+import { resolveDiffSelection, type DiffSelection } from "@/lib/session-diffs";
+import type {
+  SessionDiffFile,
+  SessionDiffRepository,
+} from "@open-inspect/shared/types/session-diffs";
+import { SessionChangesPanel } from "@/components/session-changes-panel";
+import {
+  SESSION_CHANGES_LAYOUT_ID,
+  SessionDesktopLayout,
+} from "@/components/session-desktop-layout";
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { useBrowserLayoutStorage } from "@/hooks/use-browser-layout-storage";
+import { focusSessionDetailsTrigger } from "@/lib/session-details-focus";
+import { useSessionParticipantProfiles } from "@/hooks/use-session-participant-profiles";
+import { useSessionDetailsSidebar } from "@/hooks/use-session-details-sidebar";
+import {
+  classifySessionReadAttempt,
+  markMessageRead,
+  reconcileSessionReadState,
+  SessionReadRequestError,
+} from "@/lib/session-read-state";
+import { usePromptInput } from "@/hooks/use-prompt-input";
+import { useSessionSnapshot } from "./session-snapshot-provider";
+import { useSessionRename } from "@/hooks/use-session-rename";
 
 type SessionState = ReturnType<typeof useSessionSocket>["sessionState"];
 
+const TERMINAL_VISIBLE_STORAGE_KEY = "terminal-visible";
+const DEFAULT_SESSION_STATUS = "created" as const;
+
 export default function SessionPage() {
-  return (
-    <Suspense>
-      <SessionPageContent />
-    </Suspense>
-  );
-}
-
-function SessionPageContent() {
-  const params = useParams();
-  const searchParams = useSearchParams();
-  const sessionId = params.id as string;
-
+  const initialSnapshot = useSessionSnapshot();
+  const sessionId = initialSnapshot.session.id;
   const {
     connected,
     connecting,
-    replaying,
+    ready,
+    presenceSynced,
     authError,
     connectionError,
     sessionState,
-    sandboxError,
     events,
     participants,
     artifacts,
     currentParticipantId,
     isProcessing,
-    isCompacting,
     promptQueue,
     loadingHistory,
     sendPrompt,
-    compactContext,
+    cancelPrompt,
     stopExecution,
     sendTyping,
     reconnect,
     loadOlderEvents,
-  } = useSessionSocket(sessionId);
-
-  const fallbackSessionInfo = useMemo(
-    () => ({
-      repoOwner: searchParams.get("repoOwner") || null,
-      repoName: searchParams.get("repoName") || null,
-      title: searchParams.get("title") || null,
-    }),
-    [searchParams]
+  } = useSessionSocket(sessionId, initialSnapshot);
+  const { profiles, participants: profiledParticipants } = useSessionParticipantProfiles(
+    sessionId,
+    participants,
+    events
   );
+  const { suggestions: skillSuggestions } = useSessionSkills(sessionId);
 
-  const { handleArchive, handleUnarchive, renameSession } = useSessionListActions(sessionId);
+  const fallbackSessionInfo = {
+    repoOwner: initialSnapshot.session.repoOwner,
+    repoName: initialSnapshot.session.repoName,
+    title: initialSnapshot.session.title,
+  };
+
+  const { handleArchive, handleUnarchive } = useSessionListActions(sessionId);
+  const { optimisticTitle, renameSession } = useSessionRename({
+    sessionId,
+    currentTitle: sessionState?.title ?? initialSnapshot.session.title,
+    authoritativeTitle: sessionState?.title,
+    awaitAuthoritativeTitle: true,
+  });
   const {
     selectedModel,
     reasoningEffort,
@@ -90,69 +119,94 @@ function SessionPageContent() {
   } = useModelSelection(sessionState);
   const {
     prompt,
-    isSubmitting,
-    submissionError,
+    sessionAttachments,
     inputRef,
+    isSubmitting,
+    submitError,
+    setSubmitError,
     handleSubmit,
-    handleInputChange,
+    handleInputValueChange,
     handleKeyDown,
-    handleTranscript,
+    restorePrompt,
   } = usePromptInput(
-    isCompacting,
+    sessionId,
     sendPrompt,
     sendTyping,
     selectedModel,
     reasoningEffort,
-    loadingEnabledModels
+    loadingEnabledModels,
+    sessionState?.status ?? DEFAULT_SESSION_STATUS,
+    ready
+  );
+  const [cancellingPromptIds, setCancellingPromptIds] = useState<ReadonlySet<string>>(new Set());
+  const cancellingPromptIdsRef = useRef(new Set<string>());
+  const handleRemoveQueuedPrompt = useCallback(
+    async (messageId: string) => {
+      if (cancellingPromptIdsRef.current.has(messageId)) return;
+      const queuedPrompt = promptQueue.find((item) => item.messageId === messageId);
+      if (!queuedPrompt || queuedPrompt.status !== "pending") return;
+
+      cancellingPromptIdsRef.current.add(messageId);
+      setCancellingPromptIds(new Set(cancellingPromptIdsRef.current));
+      try {
+        const result = await cancelPrompt(messageId);
+        if (!result.ok) {
+          const message =
+            result.message ??
+            (result.reason === "timeout"
+              ? "Removing the queued prompt timed out"
+              : result.reason === "disconnected"
+                ? "Reconnect before removing a queued prompt"
+                : "The queued prompt could not be removed");
+          setSubmitError(message);
+          return;
+        }
+        restorePrompt(queuedPrompt.content);
+      } finally {
+        cancellingPromptIdsRef.current.delete(messageId);
+        setCancellingPromptIds(new Set(cancellingPromptIdsRef.current));
+      }
+    },
+    [cancelPrompt, promptQueue, restorePrompt, setSubmitError]
   );
 
   const [selectedMediaArtifactId, setSelectedMediaArtifactId] = useState<string | null>(null);
-  const [openBoard, setOpenBoard] = useState<OpenBoard | null>(null);
-  const viewedOutputRef = useRef<string | null>(null);
-  const handleLatestOutputViewed = useCallback(
-    async (messageId: string) => {
-      if (viewedOutputRef.current === messageId) return;
-      viewedOutputRef.current = messageId;
-      try {
-        const unread = await updateSessionReadState(sessionId, {
-          action: "viewed",
-          messageId,
-        });
-        await mutate<SessionListResponse>(
-          isSessionListKey,
-          (current) => applyUnreadUpdate(current, sessionId, unread),
-          { revalidate: false }
-        );
-      } catch (error) {
-        viewedOutputRef.current = null;
-        console.error("Failed to mark session output as viewed", error);
-      }
-    },
-    [sessionId]
-  );
+  const [selectedDiff, setSelectedDiff] = useState<DiffSelection | null>(null);
+  const diffReturnFocusRef = useRef<DiffSelection | null>(null);
+  const { state: diffState, isLoading: diffLoading } = useSessionDiffs(sessionId);
 
   const isBelowLg = useMediaQuery("(max-width: 1023px)");
   const isPhone = useMediaQuery("(max-width: 767px)");
 
   const [isDetailsOpen, setIsDetailsOpen] = useState(false);
+  const { isOpen: isDesktopDetailsOpen, toggle: toggleDesktopDetails } = useSessionDetailsSidebar();
   const detailsButtonRef = useRef<HTMLButtonElement>(null);
+  const actionsButtonRef = useRef<HTMLButtonElement>(null);
 
-  // Terminal panel state
-  const [terminalOpen, setTerminalOpen] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem("terminal-visible") === "true";
-  });
+  // Terminal panel state. Starts closed so the server and the client render the
+  // same markup, then adopts the stored preference after hydration.
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  useEffect(() => {
+    try {
+      setTerminalOpen(localStorage.getItem(TERMINAL_VISIBLE_STORAGE_KEY) === "true");
+    } catch {
+      // Storage is optional; the terminal stays closed when it is unavailable.
+    }
+  }, []);
+  const applyTerminalOpen = useCallback((next: boolean) => {
+    setTerminalOpen(next);
+    try {
+      localStorage.setItem(TERMINAL_VISIBLE_STORAGE_KEY, String(next));
+    } catch {
+      // Continue with the in-memory preference when storage is unavailable.
+    }
+  }, []);
   const toggleTerminal = useCallback(() => {
-    setTerminalOpen((prev) => {
-      const next = !prev;
-      localStorage.setItem("terminal-visible", String(next));
-      return next;
-    });
-  }, []);
+    applyTerminalOpen(!terminalOpen);
+  }, [applyTerminalOpen, terminalOpen]);
   const closeTerminal = useCallback(() => {
-    setTerminalOpen(false);
-    localStorage.setItem("terminal-visible", "false");
-  }, []);
+    applyTerminalOpen(false);
+  }, [applyTerminalOpen]);
   const ttydUrl = sessionState?.ttydUrl;
   const ttydToken = sessionState?.ttydToken;
   const showTerminal = !!(ttydUrl && ttydToken && terminalOpen && !isBelowLg);
@@ -160,6 +214,13 @@ function SessionPageContent() {
   const toggleDetails = useCallback(() => {
     setIsDetailsOpen((prev) => !prev);
   }, []);
+  const openMobileDetails = useCallback(() => {
+    setIsDetailsOpen(true);
+  }, []);
+  const focusDetailsTrigger = useCallback(
+    () => focusSessionDetailsTrigger(isPhone, actionsButtonRef.current, detailsButtonRef.current),
+    [isPhone]
+  );
 
   useEffect(() => {
     if (isBelowLg) return;
@@ -175,21 +236,182 @@ function SessionPageContent() {
     () => mediaArtifacts.find((artifact) => artifact.id === selectedMediaArtifactId) ?? null,
     [mediaArtifacts, selectedMediaArtifactId]
   );
+  const primaryRepo =
+    sessionState?.repositories?.[0] ??
+    (sessionState?.repoOwner && sessionState?.repoName
+      ? { repoOwner: sessionState.repoOwner, repoName: sessionState.repoName }
+      : null);
 
-  const showTimelineSkeleton = events.length === 0 && (connecting || replaying);
+  const resolvedDiff = useMemo(
+    () =>
+      selectedDiff && diffState?.current
+        ? resolveDiffSelection(diffState.current, selectedDiff)
+        : null,
+    [diffState, selectedDiff]
+  );
+  const changesLayoutStorage = useBrowserLayoutStorage();
+  const changesLayout = useDefaultLayout({
+    id: SESSION_CHANGES_LAYOUT_ID,
+    panelIds:
+      resolvedDiff && diffState && !isBelowLg
+        ? ["session-main", "session-changes"]
+        : ["session-main"],
+    storage: changesLayoutStorage,
+  });
+  const openDiff = useCallback((repository: SessionDiffRepository, file: SessionDiffFile) => {
+    const selection = { repositoryPosition: repository.position, path: file.path };
+    diffReturnFocusRef.current = selection;
+    setSelectedDiff(selection);
+    setIsDetailsOpen(false);
+  }, []);
+  const attemptMarkVisibleMessageRead = useCallback(
+    async (messageId: string) => {
+      try {
+        const result = await markMessageRead(sessionId, messageId);
+        await reconcileSessionReadState(result);
+        return classifySessionReadAttempt(result);
+      } catch (error) {
+        if (
+          error instanceof SessionReadRequestError &&
+          [400, 401, 403, 404, 405].includes(error.status)
+        ) {
+          return "permanent_failure" as const;
+        }
+        return "retry" as const;
+      }
+    },
+    [sessionId]
+  );
+  const closeDiff = useCallback(() => {
+    const returnSelection = diffReturnFocusRef.current;
+    setSelectedDiff(null);
+    requestAnimationFrame(() => {
+      if (!isBelowLg && returnSelection) {
+        const row = Array.from(
+          document.querySelectorAll<HTMLButtonElement>("button[data-diff-path]")
+        ).find(
+          (candidate) =>
+            candidate.dataset.diffRepositoryPosition ===
+              String(returnSelection.repositoryPosition) &&
+            candidate.dataset.diffPath === returnSelection.path
+        );
+        if (row) {
+          row.focus();
+          return;
+        }
+      }
+      focusDetailsTrigger();
+    });
+  }, [focusDetailsTrigger, isBelowLg]);
+
+  const sessionWorkspace = (
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-clip">
+      <div className="min-h-0 min-w-0 flex-1 overflow-clip">
+        <PanelGroup orientation="vertical" id="session-terminal" style={{ overflow: "clip" }}>
+          <Panel
+            defaultSize={showTerminal ? "70%" : "100%"}
+            minSize="30%"
+            style={{ minHeight: 0, overflow: "clip" }}
+          >
+            <SessionTimeline
+              events={events}
+              sessionId={sessionId}
+              currentParticipantId={currentParticipantId}
+              participantProfiles={profiles}
+              isProcessing={isProcessing}
+              promptQueue={promptQueue}
+              loadingHistory={loadingHistory}
+              showSkeleton={false}
+              onLoadOlder={loadOlderEvents}
+              onOpenMedia={setSelectedMediaArtifactId}
+              terminalMessageReadObservationEnabled={
+                !loadingHistory &&
+                !isDetailsOpen &&
+                selectedMediaArtifactId === null &&
+                resolvedDiff === null
+              }
+              onMarkMessageRead={attemptMarkVisibleMessageRead}
+            />
+          </Panel>
+          {showTerminal && (
+            <>
+              <PanelResizeHandle className="h-1.5 cursor-row-resize bg-border-muted transition-colors hover:bg-accent" />
+              <Panel defaultSize="30%" minSize="15%" maxSize="70%">
+                <TerminalPanel url={ttydUrl!} token={ttydToken!} onClose={closeTerminal} />
+              </Panel>
+            </>
+          )}
+        </PanelGroup>
+      </div>
+      <QueuedPromptStack
+        promptQueue={promptQueue}
+        cancellingPromptIds={cancellingPromptIds}
+        onRemove={handleRemoveQueuedPrompt}
+      />
+      <SessionPromptComposer
+        session={{
+          id: sessionId,
+          status: sessionState?.status ?? DEFAULT_SESSION_STATUS,
+          artifacts,
+          primaryRepo,
+          onArchive: handleArchive,
+          onUnarchive: handleUnarchive,
+        }}
+        prompt={{
+          value: prompt,
+          isProcessing: ready && isProcessing,
+          draftLocked: isSubmitting || sessionAttachments.isUploading,
+          sendBlocked: !ready,
+          submitError,
+          inputRef,
+          onSubmit: handleSubmit,
+          onValueChange: handleInputValueChange,
+          onKeyDown: handleKeyDown,
+          onStopExecution: stopExecution,
+        }}
+        skillSuggestions={skillSuggestions}
+        attachments={{
+          items: sessionAttachments.attachments,
+          error: sessionAttachments.attachmentError,
+          isUploading: sessionAttachments.isUploading,
+          onAdd: sessionAttachments.addFiles,
+          onRemove: sessionAttachments.removeAttachment,
+        }}
+        model={{
+          selectedModel,
+          reasoningEffort,
+          items: modelItems,
+          onModelChange: handleModelChange,
+          onReasoningEffortChange: setReasoningEffort,
+        }}
+      />
+    </div>
+  );
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="flex h-full min-h-0 min-w-0 flex-col overflow-clip">
       <SessionHeader
         sessionState={sessionState}
-        sandboxError={sandboxError}
         fallbackSessionInfo={fallbackSessionInfo}
-        connected={connected}
-        connecting={connecting}
-        participants={participants}
+        connected={connected && ready}
+        connecting={connecting || (connected && !ready)}
         isDetailsOpen={isDetailsOpen}
+        isDesktopDetailsOpen={isDesktopDetailsOpen}
+        showDesktopDetailsToggle={!resolvedDiff}
         detailsButtonRef={detailsButtonRef}
+        actionsButtonRef={actionsButtonRef}
         onToggleDetails={toggleDetails}
+        onToggleDesktopDetails={toggleDesktopDetails}
+        onOpenMobileDetails={openMobileDetails}
+        actions={{
+          sessionId,
+          sessionStatus: sessionState?.status ?? DEFAULT_SESSION_STATUS,
+          artifacts,
+          primaryRepo,
+          onArchive: handleArchive,
+          onUnarchive: handleUnarchive,
+        }}
+        optimisticTitle={optimisticTitle}
         renameSession={renameSession}
       />
 
@@ -208,49 +430,62 @@ function SessionPageContent() {
       )}
 
       {/* Main content */}
-      <main className="flex-1 flex overflow-hidden">
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <PanelGroup orientation="vertical" id="session-terminal">
-            {/* Chat / Event Timeline */}
-            <Panel defaultSize={showTerminal ? "70%" : "100%"} minSize="30%">
-              <SessionTimeline
-                events={events}
+      <main className="flex min-h-0 min-w-0 flex-1 overflow-clip">
+        {!isBelowLg ? (
+          <SessionDesktopLayout
+            workspace={sessionWorkspace}
+            sidebar={
+              <SessionRightSidebar
+                isOpen={isDesktopDetailsOpen && !resolvedDiff}
                 sessionId={sessionId}
-                currentParticipantId={currentParticipantId}
-                isProcessing={isProcessing}
-                promptQueue={promptQueue}
-                loadingHistory={loadingHistory}
-                showSkeleton={showTimelineSkeleton}
-                onLoadOlder={loadOlderEvents}
+                sessionState={sessionState}
+                participants={profiledParticipants}
+                presenceSynced={presenceSynced}
+                events={events}
+                artifacts={artifacts}
+                terminalOpen={terminalOpen}
+                onToggleTerminal={toggleTerminal}
                 onOpenMedia={setSelectedMediaArtifactId}
-                onLatestOutputViewed={(messageId) => void handleLatestOutputViewed(messageId)}
+                diffState={diffState}
+                diffLoading={diffLoading}
+                selectedDiff={selectedDiff}
+                onOpenDiff={openDiff}
               />
-            </Panel>
-
-            {/* Terminal panel — only rendered when URL + token available and open */}
-            {showTerminal && (
-              <>
-                <PanelResizeHandle className="h-1.5 bg-border-muted hover:bg-accent transition-colors cursor-row-resize" />
-                <Panel defaultSize="30%" minSize="15%" maxSize="70%">
-                  <TerminalPanel url={ttydUrl!} token={ttydToken!} onClose={closeTerminal} />
-                </Panel>
-              </>
-            )}
-          </PanelGroup>
-        </div>
-
-        {/* Right sidebar */}
-        <SessionRightSidebar
-          sessionId={sessionId}
-          sessionState={sessionState}
-          participants={participants}
-          events={events}
-          artifacts={artifacts}
-          terminalOpen={terminalOpen}
-          onToggleTerminal={toggleTerminal}
-          onOpenMedia={setSelectedMediaArtifactId}
-          onOpenBoard={setOpenBoard}
-        />
+            }
+            changes={
+              resolvedDiff && diffState ? (
+                <SessionChangesPanel
+                  sessionId={sessionId}
+                  state={diffState}
+                  resolved={resolvedDiff}
+                  onClose={closeDiff}
+                  onSelect={setSelectedDiff}
+                />
+              ) : null
+            }
+            defaultLayout={changesLayout.defaultLayout}
+            onLayoutChanged={changesLayout.onLayoutChanged}
+          />
+        ) : (
+          <>
+            {sessionWorkspace}
+            <SessionRightSidebar
+              sessionId={sessionId}
+              sessionState={sessionState}
+              participants={profiledParticipants}
+              presenceSynced={presenceSynced}
+              events={events}
+              artifacts={artifacts}
+              terminalOpen={terminalOpen}
+              onToggleTerminal={toggleTerminal}
+              onOpenMedia={setSelectedMediaArtifactId}
+              diffState={diffState}
+              diffLoading={diffLoading}
+              selectedDiff={selectedDiff}
+              onOpenDiff={openDiff}
+            />
+          </>
+        )}
       </main>
 
       {isBelowLg && (
@@ -258,27 +493,43 @@ function SessionPageContent() {
           open={isDetailsOpen}
           onOpenChange={setIsDetailsOpen}
           isPhone={isPhone}
-          returnFocusRef={detailsButtonRef}
+          onReturnFocus={focusDetailsTrigger}
           sessionId={sessionId}
           sessionState={sessionState}
-          participants={participants}
+          participants={profiledParticipants}
+          presenceSynced={presenceSynced}
           events={events}
           artifacts={artifacts}
           terminalOpen={terminalOpen}
           onToggleTerminal={toggleTerminal}
           onOpenMedia={setSelectedMediaArtifactId}
-          onOpenBoard={setOpenBoard}
+          diffState={diffState}
+          diffLoading={diffLoading}
+          selectedDiff={selectedDiff}
+          onOpenDiff={openDiff}
         />
       )}
 
-      <BoardOverlay
-        sessionId={sessionId}
-        board={openBoard}
-        open={openBoard !== null}
-        onOpenChange={(open) => {
-          if (!open) setOpenBoard(null);
-        }}
-      />
+      {isBelowLg && (
+        <Sheet
+          open={Boolean(resolvedDiff && diffState)}
+          onOpenChange={(open) => !open && closeDiff()}
+        >
+          <SheetContent className="inset-0 h-dvh w-screen max-w-none gap-0 p-0 sm:max-w-none">
+            <SheetTitle className="sr-only">Changes</SheetTitle>
+            {resolvedDiff && diffState && (
+              <SessionChangesPanel
+                mobile
+                sessionId={sessionId}
+                state={diffState}
+                resolved={resolvedDiff}
+                onClose={closeDiff}
+                onSelect={setSelectedDiff}
+              />
+            )}
+          </SheetContent>
+        </Sheet>
+      )}
 
       <MediaLightbox
         sessionId={sessionId}
@@ -290,67 +541,15 @@ function SessionPageContent() {
           }
         }}
       />
-
-      <SessionPromptComposer
-        session={{
-          id: sessionId,
-          status: sessionState?.status || "",
-          artifacts,
-          primaryRepo:
-            sessionState?.repositories?.[0] ??
-            (sessionState?.repoOwner && sessionState?.repoName
-              ? { repoOwner: sessionState.repoOwner, repoName: sessionState.repoName }
-              : null),
-          onArchive: handleArchive,
-          onUnarchive: handleUnarchive,
-        }}
-        prompt={{
-          value: prompt,
-          isProcessing,
-          isSubmitting,
-          submissionError,
-          inputRef,
-          onSubmit: handleSubmit,
-          onChange: handleInputChange,
-          onKeyDown: handleKeyDown,
-          onStopExecution: stopExecution,
-          isCompacting,
-          onCompactContext: () => compactContext(selectedModel),
-          onTranscript: handleTranscript,
-        }}
-        model={{
-          selectedModel,
-          reasoningEffort,
-          items: modelItems,
-          onModelChange: handleModelChange,
-          onReasoningEffortChange: setReasoningEffort,
-        }}
-      />
     </div>
   );
 }
 
 /**
- * Archive, unarchive, and rename actions for the current session, each keeping
- * the SWR session-list caches in sync.
+ * Archive and unarchive actions for the current session.
  */
 function useSessionListActions(sessionId: string) {
   const router = useRouter();
-
-  const { trigger: triggerRename } = useSWRMutation(
-    `/api/sessions/${sessionId}/title`,
-    (url: string, { arg }: { arg: { title: string } }) =>
-      fetch(url, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: arg.title }),
-      }).then((r) => {
-        if (r.ok) return true;
-        console.error("Failed to update session title");
-        return false;
-      }),
-    { throwOnError: false }
-  );
 
   const handleArchive = useCallback(async () => {
     const didArchive = await archiveSession(sessionId);
@@ -367,46 +566,10 @@ function useSessionListActions(sessionId: string) {
     }
   }, [router, sessionId]);
 
-  const renameSession = useCallback(
-    async (title: string) => {
-      const updatedAt = Date.now();
-      const updateSessionsTitle = (data?: SessionListResponse): SessionListResponse | undefined => {
-        if (!data?.sessions) return data;
-        return {
-          ...data,
-          sessions: data.sessions.map((session) =>
-            session.id === sessionId ? { ...session, title, updatedAt } : session
-          ),
-        };
-      };
-
-      try {
-        const success = await triggerRename({ title });
-        if (!success) {
-          throw new Error("Failed to update session title");
-        }
-        await Promise.all([
-          mutate<SessionListResponse>(isUnarchivedSessionListKey, updateSessionsTitle, {
-            populateCache: true,
-            revalidate: true,
-          }),
-          mutate<SessionListResponse>(isArchivedSessionListKey, updateSessionsTitle, {
-            populateCache: true,
-            revalidate: false,
-          }),
-        ]);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    [sessionId, triggerRename]
-  );
-
   const { trigger: handleUnarchive } = useSWRMutation(
     `/api/sessions/${sessionId}/unarchive`,
-    (url: string) =>
-      fetch(url, { method: "POST" }).then(async (r) => {
+    (url: BrowserApiPath) =>
+      browserApiFetch(url, { method: "POST" }).then(async (r) => {
         if (r.ok) {
           await mutate<SessionListResponse>(
             isArchivedSessionListKey,
@@ -424,7 +587,7 @@ function useSessionListActions(sessionId: string) {
     { throwOnError: false }
   );
 
-  return { handleArchive, handleUnarchive, renameSession };
+  return { handleArchive, handleUnarchive };
 }
 
 /**
@@ -475,88 +638,5 @@ function useModelSelection(sessionState: SessionState) {
     handleModelChange,
     modelItems,
     loadingEnabledModels,
-  };
-}
-
-/**
- * Prompt textarea state and handlers: submit, Cmd/Ctrl+Enter, and the
- * debounced typing indicator.
- */
-function usePromptInput(
-  isCompacting: boolean,
-  sendPrompt: ReturnType<typeof useSessionSocket>["sendPrompt"],
-  sendTyping: ReturnType<typeof useSessionSocket>["sendTyping"],
-  selectedModel: string,
-  reasoningEffort: string | undefined,
-  loadingEnabledModels: boolean
-) {
-  const [prompt, setPrompt] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [submissionError, setSubmissionError] = useState<string | null>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
-  const clearTypingTimeout = useCallback(() => {
-    if (typingTimeoutRef.current) {
-      clearTimeout(typingTimeoutRef.current);
-      typingTimeoutRef.current = null;
-    }
-  }, []);
-
-  useEffect(() => clearTypingTimeout, [clearTypingTimeout]);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const submittedPrompt = prompt;
-    if (!submittedPrompt.trim() || isCompacting || isSubmitting || loadingEnabledModels) return;
-
-    clearTypingTimeout();
-    setSubmissionError(null);
-    setIsSubmitting(true);
-    const result = await sendPrompt(submittedPrompt, selectedModel, reasoningEffort);
-    setIsSubmitting(false);
-    if (!result.ok) {
-      setSubmissionError(result.error);
-      return;
-    }
-
-    setPrompt((current) => (current === submittedPrompt ? "" : current));
-    mutate(isUnarchivedSessionListKey);
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.nativeEvent.isComposing) return;
-
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
-      e.preventDefault();
-      handleSubmit(e);
-    }
-  };
-
-  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setPrompt(e.target.value);
-    setSubmissionError(null);
-
-    // Send typing indicator (debounced)
-    clearTypingTimeout();
-    typingTimeoutRef.current = setTimeout(() => {
-      sendTyping();
-    }, 300);
-  };
-
-  const handleTranscript = (text: string) => {
-    setPrompt((draft) => appendTranscript(draft, text));
-    setSubmissionError(null);
-  };
-
-  return {
-    prompt,
-    isSubmitting,
-    submissionError,
-    inputRef,
-    handleSubmit,
-    handleInputChange,
-    handleKeyDown,
-    handleTranscript,
   };
 }

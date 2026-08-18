@@ -3,20 +3,22 @@
 import { useState } from "react";
 import useSWR, { mutate } from "swr";
 import { toast } from "sonner";
-import type { Environment, ImageBuildRecordView } from "@open-inspect/shared";
+import type { Environment } from "@open-inspect/shared/types/environments";
+import type { ImageBuildRecordView } from "@open-inspect/shared/types/image-builds";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ErrorBanner } from "@/components/ui/error-banner";
 import { RefreshIcon } from "@/components/ui/icons";
-import { parsePrimaryBuildSha } from "@/lib/image-builds";
+import { formatReadyDetails, parsePrimaryBuildSha } from "@/lib/image-builds";
 import { formatSessionRepositoriesLabel } from "@/lib/repo-label";
 import { supportsRepoImages } from "@/lib/sandbox-provider";
 import { useEnvironments, ENVIRONMENTS_KEY } from "@/hooks/use-environments";
 import { EnvironmentForm, type EnvironmentFormValues } from "./environment-form";
+import { browserApiFetch } from "@/lib/browser-api-fetch";
 import { EnvironmentIntegrationSettings } from "./environment-integration-settings";
 import { EnvironmentSecretsImport } from "./environment-secrets-import";
-import { ImageBuildStatus, formatReadyDetails } from "./image-build-status";
+import { ImageBuildStatus } from "./image-build-status";
 import { SecretsEditor } from "@/components/secrets-editor";
 
 type View =
@@ -39,7 +41,7 @@ export function EnvironmentsSettings() {
     setSubmitting(true);
     setError("");
     try {
-      const response = await fetch("/api/environments", {
+      const response = await browserApiFetch("/api/environments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(values),
@@ -68,7 +70,7 @@ export function EnvironmentsSettings() {
     setSubmitting(true);
     setError("");
     try {
-      const response = await fetch(`/api/environments/${environmentId}`, {
+      const response = await browserApiFetch(`/api/environments/${environmentId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(values),
@@ -91,7 +93,9 @@ export function EnvironmentsSettings() {
   const handleDelete = async (environment: Environment) => {
     setError("");
     try {
-      const response = await fetch(`/api/environments/${environment.id}`, { method: "DELETE" });
+      const response = await browserApiFetch(`/api/environments/${environment.id}`, {
+        method: "DELETE",
+      });
       if (!response.ok) {
         const data = await response.json();
         setError(data?.error || "Failed to delete environment");
@@ -108,7 +112,7 @@ export function EnvironmentsSettings() {
     setTogglingIds((prev) => new Set(prev).add(environment.id));
     setError("");
     try {
-      const response = await fetch(`/api/environments/${environment.id}`, {
+      const response = await browserApiFetch(`/api/environments/${environment.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prebuildEnabled: enabled }),
@@ -135,7 +139,7 @@ export function EnvironmentsSettings() {
     setTriggeringIds((prev) => new Set(prev).add(environment.id));
     setError("");
     try {
-      const response = await fetch(`/api/environments/${environment.id}/images/trigger`, {
+      const response = await browserApiFetch(`/api/environments/${environment.id}/images/trigger`, {
         method: "POST",
       });
       if (!response.ok) {
@@ -202,6 +206,7 @@ export function EnvironmentsSettings() {
         <div className="flex items-center gap-1 border-b border-border-muted mb-4">
           {(["configuration", "secrets", "overrides"] as const).map((tab) => (
             <button
+              type="button"
               key={tab}
               onClick={() => setView({ ...view, tab })}
               className={`px-3 py-2 text-sm capitalize transition border-b-2 -mb-px ${

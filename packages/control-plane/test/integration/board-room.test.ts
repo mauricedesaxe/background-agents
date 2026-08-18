@@ -3,7 +3,6 @@ import { env, SELF } from "cloudflare:test";
 import { BoardInternalPaths } from "../../src/board/contracts";
 import { mintBoardInspectionToken } from "../../src/board/inspection-token";
 import { boardSchema } from "../../src/board/schema";
-import { epochMs } from "../../src/time";
 import { getTlsyncProtocolVersion } from "@tldraw/sync-core";
 
 /**
@@ -154,7 +153,7 @@ describe("board WebSocket auth hop (integration)", () => {
       {
         sessionId: "s-inspect",
         boardId: "b-inspect",
-        expiresAtMs: epochMs(Date.now() + 60_000),
+        expiresAtMs: Date.now() + 60_000,
       },
       env.TOKEN_ENCRYPTION_KEY
     );
@@ -217,7 +216,7 @@ describe("board WebSocket auth hop (integration)", () => {
     const cases = [
       {
         token: await mintBoardInspectionToken(
-          { ...validScope, expiresAtMs: epochMs(Date.now() - 1) },
+          { ...validScope, expiresAtMs: Date.now() - 1 },
           env.TOKEN_ENCRYPTION_KEY
         ),
         sessionId: validScope.sessionId,
@@ -225,7 +224,7 @@ describe("board WebSocket auth hop (integration)", () => {
       },
       {
         token: await mintBoardInspectionToken(
-          { ...validScope, expiresAtMs: epochMs(Date.now() + 60_000) },
+          { ...validScope, expiresAtMs: Date.now() + 60_000 },
           env.TOKEN_ENCRYPTION_KEY
         ),
         sessionId: "another-session",
@@ -233,7 +232,7 @@ describe("board WebSocket auth hop (integration)", () => {
       },
       {
         token: await mintBoardInspectionToken(
-          { ...validScope, expiresAtMs: epochMs(Date.now() + 60_000) },
+          { ...validScope, expiresAtMs: Date.now() + 60_000 },
           env.TOKEN_ENCRYPTION_KEY
         ),
         sessionId: validScope.sessionId,

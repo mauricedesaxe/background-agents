@@ -1,14 +1,17 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { SELF, env } from "cloudflare:test";
-import { ParentSessionSpawnRejectedError, SessionIndexStore } from "../../src/db/session-index";
+import { SELF, env, runInDurableObject } from "cloudflare:test";
+import type { SessionDO } from "../../src/session/durable-object";
+import { SessionIndexStore } from "../../src/db/session-index";
 import { cleanD1Tables } from "./cleanup";
 import {
   initNamedSession,
+  initNamedSessionDO,
   seedSandboxAuth,
   queryDO,
   seedEvents,
   openClientWs,
   collectMessages,
+  seedMessage,
 } from "./helpers";
 
 describe("Child session operations (list, get, cancel)", () => {
@@ -25,7 +28,7 @@ describe("Child session operations (list, get, cancel)", () => {
     const childName = `child-ops-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
     // Create parent DO
-    const { stub: parentStub } = await initNamedSession(pName, {
+    const { stub: parentStub } = await initNamedSessionDO(pName, {
       repoOwner: "acme",
       repoName: "web-app",
       userId: "user-1",
@@ -35,13 +38,30 @@ describe("Child session operations (list, get, cancel)", () => {
     // Seed sandbox auth on parent so sandbox Bearer token works
     const sandboxToken = `sb-tok-ops-${Date.now()}`;
     await seedSandboxAuth(parentStub, { authToken: sandboxToken, sandboxId: "sb-ops-1" });
+    const [parentOwner] = await queryDO<{ id: string }>(
+      parentStub,
+      "SELECT id FROM participants WHERE role = 'owner'"
+    );
+    if (!parentOwner) throw new Error("Expected parent owner participant");
+    await seedMessage(parentStub, {
+      id: `processing-${pName}`,
+      authorId: parentOwner.id,
+      content: "Prompt the child",
+      source: "web",
+      status: "processing",
+      createdAt: Date.now(),
+      startedAt: Date.now(),
+    });
 
     // Create child DO
-    const { stub: childStub } = await initNamedSession(childName, {
+    const { stub: childStub } = await initNamedSessionDO(childName, {
       repoOwner: "acme",
       repoName: "web-app",
       userId: "user-1",
       scmLogin: "acmedev",
+      parentSessionId: pName,
+      spawnSource: "agent",
+      spawnDepth: 1,
     });
 
     // Seed D1 rows for both parent and child
@@ -85,11 +105,10 @@ describe("Child session operations (list, get, cancel)", () => {
     store: SessionIndexStore,
     parentSessionId: string,
     spawnDepth: number,
-    prefix: string,
-    status: "active" | "completed" = "active"
+    prefix: string
   ): Promise<string> {
     const id = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    await initNamedSession(id, { repoOwner: "acme", repoName: "web-app" });
+    await initNamedSessionDO(id, { repoOwner: "acme", repoName: "web-app" });
     const now = Date.now();
     await store.create({
       id,
@@ -99,7 +118,7 @@ describe("Child session operations (list, get, cancel)", () => {
       model: "anthropic/claude-sonnet-4-6",
       reasoningEffort: null,
       baseBranch: null,
-      status,
+      status: "active",
       parentSessionId,
       spawnSource: "agent",
       spawnDepth,
@@ -227,7 +246,7 @@ describe("Child session operations (list, get, cancel)", () => {
 
       // Create a different "parent" session with sandbox auth
       const fakeName = `fake-parent-${Date.now()}`;
-      const { stub: fakeStub } = await initNamedSession(fakeName, {
+      const { stub: fakeStub } = await initNamedSessionDO(fakeName, {
         repoOwner: "acme",
         repoName: "web-app",
       });
@@ -305,25 +324,6 @@ describe("Child session operations (list, get, cancel)", () => {
         3,
         "great-grandchild-ops"
       );
-      const deeperDescendantNames: string[] = [];
-      let deepestParentId = greatGrandchildName;
-      for (let depth = 4; depth <= 12; depth += 1) {
-        deepestParentId = await setupNestedSession(
-          store,
-          deepestParentId,
-          depth,
-          `descendant-depth-${depth}`
-        );
-        deeperDescendantNames.push(deepestParentId);
-      }
-      const siblingName = await setupNestedSession(store, pName, 1, "sibling-ops");
-      const completedDescendantName = await setupNestedSession(
-        store,
-        childName,
-        2,
-        "completed-descendant-ops",
-        "completed"
-      );
 
       const res = await SELF.fetch(
         `https://test.local/sessions/${pName}/children/${childName}/cancel`,
@@ -336,29 +336,65 @@ describe("Child session operations (list, get, cancel)", () => {
       expect(res.status).toBe(200);
       await expect(res.json()).resolves.toEqual({
         status: "cancelled",
-        cancelledDescendantIds: [
-          ...[...deeperDescendantNames].reverse(),
-          greatGrandchildName,
-          grandchildName,
-          completedDescendantName,
-        ],
+        cancelledDescendantIds: [greatGrandchildName, grandchildName],
       });
       expect((await store.get(childName))?.status).toBe("cancelled");
       expect((await store.get(grandchildName))?.status).toBe("cancelled");
       expect((await store.get(greatGrandchildName))?.status).toBe("cancelled");
-      for (const descendantName of deeperDescendantNames) {
-        expect((await store.get(descendantName))?.status).toBe("cancelled");
-      }
-      expect((await store.get(siblingName))?.status).toBe("active");
-      expect((await store.get(completedDescendantName))?.status).toBe("cancelled");
     });
 
-    it("cancels a live descendant whose indexed status is stale", async () => {
+    it("leaves nested tasks running when cancelNested is false", async () => {
       const { pName, childName, sandboxToken, store } = await setupParentAndChild({
         childStatus: "active",
       });
-      const grandchildName = await setupNestedSession(store, childName, 2, "stale-grandchild");
-      await store.updateStatus(grandchildName, "completed");
+      const grandchildName = await setupNestedSession(store, childName, 2, "grandchild-no-cascade");
+
+      const res = await SELF.fetch(
+        `https://test.local/sessions/${pName}/children/${childName}/cancel`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${sandboxToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ cancelNested: false }),
+        }
+      );
+
+      expect(res.status).toBe(200);
+      expect((await store.get(childName))?.status).toBe("cancelled");
+      expect((await store.get(grandchildName))?.status).toBe("active");
+    });
+
+    it("returns 400 for malformed non-empty JSON without cancelling tasks", async () => {
+      const { pName, childName, sandboxToken, store } = await setupParentAndChild({
+        childStatus: "active",
+      });
+      const grandchildName = await setupNestedSession(store, childName, 2, "grandchild-malformed");
+
+      const res = await SELF.fetch(
+        `https://test.local/sessions/${pName}/children/${childName}/cancel`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${sandboxToken}`,
+            "Content-Type": "application/json",
+          },
+          body: '{"cancelNested":false',
+        }
+      );
+
+      expect(res.status).toBe(400);
+      expect((await store.get(childName))?.status).toBe("active");
+      expect((await store.get(grandchildName))?.status).toBe("active");
+    });
+
+    it("continues cascading when the direct child is already terminal", async () => {
+      const { pName, childName, childStub, sandboxToken, store } = await setupParentAndChild({
+        childStatus: "cancelled",
+      });
+      await queryDO(childStub, "UPDATE session SET status = 'cancelled'");
+      const grandchildName = await setupNestedSession(store, childName, 2, "grandchild-retry");
 
       const res = await SELF.fetch(
         `https://test.local/sessions/${pName}/children/${childName}/cancel`,
@@ -373,157 +409,14 @@ describe("Child session operations (list, get, cancel)", () => {
         status: "cancelled",
         cancelledDescendantIds: [grandchildName],
       });
+      expect((await store.get(childName))?.status).toBe("cancelled");
       expect((await store.get(grandchildName))?.status).toBe("cancelled");
     });
 
-    it("blocks a late spawn when cancellation status projection fails", async () => {
+    it("returns 409 when the direct child is terminal and no descendants are active", async () => {
       const { pName, childName, childStub, sandboxToken, store } = await setupParentAndChild({
-        childStatus: "active",
+        childStatus: "cancelled",
       });
-      const triggerName = `fail_cancel_projection_${Date.now()}`;
-      await env.DB.prepare(
-        `CREATE TRIGGER ${triggerName}
-         BEFORE UPDATE OF status ON sessions
-         WHEN OLD.id = '${childName}' AND NEW.status = 'cancelled'
-         BEGIN
-           SELECT RAISE(ABORT, 'forced status projection failure');
-         END;`
-      ).run();
-
-      try {
-        const res = await SELF.fetch(
-          `https://test.local/sessions/${pName}/children/${childName}/cancel`,
-          {
-            method: "POST",
-            headers: { Authorization: `Bearer ${sandboxToken}` },
-          }
-        );
-
-        expect(res.status).toBe(200);
-        expect((await store.get(childName))?.status).toBe("active");
-        const [childSession] = await queryDO<{ status: string }>(
-          childStub,
-          "SELECT status FROM session LIMIT 1"
-        );
-        expect(childSession.status).toBe("cancelled");
-
-        const now = Date.now();
-        await expect(
-          store.create({
-            id: `late-child-${now}`,
-            title: "Late child",
-            repoOwner: "acme",
-            repoName: "web-app",
-            model: "anthropic/claude-sonnet-4-6",
-            reasoningEffort: null,
-            baseBranch: null,
-            status: "created",
-            parentSessionId: childName,
-            spawnSource: "agent",
-            spawnDepth: 2,
-            createdAt: now,
-            updatedAt: now,
-          })
-        ).rejects.toBeInstanceOf(ParentSessionSpawnRejectedError);
-      } finally {
-        await env.DB.prepare(`DROP TRIGGER IF EXISTS ${triggerName}`).run();
-      }
-    });
-
-    it("rejects initialization when cancellation sees an indexed but empty child DO", async () => {
-      const pName = parentName();
-      const childName = `child-before-init-${Date.now()}`;
-      const { stub: parentStub } = await initNamedSession(pName, {
-        repoOwner: "acme",
-        repoName: "web-app",
-        userId: "user-1",
-      });
-      const sandboxToken = `sb-before-init-${Date.now()}`;
-      await seedSandboxAuth(parentStub, { authToken: sandboxToken, sandboxId: "sb-before-init" });
-
-      const store = new SessionIndexStore(env.DB);
-      const now = Date.now();
-      await store.create({
-        id: pName,
-        title: "Parent Session",
-        repoOwner: "acme",
-        repoName: "web-app",
-        model: "anthropic/claude-sonnet-4-6",
-        reasoningEffort: null,
-        baseBranch: null,
-        status: "active",
-        spawnDepth: 0,
-        createdAt: now,
-        updatedAt: now,
-      });
-      await store.create({
-        id: childName,
-        title: "Child before init",
-        repoOwner: "acme",
-        repoName: "web-app",
-        model: "anthropic/claude-sonnet-4-6",
-        reasoningEffort: null,
-        baseBranch: "main",
-        status: "created",
-        parentSessionId: pName,
-        spawnSource: "agent",
-        spawnDepth: 1,
-        createdAt: now + 1,
-        updatedAt: now + 1,
-      });
-
-      const cancelResponse = await SELF.fetch(
-        `https://test.local/sessions/${pName}/children/${childName}/cancel`,
-        {
-          method: "POST",
-          headers: { Authorization: `Bearer ${sandboxToken}` },
-        }
-      );
-      expect(cancelResponse.status).toBe(502);
-
-      const childStub = env.SESSION.get(env.SESSION.idFromName(childName));
-      const initResponse = await childStub.fetch("http://internal/internal/init", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionName: childName,
-          repoOwner: "acme",
-          repoName: "web-app",
-          repoId: 123,
-          branch: "main",
-          repositories: [
-            {
-              repoOwner: "acme",
-              repoName: "web-app",
-              repoId: 123,
-              baseBranch: "main",
-            },
-          ],
-          model: "anthropic/claude-sonnet-4-6",
-          userId: "user-1",
-          parentSessionId: pName,
-          spawnSource: "agent",
-          spawnDepth: 1,
-        }),
-      });
-
-      expect(initResponse.status).toBe(409);
-      await expect(initResponse.json()).resolves.toEqual({
-        error: "Session initialization was cancelled",
-      });
-      const [{ count }] = await queryDO<{ count: number }>(
-        childStub,
-        "SELECT COUNT(*) AS count FROM session"
-      );
-      expect(count).toBe(0);
-    });
-
-    it("continues cascading when the direct child is already terminal", async () => {
-      const { pName, childName, childStub, sandboxToken, store } = await setupParentAndChild({
-        childStatus: "active",
-      });
-      const grandchildName = await setupNestedSession(store, childName, 2, "grandchild-retry");
-      await store.updateStatus(childName, "cancelled");
       await queryDO(childStub, "UPDATE session SET status = 'cancelled'");
 
       const res = await SELF.fetch(
@@ -534,12 +427,8 @@ describe("Child session operations (list, get, cancel)", () => {
         }
       );
 
-      expect(res.status).toBe(200);
-      await expect(res.json()).resolves.toEqual({
-        status: "cancelled",
-        cancelledDescendantIds: [grandchildName],
-      });
-      expect((await store.get(grandchildName))?.status).toBe("cancelled");
+      expect(res.status).toBe(409);
+      expect((await store.get(childName))?.status).toBe("cancelled");
     });
 
     it("returns 409 for completed session", async () => {
@@ -570,7 +459,7 @@ describe("Child session operations (list, get, cancel)", () => {
 
       // Create a different parent with sandbox auth
       const fakeName = `fake-cancel-${Date.now()}`;
-      const { stub: fakeStub } = await initNamedSession(fakeName, {
+      const { stub: fakeStub } = await initNamedSessionDO(fakeName, {
         repoOwner: "acme",
         repoName: "web-app",
       });
@@ -605,70 +494,279 @@ describe("Child session operations (list, get, cancel)", () => {
     });
   });
 
-  describe("POST /internal/child-session-update", () => {
-    it("queues the child's final response for the parent agent", async () => {
-      const { childName, parentStub, childStub } = await setupParentAndChild();
-      const [{ id: childParticipantId }] = await queryDO<{ id: string }>(
-        childStub,
-        "SELECT id FROM participants LIMIT 1"
+  describe("POST /sessions/:parentId/children/:childId/prompt", () => {
+    it("queues a follow-up in the direct child as the parent prompt author", async () => {
+      const { pName, childName, childStub, sandboxToken } = await setupParentAndChild();
+
+      const res = await SELF.fetch(
+        `https://test.local/sessions/${pName}/children/${childName}/prompt`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${sandboxToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ content: "Now cover the edge cases" }),
+        }
       );
 
-      await queryDO(
+      expect(res.status).toBe(200);
+      const body = await res.json<{ messageId: string; status: string }>();
+      expect(body.status).toBe("queued");
+
+      const messages = await queryDO<{
+        id: string;
+        content: string;
+        source: string;
+        user_id: string;
+      }>(
         childStub,
-        `INSERT INTO messages (id, author_id, content, source, status, created_at, started_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        "child-result-message",
-        childParticipantId,
-        "Complete the child task",
-        "web",
-        "completed",
-        100,
-        110,
-        200
+        `SELECT messages.id, messages.content, messages.source, participants.user_id
+         FROM messages JOIN participants ON participants.id = messages.author_id
+         WHERE messages.id = ?`,
+        body.messageId
       );
-      await seedEvents(childStub, [
+      expect(messages).toEqual([
         {
-          id: "child-result-token",
-          type: "token",
-          data: JSON.stringify({ content: "The child fixed the failing workflow." }),
-          messageId: "child-result-message",
-          createdAt: 180,
-        },
-        {
-          id: "child-result-complete",
-          type: "execution_complete",
-          data: JSON.stringify({ success: true }),
-          messageId: "child-result-message",
-          createdAt: 200,
+          id: body.messageId,
+          content: "Now cover the edge cases",
+          source: "agent",
+          user_id: "user-1",
         },
       ]);
-
-      const response = await parentStub.fetch("http://internal/internal/child-session-update", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          childSessionId: childName,
-          status: "completed",
-          title: "Child Session",
-          deliverResult: true,
-        }),
-      });
-
-      expect(response.status).toBe(200);
-      await expect
-        .poll(async () => {
-          const messages = await queryDO<{ content: string }>(
-            parentStub,
-            "SELECT content FROM messages WHERE source = 'agent'"
-          );
-          return messages[0]?.content;
-        })
-        .toContain("The child fixed the failing workflow.");
     });
 
+    it("preserves a different parent prompt author in the child", async () => {
+      const { pName, childName, parentStub, childStub, sandboxToken } = await setupParentAndChild();
+      const [processing] = await queryDO<{ id: string }>(
+        parentStub,
+        "SELECT id FROM messages WHERE status = 'processing'"
+      );
+      if (!processing) throw new Error("Expected processing parent prompt");
+      await runInDurableObject(parentStub, (instance: SessionDO) => {
+        instance.ctx.storage.sql.exec(
+          `INSERT INTO participants (
+             id, user_id, canonical_user_id, scm_user_id, scm_login, scm_name, scm_email,
+             role, joined_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'member', ?)`,
+          "participant-second-user",
+          "slack:U2",
+          "canonical-2",
+          "222",
+          "second-user",
+          "Second User",
+          "second@example.com",
+          Date.now()
+        );
+      });
+      const [secondUser] = await queryDO<{ id: string }>(
+        parentStub,
+        "SELECT id FROM participants WHERE user_id = 'slack:U2'"
+      );
+      if (!secondUser) throw new Error("Expected second participant");
+      await runInDurableObject(parentStub, (instance: SessionDO) => {
+        instance.ctx.storage.sql.exec(
+          "UPDATE messages SET author_id = ? WHERE id = ?",
+          secondUser.id,
+          processing.id
+        );
+      });
+
+      const res = await SELF.fetch(
+        `https://test.local/sessions/${pName}/children/${childName}/prompt`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${sandboxToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ content: "Continue as the teammate" }),
+        }
+      );
+
+      expect(res.status).toBe(200);
+      const body = await res.json<{ messageId: string }>();
+      const messages = await queryDO<{
+        user_id: string;
+        canonical_user_id: string | null;
+        scm_user_id: string | null;
+        scm_login: string | null;
+        scm_name: string | null;
+        scm_email: string | null;
+      }>(
+        childStub,
+        `SELECT participants.user_id, participants.canonical_user_id,
+                participants.scm_user_id, participants.scm_login,
+                participants.scm_name, participants.scm_email
+         FROM messages JOIN participants ON participants.id = messages.author_id
+         WHERE messages.id = ?`,
+        body.messageId
+      );
+      expect(messages).toEqual([
+        {
+          user_id: "slack:U2",
+          canonical_user_id: "canonical-2",
+          scm_user_id: "222",
+          scm_login: "second-user",
+          scm_name: "Second User",
+          scm_email: "second@example.com",
+        },
+      ]);
+    });
+
+    it("rejects authority-expanding request fields", async () => {
+      const { pName, childName, sandboxToken } = await setupParentAndChild();
+
+      const res = await SELF.fetch(
+        `https://test.local/sessions/${pName}/children/${childName}/prompt`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${sandboxToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ content: "Continue", source: "web" }),
+        }
+      );
+
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects whitespace-only content", async () => {
+      const { pName, childName, sandboxToken } = await setupParentAndChild();
+
+      const res = await SELF.fetch(
+        `https://test.local/sessions/${pName}/children/${childName}/prompt`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${sandboxToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ content: "  \n\t " }),
+        }
+      );
+
+      expect(res.status).toBe(400);
+    });
+
+    it.each(["cancelled", "archived"])(
+      "rejects a %s child without storing a prompt",
+      async (status) => {
+        const { pName, childName, childStub, sandboxToken, store } = await setupParentAndChild();
+        await queryDO(childStub, "UPDATE session SET status = ?", status);
+        await store.updateStatus(childName, status as "cancelled" | "archived");
+
+        const res = await SELF.fetch(
+          `https://test.local/sessions/${pName}/children/${childName}/prompt`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${sandboxToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ content: "Continue" }),
+          }
+        );
+
+        expect(res.status).toBe(409);
+        const messages = await queryDO<{ count: number }>(
+          childStub,
+          "SELECT COUNT(*) AS count FROM messages"
+        );
+        expect(messages[0]?.count).toBe(0);
+      }
+    );
+
+    it.each(["completed", "failed"])("resumes a %s child", async (status) => {
+      const { pName, childName, childStub, sandboxToken, store } = await setupParentAndChild();
+      await queryDO(childStub, "UPDATE session SET status = ?", status);
+      await store.updateStatus(childName, status as "completed" | "failed");
+
+      const res = await SELF.fetch(
+        `https://test.local/sessions/${pName}/children/${childName}/prompt`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${sandboxToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ content: "Try again" }),
+        }
+      );
+
+      expect(res.status).toBe(200);
+      const state = await queryDO<{ status: string }>(childStub, "SELECT status FROM session");
+      expect(state[0]?.status).toBe("active");
+    });
+
+    it("rejects a child sandbox token on the parent-scoped route", async () => {
+      const { pName, childName, childStub } = await setupParentAndChild();
+      const childToken = `sb-tok-child-${Date.now()}`;
+      await seedSandboxAuth(childStub, { authToken: childToken, sandboxId: "sb-child" });
+
+      const res = await SELF.fetch(
+        `https://test.local/sessions/${pName}/children/${childName}/prompt`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${childToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ content: "Continue" }),
+        }
+      );
+
+      expect(res.status).toBe(401);
+    });
+
+    it("returns 404 without touching a child owned by another parent", async () => {
+      const { childName, childStub } = await setupParentAndChild();
+      const fakeName = `fake-prompt-${Date.now()}`;
+      const { stub: fakeStub } = await initNamedSessionDO(fakeName);
+      const fakeToken = `sb-tok-fake-prompt-${Date.now()}`;
+      await seedSandboxAuth(fakeStub, { authToken: fakeToken, sandboxId: "sb-fake-prompt" });
+      const store = new SessionIndexStore(env.DB);
+      const now = Date.now();
+      await store.create({
+        id: fakeName,
+        title: "Fake Parent",
+        repoOwner: "acme",
+        repoName: "web-app",
+        model: "anthropic/claude-sonnet-4-6",
+        reasoningEffort: null,
+        baseBranch: null,
+        status: "active",
+        spawnDepth: 0,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const res = await SELF.fetch(
+        `https://test.local/sessions/${fakeName}/children/${childName}/prompt`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${fakeToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ content: "Continue" }),
+        }
+      );
+
+      expect(res.status).toBe(404);
+      const messages = await queryDO<{ count: number }>(
+        childStub,
+        "SELECT COUNT(*) AS count FROM messages"
+      );
+      expect(messages[0]?.count).toBe(0);
+    });
+  });
+
+  describe("POST /internal/child-session-update", () => {
     it("broadcasts child_session_update to authenticated clients", async () => {
       const pName = parentName();
-      await initNamedSession(pName, { repoOwner: "acme", repoName: "web-app" });
+      await initNamedSessionDO(pName, { repoOwner: "acme", repoName: "web-app" });
 
       // Seed D1 row so WS token generation works
       const store = new SessionIndexStore(env.DB);

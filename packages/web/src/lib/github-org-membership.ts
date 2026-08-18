@@ -38,6 +38,7 @@ function getMembershipState(data: unknown): unknown {
 export async function checkGitHubOrganizationAccess({
   accessToken,
   allowedOrganizations,
+  // eslint-disable-next-line no-restricted-globals -- external GitHub API, not the BFF
   fetchImpl = fetch,
   userAgent = "Open-Inspect",
   timeoutMs = GITHUB_MEMBERSHIP_CHECK_TIMEOUT_MS,

@@ -5,12 +5,8 @@ const mocks = vi.hoisted(() => ({
   supportsRepoImagesValue: true,
 }));
 
-vi.mock("next-auth", () => ({
-  getServerSession: vi.fn(),
-}));
-
-vi.mock("@/lib/auth", () => ({
-  authOptions: {},
+vi.mock("@/lib/server-auth-session", () => ({
+  getServerAuthSession: vi.fn(),
 }));
 
 vi.mock("@/lib/control-plane", () => ({
@@ -21,7 +17,7 @@ vi.mock("@/lib/sandbox-provider", () => ({
   supportsRepoImages: () => mocks.supportsRepoImagesValue,
 }));
 
-import { getServerSession } from "next-auth";
+import { getServerAuthSession } from "@/lib/server-auth-session";
 import { controlPlaneUserFetch } from "@/lib/control-plane";
 import { GET as getFeed } from "./route";
 import { POST as triggerBuild } from "./repo/[owner]/[name]/trigger/route";
@@ -49,7 +45,7 @@ describe.each(routes)("$name", ({ call }) => {
 
   it("returns 401 before disclosing provider support when unauthenticated", async () => {
     mocks.supportsRepoImagesValue = false;
-    vi.mocked(getServerSession).mockResolvedValue(null);
+    vi.mocked(getServerAuthSession).mockResolvedValue(null);
 
     const response = await call();
 
@@ -59,7 +55,7 @@ describe.each(routes)("$name", ({ call }) => {
 
   it("returns 501 for authenticated users on a provider without image support", async () => {
     mocks.supportsRepoImagesValue = false;
-    vi.mocked(getServerSession).mockResolvedValue({ user: { id: "12345" } } as never);
+    vi.mocked(getServerAuthSession).mockResolvedValue({ user: { id: "12345" } } as never);
 
     const response = await call();
 
@@ -68,7 +64,7 @@ describe.each(routes)("$name", ({ call }) => {
   });
 
   it("proxies to the control plane for authenticated users", async () => {
-    vi.mocked(getServerSession).mockResolvedValue({ user: { id: "12345" } } as never);
+    vi.mocked(getServerAuthSession).mockResolvedValue({ user: { id: "12345" } } as never);
     // Fresh Response per call — the feed route consumes three bodies.
     vi.mocked(controlPlaneUserFetch).mockImplementation(async () =>
       Response.json({ units: [], repos: [], images: [] })
@@ -85,7 +81,7 @@ describe("GET /api/image-builds feed", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.supportsRepoImagesValue = true;
-    vi.mocked(getServerSession).mockResolvedValue({ user: { id: "12345" } } as never);
+    vi.mocked(getServerAuthSession).mockResolvedValue({ user: { id: "12345" } } as never);
   });
 
   it("serves enabled scopes plus cross-scope status, failed rows included", async () => {
@@ -123,16 +119,13 @@ describe("GET /api/image-builds feed", () => {
               scopeKind: "repo",
               scopeId: "acme/web",
               repositoriesFingerprint: "fp-repo",
-              repositories: [],
             },
             {
               scopeKind: "environment",
               scopeId: "env_1",
               repositoriesFingerprint: "fp-env",
-              repositories: [],
             },
           ],
-          minRuntimeVersion: 53,
         });
       }
       if (path === "/image-builds/enabled-repos") {
@@ -206,13 +199,41 @@ describe("GET /api/image-builds feed", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ units: [], enabledRepos: [], images: [] });
   });
+
+  it("returns 502 when the control-plane feed has an invalid shape", async () => {
+    vi.mocked(controlPlaneUserFetch).mockImplementation(async (path: string) => {
+      if (path === "/image-builds/enabled") {
+        return Response.json({ units: [{ scopeKind: "repo", scopeId: "acme/web" }] });
+      }
+      if (path === "/image-builds/enabled-repos") return Response.json({ repos: [] });
+      return Response.json({ images: [] });
+    });
+
+    const response = await getFeed();
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({ error: "Failed to fetch image builds" });
+  });
+
+  it("returns 502 when the control-plane feed omits a required array", async () => {
+    vi.mocked(controlPlaneUserFetch).mockImplementation(async (path: string) => {
+      if (path === "/image-builds/enabled") return Response.json({});
+      if (path === "/image-builds/enabled-repos") return Response.json({ repos: [] });
+      return Response.json({ images: [] });
+    });
+
+    const response = await getFeed();
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({ error: "Failed to fetch image builds" });
+  });
 });
 
 describe("proxied control-plane paths", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.supportsRepoImagesValue = true;
-    vi.mocked(getServerSession).mockResolvedValue({ user: { id: "12345" } } as never);
+    vi.mocked(getServerAuthSession).mockResolvedValue({ user: { id: "12345" } } as never);
     vi.mocked(controlPlaneUserFetch).mockImplementation(async () => Response.json({ ok: true }));
   });
 
@@ -224,6 +245,17 @@ describe("proxied control-plane paths", () => {
     });
   });
 
+  it("trigger preserves nested namespace owners as one encoded route segment", async () => {
+    await triggerBuild({} as NextRequest, {
+      params: Promise.resolve({ owner: "group/subgroup", name: "web" }),
+    });
+
+    expect(controlPlaneUserFetch).toHaveBeenCalledWith(
+      "/image-builds/trigger/repo/group%2Fsubgroup/web",
+      { method: "POST" }
+    );
+  });
+
   it("toggle puts to the unified repo toggle route", async () => {
     await toggleBuild({ json: async () => ({ enabled: true }) } as NextRequest, params);
 
@@ -231,5 +263,19 @@ describe("proxied control-plane paths", () => {
       method: "PUT",
       body: JSON.stringify({ enabled: true }),
     });
+  });
+
+  it("toggle preserves nested namespace owners as one encoded route segment", async () => {
+    await toggleBuild({ json: async () => ({ enabled: false }) } as NextRequest, {
+      params: Promise.resolve({ owner: "group/subgroup", name: "web" }),
+    });
+
+    expect(controlPlaneUserFetch).toHaveBeenCalledWith(
+      "/image-builds/toggle/repo/group%2Fsubgroup/web",
+      {
+        method: "PUT",
+        body: JSON.stringify({ enabled: false }),
+      }
+    );
   });
 });

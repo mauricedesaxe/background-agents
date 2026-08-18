@@ -13,10 +13,11 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { useEnvironments } from "@/hooks/use-environments";
+import { browserApiFetch } from "@/lib/browser-api-fetch";
 import { formatRepoLabel } from "@/lib/repo-label";
 
 const fetcher = async (url: string): Promise<ListScheduledTasksResponse> => {
-  const response = await fetch(url);
+  const response = await browserApiFetch(url as `/api/${string}`);
   if (!response.ok) throw new Error("Scheduled prompts could not be loaded");
   return response.json();
 };
@@ -37,7 +38,9 @@ export function ScheduledTasksList() {
   const cancel = async (id: string) => {
     setCancelError(null);
     try {
-      const response = await fetch(`/api/scheduled-tasks/${id}/cancel`, { method: "POST" });
+      const response = await browserApiFetch(`/api/scheduled-tasks/${id}/cancel`, {
+        method: "POST",
+      });
       if (!response.ok && response.status !== 409) {
         throw new Error("Scheduled prompt could not be cancelled");
       }

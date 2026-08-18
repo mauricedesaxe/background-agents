@@ -2,11 +2,13 @@
 /// <reference types="@testing-library/jest-dom" />
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as matchers from "@testing-library/jest-dom/matchers";
-import { DEFAULT_MODEL } from "@open-inspect/shared";
+import { DEFAULT_MODEL } from "@open-inspect/shared/models";
 import Home from "./page";
+import { isSessionInboxKey } from "@/lib/session-inbox-api";
+import { isUnarchivedSessionListKey } from "@/lib/session-list";
 
 expect.extend(matchers);
 
@@ -24,7 +26,6 @@ const mocks = vi.hoisted(() => ({
   }>,
   loadingReposValue: false,
   environmentsLoadingValue: false,
-  initialVoiceTranscript: undefined as undefined | ((text: string) => void),
   environmentsValue: [] as Array<{
     id: string;
     name: string;
@@ -39,6 +40,22 @@ const mocks = vi.hoisted(() => ({
       baseBranch: string;
     }>;
   }>,
+  skillPreview: {
+    skills: [
+      {
+        skillId: "skill-1",
+        revisionId: "revision-1",
+        name: "review-pr",
+        description: "Review a pull request",
+        revisionNumber: 1,
+        revisionSha256: "abc",
+        totalBytes: 10,
+        assignmentSources: [],
+      },
+    ],
+    totalBytes: 10,
+    ignoredProfileSkillIds: [],
+  },
 }));
 
 const repo = {
@@ -51,8 +68,8 @@ const repo = {
   defaultBranch: "main",
 };
 
-vi.mock("next-auth/react", () => ({
-  useSession: () => ({ data: { user: { id: "user-1" } }, status: "authenticated" }),
+vi.mock("@/lib/auth-session", () => ({
+  useAuthSession: () => ({ data: { user: { id: "user-1" } }, status: "authenticated" }),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -74,7 +91,6 @@ vi.mock("@/hooks/use-environments", () => ({
 }));
 
 vi.mock("@/components/sidebar-layout", () => ({
-  CollapsedSidebarControls: () => <div data-testid="collapsed-sidebar-controls" />,
   useSidebarContext: () => ({ isOpen: true, toggle: vi.fn() }),
 }));
 
@@ -88,30 +104,25 @@ vi.mock("@/hooks/use-branches", () => ({
 
 vi.mock("@/hooks/use-enabled-models", () => ({
   useEnabledModels: () => ({
-    enabledModels: [DEFAULT_MODEL, "openai/gpt-5.4"],
+    enabledModels: [DEFAULT_MODEL],
     enabledModelOptions: [
       {
         category: "Anthropic",
         models: [{ id: DEFAULT_MODEL, name: "Claude Sonnet 4.6", description: "" }],
-      },
-      {
-        category: "OpenAI",
-        models: [{ id: "openai/gpt-5.4", name: "GPT-5.4", description: "" }],
       },
     ],
     loading: false,
   }),
 }));
 
-vi.mock("@/components/voice-input-button", () => ({
-  VoiceInputButton: ({ onTranscript }: { onTranscript: (text: string) => void }) => {
-    mocks.initialVoiceTranscript ??= onTranscript;
-    return (
-      <button type="button" onClick={() => onTranscript("Draft from the microphone.")}>
-        Voice input
-      </button>
-    );
-  },
+vi.mock("@/hooks/use-managed-skills", () => ({
+  useSkillProfiles: () => ({ profiles: [], loading: false }),
+  useSkillResolutionPreview: () => ({
+    preview: mocks.skillPreview,
+    loading: false,
+    error: undefined,
+    suggestions: { status: "ready", skills: mocks.skillPreview.skills },
+  }),
 }));
 
 beforeAll(() => {
@@ -123,7 +134,6 @@ beforeEach(() => {
   mocks.loadingReposValue = false;
   mocks.environmentsLoadingValue = false;
   mocks.environmentsValue = [];
-  mocks.initialVoiceTranscript = undefined;
   mocks.routerPush.mockReset();
   mocks.mutateMock.mockReset();
   vi.stubGlobal(
@@ -155,46 +165,78 @@ function sessionCreateBody(): Record<string, unknown> {
 }
 
 describe("Home", () => {
-  it("hydrates the saved model preference", async () => {
-    localStorage.setItem("open-inspect-last-selected-model", "openai/gpt-5.4");
-
+  it("disables autofill suggestions for the prompt", () => {
     render(<Home />);
 
-    expect(await screen.findByRole("button", { name: /gpt 5.4/i })).toBeInTheDocument();
-  });
-
-  it("keeps a voice transcript in the new-session draft", async () => {
-    const user = userEvent.setup();
-    render(<Home />);
-
-    await user.click(await screen.findByRole("button", { name: "Voice input" }));
-
-    expect(screen.getByPlaceholderText("What do you want to build?")).toHaveValue(
-      "Draft from the microphone."
+    expect(screen.getByPlaceholderText("What do you want to build?")).toHaveAttribute(
+      "autocomplete",
+      "off"
     );
-    expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("keeps edits made while a voice transcript is pending", async () => {
+  it("completes skills from the current resolution preview", async () => {
     const user = userEvent.setup();
     render(<Home />);
-    const input = await screen.findByPlaceholderText("What do you want to build?");
+    const input = screen.getByPlaceholderText("What do you want to build?");
 
-    await user.type(input, "Inspect the route first.");
-    act(() => mocks.initialVoiceTranscript?.("Then run the tests."));
+    await user.click(input);
+    await screen.findByText("(1)");
+    await user.type(input, "$rev");
+    await user.keyboard("{Enter}");
 
-    expect(input).toHaveValue("Inspect the route first. Then run the tests.");
+    expect(input).toHaveValue("$review-pr ");
   });
 
-  it("does not create or warm a session while composing", async () => {
+  it("keeps the attachment control anchored while the sandbox warms", async () => {
+    let resolveCreate: ((response: Response) => void) | undefined;
+    vi.mocked(fetch).mockImplementation(
+      (input) =>
+        new Promise<Response>((resolve) => {
+          if (String(input) === "/api/sessions") {
+            resolveCreate = resolve;
+          } else {
+            resolve(Response.json({ error: "unexpected request" }, { status: 500 }));
+          }
+        })
+    );
     const user = userEvent.setup();
     render(<Home />);
 
-    await screen.findByRole("button", { name: /background-agents/i });
-    await user.type(screen.getByPlaceholderText("What do you want to build?"), "Run this later");
+    await user.type(screen.getByPlaceholderText("What do you want to build?"), "I");
 
-    expect(fetch).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: /schedule prompt/i })).toBeEnabled();
+    const warmingStatus = await screen.findByText("Warming sandbox...");
+    const attachmentButton = screen.getByRole("button", { name: "Attach images" });
+    expect(
+      warmingStatus.compareDocumentPosition(attachmentButton) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+
+    resolveCreate?.(Response.json({ sessionId: "session-1" }));
+    await waitFor(() => expect(screen.queryByText("Warming sandbox...")).not.toBeInTheDocument());
+  });
+
+  it("invalidates a warmed session when the managed skill selection changes", async () => {
+    const user = userEvent.setup();
+    render(<Home />);
+
+    await user.type(screen.getByPlaceholderText("What do you want to build?"), "Use no skills");
+    await waitFor(() =>
+      expect(
+        vi.mocked(fetch).mock.calls.filter(([input]) => String(input) === "/api/sessions")
+      ).toHaveLength(1)
+    );
+
+    await user.click(screen.getByRole("button", { name: /all skills/i }));
+    await user.click(within(screen.getByRole("listbox")).getByRole("option", { name: /^None/ }));
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(mocks.routerPush).toHaveBeenCalledWith("/session/session-1"));
+    const createCalls = vi
+      .mocked(fetch)
+      .mock.calls.filter(([input]) => String(input) === "/api/sessions");
+    expect(createCalls).toHaveLength(2);
+    expect(JSON.parse(String(createCalls[1][1]?.body))).toMatchObject({
+      skillSelection: { mode: "none" },
+    });
   });
 
   it("can start a new session without a repository from the primary selector", async () => {
@@ -210,6 +252,8 @@ describe("Home", () => {
     await user.click(screen.getByRole("button", { name: /send/i }));
 
     await waitFor(() => expect(mocks.routerPush).toHaveBeenCalledWith("/session/session-1"));
+    expect(mocks.mutateMock).toHaveBeenCalledWith(isUnarchivedSessionListKey);
+    expect(mocks.mutateMock).toHaveBeenCalledWith(isSessionInboxKey);
     expect(sessionCreateBody()).toMatchObject({
       repoOwner: null,
       repoName: null,

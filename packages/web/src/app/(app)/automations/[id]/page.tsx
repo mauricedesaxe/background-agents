@@ -3,7 +3,8 @@
 import { useState, use } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { describeCron, getReasoningConfig } from "@open-inspect/shared";
+import { describeCron } from "@open-inspect/shared/cron";
+import { getReasoningConfig } from "@open-inspect/shared/models";
 import { CollapsedSidebarControls, useSidebarContext } from "@/components/sidebar-layout";
 import { useAutomation, useAutomationInvocations } from "@/hooks/use-automations";
 import { useEnvironments } from "@/hooks/use-environments";
@@ -15,6 +16,7 @@ import { ErrorBanner } from "@/components/ui/error-banner";
 import { BackIcon, PencilIcon } from "@/components/ui/icons";
 import { formatModelNameLower } from "@/lib/format";
 import { formatAutomationTargetsLabel } from "@/lib/repo-label";
+import { browserApiFetch } from "@/lib/browser-api-fetch";
 
 const HISTORY_PAGE_SIZE = 20;
 
@@ -45,7 +47,7 @@ export default function AutomationDetailPage({ params }: { params: Promise<{ id:
   const handleAction = async (action: "pause" | "resume" | "trigger") => {
     setActionError(null);
     try {
-      const res = await fetch(`/api/automations/${id}/${action}`, { method: "POST" });
+      const res = await browserApiFetch(`/api/automations/${id}/${action}`, { method: "POST" });
       if (!res.ok) {
         setActionError(`Failed to ${action} automation`);
         return;
@@ -61,7 +63,7 @@ export default function AutomationDetailPage({ params }: { params: Promise<{ id:
   const handleDelete = async () => {
     setActionError(null);
     try {
-      const res = await fetch(`/api/automations/${id}`, { method: "DELETE" });
+      const res = await browserApiFetch(`/api/automations/${id}`, { method: "DELETE" });
       if (!res.ok) {
         setActionError("Failed to delete automation");
         return;
@@ -111,7 +113,7 @@ export default function AutomationDetailPage({ params }: { params: Promise<{ id:
         </header>
       )}
 
-      <div className="flex-1 overflow-y-auto p-8">
+      <div className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
         <div className="max-w-3xl mx-auto">
           {actionError && (
             <ErrorBanner className="mb-4" role="alert">
@@ -123,7 +125,9 @@ export default function AutomationDetailPage({ params }: { params: Promise<{ id:
           <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="text-3xl font-semibold text-foreground">{automation.name}</h1>
+                <h1 className="text-2xl font-semibold text-foreground sm:text-3xl">
+                  {automation.name}
+                </h1>
                 <AutomationStatusBadge automation={automation} />
               </div>
               <p className="text-sm text-muted-foreground mt-1">
@@ -214,12 +218,12 @@ export default function AutomationDetailPage({ params }: { params: Promise<{ id:
                       ? describeCron(automation.scheduleCron, automation.scheduleTz)
                       : "Schedule (no cron)"
                     : {
-                        once: "One-shot prompt",
                         sentry: "Sentry Alert",
                         webhook: "Inbound Webhook",
                         github_event: "GitHub Event",
                         linear_event: "Linear Event",
                         slack_event: "Slack Message",
+                        once: "One-shot prompt",
                       }[automation.triggerType] || automation.triggerType}
                   {automation.eventType && (
                     <span className="text-muted-foreground ml-1">({automation.eventType})</span>

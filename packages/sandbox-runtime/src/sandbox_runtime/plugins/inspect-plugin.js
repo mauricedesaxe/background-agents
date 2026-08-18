@@ -7,8 +7,7 @@
 import { tool } from "@opencode-ai/plugin";
 import { z } from "zod";
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -71,6 +70,44 @@ function getRepositories() {
   }
 }
 
+/** Resolve an owner/name argument, preserving nested owners and manifest casing. */
+export function resolveRepositoryTarget(repo, repositories) {
+  const requested = String(repo || "").trim();
+
+  if (repositories.length > 0) {
+    const normalized = requested.toLowerCase();
+    return (
+      repositories.find(
+        (repository) => `${repository.owner}/${repository.name}`.toLowerCase() === normalized
+      ) || null
+    );
+  }
+
+  const separator = requested.lastIndexOf("/");
+  if (separator <= 0 || separator === requested.length - 1) {
+    return null;
+  }
+
+  const owner = requested.slice(0, separator);
+  const name = requested.slice(separator + 1);
+  return owner.split("/").some((segment) => !segment) ? null : { owner, name };
+}
+
+export function formatPullRequestSuccess(result) {
+  const branches =
+    result?.headBranch && result?.baseBranch
+      ? ` (${result.headBranch} -> ${result.baseBranch})`
+      : "";
+  if (result?.updated) {
+    return `Pull request updated with your latest commits.\n\nPR #${result.prNumber}${branches}: ${result.prUrl}`;
+  }
+  const status =
+    result?.state === "draft"
+      ? "The pull request is in draft mode."
+      : "The pull request is now ready for review.";
+  return `Pull request created successfully!\n\nPR #${result.prNumber}${branches}: ${result.prUrl}\n\n${status}`;
+}
+
 async function getCurrentBranch(repoPath) {
   try {
     const gitArgs = repoPath
@@ -90,94 +127,12 @@ async function getCurrentBranch(repoPath) {
   }
 }
 
-// Run a jj subcommand inside `repoPath`. Returns trimmed stdout.
-async function jj(repoPath, jjArgs) {
-  const { stdout } = await execFileAsync("jj", ["--repository", repoPath, ...jjArgs], {
-    timeout: 15000,
-  });
-  return stdout.trim();
-}
-
-/**
- * Finalize a colocated Jujutsu (jj) working copy so git HEAD includes all of
- * the agent's uncommitted work before the PR is pushed.
- *
- * The control plane pushes git HEAD to the PR branch. But in a colocated jj
- * repo, jj keeps git HEAD at the PARENT of jj's working-copy commit `@`, so any
- * uncommitted changes in `@` are absent from HEAD and would be silently dropped
- * from the PR. We fix that here by finalizing `@` into a real commit and
- * exporting it to git HEAD.
- *
- * This is a complete no-op for plain git repos (no `.jj` directory) so existing
- * PR behavior is unchanged. The sequence is idempotent: if `@` is already empty
- * (the agent committed everything itself), we do NOT create an empty commit.
- *
- * Verified against jj 0.43.0. Notes:
- *  - jj needs its own identity to commit; `jj git init --colocate` does not copy
- *    git's user.name/user.email. We set it (repo-local) from git's config right
- *    before committing. jj warns that the setting only affects future commits,
- *    but `jj commit` rewrites `@` into a new commit that DOES pick up the
- *    freshly-set identity, so the resulting HEAD is authored correctly.
- *  - `jj log -r @ -T empty` prints "true"/"false" to detect whether `@` has
- *    changes, so we only commit when there is work to finalize.
- */
-async function finalizeJujutsuWorkingCopy(repoPath, commitMessage) {
-  // No-op unless this repo is a colocated jj checkout.
-  if (!existsSync(join(repoPath, ".jj"))) {
-    return;
-  }
-
-  console.log(`[create-pull-request] Colocated jj repo detected at ${repoPath}; finalizing @`);
-
-  try {
-    // jj needs an identity to author a commit. `--colocate` does not inherit
-    // git's, so seed it (repo-local) from git's config. Idempotent.
-    const gitName = await execFileAsync("git", ["-C", repoPath, "config", "user.name"], {
-      timeout: 5000,
-    })
-      .then((r) => r.stdout.trim())
-      .catch(() => "");
-    const gitEmail = await execFileAsync("git", ["-C", repoPath, "config", "user.email"], {
-      timeout: 5000,
-    })
-      .then((r) => r.stdout.trim())
-      .catch(() => "");
-    if (gitName) {
-      await jj(repoPath, ["config", "set", "--repo", "user.name", gitName]);
-    }
-    if (gitEmail) {
-      await jj(repoPath, ["config", "set", "--repo", "user.email", gitEmail]);
-    }
-
-    // Only finalize when `@` actually has changes, so a repo where the agent
-    // already committed everything doesn't gain a stray empty commit.
-    const isEmpty =
-      (await jj(repoPath, ["log", "-r", "@", "-T", "empty", "--no-graph"])) === "true";
-    if (!isEmpty) {
-      console.log("[create-pull-request] jj @ is non-empty; committing to finalize");
-      await jj(repoPath, ["commit", "-m", commitMessage]);
-    } else {
-      console.log("[create-pull-request] jj @ is empty; nothing to finalize");
-    }
-
-    // Push the finalized jj commit(s) into the underlying git repo's HEAD/refs
-    // so the control plane pushes the complete work.
-    await jj(repoPath, ["git", "export"]);
-    console.log("[create-pull-request] jj working copy finalized and exported to git HEAD");
-  } catch (e) {
-    // Don't let a jj hiccup swallow the PR flow silently — surface it, but let
-    // the caller decide. We rethrow so the PR isn't created from a stale HEAD.
-    console.log(`[create-pull-request] Failed to finalize jj working copy: ${e.message}`);
-    throw e;
-  }
-}
-
 // Use tool() helper - args should be a ZodRawShape (plain object), NOT a ZodObject
 // OpenCode wraps it with z.object() internally
 export default tool({
   name: "create-pull-request",
   description:
-    "Create a pull request for the committed changes. DO NOT use 'gh' CLI - use this tool instead. It handles git push and PR creation automatically with pre-configured authentication. You MUST provide a descriptive title and body that explain what changes were made. Call this after committing your changes.",
+    "Create a pull request for the committed changes. DO NOT use 'gh' CLI - use this tool instead. It handles git push and PR creation automatically with pre-configured authentication. You MUST provide a descriptive title and body that explain what changes were made. Call this after committing your changes. Calling it again from the same branch updates that branch's open pull request with your latest commits. To open a separate, additional pull request (including stacked PRs), create a new branch with 'git checkout -b', commit, and call this tool again.",
   args: {
     title: z
       .string()
@@ -192,7 +147,10 @@ export default tool({
     baseBranch: z
       .string()
       .optional()
-      .describe("Target branch to merge into. Defaults to the session's base branch."),
+      .describe(
+        "Target branch to merge into. Defaults to the session's base branch. For a stacked " +
+          "pull request, pass the head branch of the pull request you are stacking on."
+      ),
     repo: z
       .string()
       .optional()
@@ -200,12 +158,19 @@ export default tool({
         'Target repository as "owner/name". Required when the session spans multiple ' +
           "repositories; may be omitted for single-repository sessions."
       ),
+    draft: z
+      .boolean()
+      .optional()
+      .describe(
+        "Whether to open the pull request as a draft. Set to true only when the user explicitly asks for a draft; otherwise omit this field so the pull request is ready for review. Note: repository policy may still require draft mode."
+      ),
   },
   async execute(args, context) {
     console.log(`[create-pull-request] execute() called with args:`, JSON.stringify(args));
     const title = args.title || "Changes from OpenCode session";
     const body = args.body || "Automated PR created via create-pull-request tool";
     const baseBranch = args.baseBranch; // undefined if not provided, server will use default
+    const draft = args.draft; // undefined if not provided, server falls back to repo setting
 
     // Resolve the target repository for multi-repo sessions.
     const repositories = getRepositories();
@@ -214,48 +179,20 @@ export default tool({
     let repoName;
     let repoPath;
     if (args.repo) {
-      const parts = String(args.repo).trim().split("/");
-      if (parts.length !== 2 || !parts[0] || !parts[1]) {
-        return `Failed to create pull request: repo must be "owner/name"${
-          validValues ? ` (one of: ${validValues})` : ""
-        }.`;
-      }
-      const [ownerArg, nameArg] = parts;
-      const match = repositories.find(
-        (r) =>
-          r.owner.toLowerCase() === ownerArg.toLowerCase() &&
-          r.name.toLowerCase() === nameArg.toLowerCase()
-      );
-      if (repositories.length > 0 && !match) {
+      const target = resolveRepositoryTarget(args.repo, repositories);
+      if (!target && repositories.length > 0) {
         return `Failed to create pull request: ${args.repo} is not part of this session. Valid values: ${validValues}.`;
       }
+      if (!target) {
+        return 'Failed to create pull request: repo must be "owner/name".';
+      }
       // Use the manifest's canonical casing and path — checkout directories
-      // and the control plane's member records are case-sensitive even
-      // though the match above is not.
-      repoOwner = match ? match.owner : ownerArg;
-      repoName = match ? match.name : nameArg;
-      repoPath = match ? match.path : undefined;
+      // and the control plane's member records are case-sensitive.
+      repoOwner = target.owner;
+      repoName = target.name;
+      repoPath = target.path;
     } else if (repositories.length > 1) {
       return `Failed to create pull request: this session spans multiple repositories — pass repo with one of: ${validValues}.`;
-    }
-
-    // Resolve the directory the git/jj commands operate on. When repo wasn't
-    // specified and the session has exactly one repo, use that repo's path;
-    // otherwise fall back to the process cwd (matches getCurrentBranch, which
-    // runs git without -C when repoPath is undefined).
-    const effectiveRepoPath =
-      repoPath || (repositories.length === 1 ? repositories[0].path : undefined) || process.cwd();
-
-    // If this is a colocated jj repo, finalize the working copy so git HEAD
-    // (what the control plane pushes) contains all uncommitted work. No-op for
-    // plain git repos. For multi-repo sessions this only finalizes the single
-    // target repo resolved above; other repos are untouched, which is correct
-    // since only the target repo's HEAD is pushed for this PR.
-    try {
-      await finalizeJujutsuWorkingCopy(effectiveRepoPath, title);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return `Failed to create pull request: could not finalize Jujutsu working copy (${message}). Your uncommitted changes were not included, so no PR was created.`;
     }
 
     const headBranch = await getCurrentBranch(repoPath);
@@ -288,6 +225,7 @@ export default tool({
           headBranch: headBranch,
           repoOwner: repoOwner,
           repoName: repoName,
+          draft: draft,
           timestamp: Date.now(),
         }),
       });
@@ -310,7 +248,7 @@ export default tool({
         } else if (response.status === 404) {
           userMessage = `Session not found: ${errorMessage}. The session may have been deleted or the ID is incorrect.`;
         } else if (response.status === 409) {
-          userMessage = `Conflict: ${errorMessage}. A PR may already exist for this branch.`;
+          userMessage = `Conflict: ${errorMessage} To open an additional pull request, create a new branch ('git checkout -b'), commit, and call this tool again.`;
         }
 
         console.log(`[create-pull-request] ERROR: HTTP ${response.status} - ${errorMessage}`);
@@ -325,7 +263,7 @@ export default tool({
       }
 
       console.log(`[create-pull-request] SUCCESS: PR #${result.prNumber} created`);
-      return `Pull request created successfully!\n\nPR #${result.prNumber}: ${result.prUrl}\n\nThe PR is now ready for review.`;
+      return formatPullRequestSuccess(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.log(`[create-pull-request] ERROR: ${message}`);

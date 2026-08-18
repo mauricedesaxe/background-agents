@@ -11,6 +11,7 @@ import {
 } from "@/components/automations/automation-form";
 import { ErrorBanner } from "@/components/ui/error-banner";
 import { BackIcon } from "@/components/ui/icons";
+import { browserApiFetch } from "@/lib/browser-api-fetch";
 
 export default function EditAutomationPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -25,7 +26,7 @@ export default function EditAutomationPage({ params }: { params: Promise<{ id: s
     setError("");
 
     try {
-      const res = await fetch(`/api/automations/${id}`, {
+      const res = await browserApiFetch(`/api/automations/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(values),
@@ -82,9 +83,11 @@ export default function EditAutomationPage({ params }: { params: Promise<{ id: s
         </header>
       )}
 
-      <div className="flex-1 overflow-y-auto p-8">
+      <div className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
         <div className="max-w-2xl mx-auto">
-          <h1 className="text-3xl font-semibold text-foreground mb-6">Edit Automation</h1>
+          <h1 className="mb-6 text-2xl font-semibold text-foreground sm:text-3xl">
+            Edit Automation
+          </h1>
 
           {error && (
             <ErrorBanner className="mb-4" role="alert">

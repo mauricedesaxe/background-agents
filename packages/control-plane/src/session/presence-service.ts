@@ -9,7 +9,12 @@
  */
 
 import type { Logger } from "../logger";
-import type { ClientInfo, ServerMessage, ParticipantPresence } from "../types";
+import type {
+  ParticipantPresence,
+  ServerMessage,
+} from "@open-inspect/shared/types/server-messages";
+import type { ClientInfo } from "../types";
+import { projectConnectedParticipants } from "./connections";
 import type { SessionMessenger } from "./messenger";
 
 /**
@@ -18,7 +23,6 @@ import type { SessionMessenger } from "./messenger";
  */
 export interface PresenceServiceDeps {
   getAuthenticatedClients: () => IterableIterator<ClientInfo>;
-  getClientInfo: (ws: WebSocket) => ClientInfo | null;
   messenger: SessionMessenger;
   send: (ws: WebSocket, message: ServerMessage) => boolean;
   getSandboxSocket: () => WebSocket | null;
@@ -42,24 +46,7 @@ export class PresenceService {
    * participant active, and we take the most recent lastSeen across sockets.
    */
   getPresenceList(): ParticipantPresence[] {
-    const byId = new Map<string, ParticipantPresence>();
-    for (const c of this.deps.getAuthenticatedClients()) {
-      const existing = byId.get(c.participantId);
-      if (!existing) {
-        byId.set(c.participantId, {
-          participantId: c.participantId,
-          userId: c.userId,
-          name: c.name,
-          avatar: c.avatar,
-          status: c.status,
-          lastSeen: c.lastSeen,
-        });
-        continue;
-      }
-      if (c.status === "active") existing.status = "active";
-      if (c.lastSeen > existing.lastSeen) existing.lastSeen = c.lastSeen;
-    }
-    return Array.from(byId.values());
+    return projectConnectedParticipants(this.deps.getAuthenticatedClients());
   }
 
   /**
@@ -82,15 +69,12 @@ export class PresenceService {
    * Update client presence status and broadcast.
    */
   updatePresence(
-    ws: WebSocket,
+    client: ClientInfo,
     data: { status: "active" | "idle"; cursor?: { line: number; file: string } }
   ): void {
-    const client = this.deps.getClientInfo(ws);
-    if (client) {
-      client.status = data.status;
-      client.lastSeen = Date.now();
-      this.broadcastPresence();
-    }
+    client.status = data.status;
+    client.lastSeen = Date.now();
+    this.broadcastPresence();
   }
 
   /**

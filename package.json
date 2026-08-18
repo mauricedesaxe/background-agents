@@ -8,14 +8,17 @@
   ],
   "scripts": {
     "lint": "eslint .",
+    "lint:complexity": "node scripts/lint-complexity.mjs",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "npm run test --workspaces --if-present",
+    "test:lint-complexity": "node --test scripts/lint-complexity-message.test.mjs",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
     "test:integration": "npm run test:integration --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present",
-    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run build -w @open-inspect/shared && npm run typecheck --workspaces --if-present",
+    "knip": "knip",
+    "build": "npm run build -w @open-inspect/shared && npm run build --workspaces --if-present",
     "build:opencomputer-template": "npm run build-template -w @open-inspect/opencomputer-infra --",
     "prepare": "node -e \"if (process.env.CI) process.exit(0)\" && husky"
   },
@@ -28,6 +31,7 @@
     "eslint-plugin-react-hooks": "^5.1.0",
     "globals": "^15.14.0",
     "husky": "^9.1.7",
+    "knip": "^6.32.1",
     "lint-staged": "^16.2.7",
     "prettier": "^3.4.2",
     "typescript": "^5.7.2",
@@ -39,11 +43,7 @@
   },
   "overrides": {
     "minimatch": "^10.2.5",
-    "undici": "^7.28.0",
-    "tldraw": "5.2.3",
-    "@tldraw/sync": "5.2.3",
-    "@tldraw/sync-core": "5.2.3",
-    "@tldraw/tlschema": "5.2.3"
+    "undici": "^7.29.0"
   },
   "lint-staged": {
     "*.{ts,tsx}": [
@@ -53,11 +53,7 @@
     "*.{js,jsx,json,md,yaml,yml,css}": [
       "prettier --write"
     ],
-    "packages/modal-infra/**/*.py": [
-      "ruff check --fix",
-      "ruff format"
-    ],
-    "packages/sandbox-runtime/**/*.py": [
+    "packages/{daytona-infra,e2b-infra,modal-infra,sandbox-runtime}/**/*.py": [
       "ruff check --fix",
       "ruff format"
     ]

@@ -23,6 +23,7 @@ import { resolveSessionRepositories } from "../repos/resolve";
 import type { Env } from "../types";
 import { error, json, parseJsonBody, parsePattern } from "./shared";
 import type { RequestContext, Route } from "./shared";
+import { SCM_AGNOSTIC_HUMAN_USER_ROUTE } from "./shared";
 
 const MAX_INSTRUCTIONS_LENGTH = 15_000;
 const MAX_TASK_NAME_LENGTH = 80;
@@ -191,10 +192,10 @@ async function handleCancelScheduledTask(
 }
 
 function authenticatedOwnerUserId(ctx: RequestContext): string | Response {
-  if (ctx.principal?.kind !== "user" || !ctx.principal.user.canonicalUserId) {
+  if (ctx.principal?.kind !== "user" || !ctx.principal.userId) {
     return error("User authentication required", 403);
   }
-  return ctx.principal.user.canonicalUserId;
+  return ctx.principal.userId;
 }
 
 async function scheduledTaskView(
@@ -230,16 +231,28 @@ function isValidTimezone(timeZone: string): boolean {
 }
 
 export const scheduledTaskRoutes: Route[] = [
-  { method: "POST", pattern: parsePattern("/scheduled-tasks"), handler: handleCreateScheduledTask },
-  { method: "GET", pattern: parsePattern("/scheduled-tasks"), handler: handleListScheduledTasks },
+  {
+    method: "POST",
+    pattern: parsePattern("/scheduled-tasks"),
+    handler: handleCreateScheduledTask,
+    ...SCM_AGNOSTIC_HUMAN_USER_ROUTE,
+  },
+  {
+    method: "GET",
+    pattern: parsePattern("/scheduled-tasks"),
+    handler: handleListScheduledTasks,
+    ...SCM_AGNOSTIC_HUMAN_USER_ROUTE,
+  },
   {
     method: "GET",
     pattern: parsePattern("/scheduled-tasks/:id"),
     handler: handleGetScheduledTask,
+    ...SCM_AGNOSTIC_HUMAN_USER_ROUTE,
   },
   {
     method: "POST",
     pattern: parsePattern("/scheduled-tasks/:id/cancel"),
     handler: handleCancelScheduledTask,
+    ...SCM_AGNOSTIC_HUMAN_USER_ROUTE,
   },
 ];

@@ -3,7 +3,7 @@ import { env } from "cloudflare:test";
 import { SessionIndexStore } from "../../src/db/session-index";
 import type { SessionStatus } from "@open-inspect/shared";
 import { cleanD1Tables } from "./cleanup";
-import { initNamedSession, queryDO } from "./helpers";
+import { initNamedSessionDO, queryDO } from "./helpers";
 
 /**
  * Exercises the parent→child archive cascade (issue #14) end to end through real
@@ -29,7 +29,7 @@ describe("Archive cascade to child sessions", () => {
     id: string,
     opts: { status: SessionStatus; parentSessionId?: string; spawnSource?: "user" | "agent" }
   ) {
-    await initNamedSession(id, { userId: "user-1", scmLogin: "acmedev" });
+    await initNamedSessionDO(id, { userId: "user-1", scmLogin: "acmedev" });
     await store.create({
       id,
       title: id,

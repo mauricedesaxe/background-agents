@@ -5,14 +5,17 @@ import {
   completeExternalUpload,
   getExternalUploadUrl,
   getChannelInfo,
+  getMessageDetails,
   getPermalink,
   getThreadMessages,
   getUserInfo,
   listChannels,
   openView,
+  postBlocks,
   postMessage,
   publishView,
   removeReaction,
+  SLACK_USER_INFO_TIMEOUT_MS,
   updateMessage,
   uploadToExternalUrl,
 } from "./client";
@@ -152,7 +155,7 @@ describe("postMessage", () => {
   it("posts text to a channel and returns the Slack envelope", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(jsonResponse({ ok: true, ts: "1700000000.000100" }));
+      .mockResolvedValueOnce(jsonResponse({ ok: true, channel: "C123", ts: "1700000000.000100" }));
 
     const result = await postMessage("xoxb-token", "C123", "hello");
 
@@ -173,7 +176,7 @@ describe("postMessage", () => {
   it("threads via thread_ts when provided", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(jsonResponse({ ok: true, ts: "1700000000.000200" }));
+      .mockResolvedValueOnce(jsonResponse({ ok: true, channel: "C123", ts: "1700000000.000200" }));
 
     await postMessage("xoxb-token", "C123", "reply text", {
       thread_ts: "1699999999.000100",
@@ -231,12 +234,72 @@ describe("postMessage", () => {
     expect(result.error).toBe("invalid_response");
   });
 
+  it("on a partial Slack envelope returns invalid_response", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse({ error: "missing_ok" }));
+
+    const result = await postMessage("xoxb-token", "C123", "hi");
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("invalid_response");
+  });
+
+  it("rejects malformed Slack error envelopes", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse({ ok: false, error: null }));
+
+    const result = await postMessage("xoxb-token", "C123", "hi");
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("invalid_response");
+  });
+
+  it("rejects a bare ok:true success that carries no message identity", async () => {
+    // A caller that trusted this arm would thread its replies off an undefined
+    // ts; the endpoint's schema is what makes the success arm mean something.
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse({ ok: true }));
+
+    const result = await postMessage("xoxb-token", "C123", "hi");
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("invalid_response");
+  });
+
+  it("rejects a success whose message identity has the wrong type", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({ ok: true, channel: "C123", ts: 1700000000 })
+    );
+
+    const result = await postMessage("xoxb-token", "C123", "hi");
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("invalid_response");
+  });
+
   it("on fetch network error returns a typed error rather than throwing", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new TypeError("fetch failed"));
 
     const result = await postMessage("xoxb-token", "C123", "hi");
     expect(result.ok).toBe(false);
     expect(result.error).toBe("network_error");
+  });
+});
+
+describe("postBlocks", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("posts blocks without a top-level text field", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({ ok: true, channel: "C123", ts: "1700000000.000300" }));
+    const blocks = [{ type: "section", text: { type: "mrkdwn", text: "hello" } }];
+
+    const result = await postBlocks("xoxb-token", "C123", blocks, {
+      thread_ts: "1699999999.000100",
+    });
+
+    expect(result.ok).toBe(true);
+    const init = fetchSpy.mock.calls[0]![1];
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("text");
+    expect(body.blocks).toEqual(blocks);
+    expect(body.thread_ts).toBe("1699999999.000100");
   });
 });
 
@@ -509,39 +572,6 @@ describe("getThreadMessages", () => {
     expect(String(secondUrl)).toContain("oldest=1.0");
   });
 
-  it("reports truncated false when the thread ends before the page cap", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      jsonResponse({ ok: true, messages: [{ ts: "1.1", text: "only", user: "U1" }] })
-    );
-
-    const result = await getThreadMessages("xoxb-token", "C123", "1.0");
-
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.truncated).toBe(false);
-    }
-  });
-
-  it("reports truncated when the page cap is hit with a cursor still pending", async () => {
-    // Every page hands back another cursor, so the loop can only stop at the cap.
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
-      jsonResponse({
-        ok: true,
-        messages: [{ ts: "1.1", text: "page", user: "U1" }],
-        response_metadata: { next_cursor: "more" },
-      })
-    );
-
-    const result = await getThreadMessages("xoxb-token", "C123", "1.0");
-
-    expect(fetchSpy).toHaveBeenCalledTimes(25);
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.truncated).toBe(true);
-      expect(result.messages).toHaveLength(25);
-    }
-  });
-
   it("returns Slack's error envelope on lookup failure", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       jsonResponse({ ok: false, error: "thread_not_found" })
@@ -551,6 +581,16 @@ describe("getThreadMessages", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toBe("thread_not_found");
+    }
+  });
+
+  it("rejects a success page with no messages array", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse({ ok: true }));
+
+    const result = await getThreadMessages("xoxb-token", "C123", "1.0");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("invalid_response");
     }
   });
 
@@ -579,6 +619,8 @@ describe("getUserInfo", () => {
   });
 
   it("fetches user info via GET with user query", async () => {
+    const timeoutSignal = new AbortController().signal;
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutSignal);
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       jsonResponse({
         ok: true,
@@ -595,6 +637,8 @@ describe("getUserInfo", () => {
     }
     const [url] = fetchSpy.mock.calls[0]!;
     expect(url).toBe("https://slack.com/api/users.info?user=U1");
+    expect(timeoutSpy).toHaveBeenCalledWith(SLACK_USER_INFO_TIMEOUT_MS);
+    expect(fetchSpy.mock.calls[0]![1]?.signal).toBe(timeoutSignal);
   });
 
   it("returns Slack's error envelope on user_not_found", async () => {
@@ -750,5 +794,150 @@ describe("listChannels", () => {
     if (!result.ok) {
       expect(result.error).toBe("missing_scope");
     }
+  });
+
+  it("rejects a success page with no channels array instead of iterating undefined", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse({ ok: true }));
+
+    const result = await listChannels("xoxb-token");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("invalid_response");
+    }
+  });
+
+  it("rejects a channel entry that is missing its name", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({ ok: true, channels: [{ id: "C1", name: "general" }, { id: "C2" }] })
+    );
+
+    const result = await listChannels("xoxb-token");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("invalid_response");
+    }
+  });
+});
+
+describe("getMessageDetails", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("fetches a single top-level message via conversations.history without oldest", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({
+        ok: true,
+        messages: [{ ts: "1.0", files: [{ id: "F1", mimetype: "image/png" }] }],
+      })
+    );
+
+    const result = await getMessageDetails("xoxb-token", "C123", "1.0");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.id).toBe("F1");
+    }
+    const [url] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe(
+      "https://slack.com/api/conversations.history?channel=C123&latest=1.0&inclusive=true&limit=1"
+    );
+  });
+
+  it("fetches a thread reply via conversations.replies anchored on oldest", async () => {
+    // conversations.replies returns oldest-first, so an oldest=<ts> anchor puts
+    // the target reply first in the window; a latest anchor would return the
+    // thread root instead.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({
+        ok: true,
+        messages: [{ ts: "1.5", files: [{ id: "F2", mimetype: "image/jpeg" }] }, { ts: "1.7" }],
+      })
+    );
+
+    const result = await getMessageDetails("xoxb-token", "C123", "1.5", "1.0");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.id).toBe("F2");
+    }
+    const [url] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe(
+      "https://slack.com/api/conversations.replies?channel=C123&ts=1.0&oldest=1.5&inclusive=true&limit=2"
+    );
+  });
+
+  it("finds the target reply even when the thread root is included in the page", async () => {
+    // Some conversations.replies responses include the thread root alongside
+    // the windowed replies; find-by-ts must still pick the target.
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({
+        ok: true,
+        messages: [{ ts: "1.0" }, { ts: "1.5", files: [{ id: "F3", mimetype: "image/png" }] }],
+      })
+    );
+
+    const result = await getMessageDetails("xoxb-token", "C123", "1.5", "1.0");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.files[0]!.id).toBe("F3");
+    }
+  });
+
+  it("uses conversations.history when threadTs equals ts (thread parent)", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({ ok: true, messages: [{ ts: "1.0" }] }));
+
+    await getMessageDetails("xoxb-token", "C123", "1.0", "1.0");
+
+    const [url] = fetchSpy.mock.calls[0]!;
+    expect(String(url)).toContain("conversations.history");
+  });
+
+  it("returns empty files when the message has none or is not found", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({ ok: true, messages: [{ ts: "9.9" }] })
+    );
+
+    expect(await getMessageDetails("xoxb-token", "C123", "1.0")).toEqual({
+      ok: true,
+      files: [],
+      attachments: [],
+    });
+  });
+
+  it("returns the message's attachments alongside its files", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({
+        ok: true,
+        messages: [
+          {
+            ts: "1.0",
+            attachments: [{ is_share: true, text: "the shared body", author_name: "Ada" }],
+          },
+        ],
+      })
+    );
+
+    expect(await getMessageDetails("xoxb-token", "C123", "1.0")).toEqual({
+      ok: true,
+      files: [],
+      attachments: [{ is_share: true, text: "the shared body", author_name: "Ada" }],
+    });
+  });
+
+  it("returns the failure arm on Slack API errors (e.g. missing_scope)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({ ok: false, error: "missing_scope" })
+    );
+
+    expect(await getMessageDetails("xoxb-token", "C123", "1.0")).toEqual({
+      ok: false,
+      error: "missing_scope",
+    });
   });
 });

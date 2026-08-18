@@ -111,7 +111,7 @@ const sampleRunRow: AutomationRunRow = {
   started_at: null,
   completed_at: null,
   created_at: now,
-  invocation_id: null,
+  invocation_id: "inv-test1",
   repo_owner: null,
   repo_name: null,
   repo_id: null,
@@ -126,7 +126,6 @@ describe("toAutomation", () => {
     const automation = toAutomation(sampleRow, [
       {
         automation_id: "auto_test1",
-        position: 0,
         repo_owner: "acme",
         repo_name: "web-app",
         repo_id: 12345,
@@ -246,14 +245,14 @@ describe("AutomationStore", () => {
   });
 
   describe("list", () => {
-    it("returns automations and total", async () => {
+    it("returns a bounded page", async () => {
       const { db } = createFakeD1({
         allResults: [sampleRow],
       });
       const store = new AutomationStore(db);
-      const result = await store.list();
-      expect(result.total).toBe(1);
+      const result = await store.list({ limit: 25 });
       expect(result.automations).toHaveLength(1);
+      expect(result.hasMore).toBe(false);
     });
   });
 

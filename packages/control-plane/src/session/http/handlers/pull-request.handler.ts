@@ -11,7 +11,7 @@ import {
   resolveSessionRepositoryTarget,
   type SessionRepositoryEntry,
 } from "../../repository-target";
-import type { UpdateArtifactData } from "../../repository";
+import type { UpdateArtifactData } from "../../artifact-repository";
 import type { ArtifactRow, ParticipantRow, SessionRow } from "../../types";
 import { z } from "zod";
 
@@ -22,6 +22,7 @@ const createPrRequestSchema = z.object({
   headBranch: z.string().optional(),
   repoOwner: z.string().optional(),
   repoName: z.string().optional(),
+  draft: z.boolean().optional(),
 });
 
 type CreatePrRequest = z.infer<typeof createPrRequestSchema>;
@@ -128,6 +129,7 @@ export function createPullRequestHandler(deps: PullRequestHandlerDeps): PullRequ
           promptingUserId: promptingParticipant.user_id,
           promptingAuth: authResolution.auth,
           sessionUrl: deps.getSessionUrl(session),
+          draft: body.draft,
         },
         log
       );
@@ -140,6 +142,9 @@ export function createPullRequestHandler(deps: PullRequestHandlerDeps): PullRequ
         prNumber: result.prNumber,
         prUrl: result.prUrl,
         state: result.state,
+        headBranch: result.headBranch,
+        baseBranch: result.baseBranch,
+        updated: result.updated,
       });
     },
 

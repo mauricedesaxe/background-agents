@@ -1,13 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { Env } from "../types";
 import { createSandboxProviderFromEnv } from "./provider-factory";
-import { createDaytonaRestClient } from "./daytona-rest-client";
-import type * as DaytonaRestClientModule from "./daytona-rest-client";
-
-vi.mock("./daytona-rest-client", async (importOriginal) => {
-  const actual = await importOriginal<typeof DaytonaRestClientModule>();
-  return { ...actual, createDaytonaRestClient: vi.fn(actual.createDaytonaRestClient) };
-});
 
 function createEnv(overrides: Partial<Env>): Env {
   return {
@@ -60,17 +53,31 @@ describe("createSandboxProviderFromEnv", () => {
     );
   });
 
-  it("defaults the Daytona auto-archive interval to 720 minutes when unset", () => {
+  it("rejects malformed E2B auto-pause configuration", () => {
     const env = createEnv({
-      DAYTONA_API_URL: "https://daytona.test",
-      DAYTONA_API_KEY: "daytona-key",
-      DAYTONA_BASE_SNAPSHOT: "base",
+      E2B_API_KEY: "e2b-key",
+      E2B_TEMPLATE_ID: "tmpl",
+      E2B_AUTO_PAUSE: "tru",
     });
 
-    createSandboxProviderFromEnv(env, "daytona");
-
-    expect(vi.mocked(createDaytonaRestClient)).toHaveBeenCalledWith(
-      expect.objectContaining({ autoArchiveIntervalMinutes: 720 })
+    expect(() => createSandboxProviderFromEnv(env, "e2b")).toThrow(
+      "E2B_AUTO_PAUSE must be a valid boolean"
     );
+  });
+
+  it("requires an OpenComputer template for starts but not existing-session cleanup", () => {
+    const env = createEnv({
+      OPENCOMPUTER_API_URL: "https://opencomputer.test",
+      OPENCOMPUTER_API_KEY: "opencomputer-key",
+    });
+
+    expect(() => createSandboxProviderFromEnv(env, "opencomputer")).toThrow(
+      "OPENCOMPUTER_TEMPLATE"
+    );
+    expect(() =>
+      createSandboxProviderFromEnv(env, "opencomputer", {
+        requireOpenComputerTemplate: false,
+      })
+    ).not.toThrow();
   });
 });

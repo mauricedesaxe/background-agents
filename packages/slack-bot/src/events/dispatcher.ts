@@ -4,30 +4,13 @@ import { isDmDispatchable } from "../dm-utils";
 import type { BackgroundTaskScheduler } from "../messages/blocks";
 import type { Env } from "../types";
 import { handleAppMention, handleDirectMessage } from "./message-handler";
+import type { SlackEventPayload } from "./payload";
 
-export interface SlackEventPayload {
-  type: string;
-  event?: {
-    type: string;
-    text?: string;
-    user?: string;
-    channel?: string;
-    ts?: string;
-    thread_ts?: string;
-    bot_id?: string;
-    tab?: string;
-    channel_type?: string;
-    subtype?: string;
-    attachments?: Array<{
-      text?: string;
-      pretext?: string;
-      author_name?: string;
-      from_url?: string;
-      channel_name?: string;
-      footer?: string;
-    }>;
-  };
-}
+/**
+ * Re-exported so existing importers keep a single dispatcher-facing name; the
+ * type is inferred from `slackEventPayloadSchema` in `./payload`.
+ */
+export type { SlackEventPayload };
 
 export async function handleSlackEvent(
   payload: SlackEventPayload,
@@ -46,12 +29,15 @@ export async function handleSlackEvent(
     await handleDirectMessage(
       {
         type: event.type,
-        text: event.text!,
+        // file_share messages may carry no text at all.
+        text: event.text ?? "",
         user: event.user!,
         channel: event.channel!,
         ts: event.ts!,
         thread_ts: event.thread_ts,
         channel_type: event.channel_type,
+        files: event.files,
+        attachments: event.attachments,
       },
       env,
       traceId,
@@ -68,6 +54,8 @@ export async function handleSlackEvent(
         channel: event.channel,
         ts: event.ts,
         thread_ts: event.thread_ts,
+        files: event.files,
+        attachments: event.attachments,
       },
       env,
       traceId,

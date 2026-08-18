@@ -134,9 +134,9 @@ describe("pending prompt connection deadline", () => {
 
     const replayClient = await openClientWs(name, { subscribe: true });
     const subscribed = replayClient.messages!.find((message) => message.type === "subscribed") as {
-      replay: { events: Array<Record<string, unknown>> };
+      timeline: { events: Array<{ event: Record<string, unknown> }> };
     };
-    expect(subscribed.replay.events).toContainEqual(
+    expect(subscribed.timeline.events.map((entry) => entry.event)).toContainEqual(
       expect.objectContaining({
         type: "execution_complete",
         messageId,

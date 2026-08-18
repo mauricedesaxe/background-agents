@@ -2,23 +2,22 @@ import type { Env } from "../types";
 
 type ObjectStoragePutValue = ArrayBuffer | ArrayBufferView | ReadableStream | string;
 
-export type ObjectStoragePutOptions = {
+type ObjectStoragePutOptions = {
   contentType?: string;
 };
 
-export type ObjectStorageRange = {
+type ObjectStorageRange = {
   offset: number;
   length: number;
 };
 
 export type ObjectStorageMetadata = {
   size: number;
-  etag: string;
   httpEtag: string;
   writeHttpMetadata(headers: Headers): void;
 };
 
-export type ObjectStorageObject = ObjectStorageMetadata & {
+type ObjectStorageObject = ObjectStorageMetadata & {
   body: ReadableStream;
 };
 
@@ -27,7 +26,6 @@ export interface ObjectStorage {
   delete(key: string): Promise<void>;
   head(key: string): Promise<ObjectStorageMetadata | null>;
   get(key: string, options?: { range?: ObjectStorageRange }): Promise<ObjectStorageObject | null>;
-  deletePrefix(prefix: string): Promise<void>;
 }
 
 class R2ObjectStorage implements ObjectStorage {
@@ -41,11 +39,7 @@ class R2ObjectStorage implements ObjectStorage {
     await this.bucket.put(
       key,
       value,
-      options
-        ? {
-            ...(options.contentType ? { httpMetadata: { contentType: options.contentType } } : {}),
-          }
-        : undefined
+      options?.contentType ? { httpMetadata: { contentType: options.contentType } } : undefined
     );
   }
 
@@ -62,17 +56,6 @@ class R2ObjectStorage implements ObjectStorage {
     options?: { range?: ObjectStorageRange }
   ): Promise<ObjectStorageObject | null> {
     return this.bucket.get(key, options?.range ? { range: options.range } : undefined);
-  }
-
-  async deletePrefix(prefix: string): Promise<void> {
-    let cursor: string | undefined;
-    do {
-      const page = await this.bucket.list({ prefix, cursor });
-      if (page.objects.length > 0) {
-        await this.bucket.delete(page.objects.map((object) => object.key));
-      }
-      cursor = page.truncated ? page.cursor : undefined;
-    } while (cursor);
   }
 }
 

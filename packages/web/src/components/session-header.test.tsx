@@ -3,35 +3,143 @@
 
 import { createRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import * as matchers from "@testing-library/jest-dom/matchers";
+import type { SessionState } from "@open-inspect/shared/types/server-messages";
 import { SessionHeader } from "./session-header";
+import type { SessionActionProps } from "./session-actions";
 
 expect.extend(matchers);
 
-afterEach(cleanup);
-
 vi.mock("@/components/sidebar-layout", () => ({
-  CollapsedSidebarControls: () => <div data-testid="collapsed-sidebar-controls" />,
   useSidebarContext: () => ({
-    isOpen: false,
+    isOpen: true,
     toggle: vi.fn(),
   }),
 }));
 
+afterEach(cleanup);
+
+const actions: SessionActionProps = {
+  sessionId: "session-1",
+  sessionStatus: "active",
+  artifacts: [],
+};
+
+function createSessionState(overrides: Partial<SessionState> = {}): SessionState {
+  return {
+    id: "session-1",
+    title: "Session 1",
+    repoOwner: "acme",
+    repoName: "web",
+    baseBranch: "main",
+    branchName: "feature/status-icons",
+    status: "active",
+    sandboxStatus: "ready",
+    messageCount: 0,
+    createdAt: 1,
+    ...overrides,
+  };
+}
+
 describe("SessionHeader", () => {
+  it("lets desktop users hide and show the session details sidebar", () => {
+    const onToggleDesktopDetails = vi.fn();
+    const { rerender } = render(
+      <SessionHeader
+        sessionState={null}
+        fallbackSessionInfo={{ repoOwner: "acme", repoName: "web", title: "Desktop details" }}
+        connected
+        connecting={false}
+        isDetailsOpen={false}
+        isDesktopDetailsOpen
+        showDesktopDetailsToggle
+        detailsButtonRef={createRef<HTMLButtonElement>()}
+        actionsButtonRef={createRef<HTMLButtonElement>()}
+        onToggleDetails={vi.fn()}
+        onToggleDesktopDetails={onToggleDesktopDetails}
+        onOpenMobileDetails={vi.fn()}
+        actions={actions}
+        renameSession={vi.fn()}
+      />
+    );
+
+    const hideButton = screen.getByRole("button", { name: "Hide session details" });
+    const connectedStatus = screen.getByRole("status", { name: "Connection status: Connected" });
+    expect(hideButton).toHaveClass("hidden", "lg:block");
+    expect(hideButton).toHaveAttribute("aria-controls", "session-details-sidebar");
+    expect(hideButton).toHaveAttribute("aria-expanded", "true");
+    expect(hideButton.querySelector('line[x1="15"][x2="15"]')).toBeInTheDocument();
+    expect(
+      connectedStatus.compareDocumentPosition(hideButton) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    fireEvent.click(hideButton);
+    expect(onToggleDesktopDetails).toHaveBeenCalledOnce();
+
+    rerender(
+      <SessionHeader
+        sessionState={null}
+        fallbackSessionInfo={{ repoOwner: "acme", repoName: "web", title: "Desktop details" }}
+        connected
+        connecting={false}
+        isDetailsOpen={false}
+        isDesktopDetailsOpen={false}
+        showDesktopDetailsToggle
+        detailsButtonRef={createRef<HTMLButtonElement>()}
+        actionsButtonRef={createRef<HTMLButtonElement>()}
+        onToggleDetails={vi.fn()}
+        onToggleDesktopDetails={onToggleDesktopDetails}
+        onOpenMobileDetails={vi.fn()}
+        actions={actions}
+        renameSession={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: "Show session details" })).toHaveAttribute(
+      "aria-expanded",
+      "false"
+    );
+  });
+
+  it("hides the desktop details toggle while changes own the right-hand surface", () => {
+    render(
+      <SessionHeader
+        sessionState={null}
+        fallbackSessionInfo={{ repoOwner: "acme", repoName: "web", title: "Review changes" }}
+        connected
+        connecting={false}
+        isDetailsOpen={false}
+        isDesktopDetailsOpen
+        showDesktopDetailsToggle={false}
+        detailsButtonRef={createRef<HTMLButtonElement>()}
+        actionsButtonRef={createRef<HTMLButtonElement>()}
+        onToggleDetails={vi.fn()}
+        onToggleDesktopDetails={vi.fn()}
+        onOpenMobileDetails={vi.fn()}
+        actions={actions}
+        renameSession={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByRole("button", { name: "Hide session details" })).not.toBeInTheDocument();
+  });
+
   it("renders no-repository fallback data as loaded while socket state is absent", () => {
     render(
       <SessionHeader
         sessionState={null}
-        sandboxError={null}
         fallbackSessionInfo={{ repoOwner: null, repoName: null, title: "Incident sweep" }}
         connected={false}
         connecting={true}
-        participants={[]}
         isDetailsOpen={false}
+        isDesktopDetailsOpen
+        showDesktopDetailsToggle
         detailsButtonRef={createRef<HTMLButtonElement>()}
+        actionsButtonRef={createRef<HTMLButtonElement>()}
         onToggleDetails={vi.fn()}
+        onToggleDesktopDetails={vi.fn()}
+        onOpenMobileDetails={vi.fn()}
+        actions={actions}
         renameSession={vi.fn()}
       />
     );
@@ -41,67 +149,153 @@ describe("SessionHeader", () => {
     expect(screen.queryByText("Loading session...")).not.toBeInTheDocument();
   });
 
-  it("keeps session identity shrinkable beside collapsed controls", () => {
+  it("replaces the phone Details control with the unified actions menu", () => {
+    const onToggleDetails = vi.fn();
+    const onOpenMobileDetails = vi.fn();
     render(
       <SessionHeader
         sessionState={null}
-        sandboxError={null}
-        fallbackSessionInfo={{
-          repoOwner: "open-inspect",
-          repoName: "a-repository-name-that-does-not-fit-on-a-narrow-phone",
-          title: "A session title that also needs room",
-        }}
-        connected={true}
+        fallbackSessionInfo={{ repoOwner: "acme", repoName: "web", title: "Mobile menu" }}
+        connected
         connecting={false}
-        participants={[]}
         isDetailsOpen={false}
+        isDesktopDetailsOpen
+        showDesktopDetailsToggle
         detailsButtonRef={createRef<HTMLButtonElement>()}
-        onToggleDetails={vi.fn()}
+        actionsButtonRef={createRef<HTMLButtonElement>()}
+        onToggleDetails={onToggleDetails}
+        onToggleDesktopDetails={vi.fn()}
+        onOpenMobileDetails={onOpenMobileDetails}
+        actions={actions}
         renameSession={vi.fn()}
       />
     );
 
-    expect(screen.getByTestId("collapsed-sidebar-controls").parentElement).toHaveClass(
-      "min-w-0",
-      "flex-1"
+    expect(screen.getByRole("button", { name: "Toggle session details" })).toHaveClass(
+      "hidden",
+      "md:block",
+      "lg:hidden"
     );
-    expect(
-      screen.getByText("open-inspect/a-repository-name-that-does-not-fit-on-a-narrow-phone")
-    ).toHaveClass("truncate");
-    expect(
-      screen.getByRole("button", { name: "Toggle session details" }).parentElement
-    ).toHaveClass("shrink-0");
+    const trigger = screen.getByRole("button", { name: "Session actions" });
+    expect(trigger.parentElement).toHaveClass("md:hidden");
+
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Details" }));
+    expect(onOpenMobileDetails).toHaveBeenCalledOnce();
+    expect(onToggleDetails).not.toHaveBeenCalled();
   });
 
-  it("shows the sandbox failure reason", () => {
+  it("renders separate status icons and reveals the connection label on hover", async () => {
     render(
       <SessionHeader
-        sessionState={{
-          id: "session-1",
-          title: "Broken sandbox",
-          repoOwner: "open-inspect",
-          repoName: "background-agents",
-          baseBranch: "main",
-          branchName: "fix/sandbox",
-          status: "active",
-          sandboxStatus: "failed",
-          messageCount: 0,
-          createdAt: 1,
-        }}
-        sandboxError="Total disk limit exceeded"
-        fallbackSessionInfo={{ repoOwner: null, repoName: null, title: null }}
-        connected={true}
+        sessionState={createSessionState()}
+        fallbackSessionInfo={{ repoOwner: "acme", repoName: "web", title: "Status icons" }}
+        connected
         connecting={false}
-        participants={[]}
         isDetailsOpen={false}
+        isDesktopDetailsOpen
+        showDesktopDetailsToggle
         detailsButtonRef={createRef<HTMLButtonElement>()}
+        actionsButtonRef={createRef<HTMLButtonElement>()}
         onToggleDetails={vi.fn()}
+        onToggleDesktopDetails={vi.fn()}
+        onOpenMobileDetails={vi.fn()}
+        actions={actions}
         renameSession={vi.fn()}
       />
     );
 
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "Sandbox failed: Total disk limit exceeded"
+    const connection = screen.getByRole("status", { name: "Connection status: Connected" });
+    expect(connection.parentElement).not.toHaveClass("md:hidden");
+    expect(connection).toHaveAttribute("tabindex", "0");
+    expect(screen.getByRole("button", { name: "Sandbox status: Ready" })).toBeInTheDocument();
+
+    fireEvent.pointerMove(connection, { pointerType: "mouse" });
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Connected");
+  });
+
+  it("reveals the connection label on keyboard focus", async () => {
+    render(
+      <SessionHeader
+        sessionState={createSessionState()}
+        fallbackSessionInfo={{ repoOwner: "acme", repoName: "web", title: "Status icons" }}
+        connected
+        connecting={false}
+        isDetailsOpen={false}
+        isDesktopDetailsOpen
+        showDesktopDetailsToggle
+        detailsButtonRef={createRef<HTMLButtonElement>()}
+        actionsButtonRef={createRef<HTMLButtonElement>()}
+        onToggleDetails={vi.fn()}
+        onToggleDesktopDetails={vi.fn()}
+        onOpenMobileDetails={vi.fn()}
+        actions={actions}
+        renameSession={vi.fn()}
+      />
+    );
+
+    fireEvent.focus(screen.getByRole("status", { name: "Connection status: Connected" }));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Connected");
+  });
+
+  it("labels connecting and disconnected mobile connection states", () => {
+    const props = {
+      sessionState: createSessionState(),
+      fallbackSessionInfo: { repoOwner: "acme", repoName: "web", title: "Status icons" },
+      isDetailsOpen: false,
+      isDesktopDetailsOpen: true,
+      showDesktopDetailsToggle: true,
+      detailsButtonRef: createRef<HTMLButtonElement>(),
+      actionsButtonRef: createRef<HTMLButtonElement>(),
+      onToggleDetails: vi.fn(),
+      onToggleDesktopDetails: vi.fn(),
+      onOpenMobileDetails: vi.fn(),
+      actions,
+      renameSession: vi.fn(),
+    };
+    const { rerender } = render(<SessionHeader {...props} connected={false} connecting />);
+
+    expect(
+      screen.getByRole("status", { name: "Connection status: Connecting..." })
+    ).toBeInTheDocument();
+
+    rerender(<SessionHeader {...props} connected={false} connecting={false} />);
+    expect(
+      screen.getByRole("status", { name: "Connection status: Disconnected" })
+    ).toBeInTheDocument();
+  });
+
+  it("opens mobile sandbox details with a safe provider dashboard link", () => {
+    render(
+      <SessionHeader
+        sessionState={createSessionState({
+          sandboxStatus: "failed",
+          sandboxDashboardUrl: "https://modal.com/apps/acme/main/sandbox",
+        })}
+        fallbackSessionInfo={{ repoOwner: "acme", repoName: "web", title: "Status icons" }}
+        connected
+        connecting={false}
+        isDetailsOpen={false}
+        isDesktopDetailsOpen
+        showDesktopDetailsToggle
+        detailsButtonRef={createRef<HTMLButtonElement>()}
+        actionsButtonRef={createRef<HTMLButtonElement>()}
+        onToggleDetails={vi.fn()}
+        onToggleDesktopDetails={vi.fn()}
+        onOpenMobileDetails={vi.fn()}
+        actions={actions}
+        renameSession={vi.fn()}
+      />
+    );
+
+    const trigger = screen.getByRole("button", { name: "Sandbox status: Failed" });
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    fireEvent.click(trigger);
+
+    expect(screen.getByText("Sandbox Failed")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Open provider dashboard/ })).toHaveAttribute(
+      "href",
+      "https://modal.com/apps/acme/main/sandbox"
     );
   });
 });

@@ -1,20 +1,21 @@
 // @vitest-environment jsdom
 /// <reference types="@testing-library/jest-dom" />
 
+import { useRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as matchers from "@testing-library/jest-dom/matchers";
 import { SessionPromptComposer } from "./session-prompt-composer";
+import { MAX_WEB_PROMPT_CHARS } from "@open-inspect/shared/types/websocket";
 
 expect.extend(matchers);
 
-vi.mock("@/components/action-bar", () => ({ ActionBar: () => null }));
-vi.mock("@/components/ui/combobox", () => ({
-  Combobox: ({ disabled }: { disabled?: boolean }) => (
-    <button type="button" disabled={disabled}>
-      Model
-    </button>
-  ),
+vi.mock("@/components/action-bar", () => ({
+  ActionBar: () => <div data-testid="action-bar" />,
+}));
+vi.mock("@/components/attachment-preview-strip", () => ({
+  AttachmentPreviewStrip: () => null,
 }));
 vi.mock("@/components/reasoning-effort-pills", () => ({
   ReasoningEffortPills: ({ disabled }: { disabled?: boolean }) => (
@@ -23,100 +24,187 @@ vi.mock("@/components/reasoning-effort-pills", () => ({
     </button>
   ),
 }));
-vi.mock("@/components/voice-input-button", () => ({
-  VoiceInputButton: ({ onTranscript }: { onTranscript: (text: string) => void }) => (
-    <button type="button" onClick={() => onTranscript("Run the voice-input tests.")}>
-      Voice input
+vi.mock("@/components/ui/combobox", () => ({
+  Combobox: ({ children, disabled }: { children: React.ReactNode; disabled?: boolean }) => (
+    <button type="button" disabled={disabled} aria-label="Model">
+      {children}
     </button>
   ),
 }));
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
-function renderComposer(
-  overrides: {
-    isCompacting?: boolean;
-    submissionError?: string;
-    isSubmitting?: boolean;
-  } = {}
-) {
-  const onSubmit = vi.fn((event: React.FormEvent) => event.preventDefault());
-  const onStopExecution = vi.fn();
-  const onTranscript = vi.fn();
-  render(
+function ComposerHarness({
+  initialValue = "",
+  isProcessing = false,
+  isUploading = false,
+  connecting = false,
+  status = "active",
+  submitError = null,
+  withSkill = false,
+}: {
+  initialValue?: string;
+  isProcessing?: boolean;
+  isUploading?: boolean;
+  connecting?: boolean;
+  status?: "active" | "archived" | "cancelled";
+  submitError?: string | null;
+  withSkill?: boolean;
+}) {
+  const [value, setValue] = useState(initialValue);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  return (
     <SessionPromptComposer
       session={{
         id: "session-1",
-        status: "active",
+        status,
         artifacts: [],
         onArchive: vi.fn(),
         onUnarchive: vi.fn(),
       }}
       prompt={{
-        value: "Run the tests next",
-        isProcessing: !overrides.isCompacting,
-        isCompacting: overrides.isCompacting ?? false,
-        isSubmitting: overrides.isSubmitting ?? false,
-        submissionError: overrides.submissionError ?? null,
-        inputRef: { current: null },
-        onSubmit,
-        onChange: vi.fn(),
+        value,
+        isProcessing,
+        draftLocked: isUploading,
+        sendBlocked: connecting,
+        submitError,
+        inputRef,
+        onSubmit: vi.fn(),
+        onValueChange: setValue,
         onKeyDown: vi.fn(),
-        onStopExecution,
-        onCompactContext: vi.fn(),
-        onTranscript,
+        onStopExecution: vi.fn(),
+      }}
+      skillSuggestions={{
+        status: "ready",
+        skills: withSkill
+          ? [{ skillId: "skill-1", name: "review-pr", description: "Review a pull request" }]
+          : [],
+      }}
+      attachments={{
+        items: [],
+        error: null,
+        isUploading,
+        onAdd: vi.fn(),
+        onRemove: vi.fn(),
       }}
       model={{
-        selectedModel: "anthropic/claude-sonnet-4-6",
-        reasoningEffort: "high",
+        selectedModel: "model-1",
+        reasoningEffort: undefined,
         items: [],
         onModelChange: vi.fn(),
         onReasoningEffortChange: vi.fn(),
       }}
     />
   );
-  return { onSubmit, onStopExecution, onTranscript };
 }
 
 describe("SessionPromptComposer", () => {
-  it("offers cancellation while context compaction is active", () => {
-    renderComposer({ isCompacting: true });
+  it("disables autofill suggestions for the prompt", () => {
+    render(<ComposerHarness />);
 
-    expect(screen.getByRole("button", { name: "Cancel context compaction" })).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Ask or build anything")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Ask or build anything")).toHaveAttribute(
+      "autocomplete",
+      "off"
+    );
+    expect(screen.getByPlaceholderText("Ask or build anything")).toHaveAttribute(
+      "maxlength",
+      String(MAX_WEB_PROMPT_CHARS)
+    );
   });
 
-  it("offers Queue and Stop as separate actions during an active run", () => {
-    const { onSubmit, onStopExecution } = renderComposer();
+  it("allows drafting while the session connection is not ready", () => {
+    render(<ComposerHarness initialValue="Draft while connecting" connecting />);
 
-    fireEvent.click(screen.getByRole("button", { name: /queue/i }));
-    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
-
-    expect(onSubmit).toHaveBeenCalledTimes(1);
-    expect(onStopExecution).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps model controls available while an active run accepts follow-ups", () => {
-    renderComposer();
-
+    const input = screen.getByDisplayValue("Draft while connecting");
+    expect(input).toBeEnabled();
+    fireEvent.change(input, { target: { value: "Updated while connecting" } });
+    expect(screen.getByDisplayValue("Updated while connecting")).toBeEnabled();
+    expect(screen.getByTitle("Attach images")).toBeEnabled();
     expect(screen.getByRole("button", { name: "Model" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Reasoning" })).toBeEnabled();
+    expect(screen.getByTitle(/Send/)).toBeDisabled();
   });
 
-  it("keeps a rejected submission visible and retryable", () => {
-    renderComposer({ submissionError: "Not connected. Reconnect and try again." });
+  it("starts with one row and grows and shrinks with its content", () => {
+    const scrollHeight = vi
+      .spyOn(HTMLTextAreaElement.prototype, "scrollHeight", "get")
+      .mockReturnValue(48);
+    render(<ComposerHarness />);
 
-    expect(screen.getByDisplayValue("Run the tests next")).toBeInTheDocument();
-    expect(screen.getByText("Not connected. Reconnect and try again.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /queue/i })).toBeEnabled();
+    const input = screen.getByPlaceholderText<HTMLTextAreaElement>("Ask or build anything");
+    expect(input).toHaveAttribute("rows", "1");
+    expect(input).toHaveStyle({ height: "48px" });
+
+    scrollHeight.mockReturnValue(112);
+    fireEvent.change(input, { target: { value: "A prompt that wraps onto multiple lines" } });
+    expect(input).toHaveStyle({ height: "112px" });
+
+    scrollHeight.mockReturnValue(48);
+    fireEvent.change(input, { target: { value: "" } });
+    expect(input).toHaveStyle({ height: "48px" });
+
+    scrollHeight.mockReturnValue(72);
+    fireEvent(window, new Event("resize"));
+    expect(input).toHaveStyle({ height: "72px" });
   });
 
-  it("returns voice transcripts to the editable draft", () => {
-    const { onSubmit, onTranscript } = renderComposer();
+  it("keeps queue, stop, and uploading controls in the mobile layout flow", () => {
+    render(<ComposerHarness initialValue="Queued prompt" isProcessing isUploading />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Voice input" }));
+    const input = screen.getByPlaceholderText("Add a follow-up...");
+    const actions = screen.getByTestId("prompt-actions");
 
-    expect(onTranscript).toHaveBeenCalledWith("Run the voice-input tests.");
-    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByText("Uploading…")).toBeInTheDocument();
+    expect(screen.queryByText("Waiting...")).not.toBeInTheDocument();
+    expect(screen.getByText("Queue")).toBeInTheDocument();
+    expect(
+      screen.getByTitle("Stop current prompt; queued prompts will continue")
+    ).toBeInTheDocument();
+    expect(screen.getByTitle("Queue follow-up; runs after the current prompt")).toBeDisabled();
+    expect(input).toHaveClass("min-w-48", "flex-1");
+    expect(input).not.toHaveClass("pr-24");
+    expect(input.parentElement).toHaveClass("flex-wrap", "justify-end");
+    expect(actions).toHaveClass("shrink-0", "sm:absolute");
+  });
+
+  it("keeps model controls editable while processing and blocks terminal sessions", () => {
+    const { rerender } = render(<ComposerHarness initialValue="Follow up" isProcessing />);
+    expect(screen.getByTitle("Queue follow-up; runs after the current prompt")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Model" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Reasoning" })).toBeEnabled();
+
+    rerender(<ComposerHarness initialValue="Cannot send" status="archived" />);
+    expect(screen.getByTitle(/Send/)).toBeDisabled();
+  });
+
+  it("shows an inline submission error", () => {
+    render(<ComposerHarness initialValue="Keep me" submitError="The prompt queue is full" />);
+    expect(screen.getByRole("alert")).toHaveTextContent("The prompt queue is full");
+    expect(screen.getByDisplayValue("Keep me")).toBeInTheDocument();
+  });
+
+  it("offers pinned skills in the follow-up textarea", async () => {
+    const user = userEvent.setup();
+    render(<ComposerHarness withSkill />);
+    const input = screen.getByPlaceholderText("Ask or build anything");
+
+    await user.click(input);
+    await user.type(input, "$rev");
+
+    expect(await screen.findByRole("option", { name: /review-pr/i })).toBeInTheDocument();
+  });
+
+  it("removes the action bar row and spacing below md", () => {
+    render(<ComposerHarness />);
+
+    expect(screen.getByTestId("action-bar").parentElement).toHaveClass(
+      "hidden",
+      "mb-3",
+      "md:block"
+    );
   });
 });

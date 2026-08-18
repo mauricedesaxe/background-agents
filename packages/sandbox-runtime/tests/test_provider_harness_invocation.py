@@ -35,7 +35,6 @@ HARNESS_PIN_FINGERPRINTS = {
     "modal": REPO_ROOT / "terraform/environments/production/modal.tf",
     "vercel": REPO_ROOT / "terraform/environments/production/vercel.tf",
 }
-HASH_IMPLEMENTATION_COUNT = 2
 
 
 @pytest.mark.parametrize("provider", sorted(PROVIDER_BUILDS))
@@ -82,5 +81,10 @@ class TestNoProviderIsMissed:
 
 @pytest.mark.parametrize("provider", sorted(HARNESS_PIN_FINGERPRINTS))
 def test_harness_pin_invalidates_provider_image(provider):
+    # The installer is a .sh file under packages/sandbox-runtime/src; editing it must
+    # invalidate the image. Upstream's fingerprint hashes every file under that directory
+    # (a bare ``-type f`` with no name filter), which includes .sh. The fork named ``*.sh``
+    # in a whitelist; either way the .sh installer participates in the hash.
     fingerprint = HARNESS_PIN_FINGERPRINTS[provider].read_text()
-    assert fingerprint.count('-name "*.sh"') == HASH_IMPLEMENTATION_COUNT
+    assert "packages/sandbox-runtime/src" in fingerprint
+    assert '-name "*.sh"' in fingerprint or "-type f" in fingerprint

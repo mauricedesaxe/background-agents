@@ -1,21 +1,5 @@
-import { beforeEach, describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { Env } from "../src/types";
-import type * as Handlers from "../src/handlers";
-
-const { handleIssueCommentMock } = vi.hoisted(() => ({
-  handleIssueCommentMock: vi.fn().mockResolvedValue({
-    outcome: "processed",
-    session_id: "session-123",
-    message_id: "message-123",
-    handler_action: "command",
-  }),
-}));
-
-vi.mock("../src/handlers", async (importOriginal) => ({
-  ...(await importOriginal<Handlers>()),
-  handleIssueComment: handleIssueCommentMock,
-}));
-
 import app from "../src/index";
 
 /** Generate a valid GitHub webhook signature for a given secret and body. */
@@ -79,10 +63,6 @@ async function flushWaitUntil(ctx: ReturnType<typeof makeCtx>, callIndex = 0): P
 }
 
 describe("POST /webhooks/github", () => {
-  beforeEach(() => {
-    handleIssueCommentMock.mockClear();
-  });
-
   it("returns 401 for invalid signature", async () => {
     const body = '{"action":"created"}';
     const res = await app.fetch(
@@ -181,67 +161,6 @@ describe("POST /webhooks/github", () => {
     expect(githubKv.put).toHaveBeenCalledTimes(2);
   });
 
-  it.each(["get", "put"] as const)(
-    "handles actionable deliveries when the dedupe %s fails",
-    async (operation) => {
-      const body = JSON.stringify({
-        action: "created",
-        issue: {
-          number: 42,
-          title: "Review this change",
-          body: null,
-          pull_request: { url: "https://api.github.com/repos/test/repo/pulls/42" },
-        },
-        comment: {
-          id: 99,
-          body: "@test-bot[bot] review this PR",
-          user: { login: "alice" },
-        },
-        repository: {
-          owner: { login: "test" },
-          name: "repo",
-          private: false,
-          default_branch: "main",
-        },
-        sender: {
-          login: "alice",
-          id: 123,
-          avatar_url: "https://avatars.githubusercontent.com/u/123",
-        },
-      });
-      const signature = await sign(SECRET, body);
-      const ctx = makeCtx();
-      const env = makeEnv();
-      const githubKv = env.GITHUB_KV as unknown as {
-        get: ReturnType<typeof vi.fn>;
-        put: ReturnType<typeof vi.fn>;
-      };
-      githubKv[operation].mockRejectedValueOnce(new Error(`KV ${operation}() failed`));
-
-      const response = await app.fetch(
-        new Request("http://localhost/webhooks/github", {
-          method: "POST",
-          body,
-          headers: {
-            "X-Hub-Signature-256": signature,
-            "X-GitHub-Event": "issue_comment",
-            "X-GitHub-Delivery": `delivery-${operation}-failure`,
-          },
-        }),
-        env,
-        ctx
-      );
-
-      expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ ok: true });
-      expect(ctx.waitUntil).toHaveBeenCalledOnce();
-      await flushWaitUntil(ctx);
-      expect(handleIssueCommentMock).toHaveBeenCalledOnce();
-      expect(githubKv.get).toHaveBeenCalledOnce();
-      expect(githubKv.put).toHaveBeenCalledTimes(operation === "get" ? 0 : 1);
-    }
-  );
-
   it("allows redelivery after async processing failure clears the marker", async () => {
     const body = JSON.stringify({
       action: "opened",
@@ -295,7 +214,6 @@ describe("POST /webhooks/github", () => {
     const body = '{"action":"opened"}';
     const signature = await sign(SECRET, body);
     const ctx = makeCtx();
-    const env = makeEnv();
 
     const res = await app.fetch(
       new Request("http://localhost/webhooks/github", {
@@ -304,116 +222,16 @@ describe("POST /webhooks/github", () => {
         headers: {
           "X-Hub-Signature-256": signature,
           "X-GitHub-Event": "push",
-          "X-GitHub-Delivery": "ignored-delivery",
         },
       }),
-      env,
+      makeEnv(),
       ctx
     );
 
     expect(res.status).toBe(200);
     expect(ctx.waitUntil).toHaveBeenCalledOnce();
     await flushWaitUntil(ctx);
-    const githubKv = env.GITHUB_KV as unknown as {
-      get: ReturnType<typeof vi.fn>;
-      put: ReturnType<typeof vi.fn>;
-    };
-    expect(githubKv.get).not.toHaveBeenCalled();
-    expect(githubKv.put).not.toHaveBeenCalled();
   });
-
-  it("returns 200 for handled event with non-matching action", async () => {
-    const body = JSON.stringify({
-      action: "closed",
-      repository: { owner: { login: "test" }, name: "repo" },
-    });
-    const signature = await sign(SECRET, body);
-    const ctx = makeCtx();
-    const env = makeEnv();
-
-    const res = await app.fetch(
-      new Request("http://localhost/webhooks/github", {
-        method: "POST",
-        body,
-        headers: {
-          "X-Hub-Signature-256": signature,
-          "X-GitHub-Event": "pull_request",
-          "X-GitHub-Delivery": "ignored-action-delivery",
-        },
-      }),
-      env,
-      ctx
-    );
-
-    expect(res.status).toBe(200);
-    expect(ctx.waitUntil).toHaveBeenCalledOnce();
-    await flushWaitUntil(ctx);
-    const githubKv = env.GITHUB_KV as unknown as {
-      get: ReturnType<typeof vi.fn>;
-      put: ReturnType<typeof vi.fn>;
-    };
-    expect(githubKv.get).not.toHaveBeenCalled();
-    expect(githubKv.put).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ["issue", undefined, "/open-inspect investigate this bug"],
-    [
-      "pull request",
-      { url: "https://api.github.com/repos/test/repo/pulls/42" },
-      "/open-inspect review this PR",
-    ],
-  ])(
-    "dispatches a /open-inspect command from a %s comment",
-    async (_kind, pullRequest, command) => {
-      const body = JSON.stringify({
-        action: "created",
-        issue: {
-          number: 42,
-          title: "Investigate stale cache",
-          body: "The cache sometimes serves old data.",
-          ...(pullRequest ? { pull_request: pullRequest } : {}),
-        },
-        comment: { id: 99, body: command, user: { login: "alice" } },
-        repository: {
-          owner: { login: "test" },
-          name: "repo",
-          private: false,
-          default_branch: "main",
-        },
-        sender: {
-          login: "alice",
-          id: 123,
-          avatar_url: "https://avatars.githubusercontent.com/u/123",
-        },
-      });
-      const signature = await sign(SECRET, body);
-      const ctx = makeCtx();
-
-      const response = await app.fetch(
-        new Request("http://localhost/webhooks/github", {
-          method: "POST",
-          body,
-          headers: {
-            "X-Hub-Signature-256": signature,
-            "X-GitHub-Event": "issue_comment",
-          },
-        }),
-        makeEnv(),
-        ctx
-      );
-      await flushWaitUntil(ctx);
-
-      expect(response.status).toBe(200);
-      expect(handleIssueCommentMock).toHaveBeenCalledOnce();
-      const dispatchedPayload = handleIssueCommentMock.mock.calls[0][2];
-      expect(dispatchedPayload).toMatchObject({
-        issue: { number: 42 },
-        comment: { body: command },
-      });
-      expect(dispatchedPayload.issue.pull_request).toEqual(pullRequest);
-    }
-  );
 
   it("forwards closed pull request lifecycle fields to the control plane", async () => {
     const body = JSON.stringify({

@@ -5,7 +5,7 @@
 import type { Env } from "./types";
 import { authenticate, isAuthError } from "./auth/authenticate";
 import type { Principal } from "./auth/principal";
-import type { ServiceName } from "@open-inspect/shared";
+import { getUserAuth, getUserAuthRuntime } from "./auth/user/runtime";
 import {
   resolveScmProviderFromEnv,
   SourceControlProviderError,
@@ -16,16 +16,23 @@ import { createSessionRuntimeClient } from "./session/runtime-client";
 
 import { createRequestMetrics, instrumentD1 } from "./db/instrumented-d1";
 import { createLogger } from "./logger";
+import type { BackgroundJobDispatcher } from "./platform-ports";
 import {
   type Route,
+  type RouteAuthentication,
   type RequestContext,
+  defineRoute,
+  GITHUB_SANDBOX_FALLBACK_ROUTE,
   parsePattern,
   json,
   error,
   HttpError,
 } from "./routes/shared";
-import { authTokenRoutes } from "./routes/auth-tokens";
+import { browserAuthRoutes } from "./routes/browser-auth";
+import { signInProviderRoutes } from "./routes/sign-in-providers";
 import { integrationSettingsRoutes } from "./routes/integration-settings";
+import { commitSigningRoutes } from "./routes/commit-signing";
+import { scmSettingsRoutes } from "./routes/scm-settings";
 import { modelPreferencesRoutes } from "./routes/model-preferences";
 import { reposRoutes } from "./routes/repos";
 import { secretsRoutes } from "./routes/secrets";
@@ -33,14 +40,14 @@ import { environmentRoutes } from "./routes/environments";
 import { environmentSecretsRoutes } from "./routes/environment-secrets";
 import { imageBuildRoutes } from "./routes/image-builds";
 import { automationRoutes } from "./routes/automations";
+import { boardRoutes } from "./routes/board";
 import { scheduledTaskRoutes } from "./routes/scheduled-tasks";
+import { sessionLegacyCheckpointRoutes } from "./routes/session-legacy-checkpoints";
 import { mcpServerRoutes } from "./routes/mcp-servers";
 import { analyticsRoutes } from "./routes/analytics";
-import { providerIdentityRoutes } from "./routes/provider-identities";
+import { skillRoutes } from "./routes/skills";
 import { sessionRoutes } from "./routes/sessions";
-import { boardRoutes } from "./routes/board";
 import { handleSlackNotify } from "./routes/slack-notify";
-import { upstreamExchangeRoutes } from "./routes/upstream-exchange";
 import { webhookRoutes } from "./webhooks";
 
 const logger = createLogger("router");
@@ -56,90 +63,6 @@ function withCorsAndTraceHeaders(response: Response, ctx: RequestContext): Respo
     headers,
   });
 }
-
-/**
- * Routes that do not require authentication.
- */
-const PUBLIC_ROUTES: RegExp[] = [
-  /^\/health$/,
-  /^\/webhooks\/sentry\/[^/]+$/,
-  /^\/webhooks\/automation\/[^/]+$/,
-  // Image-build callbacks authenticate inside the workflow (internal HMAC
-  // for provider_image mode, per-build bearer token for provider_session).
-  /^\/image-builds\/build-complete$/,
-  /^\/image-builds\/build-failed$/,
-];
-
-/**
- * Routes that accept sandbox authentication.
- * These are session-specific routes that can be called by sandboxes using their auth token.
- * The sandbox token is validated by the Durable Object.
- */
-interface PrincipalRouteGrant {
-  method: string;
-  pattern: RegExp;
-}
-
-const SANDBOX_ONLY_ROUTES: PrincipalRouteGrant[] = [
-  { method: "POST", pattern: /^\/sessions\/[^/]+\/pr$/ },
-  { method: "POST", pattern: /^\/sessions\/[^/]+\/openai-token-refresh$/ },
-  { method: "POST", pattern: /^\/sessions\/[^/]+\/scm-credentials$/ },
-  { method: "POST", pattern: /^\/sessions\/[^/]+\/supervisor-heartbeat$/ },
-  { method: "GET", pattern: /^\/sessions\/[^/]+\/tunnel-urls$/ },
-  { method: "POST", pattern: /^\/sessions\/[^/]+\/media$/ },
-  { method: "POST", pattern: /^\/sessions\/[^/]+\/children$/ },
-  { method: "POST", pattern: /^\/sessions\/[^/]+\/children\/[^/]+\/cancel$/ },
-  { method: "POST", pattern: /^\/sessions\/[^/]+\/slack-notify$/ },
-  { method: "POST", pattern: /^\/sessions\/[^/]+\/upstream-exchange$/ },
-  { method: "POST", pattern: /^\/sessions\/[^/]+\/board$/ },
-  { method: "POST", pattern: /^\/sessions\/[^/]+\/board\/[^/]+\/mutate$/ },
-  { method: "GET", pattern: /^\/sessions\/[^/]+\/board\/[^/]+\/snapshot$/ },
-  { method: "POST", pattern: /^\/sessions\/[^/]+\/board\/[^/]+\/inspect$/ },
-  { method: "PUT", pattern: /^\/sessions\/[^/]+\/checkpoint$/ },
-  { method: "GET", pattern: /^\/sessions\/[^/]+\/checkpoint$/ },
-];
-
-const USER_OR_SANDBOX_ROUTES: PrincipalRouteGrant[] = [
-  { method: "GET", pattern: /^\/sessions\/[^/]+\/children$/ },
-  { method: "GET", pattern: /^\/sessions\/[^/]+\/children\/[^/]+$/ },
-];
-
-const SERVICE_ROUTE_GRANTS: Record<ServiceName, PrincipalRouteGrant[]> = {
-  web: [{ method: "POST", pattern: /^\/auth\/tokens\/(exchange|refresh|revoke)$/ }],
-  "slack-bot": [
-    { method: "GET", pattern: /^\/repos$/ },
-    { method: "GET", pattern: /^\/environments$/ },
-    { method: "GET", pattern: /^\/model-preferences$/ },
-    { method: "GET", pattern: /^\/integration-settings\/slack$/ },
-    { method: "GET", pattern: /^\/integration-settings\/slack\/watched-channels$/ },
-    { method: "POST", pattern: /^\/sessions$/ },
-    { method: "POST", pattern: /^\/sessions\/[^/]+\/prompt$/ },
-    { method: "GET", pattern: /^\/sessions\/[^/]+\/(events|artifacts)$/ },
-    { method: "POST", pattern: /^\/internal\/slack-event$/ },
-  ],
-  "github-bot": [
-    { method: "GET", pattern: /^\/repos\/[^/]+\/[^/]+\/metadata$/ },
-    { method: "GET", pattern: /^\/environments\/[^/]+$/ },
-    { method: "GET", pattern: /^\/integration-settings\/github\/resolved\/[^/]+\/[^/]+$/ },
-    { method: "POST", pattern: /^\/sessions$/ },
-    { method: "POST", pattern: /^\/sessions\/[^/]+\/prompt$/ },
-    { method: "POST", pattern: /^\/internal\/github-event$/ },
-  ],
-  "linear-bot": [
-    { method: "GET", pattern: /^\/repos$/ },
-    { method: "GET", pattern: /^\/environments$/ },
-    { method: "GET", pattern: /^\/integration-settings\/linear\/resolved\/[^/]+\/[^/]+$/ },
-    { method: "POST", pattern: /^\/sessions$/ },
-    { method: "POST", pattern: /^\/sessions\/[^/]+\/(prompt|stop)$/ },
-    { method: "GET", pattern: /^\/sessions\/[^/]+\/(events|artifacts)$/ },
-  ],
-  modal: [
-    { method: "GET", pattern: /^\/image-builds\/(enabled|status)$/ },
-    { method: "POST", pattern: /^\/image-builds\/(mark-stale|cleanup)$/ },
-    { method: "POST", pattern: /^\/image-builds\/trigger\/environment\/[^/]+$/ },
-    { method: "POST", pattern: /^\/image-builds\/trigger\/repo\/[^/]+\/[^/]+$/ },
-  ],
-};
 
 type CachedScmProvider =
   | {
@@ -181,81 +104,15 @@ function resolveDeploymentScmProvider(env: Env): SourceControlProviderName {
   return cachedScmProvider.provider;
 }
 
-/**
- * Check if a path matches any public route pattern.
- */
-function isPublicRoute(path: string): boolean {
-  return PUBLIC_ROUTES.some((pattern) => pattern.test(path));
-}
-
-/**
- * Check if a path matches any sandbox auth route pattern.
- */
-function matchesGrant(grant: PrincipalRouteGrant, path: string, method: string): boolean {
-  return grant.method === method && grant.pattern.test(path);
-}
-
-function isSandboxAuthRoute(path: string, method: string): boolean {
-  return [...SANDBOX_ONLY_ROUTES, ...USER_OR_SANDBOX_ROUTES].some((grant) =>
-    matchesGrant(grant, path, method)
-  );
-}
-
-function authorizePrincipal(
-  principal: Principal,
-  path: string,
-  method: string,
-  sandboxSessionId: string | null
-): boolean {
-  const sandboxOnly = SANDBOX_ONLY_ROUTES.some((grant) => matchesGrant(grant, path, method));
-  const userOrSandbox = USER_OR_SANDBOX_ROUTES.some((grant) => matchesGrant(grant, path, method));
-
-  if (principal.kind === "sandbox") {
-    return (
-      (sandboxOnly || userOrSandbox) &&
-      sandboxSessionId !== null &&
-      principal.sessionId === sandboxSessionId
-    );
-  }
-  if (sandboxOnly) return false;
-  if (principal.kind === "user") return true;
-  return SERVICE_ROUTE_GRANTS[principal.service].some((grant) => matchesGrant(grant, path, method));
-}
-
-function isScmAgnosticRoute(path: string): boolean {
-  return (
-    // Token issuance is identity work, independent of the SCM provider.
-    /^\/auth\/tokens\/(exchange|refresh|revoke)$/.test(path) ||
-    /^\/analytics\/(summary|timeseries|breakdown|pull-requests)$/.test(path) ||
-    // Identity resolution is independent of the SCM provider. Only the known
-    // auth providers are agnostic; an unimplemented SCM (e.g. gitlab) still 501s.
-    /^\/provider-identities\/(github|slack|linear|google)\/[^/]+$/.test(path) ||
-    /^\/sessions\/[^/]+\/tunnel-urls$/.test(path) ||
-    /^\/sessions\/[^/]+\/supervisor-heartbeat$/.test(path) ||
-    /^\/sessions\/[^/]+\/children(\/[^/]+(\/cancel)?)?$/.test(path) ||
-    /^\/sessions\/[^/]+\/checkpoint$/.test(path) ||
-    // Boards are unrelated to the SCM provider.
-    /^\/sessions\/[^/]+\/board(\/[^/]+\/(mutate|snapshot|inspect))?$/.test(path)
-  );
-}
-
-function isProviderImplementedRoute(provider: SourceControlProviderName, path: string): boolean {
-  if (provider === "github") return true;
-  return provider === "gitlab" && /^\/sessions\/[^/]+\/scm-credentials$/.test(path);
-}
-
 function enforceImplementedScmProvider(
+  route: Route,
   path: string,
   env: Env,
   ctx: RequestContext
 ): Response | null {
   try {
     const provider = resolveDeploymentScmProvider(env);
-    if (
-      !isProviderImplementedRoute(provider, path) &&
-      !isPublicRoute(path) &&
-      !isScmAgnosticRoute(path)
-    ) {
+    if (route.supportedScmProviders !== "all" && !route.supportedScmProviders.includes(provider)) {
       logger.warn("SCM provider not implemented", {
         event: "scm.provider_not_implemented",
         scm_provider: provider,
@@ -351,8 +208,6 @@ function logPrincipal(principal: Principal, ctx: RequestContext, path: string): 
   const fields: Record<string, string | undefined> = { principal_kind: principal.kind };
   switch (principal.kind) {
     case "service":
-      // Kept as a log key for dashboard continuity; per-service is the only
-      // service scheme since the shared bearer's retirement.
       fields.auth_scheme = "per-service";
       fields.service = principal.service;
       fields.actor = principal.actor?.participantUserId;
@@ -361,7 +216,7 @@ function logPrincipal(principal: Principal, ctx: RequestContext, path: string): 
       fields.session_id = principal.sessionId;
       break;
     case "user":
-      fields.user_id = principal.user.canonicalUserId ?? undefined;
+      fields.user_id = principal.userId;
       break;
   }
   logger.info("auth.principal", {
@@ -373,33 +228,66 @@ function logPrincipal(principal: Principal, ctx: RequestContext, path: string): 
   });
 }
 
+function logRequest(
+  response: Response,
+  ctx: RequestContext,
+  method: string,
+  path: string,
+  startTime: number
+): void {
+  logger.info("http.request", {
+    event: "http.request",
+    request_id: ctx.request_id,
+    trace_id: ctx.trace_id,
+    http_method: method,
+    http_path: path,
+    http_status: response.status,
+    duration_ms: Date.now() - startTime,
+    outcome: response.status >= 500 ? "error" : "success",
+    ...ctx.metrics.summarize(),
+  });
+}
+
+export function enforceRoutePrincipal(
+  authentication: RouteAuthentication,
+  principal: Principal
+): Response | null {
+  if (
+    authentication.kind === "web-service" &&
+    (principal.kind !== "service" || principal.service !== "web")
+  ) {
+    return error("Unauthorized", 401);
+  }
+  if (authentication.kind === "user" && principal.kind !== "user") {
+    return error("Human user authentication required", 403);
+  }
+  return null;
+}
+
 /**
  * Routes definition.
  */
-const routes: Route[] = [
+export const routes: Route[] = [
   // Health check
   {
+    authentication: { kind: "public" },
+    supportedScmProviders: "all",
     method: "GET",
     pattern: parsePattern("/health"),
     handler: async () => json({ status: "healthy", service: "open-inspect-control-plane" }),
   },
 
-  // Token issuance (exchange + refresh; web service principal only)
-  ...authTokenRoutes,
+  ...browserAuthRoutes,
+  ...signInProviderRoutes,
 
   // Session management
   ...sessionRoutes,
   // Agent-initiated Slack notification (sandbox-authenticated)
-  {
+  defineRoute(GITHUB_SANDBOX_FALLBACK_ROUTE, {
     method: "POST",
     pattern: parsePattern("/sessions/:id/slack-notify"),
     handler: handleSlackNotify,
-  },
-  ...upstreamExchangeRoutes,
-
-  // Interactive tldraw boards (create is session-scoped; mutate/snapshot reach
-  // the BoardRoom DO). All sandbox-authenticated.
-  ...boardRoutes,
+  }),
 
   // Repository management
   ...reposRoutes,
@@ -420,18 +308,28 @@ const routes: Route[] = [
   // Integration settings
   ...integrationSettingsRoutes,
 
+  // Deployment-wide commit signing identity
+  ...commitSigningRoutes,
+
+  // SCM (source-control) settings
+  ...scmSettingsRoutes,
+
   // Automations
   ...automationRoutes,
+
   ...scheduledTaskRoutes,
 
-  // MCP servers
+  ...boardRoutes,
+
+  ...sessionLegacyCheckpointRoutes,
+
   ...mcpServerRoutes,
 
   // Analytics
   ...analyticsRoutes,
 
-  // Provider identities
-  ...providerIdentityRoutes,
+  // Installation-wide managed skills and personal profiles
+  ...skillRoutes,
 
   // Webhooks (public routes — auth handled per-route)
   ...webhookRoutes,
@@ -443,7 +341,7 @@ const routes: Route[] = [
 export async function handleRequest(
   request: Request,
   env: Env,
-  executionCtx?: ExecutionContext
+  executionCtx: BackgroundJobDispatcher
 ): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -473,6 +371,13 @@ export async function handleRequest(
     metrics,
     // eslint-disable-next-line no-restricted-syntax -- composition root: the one route-layer env.DB read
     db: instrumentD1(env.DB, metrics),
+    // env.DB (not the per-request instrumented wrapper) keys the memoized
+    // Better Auth runtime: the canonical adapter accepts any SqlDatabase, but
+    // cache identity requires the stable object.
+    // eslint-disable-next-line no-restricted-syntax -- composition root: stable cache key for the auth runtime
+    getUserAuth: () => getUserAuth(env, env.DB),
+    // eslint-disable-next-line no-restricted-syntax -- composition root owns normalized auth runtime construction
+    getUserAuthRuntime: () => getUserAuthRuntime(env, env.DB),
     executionCtx,
   };
 
@@ -481,7 +386,7 @@ export async function handleRequest(
     return new Response(null, {
       headers: {
         "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, Authorization",
         "Access-Control-Max-Age": "86400",
         "x-request-id": ctx.request_id,
@@ -490,97 +395,101 @@ export async function handleRequest(
     });
   }
 
-  // Require authentication for non-public routes
-  if (!isPublicRoute(path)) {
+  const matchedRoute = routes
+    .filter((route) => route.method === method)
+    .map((route) => ({ route, match: path.match(route.pattern) }))
+    .find(
+      (candidate): candidate is { route: Route; match: RegExpMatchArray } =>
+        candidate.match !== null
+    );
+  if (!matchedRoute) {
+    return withCorsAndTraceHeaders(error("Not found", 404), ctx);
+  }
+
+  const authentication = matchedRoute.route.authentication;
+  if (authentication.kind !== "public" && authentication.kind !== "handler-authenticated") {
     let authError: Response | null;
 
-    // Session id for sandbox auth (e.g., /sessions/abc123/pr -> abc123)
-    const sandboxSessionId = path.match(/^\/sessions\/([^/]+)\//)?.[1] ?? null;
+    const sandboxSessionId =
+      authentication.kind === "sandbox" ||
+      authentication.kind === "user-or-service-with-sandbox-fallback"
+        ? authentication.getSessionId(matchedRoute.match)
+        : null;
 
-    const authResult = await authenticate(request, env, ctx);
-
-    if (isAuthError(authResult)) {
-      authError = error(authResult.reason, authResult.status);
-
-      if (
-        authResult.failedScheme === "none" &&
-        isSandboxAuthRoute(path, method) &&
-        sandboxSessionId
-      ) {
-        authError = await verifySandboxAuth(request, env, sandboxSessionId, ctx);
-      }
+    if (authentication.kind === "sandbox") {
+      authError = sandboxSessionId
+        ? await verifySandboxAuth(request, env, sandboxSessionId, ctx)
+        : error("Unauthorized: Invalid session path", 401);
     } else {
-      authError = null;
-      ctx.principal = authResult.principal;
-      request = authResult.request;
+      const authResult = await authenticate(request, env, ctx, {
+        webService: authentication.kind === "web-service" ? "service" : "user",
+      });
+
+      if (isAuthError(authResult)) {
+        // A service-credential attempt is terminal; only a request with no
+        // recognized credential may still be a sandbox-token call on a
+        // sandbox-accepting route.
+        authError = error(authResult.reason, authResult.status);
+
+        if (
+          authResult.failedScheme === "none" &&
+          authentication.kind === "user-or-service-with-sandbox-fallback" &&
+          sandboxSessionId
+        ) {
+          authError = await verifySandboxAuth(request, env, sandboxSessionId, ctx);
+        }
+      } else {
+        authError = null;
+        ctx.principal = authResult.principal;
+        ctx.authentication = authResult.authentication;
+        request = authResult.request;
+        authError = enforceRoutePrincipal(authentication, ctx.principal);
+      }
     }
 
     if (authError) {
+      if (ctx.principal) {
+        logPrincipal(ctx.principal, ctx, path);
+        logRequest(authError, ctx, method, path, startTime);
+      }
       return withCorsAndTraceHeaders(authError, ctx);
     }
 
     if (ctx.principal) {
       logPrincipal(ctx.principal, ctx, path);
-      if (!authorizePrincipal(ctx.principal, path, method, sandboxSessionId)) {
-        return withCorsAndTraceHeaders(error("Forbidden", 403), ctx);
-      }
     }
   }
 
-  const providerCheck = enforceImplementedScmProvider(path, env, ctx);
+  const providerCheck = enforceImplementedScmProvider(matchedRoute.route, path, env, ctx);
   if (providerCheck) {
     return providerCheck;
   }
 
-  // Find matching route
-  for (const route of routes) {
-    if (route.method !== method) continue;
-
-    const match = path.match(route.pattern);
-    if (match) {
-      let response: Response;
-      let outcome: "success" | "error";
-      try {
-        response = await route.handler(request, env, match, ctx);
-        outcome = response.status >= 500 ? "error" : "success";
-      } catch (e) {
-        if (e instanceof HttpError) {
-          response = error(e.message, e.status);
-          outcome = e.status >= 500 ? "error" : "success";
-        } else {
-          const durationMs = Date.now() - startTime;
-          logger.error("http.request", {
-            event: "http.request",
-            request_id: ctx.request_id,
-            trace_id: ctx.trace_id,
-            http_method: method,
-            http_path: path,
-            http_status: 500,
-            duration_ms: durationMs,
-            outcome: "error",
-            error: e instanceof Error ? e : String(e),
-            ...ctx.metrics.summarize(),
-          });
-          return withCorsAndTraceHeaders(error("Internal server error", 500), ctx);
-        }
-      }
-
+  let response: Response;
+  try {
+    response = await matchedRoute.route.handler(request, env, matchedRoute.match, ctx);
+  } catch (e) {
+    if (e instanceof HttpError) {
+      response = error(e.message, e.status);
+    } else {
       const durationMs = Date.now() - startTime;
-      logger.info("http.request", {
+      logger.error("http.request", {
         event: "http.request",
         request_id: ctx.request_id,
         trace_id: ctx.trace_id,
         http_method: method,
         http_path: path,
-        http_status: response.status,
+        http_status: 500,
         duration_ms: durationMs,
-        outcome,
+        outcome: "error",
+        error: e instanceof Error ? e : String(e),
         ...ctx.metrics.summarize(),
       });
-
-      return withCorsAndTraceHeaders(response, ctx);
+      return withCorsAndTraceHeaders(error("Internal server error", 500), ctx);
     }
   }
 
-  return error("Not found", 404);
+  logRequest(response, ctx, method, path, startTime);
+
+  return withCorsAndTraceHeaders(response, ctx);
 }

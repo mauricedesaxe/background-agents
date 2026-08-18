@@ -3,8 +3,6 @@ import {
   generateAppJwt,
   generateInstallationToken,
   postReaction,
-  postIssueComment,
-  fetchPullRequest,
   checkSenderPermission,
 } from "../src/github-auth";
 
@@ -57,87 +55,6 @@ describe("generateAppJwt", () => {
     expect(payload.iat).toBeLessThanOrEqual(now - 58);
     expect(payload.exp).toBeGreaterThanOrEqual(now + 598);
     expect(payload.exp).toBeLessThanOrEqual(now + 602);
-  });
-});
-
-describe("GitHub issue and pull request API", () => {
-  const originalFetch = globalThis.fetch;
-
-  beforeEach(() => {
-    globalThis.fetch = vi.fn();
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-  });
-
-  it("posts a visible issue comment", async () => {
-    vi.mocked(globalThis.fetch).mockResolvedValue(new Response("", { status: 201 }));
-
-    await expect(
-      postIssueComment("token", "acme", "widgets", 42, "Open Inspect could not start")
-    ).resolves.toBe(true);
-    expect(globalThis.fetch).toHaveBeenCalledWith(
-      "https://api.github.com/repos/acme/widgets/issues/42/comments",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ body: "Open Inspect could not start" }),
-      })
-    );
-  });
-
-  it("parses the PR branch and context", async () => {
-    vi.mocked(globalThis.fetch).mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          title: "Fix cache",
-          body: "Fixes stale reads",
-          user: { login: "alice" },
-          head: { ref: "fix/cache", sha: "abc123", repo: { full_name: "acme/widgets" } },
-          base: { ref: "main", repo: { full_name: "acme/widgets" } },
-        }),
-        { status: 200 }
-      )
-    );
-
-    await expect(fetchPullRequest("token", "acme", "widgets", 42)).resolves.toEqual({
-      title: "Fix cache",
-      body: "Fixes stale reads",
-      author: "alice",
-      head: "fix/cache",
-      headSha: "abc123",
-      headRepository: "acme/widgets",
-      base: "main",
-      baseRepository: "acme/widgets",
-      isCrossRepository: false,
-    });
-  });
-
-  it("identifies a fork PR without dropping its head repository or SHA", async () => {
-    vi.mocked(globalThis.fetch).mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          title: "Fix cache",
-          body: null,
-          user: { login: "contributor" },
-          head: {
-            ref: "main",
-            sha: "fork-sha",
-            repo: { full_name: "contributor/widgets" },
-          },
-          base: { ref: "main", repo: { full_name: "acme/widgets" } },
-        }),
-        { status: 200 }
-      )
-    );
-
-    await expect(fetchPullRequest("token", "acme", "widgets", 42)).resolves.toMatchObject({
-      head: "main",
-      headSha: "fork-sha",
-      headRepository: "contributor/widgets",
-      baseRepository: "acme/widgets",
-      isCrossRepository: true,
-    });
   });
 });
 

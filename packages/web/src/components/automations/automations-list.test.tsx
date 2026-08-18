@@ -2,10 +2,10 @@
 /// <reference types="@testing-library/jest-dom" />
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import * as matchers from "@testing-library/jest-dom/matchers";
 import type { ComponentProps } from "react";
-import type { Automation } from "@open-inspect/shared";
+import type { Automation } from "@open-inspect/shared/types/automations";
 import { AutomationsList } from "./automations-list";
 
 expect.extend(matchers);
@@ -57,6 +57,7 @@ describe("AutomationsList repository labels", () => {
     render(
       <AutomationsList
         automations={automations}
+        emptyState={{ kind: "no-automations" }}
         onPause={noop}
         onResume={noop}
         onTrigger={noop}
@@ -66,7 +67,7 @@ describe("AutomationsList repository labels", () => {
 
   it("shows the repository name for a single-repository automation", () => {
     renderList([makeAutomation()]);
-    expect(screen.getByRole("heading", { name: "acme/web-app" })).toBeInTheDocument();
+    expect(screen.getByText("acme/web-app")).toBeInTheDocument();
   });
 
   it("shows a count for a multi-repository automation", () => {
@@ -79,7 +80,7 @@ describe("AutomationsList repository labels", () => {
         ],
       }),
     ]);
-    expect(screen.getAllByText("3 repositories")).toHaveLength(3);
+    expect(screen.getByText("3 repositories")).toBeInTheDocument();
   });
 
   it("shows the repo-less label when no repository is selected", () => {
@@ -92,69 +93,6 @@ describe("AutomationsList repository labels", () => {
   });
 });
 
-describe("AutomationsList ordering", () => {
-  const renderList = (automations: Automation[]) =>
-    render(
-      <AutomationsList
-        automations={automations}
-        onPause={noop}
-        onResume={noop}
-        onTrigger={noop}
-        onDelete={noop}
-      />
-    );
-
-  it("groups repositories alphabetically and repeats multi-repository automations", () => {
-    renderList([
-      makeAutomation({
-        id: "multi",
-        name: "Shared checks",
-        repositories: [
-          { repoOwner: "zeta", repoName: "dashboard", repoId: 2, baseBranch: "main" },
-          { repoOwner: "acme", repoName: "api", repoId: 1, baseBranch: "main" },
-        ],
-      }),
-      makeAutomation({ id: "web", name: "Web checks" }),
-      makeAutomation({ id: "other", name: "Workspace checks", repositories: [] }),
-    ]);
-
-    expect(
-      screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)
-    ).toEqual(["acme/api", "acme/web-app", "zeta/dashboard", "Other targets"]);
-    expect(screen.getAllByRole("link", { name: "Shared checks" })).toHaveLength(2);
-  });
-
-  it("sorts titles case-insensitively and uses newest creation time for ties", () => {
-    renderList([
-      makeAutomation({ id: "older", name: "Review", createdAt: 100 }),
-      makeAutomation({ id: "beta", name: "beta", createdAt: 400 }),
-      makeAutomation({ id: "alpha", name: "Alpha", createdAt: 300 }),
-      makeAutomation({ id: "accented", name: "résumé", createdAt: 500 }),
-      makeAutomation({ id: "unaccented", name: "resume", createdAt: 50 }),
-      makeAutomation({ id: "newer", name: "review", createdAt: 200 }),
-    ]);
-
-    const group = screen.getByRole("region", { name: "acme/web-app" });
-    expect(
-      within(group)
-        .getAllByRole("link")
-        .map((link) => link.textContent)
-    ).toEqual(["Alpha", "beta", "resume", "résumé", "review", "Review"]);
-    expect(
-      within(group)
-        .getAllByRole("link")
-        .map((link) => link.getAttribute("href"))
-    ).toEqual([
-      "/automations/alpha",
-      "/automations/beta",
-      "/automations/unaccented",
-      "/automations/accented",
-      "/automations/newer",
-      "/automations/older",
-    ]);
-  });
-});
-
 describe("AutomationsList schedule metadata", () => {
   it("shows how long remains until the next scheduled run", () => {
     vi.useFakeTimers();
@@ -163,6 +101,7 @@ describe("AutomationsList schedule metadata", () => {
     render(
       <AutomationsList
         automations={[makeAutomation({ nextRunAt: Date.now() + 2 * 60 * 60 * 1000 })]}
+        emptyState={{ kind: "no-automations" }}
         onPause={noop}
         onResume={noop}
         onTrigger={noop}
@@ -179,6 +118,7 @@ describe("AutomationsList empty state", () => {
     render(
       <AutomationsList
         automations={[]}
+        emptyState={{ kind: "no-automations" }}
         onPause={noop}
         onResume={noop}
         onTrigger={noop}
@@ -194,5 +134,21 @@ describe("AutomationsList empty state", () => {
       "href",
       "/automations/new"
     );
+  });
+
+  it("describes an empty name search without showing creation prompts", () => {
+    render(
+      <AutomationsList
+        automations={[]}
+        emptyState={{ kind: "no-search-results", nameSearch: "release" }}
+        onPause={noop}
+        onResume={noop}
+        onTrigger={noop}
+        onDelete={noop}
+      />
+    );
+
+    expect(screen.getByText('No automations match "release".')).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /create automation/i })).not.toBeInTheDocument();
   });
 });

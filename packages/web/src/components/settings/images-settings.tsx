@@ -2,16 +2,22 @@
 
 import { useState } from "react";
 import useSWR, { mutate } from "swr";
-import type { ImageBuildRecordView } from "@open-inspect/shared";
+import type { ImageBuildRecordView } from "@open-inspect/shared/types/image-builds";
 import { useRepos } from "@/hooks/use-repos";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ErrorBanner } from "@/components/ui/error-banner";
 import { RefreshIcon } from "@/components/ui/icons";
-import { IMAGE_BUILDS_KEY, parsePrimaryBuildSha, type ImageBuildsFeed } from "@/lib/image-builds";
+import {
+  IMAGE_BUILDS_KEY,
+  formatReadyDetails,
+  parsePrimaryBuildSha,
+  type ImageBuildsFeed,
+} from "@/lib/image-builds";
 import { supportsRepoImages } from "@/lib/sandbox-provider";
-import { ImageBuildStatus, formatReadyDetails } from "./image-build-status";
+import { ImageBuildStatus } from "./image-build-status";
+import { browserApiFetch } from "@/lib/browser-api-fetch";
 
 export function ImagesSettings() {
   const repoImagesSupported = supportsRepoImages();
@@ -55,7 +61,7 @@ export function ImagesSettings() {
     setError("");
 
     try {
-      const res = await fetch(
+      const res = await browserApiFetch(
         `/api/image-builds/repo/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/toggle`,
         {
           method: "PUT",
@@ -87,7 +93,7 @@ export function ImagesSettings() {
     setError("");
 
     try {
-      const res = await fetch(
+      const res = await browserApiFetch(
         `/api/image-builds/repo/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/trigger`,
         { method: "POST" }
       );

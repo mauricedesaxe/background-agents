@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   applyIdentityEnforcement,
   deriveIdentity,
-  authorizeProviderIdentityRequest,
   mayAttachCallbackContext,
   requireEventPoster,
   resolveCanonicalUserId,
@@ -11,16 +10,11 @@ import {
 import type { Principal, ResolvedIdentity } from "./principal";
 import type { UserStore } from "../db/user-store";
 import type { RequestContext } from "../routes/shared";
+import { TEST_BACKGROUND_TASK_CONTEXT } from "../router.test-support";
 
 const USER_PRINCIPAL: Principal = {
   kind: "user",
-  user: {
-    provider: "github",
-    providerUserId: "583231",
-    canonicalUserId: "canon-1",
-    participantUserId: "canon-1",
-  },
-  tokenId: "token-1",
+  userId: "canon-1",
 };
 
 const SLACK_ACTOR: ResolvedIdentity = {
@@ -41,6 +35,7 @@ function createCtx(principal?: Principal): RequestContext {
     trace_id: "trace-test",
     request_id: "req-test",
     principal,
+    executionCtx: TEST_BACKGROUND_TASK_CONTEXT,
   } as RequestContext;
 }
 
@@ -86,15 +81,6 @@ describe("deriveIdentity", () => {
       spawnSource: "slack-bot",
     });
   });
-
-  it("derives modal with no participant and no spawn source", () => {
-    expect(deriveIdentity({ kind: "service", service: "modal", actor: null })).toEqual({
-      participantUserId: null,
-      canonicalUserId: null,
-      actor: null,
-      spawnSource: null,
-    });
-  });
 });
 
 describe("applyIdentityEnforcement — identityless principals", () => {
@@ -129,6 +115,7 @@ describe("applyIdentityEnforcement — forbidden-field rejection", () => {
     ).toBeUndefined();
     expect(
       applyIdentityEnforcement(createCtx(USER_PRINCIPAL), "session-create", {
+        scmLogin: "ada",
         actorDisplayName: "Ada",
         title: "display fields stay body-carried",
       }).rejection
@@ -137,7 +124,7 @@ describe("applyIdentityEnforcement — forbidden-field rejection", () => {
 
   it("rejects every spawning-route identity and credential field", () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    for (const route of ["session-create", "ws-token", "automation-create"] as const) {
+    for (const route of ["session-create", "automation-create"] as const) {
       for (const field of [
         "userId",
         "spawnSource",
@@ -147,10 +134,6 @@ describe("applyIdentityEnforcement — forbidden-field rejection", () => {
         "scmToken",
         "scmRefreshToken",
         "scmUserId",
-        "scmLogin",
-        "scmName",
-        "scmEmail",
-        "scmAvatarUrl",
       ]) {
         const { rejection } = applyIdentityEnforcement(createCtx(USER_PRINCIPAL), route, {
           [field]: "asserted",
@@ -346,67 +329,5 @@ describe("requireEventPoster", () => {
     expect(requireEventPoster(createCtx(SLACK_BOT_PRINCIPAL), "slack")).toBeNull();
     // Sentry events are not bot-posted: explicit exemption for any service.
     expect(requireEventPoster(createCtx(GITHUB_BOT), "sentry")).toBeNull();
-  });
-});
-
-describe("authorizeProviderIdentityRequest", () => {
-  it("logs and denies a user principal upserting another identity", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const authz = authorizeProviderIdentityRequest(createCtx(USER_PRINCIPAL), "github", "999999");
-    expect(authz.action).toBe("deny");
-    expect(authz.action === "deny" && authz.response.status).toBe(403);
-    const mismatch = loggedEvents(warn).find((e) => e.event === "identity.mismatch_rejected");
-    expect(mismatch).toMatchObject({
-      expected: "github:583231",
-      actual: "github:999999",
-    });
-  });
-
-  it("resolves a matching user to its token-fixed canonical id, never an upsert", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    // The takeover guard: a matching user resolves to the id its token already
-    // carries — it must NEVER return `upsert`, which would let the request
-    // body's providerEmail re-link the identity to another user.
-    const authz = authorizeProviderIdentityRequest(createCtx(USER_PRINCIPAL), "github", "583231");
-    expect(authz).toEqual({ action: "resolve", canonicalUserId: "canon-1" });
-    expect(warn).not.toHaveBeenCalled();
-  });
-
-  it("denies the web service now that provider identity linking requires a user token", () => {
-    vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const authz = authorizeProviderIdentityRequest(
-      createCtx({ kind: "service", service: "web", actor: null }),
-      "github",
-      "999999"
-    );
-    expect(authz.action === "deny" && authz.response.status).toBe(403);
-  });
-
-  it("fails closed if a user principal ever lacks a canonical id", () => {
-    vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const principal: Principal = {
-      kind: "user",
-      user: {
-        provider: "github",
-        providerUserId: "583231",
-        canonicalUserId: null,
-        participantUserId: "583231",
-      },
-      tokenId: "token-1",
-    };
-    const authz = authorizeProviderIdentityRequest(createCtx(principal), "github", "583231");
-    expect(authz.action === "deny" && authz.response.status).toBe(500);
-  });
-
-  it("denies every other service principal", () => {
-    vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const slack = authorizeProviderIdentityRequest(createCtx(SLACK_BOT_PRINCIPAL), "slack", "UANY");
-    expect(slack.action === "deny" && slack.response.status).toBe(403);
-    const modal = authorizeProviderIdentityRequest(
-      createCtx({ kind: "service", service: "modal", actor: null }),
-      "github",
-      "999999"
-    );
-    expect(modal.action === "deny" && modal.response.status).toBe(403);
   });
 });

@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { env, runInDurableObject } from "cloudflare:test";
-import type { SessionDO } from "../../src/session/durable-object";
+import { SELF, env } from "cloudflare:test";
 import {
   initNamedSession,
   openClientWs,
@@ -8,16 +7,30 @@ import {
   seedEvents,
   queryDO,
   seedMessage,
-  openSandboxWs,
-  seedSandboxAuth,
-  sendSandboxReady,
   waitForSandboxStatus,
 } from "./helpers";
-
-const SANDBOX_TOKEN = "test-sandbox-token";
-const SANDBOX_ID = "test-sandbox-id";
+import { DEFAULT_REPLAY_LIMIT } from "../../src/session/event-stream";
+import { MAX_UNFINISHED_PROMPTS } from "@open-inspect/shared/types/prompts";
 
 describe("Client WebSocket (via SELF.fetch)", () => {
+  it("rejects a nonexistent session before initializing its Durable Object", async () => {
+    const name = `ws-client-nonexistent-${Date.now()}`;
+
+    const response = await SELF.fetch(`https://test.local/sessions/${name}/ws`, {
+      headers: { Upgrade: "websocket" },
+    });
+
+    expect(response.status).toBe(404);
+    expect(response.webSocket).toBeNull();
+
+    const stub = env.SESSION.get(env.SESSION.idFromName(name));
+    const tables = await queryDO<{ name: string }>(
+      stub,
+      "SELECT name FROM sqlite_master WHERE type = 'table'"
+    );
+    expect(tables).toEqual([]);
+  });
+
   it("upgrade returns 101 with webSocket", async () => {
     const name = `ws-client-upgrade-${Date.now()}`;
     await initNamedSession(name);
@@ -38,7 +51,9 @@ describe("Client WebSocket (via SELF.fetch)", () => {
       ws.addEventListener("close", (evt) => resolve({ code: evt.code }));
     });
 
-    ws.send(JSON.stringify({ type: "prompt", content: "hello" }));
+    ws.send(
+      JSON.stringify({ type: "prompt", clientRequestId: crypto.randomUUID(), content: "hello" })
+    );
 
     // Unsubscribed sockets have no client mapping — the DO closes them
     // with 4002 and never enqueues the prompt.
@@ -51,7 +66,21 @@ describe("Client WebSocket (via SELF.fetch)", () => {
     expect(rows[0].count).toBe(0);
   });
 
-  it("subscribe with valid token sends subscribed + state", async () => {
+  it("rejects typing before subscribing", async () => {
+    const name = `ws-client-nosub-typing-${Date.now()}`;
+    await initNamedSession(name);
+
+    const { ws } = await openClientWs(name);
+    const closed = new Promise<{ code: number }>((resolve) => {
+      ws.addEventListener("close", (event) => resolve({ code: event.code }));
+    });
+
+    ws.send(JSON.stringify({ type: "typing" }));
+
+    await expect(closed).resolves.toEqual({ code: 4002 });
+  });
+
+  it("subscribe with valid token sends the canonical snapshot", async () => {
     const name = `ws-client-sub-${Date.now()}`;
     await initNamedSession(name, { repoOwner: "acme", repoName: "web-app" });
 
@@ -59,46 +88,26 @@ describe("Client WebSocket (via SELF.fetch)", () => {
 
     const subscribed = messages!.find((m) => m.type === "subscribed") as Record<string, unknown>;
     expect(subscribed).toBeDefined();
-    expect(subscribed.sessionId).toBe(name);
     expect(subscribed.participantId).toBe(participantId);
 
-    const state = subscribed.state as Record<string, unknown>;
+    const state = subscribed.session as Record<string, unknown>;
     expect(state.id).toBe(name);
     expect(state.repoOwner).toBe("acme");
 
     ws.close();
   });
 
-  it("subscribe hydrates dashboard URL when provider object id exists", async () => {
-    const dashboardUrl =
-      "https://modal.com/apps/test-workspace/main/deployed/open-inspect?activeTab=sandboxes&sandboxId=provider-obj-123";
-    const cases = [
-      {
-        status: "connecting",
-        providerObjectId: "provider-obj-123",
-        expectedDashboardUrl: dashboardUrl,
-      },
-      {
-        status: "spawning",
-        providerObjectId: "provider-obj-123",
-        expectedDashboardUrl: dashboardUrl,
-      },
-      { status: "spawning", providerObjectId: null, expectedDashboardUrl: null },
-      { status: "stale", providerObjectId: "provider-obj-123", expectedDashboardUrl: dashboardUrl },
-      {
-        status: "stopped",
-        providerObjectId: "provider-obj-123",
-        expectedDashboardUrl: dashboardUrl,
-      },
-      {
-        status: "failed",
-        providerObjectId: "provider-obj-123",
-        expectedDashboardUrl: dashboardUrl,
-      },
-    ];
-
-    for (const [index, testCase] of cases.entries()) {
-      const name = `ws-client-dashboard-url-${testCase.status}-${testCase.providerObjectId ? "with-id" : "without-id"}-${Date.now()}-${index}`;
+  it.each([
+    { status: "connecting", providerObjectId: "provider-obj-123" },
+    { status: "spawning", providerObjectId: "provider-obj-123" },
+    { status: "spawning", providerObjectId: null },
+    { status: "stale", providerObjectId: "provider-obj-123" },
+    { status: "stopped", providerObjectId: "provider-obj-123" },
+    { status: "failed", providerObjectId: "provider-obj-123" },
+  ])(
+    "subscribe hydrates dashboard URL for $status sandbox with provider object id $providerObjectId",
+    async ({ status, providerObjectId }) => {
+      const name = `ws-client-dashboard-url-${status}-${providerObjectId ? "with-id" : "without-id"}-${Date.now()}`;
       const { stub } = await initNamedSession(name);
       // Wait for init's fire-and-forget warmSandbox to fail (no Modal in test env)
       // before forcing each status, otherwise it can race and overwrite the row.
@@ -108,20 +117,24 @@ describe("Client WebSocket (via SELF.fetch)", () => {
         `UPDATE sandbox
            SET status = ?, modal_object_id = ?
          WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
-        testCase.status,
-        testCase.providerObjectId
+        status,
+        providerObjectId
       );
 
       const { ws, messages } = await openClientWs(name, { subscribe: true });
       const subscribed = messages!.find((m) => m.type === "subscribed") as Record<string, unknown>;
-      const state = subscribed.state as Record<string, unknown>;
+      const state = subscribed.session as Record<string, unknown>;
 
-      expect(state.sandboxStatus).toBe(testCase.status);
-      expect(state.sandboxDashboardUrl).toBe(testCase.expectedDashboardUrl);
+      expect(state.sandboxStatus).toBe(status);
+      expect(state.sandboxDashboardUrl).toBe(
+        providerObjectId
+          ? "https://modal.com/apps/test-workspace/main/deployed/open-inspect?activeTab=sandboxes&sandboxId=provider-obj-123"
+          : null
+      );
 
       ws.close();
     }
-  });
+  );
 
   it("subscribe with invalid token closes socket 4001", async () => {
     const name = `ws-client-badtoken-${Date.now()}`;
@@ -183,7 +196,7 @@ describe("Client WebSocket (via SELF.fetch)", () => {
 
     // Back-date the token past the 24-hour TTL
     const expiredAt = Date.now() - 24 * 60 * 60 * 1000 - 1;
-    await queryDO(
+    await queryDO<unknown>(
       stub,
       "UPDATE participants SET ws_token_created_at = ? WHERE user_id = ?",
       expiredAt,
@@ -219,73 +232,61 @@ describe("Client WebSocket (via SELF.fetch)", () => {
     const subscribed = messages!.find((m) => m.type === "subscribed") as Record<string, unknown>;
     expect(subscribed).toBeDefined();
     expect(subscribed.artifacts).toEqual([]);
-    const replay = subscribed.replay as { events: unknown[]; hasMore: boolean; cursor: unknown };
-    expect(replay).toBeDefined();
-    expect(replay.hasMore).toBe(false);
-    expect(replay.cursor).toBeNull();
-    expect(replay.events).toHaveLength(0);
+    const timeline = subscribed.timeline as {
+      events: unknown[];
+      hasMore: boolean;
+      cursor: unknown;
+    };
+    expect(timeline).toBeDefined();
+    expect(timeline.hasMore).toBe(false);
+    expect(timeline.cursor).toBeNull();
+    expect(timeline.events).toHaveLength(0);
 
     ws.close();
   });
 
-  it("subscribe restores pending prompt positions", async () => {
-    const name = `ws-client-prompt-queue-${Date.now()}`;
-    const { stub } = await initNamedSession(name);
-    const participants = await queryDO<{ id: string }>(stub, "SELECT id FROM participants LIMIT 1");
-    const now = Date.now();
-    await seedMessage(stub, {
-      id: "message-active",
-      authorId: participants[0].id,
-      content: "active",
-      source: "web",
-      status: "processing",
-      createdAt: now,
-      startedAt: now,
-    });
-    await seedMessage(stub, {
-      id: "message-next",
-      authorId: participants[0].id,
-      content: "next",
-      source: "web",
-      status: "pending",
-      createdAt: now,
-    });
-    await seedMessage(stub, {
-      id: "message-later",
-      authorId: participants[0].id,
-      content: "later",
-      source: "web",
-      status: "pending",
-      createdAt: now,
-    });
+  it.each([
+    { eventCount: DEFAULT_REPLAY_LIMIT, expectedHasMore: false },
+    { eventCount: DEFAULT_REPLAY_LIMIT + 1, expectedHasMore: true },
+  ])(
+    "subscribe reports hasMore=$expectedHasMore for $eventCount replay events",
+    async ({ eventCount, expectedHasMore }) => {
+      const name = `ws-client-replay-limit-${eventCount}-${Date.now()}`;
+      const { stub } = await initNamedSession(name);
+      const now = Date.now();
 
-    const { ws, messages } = await openClientWs(name, { subscribe: true });
-    const subscribed = messages!.find((message) => message.type === "subscribed");
+      await seedEvents(
+        stub,
+        Array.from({ length: eventCount }, (_, index) => ({
+          id: `ev-${index}`,
+          type: "git_sync",
+          data: JSON.stringify({
+            type: "git_sync",
+            status: "completed",
+            sandboxId: "sandbox-1",
+            timestamp: now - (eventCount - index),
+          }),
+          createdAt: now - (eventCount - index),
+        }))
+      );
 
-    expect(subscribed?.promptQueue).toEqual([
-      expect.objectContaining({
-        messageId: "message-next",
-        position: 2,
-        content: "next",
-        timestamp: now / 1000,
-      }),
-      expect.objectContaining({
-        messageId: "message-later",
-        position: 3,
-        content: "later",
-        timestamp: now / 1000,
-      }),
-    ]);
-    expect(subscribed?.activePrompt).toEqual(
-      expect.objectContaining({
-        messageId: "message-active",
-        position: 1,
-        content: "active",
-        timestamp: now / 1000,
-      })
-    );
-    ws.close();
-  });
+      const { ws, messages } = await openClientWs(name, { subscribe: true });
+
+      const subscribed = messages!.find((message) => message.type === "subscribed") as Record<
+        string,
+        unknown
+      >;
+      const timeline = subscribed.timeline as {
+        events: unknown[];
+        hasMore: boolean;
+      };
+
+      expect(timeline.events).toHaveLength(DEFAULT_REPLAY_LIMIT);
+      expect(timeline.hasMore).toBe(expectedHasMore);
+
+      ws.close();
+    }
+  );
 
   it("subscribe includes historical events in batched replay", async () => {
     const name = `ws-client-replay-events-${Date.now()}`;
@@ -295,15 +296,37 @@ describe("Client WebSocket (via SELF.fetch)", () => {
     await seedEvents(stub, [
       {
         id: "ev-1",
-        type: "tool_call",
-        data: JSON.stringify({ type: "tool_call", tool: "read_file" }),
+        type: "git_sync",
+        data: JSON.stringify({
+          type: "git_sync",
+          status: "in_progress",
+          sandboxId: "sandbox-1",
+          timestamp: now - 2000,
+        }),
         createdAt: now - 2000,
       },
       {
         id: "ev-2",
-        type: "tool_result",
-        data: JSON.stringify({ type: "tool_result", result: "ok" }),
+        type: "git_sync",
+        data: JSON.stringify({
+          type: "git_sync",
+          status: "completed",
+          sandboxId: "sandbox-1",
+          timestamp: now - 1000,
+        }),
         createdAt: now - 1000,
+      },
+      {
+        id: "ev-3",
+        type: "context_compacted",
+        data: JSON.stringify({
+          type: "context_compacted",
+          messageId: "message-1",
+          sandboxId: "sandbox-1",
+          timestamp: now / 1000,
+        }),
+        messageId: "message-1",
+        createdAt: now,
       },
     ]);
 
@@ -311,11 +334,18 @@ describe("Client WebSocket (via SELF.fetch)", () => {
 
     const subscribed = messages!.find((m) => m.type === "subscribed") as Record<string, unknown>;
     expect(subscribed).toBeDefined();
-    const replay = subscribed.replay as { events: Record<string, unknown>[]; hasMore: boolean };
-    expect(replay).toBeDefined();
-    expect(replay.events).toHaveLength(2);
-    expect(replay.events[0].type).toBe("tool_call");
-    expect(replay.events[1].type).toBe("tool_result");
+    const timeline = subscribed.timeline as {
+      events: Record<string, unknown>[];
+      hasMore: boolean;
+    };
+    expect(timeline).toBeDefined();
+    expect(timeline.events).toHaveLength(3);
+    expect(timeline.events[0]).toMatchObject({ eventId: "ev-1", event: { type: "git_sync" } });
+    expect(timeline.events[1]).toMatchObject({ eventId: "ev-2", event: { type: "git_sync" } });
+    expect(timeline.events[2]).toMatchObject({
+      eventId: "ev-3",
+      event: { type: "context_compacted", messageId: "message-1" },
+    });
 
     ws.close();
   });
@@ -396,7 +426,13 @@ describe("Client WebSocket (via SELF.fetch)", () => {
       timeoutMs: 2000,
     });
 
-    ws.send(JSON.stringify({ type: "prompt", content: "Hello from WS test" }));
+    ws.send(
+      JSON.stringify({
+        type: "prompt",
+        clientRequestId: crypto.randomUUID(),
+        content: "Hello from WS test",
+      })
+    );
 
     const messages = await collector;
     const queued = messages.find((m) => m.type === "prompt_queued") as Record<string, unknown>;
@@ -416,481 +452,391 @@ describe("Client WebSocket (via SELF.fetch)", () => {
     ws.close();
   });
 
-  it("compacts an idle session and accepts a later prompt", async () => {
-    const name = `ws-client-compact-${Date.now()}`;
+  it("deduplicates a correlated prompt and restores its authoritative queue in snapshots", async () => {
+    const name = `ws-client-idempotent-${Date.now()}`;
     const { stub } = await initNamedSession(name);
-    await seedSandboxAuth(stub, { authToken: SANDBOX_TOKEN, sandboxId: SANDBOX_ID });
-    const { ws: sandboxWs } = await openSandboxWs(name, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-    });
-    sandboxWs!.accept();
-    sendSandboxReady(sandboxWs!, SANDBOX_ID);
-    await waitForSandboxStatus(stub, "ready");
-    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
+    const { ws } = await openClientWs(name, { subscribe: true });
+    const request = {
+      type: "prompt",
+      clientRequestId: crypto.randomUUID(),
+      content: "Only once",
+      model: "anthropic/claude-haiku-4-5",
+      reasoningEffort: "high",
+    };
 
-    const sandboxMessages = collectMessages(sandboxWs!, {
-      until: (message) => message.type === "compact_context",
-    });
-    const started = collectMessages(clientWs, {
-      until: (message) =>
-        message.type === "sandbox_event" && message.event.type === "context_compaction_started",
-    });
-    clientWs.send(
-      JSON.stringify({
-        type: "compact_context",
-        requestId: "compact-request-1",
-        model: "openai/gpt-5.6-sol",
-      })
-    );
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const collector = collectMessages(ws, {
+        until: (message) => message.type === "prompt_queued",
+        timeoutMs: 2000,
+      });
+      ws.send(JSON.stringify(request));
+      const messages = await collector;
+      expect(messages.find((message) => message.type === "prompt_queued")).toMatchObject({
+        clientRequestId: request.clientRequestId,
+      });
+    }
 
-    expect((await sandboxMessages).find((message) => message.type === "compact_context")).toEqual({
-      type: "compact_context",
-      requestId: "compact-request-1",
-      model: "openai/gpt-5.6-sol",
-    });
-    expect(await started).toContainEqual({
-      type: "sandbox_event",
-      event: expect.objectContaining({
-        type: "context_compaction_started",
-        requestId: "compact-request-1",
-        sandboxId: SANDBOX_ID,
-      }),
-    });
-
-    const startedEvents = await queryDO<{ count: number }>(
+    const counts = await queryDO<{ messages: number; events: number }>(
       stub,
-      "SELECT COUNT(*) AS count FROM events WHERE type = ?",
-      "context_compaction_started"
+      `SELECT (SELECT COUNT(*) FROM messages) AS messages,
+              (SELECT COUNT(*) FROM events WHERE type = 'user_message') AS events`
     );
-    expect(startedEvents[0].count).toBe(1);
+    expect(counts[0]).toEqual({ messages: 1, events: 0 });
 
-    const completed = collectMessages(clientWs, {
-      until: (message) => message.type === "compaction_status" && message.state === "completed",
-    });
-    sandboxWs!.send(
-      JSON.stringify({
-        type: "context_compacted",
-        requestId: "compact-request-1",
-        ackId: "context_compacted:compact-request-1",
-        sandboxId: SANDBOX_ID,
-        timestamp: Date.now() / 1000,
-      })
-    );
-    expect(await completed).toContainEqual({
-      type: "compaction_status",
-      requestId: "compact-request-1",
-      state: "completed",
-    });
-
-    const events = await queryDO<{ count: number }>(
-      stub,
-      "SELECT COUNT(*) AS count FROM events WHERE type = ?",
-      "context_compacted"
-    );
-    expect(events[0].count).toBe(1);
-
-    const successfulReplayClient = await openClientWs(name, { subscribe: true });
-    const successfulReplay = successfulReplayClient.messages!.find(
-      (message) => message.type === "subscribed"
-    ) as { replay: { events: Array<{ type: string; requestId?: string }> } };
-    expect(
-      successfulReplay.replay.events
-        .filter((event) => event.requestId === "compact-request-1")
-        .map((event) => event.type)
-    ).toEqual(["context_compaction_started", "context_compacted"]);
-    successfulReplayClient.ws.close();
-
-    const duplicateAck = collectMessages(sandboxWs!, {
-      until: (message) =>
-        message.type === "ack" && message.ackId === "context_compacted:compact-request-1",
-    });
-    sandboxWs!.send(
-      JSON.stringify({
-        type: "context_compacted",
-        requestId: "compact-request-1",
-        ackId: "context_compacted:compact-request-1",
-        sandboxId: SANDBOX_ID,
-        timestamp: Date.now() / 1000,
-      })
-    );
-    await duplicateAck;
-    const deduplicatedEvents = await queryDO<{ count: number }>(
-      stub,
-      "SELECT COUNT(*) AS count FROM events WHERE type = ?",
-      "context_compacted"
-    );
-    expect(deduplicatedEvents[0].count).toBe(1);
-
-    const queued = collectMessages(clientWs, {
-      until: (message) => message.type === "prompt_queued",
-    });
-    const continuedPrompt = collectMessages(sandboxWs!, {
-      until: (message) => message.type === "prompt",
-    });
-    clientWs.send(JSON.stringify({ type: "prompt", content: "Continue after compaction" }));
-    expect((await queued).some((message) => message.type === "prompt_queued")).toBe(true);
-    expect(await continuedPrompt).toContainEqual(
-      expect.objectContaining({ type: "prompt", content: "Continue after compaction" })
-    );
-
-    sandboxWs!.close();
-    clientWs.close();
+    ws.close();
+    const reconnect = await openClientWs(name, { subscribe: true });
+    const subscribed = reconnect.messages!.find((message) => message.type === "subscribed") as {
+      promptQueue: Array<Record<string, unknown>>;
+    };
+    expect(subscribed.promptQueue).toEqual([
+      expect.objectContaining({ content: "Only once", status: "pending" }),
+    ]);
+    expect(subscribed.promptQueue[0]).not.toHaveProperty("model");
+    expect(subscribed.promptQueue[0]).not.toHaveProperty("reasoningEffort");
+    reconnect.ws.close();
   });
 
-  it("rejects compaction while a prompt is processing", async () => {
-    const name = `ws-client-compact-busy-${Date.now()}`;
-    const { stub } = await initNamedSession(name);
-    await seedSandboxAuth(stub, { authToken: SANDBOX_TOKEN, sandboxId: SANDBOX_ID });
-    const { ws: sandboxWs } = await openSandboxWs(name, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
+  it("broadcasts prompt queue updates to every subscribed client", async () => {
+    const name = `ws-client-queue-updates-${Date.now()}`;
+    await initNamedSession(name);
+    const first = await openClientWs(name, { subscribe: true, userId: "first-user" });
+    const second = await openClientWs(name, { subscribe: true, userId: "second-user" });
+    const firstMessages = collectMessages(first.ws, {
+      until: (message) => message.type === "prompt_queue_updated",
+      timeoutMs: 2000,
     });
-    sandboxWs!.accept();
-    sendSandboxReady(sandboxWs!, SANDBOX_ID);
-    await waitForSandboxStatus(stub, "ready");
-    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
-
-    const promptDispatched = collectMessages(sandboxWs!, {
-      until: (message) => message.type === "prompt",
-    });
-    clientWs.send(JSON.stringify({ type: "prompt", content: "Keep working" }));
-    await promptDispatched;
-
-    const rejected = collectMessages(clientWs, {
-      until: (message) => message.type === "error" && message.code === "SESSION_BUSY",
-    });
-    clientWs.send(
-      JSON.stringify({
-        type: "compact_context",
-        requestId: "compact-request-busy",
-        model: "openai/gpt-5.6-sol",
-      })
-    );
-    expect(await rejected).toContainEqual({
-      type: "error",
-      code: "SESSION_BUSY",
-      message: "Context can only be compacted while the session is idle",
-      requestId: "compact-request-busy",
+    const secondMessages = collectMessages(second.ws, {
+      until: (message) => message.type === "prompt_queue_updated",
+      timeoutMs: 2000,
     });
 
-    sandboxWs!.close();
-    clientWs.close();
-  });
-
-  it("correlates a losing tab's rejection with the active compaction", async () => {
-    const name = `ws-client-compact-two-tabs-${Date.now()}`;
-    const { stub } = await initNamedSession(name);
-    await seedSandboxAuth(stub, { authToken: SANDBOX_TOKEN, sandboxId: SANDBOX_ID });
-    const { ws: sandboxWs } = await openSandboxWs(name, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-    });
-    sandboxWs!.accept();
-    sendSandboxReady(sandboxWs!, SANDBOX_ID);
-    await waitForSandboxStatus(stub, "ready");
-    const first = await openClientWs(name, { subscribe: true });
-    const second = await openClientWs(name, { subscribe: true });
-
-    const dispatched = collectMessages(sandboxWs!, {
-      until: (message) => message.type === "compact_context",
-    });
-    first.ws.send(
-      JSON.stringify({
-        type: "compact_context",
-        requestId: "compact-request-first",
-        model: "openai/gpt-5.6-sol",
-      })
-    );
-    await dispatched;
-
-    const promptRejected = collectMessages(second.ws, {
-      until: (message) => message.type === "prompt_rejected",
-    });
     second.ws.send(
       JSON.stringify({
         type: "prompt",
-        requestId: "prompt-during-compaction",
-        content: "Queue after compaction",
+        clientRequestId: crypto.randomUUID(),
+        content: "Shared update",
       })
     );
-    expect(await promptRejected).toContainEqual({
-      type: "prompt_rejected",
-      requestId: "prompt-during-compaction",
-      message: "Wait for context compaction to finish before sending a prompt",
-    });
 
-    const rejected = collectMessages(second.ws, {
-      until: (message) => message.type === "error" && message.code === "SESSION_BUSY",
-    });
-    second.ws.send(
-      JSON.stringify({
-        type: "compact_context",
-        requestId: "compact-request-second",
-        model: "openai/gpt-5.6-sol",
-      })
-    );
-    expect(await rejected).toContainEqual({
-      type: "error",
-      code: "SESSION_BUSY",
-      message: "Context can only be compacted while the session is idle",
-      requestId: "compact-request-second",
-      activeRequestId: "compact-request-first",
-    });
-
-    sandboxWs!.close();
+    expect((await firstMessages).map((message) => message.type)).toContain("prompt_queue_updated");
+    expect((await secondMessages).map((message) => message.type)).toContain("prompt_queue_updated");
     first.ws.close();
     second.ws.close();
   });
 
-  it("fails compaction and accepts a later prompt when the sandbox terminates", async () => {
-    const name = `ws-client-compact-terminated-${Date.now()}`;
-    const { stub } = await initNamedSession(name);
-    await seedSandboxAuth(stub, { authToken: SANDBOX_TOKEN, sandboxId: SANDBOX_ID });
-    const { ws: sandboxWs } = await openSandboxWs(name, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-    });
-    sandboxWs!.accept();
-    sendSandboxReady(sandboxWs!, SANDBOX_ID);
-    await waitForSandboxStatus(stub, "ready");
-    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
-
-    const dispatched = collectMessages(sandboxWs!, {
-      until: (message) => message.type === "compact_context",
-    });
-    clientWs.send(
-      JSON.stringify({
-        type: "compact_context",
-        requestId: "compact-request-terminated",
-        model: "openai/gpt-5.6-sol",
-      })
-    );
-    await dispatched;
-
-    const failed = collectMessages(clientWs, {
-      until: (message) => message.type === "compaction_status" && message.state === "failed",
-    });
-    sandboxWs!.close(1000, "bridge exited");
-    expect(await failed).toContainEqual({
-      type: "compaction_status",
-      requestId: "compact-request-terminated",
-      state: "failed",
-      error: "Sandbox stopped before context compaction completed",
-    });
-
-    const failedReplayClient = await openClientWs(name, { subscribe: true });
-    const failedReplay = failedReplayClient.messages!.find(
-      (message) => message.type === "subscribed"
-    ) as { replay: { events: Array<{ type: string; requestId?: string }> } };
-    expect(
-      failedReplay.replay.events
-        .filter((event) => event.requestId === "compact-request-terminated")
-        .map((event) => event.type)
-    ).toEqual(["context_compaction_started", "context_compaction_failed"]);
-    failedReplayClient.ws.close();
-
-    const queued = collectMessages(clientWs, {
-      until: (message) => message.type === "prompt_queued",
-    });
-    clientWs.send(JSON.stringify({ type: "prompt", content: "Continue after bridge exit" }));
-    expect((await queued).some((message) => message.type === "prompt_queued")).toBe(true);
-
-    clientWs.close();
-  });
-
-  it("expires a compaction with no terminal bridge event", async () => {
-    const name = `ws-client-compact-timeout-${Date.now()}`;
-    const { stub } = await initNamedSession(name);
-    await seedSandboxAuth(stub, { authToken: SANDBOX_TOKEN, sandboxId: SANDBOX_ID });
-    const { ws: sandboxWs } = await openSandboxWs(name, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-    });
-    sandboxWs!.accept();
-    sendSandboxReady(sandboxWs!, SANDBOX_ID);
-    await waitForSandboxStatus(stub, "ready");
-    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
-
-    const dispatched = collectMessages(sandboxWs!, {
-      until: (message) => message.type === "compact_context",
-    });
-    clientWs.send(
-      JSON.stringify({
-        type: "compact_context",
-        requestId: "compact-request-timeout",
-        model: "openai/gpt-5.6-sol",
-      })
-    );
-    await dispatched;
-
-    const failed = collectMessages(clientWs, {
-      until: (message) => message.type === "compaction_status" && message.state === "failed",
-    });
-    await runInDurableObject(stub, async (instance: SessionDO) => {
-      const state = instance as unknown as {
-        activeCompaction: { requestId: string; deadlineAt: number } | null;
-      };
-      if (!state.activeCompaction) throw new Error("Expected active compaction");
-      state.activeCompaction.deadlineAt = Date.now() - 1;
-      await instance.alarm();
-    });
-    expect(await failed).toContainEqual({
-      type: "compaction_status",
-      requestId: "compact-request-timeout",
-      state: "failed",
-      error: "Context compaction timed out after 300s",
-    });
-
-    const continuedPrompt = collectMessages(sandboxWs!, {
-      until: (message) => message.type === "prompt",
-    });
-    clientWs.send(JSON.stringify({ type: "prompt", content: "Continue after timeout" }));
-    expect(await continuedPrompt).toContainEqual(
-      expect.objectContaining({ type: "prompt", content: "Continue after timeout" })
-    );
-
-    sandboxWs!.close();
-    clientWs.close();
-  });
-
-  it("cancels compaction and returns the session to idle", async () => {
-    const name = `ws-client-compact-cancel-${Date.now()}`;
-    const { stub } = await initNamedSession(name);
-    await seedSandboxAuth(stub, { authToken: SANDBOX_TOKEN, sandboxId: SANDBOX_ID });
-    const { ws: sandboxWs } = await openSandboxWs(name, {
-      authToken: SANDBOX_TOKEN,
-      sandboxId: SANDBOX_ID,
-    });
-    sandboxWs!.accept();
-    sendSandboxReady(sandboxWs!, SANDBOX_ID);
-    await waitForSandboxStatus(stub, "ready");
-    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
-
-    const dispatched = collectMessages(sandboxWs!, {
-      until: (message) => message.type === "compact_context",
-    });
-    clientWs.send(
-      JSON.stringify({
-        type: "compact_context",
-        requestId: "compact-request-cancelled",
-        model: "openai/gpt-5.6-sol",
-      })
-    );
-    await dispatched;
-
-    const stopped = collectMessages(sandboxWs!, {
-      until: (message) => message.type === "stop",
-    });
-    const failed = collectMessages(clientWs, {
-      until: (message) => message.type === "compaction_status" && message.state === "failed",
-    });
-    clientWs.send(JSON.stringify({ type: "stop" }));
-    expect((await stopped).some((message) => message.type === "stop")).toBe(true);
-    expect(await failed).toContainEqual({
-      type: "compaction_status",
-      requestId: "compact-request-cancelled",
-      state: "failed",
-      error: "Context compaction was cancelled",
-    });
-
-    sandboxWs!.close();
-    clientWs.close();
-  });
-
-  it("acknowledges a retried request without creating duplicate work", async () => {
-    const name = `ws-client-idempotent-prompt-${Date.now()}`;
+  it("rejects an idempotency conflict without creating duplicate work", async () => {
+    const name = `ws-client-conflict-${Date.now()}`;
     const { stub } = await initNamedSession(name);
     const { ws } = await openClientWs(name, { subscribe: true });
-    const requestId = "request-idempotent-1";
+    const clientRequestId = crypto.randomUUID();
+    const first = collectMessages(ws, {
+      until: (message) => message.type === "prompt_queued",
+      timeoutMs: 2000,
+    });
+    ws.send(JSON.stringify({ type: "prompt", clientRequestId, content: "First" }));
+    await first;
 
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const collector = collectMessages(ws, {
-        until: (message) => message.type === "prompt_queued" && message.messageId === requestId,
-      });
-      ws.send(
-        JSON.stringify({
-          type: "prompt",
-          requestId,
-          content: "Run this once",
-        })
-      );
-      await collector;
-    }
-
-    const rows = await queryDO<{ count: number }>(
-      stub,
-      "SELECT COUNT(*) AS count FROM messages WHERE id = ?",
-      requestId
-    );
-    expect(rows[0].count).toBe(1);
+    const conflict = collectMessages(ws, {
+      until: (message) => message.type === "error",
+      timeoutMs: 2000,
+    });
+    ws.send(JSON.stringify({ type: "prompt", clientRequestId, content: "Changed" }));
+    expect((await conflict).find((message) => message.type === "error")).toMatchObject({
+      code: "PROMPT_REQUEST_CONFLICT",
+    });
+    expect(
+      (await queryDO<{ count: number }>(stub, "SELECT COUNT(*) AS count FROM messages"))[0].count
+    ).toBe(1);
     ws.close();
   });
 
-  it("dispatches queued follow-ups in submission order after each completion", async () => {
-    const name = `ws-client-follow-ups-${Date.now()}`;
+  it("enforces the unfinished queue limit before creating another message", async () => {
+    const name = `ws-client-queue-full-${Date.now()}`;
     const { stub } = await initNamedSession(name);
-    const sandboxAuth = { authToken: "follow-up-token", sandboxId: "follow-up-sandbox" };
-    await seedSandboxAuth(stub, sandboxAuth);
+    const [{ id: participantId }] = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants LIMIT 1"
+    );
+    for (let index = 0; index < MAX_UNFINISHED_PROMPTS; index++) {
+      await seedMessage(stub, {
+        id: `message-${index}`,
+        authorId: participantId,
+        content: `Prompt ${index}`,
+        source: "web",
+        status: index === 0 ? "processing" : "pending",
+        createdAt: Date.now() + index,
+        startedAt: index === 0 ? Date.now() : undefined,
+      });
+    }
 
-    const { ws: sandboxWs } = await openSandboxWs(name, sandboxAuth);
-    expect(sandboxWs).not.toBeNull();
-    sandboxWs!.accept();
-    sendSandboxReady(sandboxWs!, sandboxAuth.sandboxId);
-    await waitForSandboxStatus(stub, "ready");
-    const { ws: clientWs } = await openClientWs(name, { subscribe: true });
-
-    const firstDispatch = collectMessages(sandboxWs!, {
-      until: (message) => message.type === "prompt",
+    const { ws } = await openClientWs(name, { subscribe: true });
+    const collector = collectMessages(ws, {
+      until: (message) => message.type === "error",
+      timeoutMs: 2000,
     });
-    clientWs.send(JSON.stringify({ type: "prompt", content: "first" }));
-    const first = (await firstDispatch).find((message) => message.type === "prompt")!;
+    ws.send(
+      JSON.stringify({
+        type: "prompt",
+        clientRequestId: crypto.randomUUID(),
+        content: "One too many",
+      })
+    );
+    expect((await collector).find((message) => message.type === "error")).toMatchObject({
+      code: "PROMPT_QUEUE_FULL",
+    });
+    const [{ count }] = await queryDO<{ count: number }>(
+      stub,
+      "SELECT COUNT(*) AS count FROM messages"
+    );
+    expect(count).toBe(MAX_UNFINISHED_PROMPTS);
+    ws.close();
+  });
 
-    const queued = collectMessages(clientWs, {
+  it("cancels a pending prompt, releases attachments, broadcasts, and frees its slot", async () => {
+    const name = `ws-client-cancel-prompt-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    const [{ id: participantId }] = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants LIMIT 1"
+    );
+    const now = Date.now();
+    for (let index = 0; index < MAX_UNFINISHED_PROMPTS; index++) {
+      await seedMessage(stub, {
+        id: `message-${index}`,
+        authorId: participantId,
+        content: `Prompt ${index}`,
+        source: "web",
+        status: "pending",
+        createdAt: now + index,
+      });
+    }
+    await queryDO(
+      stub,
+      `INSERT INTO attachments
+         (id, mime_type, size_bytes, object_key, message_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      "attachment-1",
+      "image/png",
+      100,
+      "sessions/test/attachment-1",
+      "message-0",
+      now
+    );
+
+    const watcher = await openClientWs(name, { subscribe: true, userId: "watcher" });
+    const requester = await openClientWs(name, { subscribe: true, userId: "requester" });
+    const clientRequestId = crypto.randomUUID();
+    const requesterMessages = collectMessages(requester.ws, {
+      until: (message) => message.type === "prompt_cancelled",
+      timeoutMs: 2000,
+    });
+    const watcherMessages = collectMessages(watcher.ws, {
       until: (message) =>
-        message.type === "prompt_queue" &&
-        Array.isArray(message.prompts) &&
-        message.prompts.length === 2,
+        message.type === "prompt_queue_updated" &&
+        !(message.promptQueue as Array<{ messageId: string }>).some(
+          (item) => item.messageId === "message-0"
+        ),
+      timeoutMs: 2000,
     });
-    clientWs.send(JSON.stringify({ type: "prompt", content: "second" }));
-    clientWs.send(JSON.stringify({ type: "prompt", content: "third" }));
-    await queued;
 
-    const earlyDispatches = await collectMessages(sandboxWs!, { timeoutMs: 100 });
-    expect(earlyDispatches.filter((message) => message.type === "prompt")).toEqual([]);
+    requester.ws.send(
+      JSON.stringify({ type: "cancel_prompt", messageId: "message-0", clientRequestId })
+    );
 
-    const secondDispatch = collectMessages(sandboxWs!, {
-      until: (message) => message.type === "prompt",
+    expect(
+      (await requesterMessages).find((message) => message.type === "prompt_cancelled")
+    ).toMatchObject({ clientRequestId, messageId: "message-0" });
+    const queueUpdate = (await watcherMessages).find(
+      (message) => message.type === "prompt_queue_updated"
+    ) as { promptQueue: Array<{ messageId: string }> };
+    expect(queueUpdate.promptQueue.map((item) => item.messageId)).not.toContain("message-0");
+    expect(await queryDO(stub, "SELECT id FROM messages WHERE id = ?", "message-0")).toEqual([]);
+    expect(
+      await queryDO(stub, "SELECT message_id FROM attachments WHERE id = ?", "attachment-1")
+    ).toEqual([{ message_id: null }]);
+
+    const enqueueRequestId = crypto.randomUUID();
+    const enqueued = collectMessages(requester.ws, {
+      until: (message) => message.type === "prompt_queued",
+      timeoutMs: 2000,
     });
-    sandboxWs!.send(
+    requester.ws.send(
       JSON.stringify({
-        type: "execution_complete",
-        messageId: first.messageId,
-        success: true,
-        sandboxId: sandboxAuth.sandboxId,
-        timestamp: Date.now() / 1000,
+        type: "prompt",
+        clientRequestId: enqueueRequestId,
+        content: "Replacement prompt",
       })
     );
-    const second = (await secondDispatch).find((message) => message.type === "prompt")!;
-    expect(second.content).toBe("second");
-
-    const thirdDispatch = collectMessages(sandboxWs!, {
-      until: (message) => message.type === "prompt",
+    expect((await enqueued).find((message) => message.type === "prompt_queued")).toMatchObject({
+      clientRequestId: enqueueRequestId,
     });
-    sandboxWs!.send(
+
+    requester.ws.close();
+    watcher.ws.close();
+  });
+
+  it("returns a session to created when its first prompt is removed before execution", async () => {
+    const name = `ws-client-cancel-first-prompt-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    const { ws } = await openClientWs(name, { subscribe: true });
+    const enqueueRequestId = crypto.randomUUID();
+    const enqueued = collectMessages(ws, {
+      until: (message) => message.type === "prompt_queued",
+      timeoutMs: 2000,
+    });
+    ws.send(
       JSON.stringify({
-        type: "execution_complete",
-        messageId: second.messageId,
-        success: true,
-        sandboxId: sandboxAuth.sandboxId,
-        timestamp: Date.now() / 1000,
+        type: "prompt",
+        clientRequestId: enqueueRequestId,
+        content: "Cancel before execution",
       })
     );
-    const third = (await thirdDispatch).find((message) => message.type === "prompt")!;
-    expect(third.content).toBe("third");
+    const queued = (await enqueued).find((message) => message.type === "prompt_queued") as {
+      messageId: string;
+    };
+    const cancelRequestId = crypto.randomUUID();
+    const cancelled = collectMessages(ws, {
+      until: (message) => message.type === "prompt_cancelled",
+      timeoutMs: 2000,
+    });
 
-    sandboxWs!.close();
-    clientWs.close();
+    ws.send(
+      JSON.stringify({
+        type: "cancel_prompt",
+        messageId: queued.messageId,
+        clientRequestId: cancelRequestId,
+      })
+    );
+    await cancelled;
+
+    expect(await queryDO<{ status: string }>(stub, "SELECT status FROM session LIMIT 1")).toEqual([
+      { status: "created" },
+    ]);
+    ws.close();
+  });
+
+  it("rejects cancellation when the prompt is already processing", async () => {
+    const name = `ws-client-cancel-processing-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    const [{ id: participantId }] = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants LIMIT 1"
+    );
+    await seedMessage(stub, {
+      id: "message-processing",
+      authorId: participantId,
+      content: "Already running",
+      source: "web",
+      status: "processing",
+      createdAt: Date.now(),
+      startedAt: Date.now(),
+    });
+    const { ws } = await openClientWs(name, { subscribe: true });
+    const clientRequestId = crypto.randomUUID();
+    const rejected = collectMessages(ws, {
+      until: (message) => message.type === "error",
+      timeoutMs: 2000,
+    });
+
+    ws.send(
+      JSON.stringify({
+        type: "cancel_prompt",
+        messageId: "message-processing",
+        clientRequestId,
+      })
+    );
+
+    expect((await rejected).find((message) => message.type === "error")).toMatchObject({
+      code: "PROMPT_NOT_CANCELLABLE",
+      clientRequestId,
+    });
+    expect(
+      await queryDO<{ status: string }>(
+        stub,
+        "SELECT status FROM messages WHERE id = ?",
+        "message-processing"
+      )
+    ).toEqual([{ status: "processing" }]);
+    ws.close();
+  });
+
+  it("does not allow web clients to cancel integration-owned prompts", async () => {
+    const name = `ws-client-cancel-integration-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    const [{ id: participantId }] = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants LIMIT 1"
+    );
+    await seedMessage(stub, {
+      id: "message-linear",
+      authorId: participantId,
+      content: "Reply in Linear",
+      source: "linear",
+      status: "pending",
+      createdAt: Date.now(),
+    });
+    await queryDO(
+      stub,
+      "UPDATE messages SET source = 'web', callback_context = ? WHERE id = ?",
+      JSON.stringify({ channel: "C1", threadTs: "1.0" }),
+      "message-linear"
+    );
+    const { ws, messages } = await openClientWs(name, { subscribe: true });
+    const subscribed = messages.find((message) => message.type === "subscribed") as {
+      promptQueue: Array<{ messageId: string }>;
+    };
+    expect(subscribed.promptQueue).toContainEqual(
+      expect.objectContaining({ messageId: "message-linear" })
+    );
+    const clientRequestId = crypto.randomUUID();
+    const rejected = collectMessages(ws, {
+      until: (message) => message.type === "error",
+      timeoutMs: 2000,
+    });
+
+    ws.send(
+      JSON.stringify({
+        type: "cancel_prompt",
+        messageId: "message-linear",
+        clientRequestId,
+      })
+    );
+
+    expect((await rejected).find((message) => message.type === "error")).toMatchObject({
+      code: "PROMPT_NOT_CANCELLABLE",
+      clientRequestId,
+    });
+    expect(
+      await queryDO<{ status: string }>(
+        stub,
+        "SELECT status FROM messages WHERE id = ?",
+        "message-linear"
+      )
+    ).toEqual([{ status: "pending" }]);
+    ws.close();
+  });
+
+  it.each([
+    ["blank", "  \n"],
+    ["oversized", "x".repeat(64_001)],
+  ])("returns correlated INVALID_PROMPT for a %s prompt", async (_case, content) => {
+    const name = `ws-client-invalid-prompt-${_case}-${Date.now()}`;
+    await initNamedSession(name);
+    const { ws } = await openClientWs(name, { subscribe: true });
+    const clientRequestId = crypto.randomUUID();
+    const collector = collectMessages(ws, {
+      until: (message) => message.type === "error",
+      timeoutMs: 2000,
+    });
+
+    ws.send(JSON.stringify({ type: "prompt", clientRequestId, content }));
+
+    expect((await collector).find((message) => message.type === "error")).toMatchObject({
+      type: "error",
+      code: "INVALID_PROMPT",
+      clientRequestId,
+    });
+    ws.close();
   });
 
   it("closing one of multiple sockets for the same participant sends presence_update, not presence_leave", async () => {
@@ -917,6 +863,45 @@ describe("Client WebSocket (via SELF.fetch)", () => {
     expect(participants.some((p) => p.participantId === tab1.participantId)).toBe(true);
 
     tab1.ws.close();
+  });
+
+  it("uses canonical profile IDs for bot participant subscription and presence", async () => {
+    const name = `ws-client-canonical-presence-${Date.now()}`;
+    await initNamedSession(name);
+    const watcher = await openClientWs(name, { subscribe: true, userId: "user-1" });
+    const collector = collectMessages(watcher.ws, {
+      until: (msg) =>
+        msg.type === "presence_update" &&
+        (msg.participants as Array<{ userId: string }>).some(
+          (participant) => participant.userId === "canonical-bot"
+        ),
+      timeoutMs: 2000,
+    });
+
+    const bot = await openClientWs(name, {
+      subscribe: true,
+      userId: "slack:U123",
+      canonicalUserId: "canonical-bot",
+    });
+    const subscribed = bot.messages.find((message) => message.type === "subscribed") as {
+      participant: { userId: string };
+    };
+    expect(subscribed.participant.userId).toBe("canonical-bot");
+
+    const messages = await collector;
+    const presence = messages.find(
+      (message) =>
+        message.type === "presence_update" &&
+        (message.participants as Array<{ userId: string }>).some(
+          (participant) => participant.userId === "canonical-bot"
+        )
+    ) as { participants: Array<{ userId: string }> };
+    expect(presence.participants).toEqual(
+      expect.arrayContaining([expect.objectContaining({ userId: "canonical-bot" })])
+    );
+
+    bot.ws.close();
+    watcher.ws.close();
   });
 
   it("closing the only socket for a participant broadcasts presence_leave", async () => {

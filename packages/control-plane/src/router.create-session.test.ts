@@ -3,10 +3,15 @@ import type { Principal } from "./auth/principal";
 import { SessionIndexStore } from "./db/session-index";
 import { UserStore } from "./db/user-store";
 import { handleRequest } from "./router";
-import { signedServiceRequest, TEST_SERVICE_SECRETS } from "./router.test-support";
+import {
+  signedServiceRequest,
+  TEST_BACKGROUND_TASK_CONTEXT,
+  TEST_SERVICE_SECRETS,
+} from "./router.test-support";
 import { sessionCreateRoutes } from "./routes/session-create";
 import { HttpError, resolveRepoOrError } from "./routes/shared";
 import { SessionInternalPaths } from "./session/contracts";
+import { resolveManagedSkills } from "./session/skill-resolution";
 
 vi.mock("./db/session-index", () => ({
   SessionIndexStore: vi.fn(),
@@ -15,6 +20,14 @@ vi.mock("./db/session-index", () => ({
 vi.mock("./db/user-store", () => ({
   UserStore: vi.fn(),
 }));
+
+vi.mock("./session/skill-resolution", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    resolveManagedSkills: vi.fn(),
+  };
+});
 
 vi.mock("./routes/shared", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
@@ -26,18 +39,19 @@ vi.mock("./routes/shared", async (importOriginal) => {
 
 const USER_PRINCIPAL: Principal = {
   kind: "user",
-  user: {
-    provider: "github",
-    providerUserId: "583231",
-    canonicalUserId: "user-1",
-    participantUserId: "user-1",
-  },
-  tokenId: "token-1",
+  userId: "user-1",
 };
 
 describe("handleCreateSession D1 ordering", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(resolveManagedSkills).mockResolvedValue({
+      selection: { mode: "all" },
+      resolverVersion: 1,
+      manifestSha256: "0".repeat(64),
+      resolvedAt: 1,
+      skills: [],
+    });
     vi.mocked(resolveRepoOrError).mockResolvedValue({
       repoId: 12345,
       defaultBranch: "main",
@@ -66,7 +80,8 @@ describe("handleCreateSession D1 ordering", () => {
         service: "slack-bot",
         actor: "slack:U0123",
       }),
-      env as never
+      env as never,
+      TEST_BACKGROUND_TASK_CONTEXT
     );
   }
 
@@ -87,7 +102,8 @@ describe("handleCreateSession D1 ordering", () => {
         service: "slack-bot",
         actor: "slack:U0123",
       }),
-      createEnv(vi.fn()) as never
+      createEnv(vi.fn()) as never,
+      TEST_BACKGROUND_TASK_CONTEXT
     );
   }
 
@@ -104,10 +120,7 @@ describe("handleCreateSession D1 ordering", () => {
       SCM_PROVIDER: "github",
       DB: {
         prepare: vi.fn(() => statement),
-        batch: vi.fn(async () => [
-          { results: [], meta: { changes: 0 } },
-          { results: [], meta: { changes: 1 } },
-        ]),
+        batch: vi.fn(),
         exec: vi.fn(),
         dump: vi.fn(),
       },
@@ -293,17 +306,20 @@ describe("handleCreateSession D1 ordering", () => {
             providerEmail: "private@example.com",
           },
         ],
-        getUserById: async () => ({ id: "user-1", displayName: "Caller Controlled Name" }),
+        getUserById: async () => ({ id: "user-1", displayName: "Trusted Ada" }),
       } as never;
     });
     const initFetch = vi.fn(async (request: Request) => {
       const body = (await request.json()) as Record<string, unknown>;
+      // Body display fields win; enrichment fills the gaps from the linked
+      // GitHub identity. Credentials would come only from the token store
+      // (none stored here), never from the body.
       expect(body).toMatchObject({
         userId: "slack:U0123",
         spawnSource: "slack-bot",
         scmUserId: "2002",
-        scmLogin: "ada",
-        scmName: "ada",
+        scmLogin: "caller-login",
+        scmName: "Trusted Ada",
         scmEmail: "2002+ada@users.noreply.github.com",
         scmTokenEncrypted: null,
         scmRefreshTokenEncrypted: null,
@@ -314,7 +330,7 @@ describe("handleCreateSession D1 ordering", () => {
     const response = await createSessionRequestWithBody(createEnv(initFetch), {
       title: "Attributed session",
       model: "anthropic/claude-haiku-4-5",
-      actorDisplayName: "Caller Controlled Name",
+      scmLogin: "caller-login",
     });
 
     expect(response.status).toBe(201);
@@ -384,7 +400,7 @@ describe("handleCreateSession D1 ordering", () => {
     expect(initFetch).not.toHaveBeenCalled();
   });
 
-  it("rejects non-GitHub SCM identity fields without initializing a session", async () => {
+  it("preserves non-GitHub SCM display identity without GitHub enrichment", async () => {
     const create = vi.fn().mockResolvedValue(undefined);
     vi.mocked(SessionIndexStore).mockImplementation(function () {
       return { create } as never;
@@ -437,6 +453,7 @@ describe("handleCreateSession D1 ordering", () => {
         trace_id: "test-trace",
         principal: USER_PRINCIPAL,
         db: testEnv["DB"] as never,
+        executionCtx: TEST_BACKGROUND_TASK_CONTEXT,
         metrics: {
           d1Queries: [],
           spans: {},
@@ -446,8 +463,8 @@ describe("handleCreateSession D1 ordering", () => {
       }
     );
 
-    expect(response.status).toBe(400);
-    expect(initFetch).not.toHaveBeenCalled();
+    expect(response.status).toBe(201);
+    expect(initFetch).toHaveBeenCalledOnce();
     expect(getIdentitiesForUser).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { browserApiFetch } from "@/lib/browser-api-fetch";
 import { MicrophoneIcon, StopIcon } from "@/components/ui/icons";
 
 type VoiceInputButtonProps = {
@@ -109,7 +110,7 @@ export function VoiceInputButton({ onTranscript, disabled = false }: VoiceInputB
     try {
       const body = new FormData();
       body.set("audio", audio, recordingFilename(audio.type));
-      const response = await fetch("/api/transcriptions", { method: "POST", body });
+      const response = await browserApiFetch("/api/transcriptions", { method: "POST", body });
       const data: unknown = await response.json();
       if (!response.ok || !isTranscriptionResponse(data)) {
         throw new Error(isErrorResponse(data) ? data.error : "Failed to transcribe recording");

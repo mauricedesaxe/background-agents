@@ -31,6 +31,7 @@ describe("initializeSession", () => {
     spawnSource: "user",
     spawnDepth: 0,
     codeServerEnabled: false,
+    vncEnabled: true,
     sandboxSettings: {},
     automationId: null,
     automationRunId: null,
@@ -162,22 +163,13 @@ describe("initializeSession", () => {
     expect(updateStatusMock).toHaveBeenCalledWith("session-123", "failed");
   });
 
-  it("leaves the D1 row replayable when an automation response is lost", async () => {
+  it("marks D1 row as failed when DO init throws a transport error", async () => {
     stubFetchMock.mockRejectedValue(new Error("network failure"));
 
-    await expect(
-      initializeSession(createEnv(), baseInput, ctx as never, { replayable: true })
-    ).rejects.toThrow("network failure");
-    expect(updateStatusMock).not.toHaveBeenCalled();
-  });
-
-  it("leaves replayable automation rows created on a 5xx response", async () => {
-    stubFetchMock.mockResolvedValue(new Response("Internal error", { status: 500 }));
-
-    await expect(
-      initializeSession(createEnv(), baseInput, ctx as never, { replayable: true })
-    ).rejects.toThrow("Session initialization returned 500");
-    expect(updateStatusMock).not.toHaveBeenCalled();
+    await expect(initializeSession(createEnv(), baseInput, ctx as never)).rejects.toThrow(
+      "network failure"
+    );
+    expect(updateStatusMock).toHaveBeenCalledWith("session-123", "failed");
   });
 
   it("passes the correct fields to D1 session index", async () => {
@@ -239,6 +231,7 @@ describe("initializeSession", () => {
     expect(body.model).toBe("anthropic/claude-sonnet-4-6");
     expect(body.reasoningEffort).toBeNull();
     expect(body.userId).toBe("user-1");
+    expect(body.canonicalUserId).toBe("platform-user-1");
     expect(body.scmLogin).toBe("acmedev");
     expect(body.scmName).toBe("Acme Dev");
     expect(body.scmEmail).toBe("dev@acme.test");
@@ -247,6 +240,7 @@ describe("initializeSession", () => {
     expect(body.scmTokenExpiresAt).toBe(1700000000000);
     expect(body.scmUserId).toBe("scm-1");
     expect(body.codeServerEnabled).toBe(false);
+    expect(body.vncEnabled).toBe(true);
     expect(body.sandboxSettings).toEqual({});
     expect(body.parentSessionId).toBeNull();
     expect(body.spawnSource).toBe("user");

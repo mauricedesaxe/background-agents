@@ -1,24 +1,54 @@
 import type {
   PullRequestSummary,
-  SessionListRepository,
+  SessionReadAction,
+  SessionReadResult,
+  SessionReadState,
   SessionStatus,
   SpawnSource,
-} from "@open-inspect/shared";
-import { SessionPullRequestStore } from "./session-pull-request-store";
-import type { SqlDatabase } from "./sql-database";
-import { epochMs, type EpochMs } from "../time";
+} from "@open-inspect/shared/types/sessions";
+import {
+  DEFAULT_SESSION_LIST_LIMIT,
+  DEFAULT_SESSION_LIST_OFFSET,
+} from "@open-inspect/shared/session-list-query";
+import type { SessionListRepository } from "@open-inspect/shared/types/repositories";
+import type { SessionSkillManifestInput } from "../session/skill-resolution";
+import { attachSessionListMetadata } from "./session-list-metadata";
+import {
+  SessionInboxStore,
+  type ListSessionInboxOptions,
+  type ListSessionInboxResult,
+  type ListSessionInboxSnapshotResult,
+} from "./session-inbox-store";
+import { readStateFromRow, unreadSql, type ViewerReadStateRow } from "./session-read-state";
+import type { SqlDatabase, SqlStatement } from "./sql-database";
 
-const TERMINAL_STATUSES: readonly SessionStatus[] = [
+export type {
+  ListSessionInboxOptions,
+  ListSessionInboxResult,
+  ListSessionInboxSnapshotResult,
+} from "./session-inbox-store";
+
+const TERMINAL_STATUSES = [
   "completed",
   "failed",
   "archived",
   "cancelled",
-];
+] satisfies SessionStatus[];
 const TERMINAL_STATUS_SQL = TERMINAL_STATUSES.map((status) => `'${status}'`).join(", ");
 
-export function sessionAcceptsChildSpawns(status: SessionStatus): boolean {
-  return !TERMINAL_STATUSES.includes(status);
+const CHILD_ADMISSION_LEASE_TTL_MS = 5 * 60 * 1000;
+
+export interface ChildAdmissionLease {
+  token: string;
+  childSessionId: string;
+  expiresAt: number;
 }
+
+/**
+ * Insurance against a corrupt parent_session_id cycle making the recursive
+ * descendant CTE run away; spawn-time depth caps keep real trees far below it.
+ */
+const MAX_DESCENDANT_DEPTH = 10;
 
 /**
  * One member of a session's repository set — the identity subset of the
@@ -49,11 +79,6 @@ export interface SessionEntry {
   activeDurationMs?: number;
   messageCount?: number;
   prCount?: number;
-  totalTokens?: number;
-  inputTokens?: number;
-  outputTokens?: number;
-  cacheReadTokens?: number;
-  cacheWriteTokens?: number;
   createdAt: number;
   updatedAt: number;
   /**
@@ -71,16 +96,11 @@ export interface SessionEntry {
    * has no tracked PRs. Attached by list() for the global sidebar.
    */
   pullRequestSummary?: PullRequestSummary;
-  unread?: boolean;
-}
-
-interface SessionRepositoryRow {
-  session_id: string;
-  position: number;
-  repo_owner: string;
-  repo_name: string;
-  repo_id: number | null;
-  base_branch: string;
+  readState?: SessionReadState;
+  /** Resolved manifest to persist atomically with a new top-level session. */
+  skillManifest?: SessionSkillManifestInput;
+  /** Parent manifest to copy atomically for an agent-spawned child. */
+  skillManifestSourceSessionId?: string;
 }
 
 interface SessionRow {
@@ -93,6 +113,7 @@ interface SessionRow {
   base_branch: string | null;
   status: SessionStatus;
   parent_session_id: string | null;
+  root_session_id: string | null;
   spawn_source: SpawnSource;
   spawn_depth: number;
   automation_id: string | null;
@@ -103,11 +124,6 @@ interface SessionRow {
   active_duration_ms: number;
   message_count: number;
   pr_count: number;
-  total_tokens: number;
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_tokens: number;
-  cache_write_tokens: number;
   environment_id: string | null;
   created_at: number;
   updated_at: number;
@@ -116,35 +132,21 @@ interface SessionRow {
 export interface ListSessionsOptions {
   status?: SessionStatus;
   excludeStatus?: SessionStatus;
+  excludeAutomationLineage?: boolean;
   repoOwner?: string;
   repoName?: string;
   createdByUserIds?: readonly string[];
   limit?: number;
   offset?: number;
-  mode?: "flat" | "tree";
-  cursor?: SessionListCursor;
   viewerUserId?: string;
 }
-
-export interface SessionListCursor {
-  updatedAt: EpochMs;
-  id: string;
-}
-
-export type SessionReadUpdate =
-  | { action: "viewed"; messageId: string }
-  | { action: "mark_read" | "mark_unread" };
 
 export interface ListSessionsResult {
   sessions: SessionEntry[];
   hasMore: boolean;
-  nextCursor?: SessionListCursor | null;
 }
 
-interface TreeSessionRow extends SessionRow {
-  is_base: number;
-  candidate_count: number;
-}
+interface ViewerSessionRow extends SessionRow, ViewerReadStateRow {}
 
 function toEntry(row: SessionRow): SessionEntry {
   return {
@@ -167,11 +169,6 @@ function toEntry(row: SessionRow): SessionEntry {
     activeDurationMs: row.active_duration_ms,
     messageCount: row.message_count,
     prCount: row.pr_count,
-    totalTokens: row.total_tokens,
-    inputTokens: row.input_tokens,
-    outputTokens: row.output_tokens,
-    cacheReadTokens: row.cache_read_tokens,
-    cacheWriteTokens: row.cache_write_tokens,
     environmentId: row.environment_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -183,7 +180,7 @@ function normalizeRepoIdentifier(value: string | null | undefined): string | nul
   return trimmed ? trimmed.toLowerCase() : null;
 }
 
-function normalizeSessionRepository(session: SessionEntry): {
+function normalizeSessionRepositoryFields(session: SessionEntry): {
   repoOwner: string | null;
   repoName: string | null;
   baseBranch: string | null;
@@ -202,42 +199,28 @@ function normalizeSessionRepository(session: SessionEntry): {
   };
 }
 
-export class SessionReplayConflictError extends Error {
-  constructor(sessionId: string) {
-    super(`Session ID ${sessionId} belongs to another session`);
-    this.name = "SessionReplayConflictError";
-  }
-}
-
-export class ParentSessionSpawnRejectedError extends Error {
-  constructor(parentSessionId: string) {
-    super(`Parent session ${parentSessionId} no longer accepts child sessions`);
-    this.name = "ParentSessionSpawnRejectedError";
-  }
-}
-
-function isDuplicateKeyError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /unique constraint|constraint failed|duplicate/i.test(message);
-}
-
 export class SessionIndexStore {
   constructor(private readonly db: SqlDatabase) {}
 
+  async exists(id: string): Promise<boolean> {
+    const result = await this.db
+      .prepare("SELECT 1 AS ok FROM sessions WHERE id = ?")
+      .bind(id)
+      .first<{ ok: number }>();
+    return result !== null;
+  }
+
   async create(session: SessionEntry): Promise<void> {
-    const repository = normalizeSessionRepository(session);
-    const parentSessionId = session.parentSessionId ?? null;
+    const repository = normalizeSessionRepositoryFields(session);
+
+    if (session.skillManifest && session.skillManifestSourceSessionId) {
+      throw new Error("Session cannot both resolve and copy a managed skill manifest");
+    }
 
     const sessionStmt = this.db
       .prepare(
-        `INSERT INTO sessions (id, title, repo_owner, repo_name, model, reasoning_effort, base_branch, status, parent_session_id, spawn_source, spawn_depth, automation_id, automation_run_id, scm_login, user_id, environment_id, created_at, updated_at)
-         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-         WHERE ? IS NULL OR EXISTS (
-           SELECT 1 FROM sessions
-           WHERE id = ?
-             AND status NOT IN (${TERMINAL_STATUS_SQL})
-             AND spawn_closed = 0
-         )`
+        `INSERT OR IGNORE INTO sessions (id, title, repo_owner, repo_name, model, reasoning_effort, base_branch, status, parent_session_id, root_session_id, spawn_source, spawn_depth, automation_id, automation_run_id, scm_login, user_id, environment_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN ? ELSE (SELECT root_session_id FROM sessions WHERE id = ?) END, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         session.id,
@@ -248,7 +231,10 @@ export class SessionIndexStore {
         session.reasoningEffort,
         repository.baseBranch,
         session.status,
-        parentSessionId,
+        session.parentSessionId ?? null,
+        session.parentSessionId ?? null,
+        session.id,
+        session.parentSessionId ?? null,
         session.spawnSource ?? "user",
         session.spawnDepth ?? 0,
         session.automationId ?? null,
@@ -257,17 +243,14 @@ export class SessionIndexStore {
         session.userId ?? null,
         session.environmentId ?? null,
         session.createdAt,
-        session.updatedAt,
-        parentSessionId,
-        parentSessionId
+        session.updatedAt
       );
 
     const repositoryStmts = (session.repositories ?? []).map((repo, position) =>
       this.db
         .prepare(
           `INSERT INTO session_repositories (session_id, position, repo_owner, repo_name, repo_id, base_branch)
-           SELECT ?, ?, ?, ?, ?, ?
-           WHERE EXISTS (SELECT 1 FROM sessions WHERE id = ?)`
+           VALUES (?, ?, ?, ?, ?, ?)`
         )
         .bind(
           session.id,
@@ -275,64 +258,102 @@ export class SessionIndexStore {
           normalizeRepoIdentifier(repo.repoOwner),
           normalizeRepoIdentifier(repo.repoName),
           repo.repoId,
-          repo.baseBranch,
-          session.id
+          repo.baseBranch
         )
     );
 
-    try {
-      const [result] = await this.db.batch([sessionStmt, ...repositoryStmts]);
-      if ((result.meta.changes ?? 0) === 0 && parentSessionId) {
-        throw new ParentSessionSpawnRejectedError(parentSessionId);
-      }
-    } catch (error) {
-      if (error instanceof ParentSessionSpawnRejectedError) throw error;
-      if (!isDuplicateKeyError(error)) throw error;
-      await this.verifyReplay(session, repository);
+    const manifestStmts = session.skillManifest
+      ? this.bindManifestInserts(session.id, session.skillManifest)
+      : session.skillManifestSourceSessionId
+        ? this.bindManifestCopy(session.id, session.skillManifestSourceSessionId)
+        : [];
+    const results = await this.db.batch([sessionStmt, ...repositoryStmts, ...manifestStmts]);
+
+    // INSERT OR IGNORE swallows every constraint violation, which would leave
+    // the session invisible to dashboards while the DO proceeds. Session ids
+    // are always freshly generated, so a skipped insert is a bug — surface it;
+    // initialize.ts relies on D1 failures being caught before sandbox spawn.
+    if ((results[0]?.meta?.changes ?? 0) === 0) {
+      throw new Error(
+        `Session index insert was skipped for session ${session.id} (duplicate id or constraint violation)`
+      );
     }
   }
 
-  private async verifyReplay(
-    session: SessionEntry,
-    repository: ReturnType<typeof normalizeSessionRepository>
-  ): Promise<void> {
-    const existing = await this.get(session.id);
-    if (!existing) throw new SessionReplayConflictError(session.id);
+  /**
+   * Build manifest statements for the session-creation batch. The caller owns
+   * execution so the session, repository snapshot, and pinned skills commit
+   * atomically rather than leaving a partially initialized session.
+   */
+  private bindManifestInserts(
+    sessionId: string,
+    manifest: SessionSkillManifestInput
+  ): SqlStatement[] {
+    const profile = manifest.selection.mode === "profile" ? manifest.selection : null;
+    return [
+      this.db
+        .prepare(
+          `INSERT INTO session_skill_manifests
+           (session_id, selection_mode, profile_id, profile_name, resolver_version, manifest_sha256, resolved_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          sessionId,
+          manifest.selection.mode,
+          profile?.profileId ?? null,
+          profile?.profileName ?? null,
+          manifest.resolverVersion,
+          manifest.manifestSha256,
+          manifest.resolvedAt
+        ),
+      ...manifest.skills.map((skill, position) =>
+        this.db
+          .prepare(
+            `INSERT INTO session_skill_revisions
+             (session_id, position, skill_id, revision_id, skill_name, description,
+              revision_number, revision_sha256, total_bytes, assignment_sources)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .bind(
+            sessionId,
+            position,
+            skill.skillId,
+            skill.revisionId,
+            skill.name,
+            skill.description,
+            skill.revisionNumber,
+            skill.revisionSha256,
+            skill.totalBytes,
+            JSON.stringify(skill.assignmentSources)
+          )
+      ),
+    ];
+  }
 
-    const existingRepositories =
-      (await this.repositoriesForSessions([session.id])).get(session.id) ?? [];
-    const requestedRepositories = session.repositories ?? [];
-    const repositoriesMatch =
-      existingRepositories.length === requestedRepositories.length &&
-      existingRepositories.every((repo, index) => {
-        const requested = requestedRepositories[index];
-        return (
-          requested !== undefined &&
-          normalizeRepoIdentifier(repo.repoOwner) ===
-            normalizeRepoIdentifier(requested.repoOwner) &&
-          normalizeRepoIdentifier(repo.repoName) === normalizeRepoIdentifier(requested.repoName) &&
-          repo.repoId === requested.repoId &&
-          repo.baseBranch === requested.baseBranch
-        );
-      });
-    if (
-      existing.repoOwner === repository.repoOwner &&
-      existing.repoName === repository.repoName &&
-      existing.baseBranch === repository.baseBranch &&
-      existing.model === session.model &&
-      existing.reasoningEffort === session.reasoningEffort &&
-      existing.parentSessionId === (session.parentSessionId ?? null) &&
-      existing.spawnSource === (session.spawnSource ?? "user") &&
-      existing.spawnDepth === (session.spawnDepth ?? 0) &&
-      existing.automationId === (session.automationId ?? null) &&
-      existing.automationRunId === (session.automationRunId ?? null) &&
-      existing.userId === (session.userId ?? null) &&
-      existing.environmentId === (session.environmentId ?? null) &&
-      repositoriesMatch
-    ) {
-      return;
-    }
-    throw new SessionReplayConflictError(session.id);
+  /** Copy a parent's exact pinned manifest into the atomic child-session batch. */
+  private bindManifestCopy(childSessionId: string, parentSessionId: string): SqlStatement[] {
+    return [
+      this.db
+        .prepare(
+          `INSERT INTO session_skill_manifests
+           (session_id, selection_mode, profile_id, profile_name, manifest_sha256, resolved_at,
+              resolver_version)
+             SELECT ?, selection_mode, profile_id, profile_name, manifest_sha256, resolved_at,
+                    resolver_version
+           FROM session_skill_manifests WHERE session_id = ?`
+        )
+        .bind(childSessionId, parentSessionId),
+      this.db
+        .prepare(
+          `INSERT INTO session_skill_revisions
+           (session_id, position, skill_id, revision_id, skill_name, description,
+            revision_number, revision_sha256, total_bytes, assignment_sources)
+           SELECT ?, position, skill_id, revision_id, skill_name, description,
+                   revision_number, revision_sha256, total_bytes, assignment_sources
+           FROM session_skill_revisions WHERE session_id = ? ORDER BY position`
+        )
+        .bind(childSessionId, parentSessionId),
+    ];
   }
 
   async get(id: string): Promise<SessionEntry | null> {
@@ -342,18 +363,6 @@ export class SessionIndexStore {
       .first<SessionRow>();
 
     return result ? toEntry(result) : null;
-  }
-
-  async canInitializeSession(id: string): Promise<boolean> {
-    const result = await this.db
-      .prepare("SELECT spawn_closed FROM sessions WHERE id = ?")
-      .bind(id)
-      .first<{ spawn_closed: number }>();
-    return result?.spawn_closed !== 1;
-  }
-
-  async repositoriesForSession(id: string): Promise<SessionIndexRepository[]> {
-    return (await this.repositoriesForSessions([id])).get(id) ?? [];
   }
 
   /**
@@ -393,13 +402,12 @@ export class SessionIndexStore {
     const {
       status,
       excludeStatus,
+      excludeAutomationLineage,
       repoOwner,
       repoName,
       createdByUserIds,
-      limit = 50,
-      offset = 0,
-      mode = "flat",
-      cursor,
+      limit = DEFAULT_SESSION_LIST_LIMIT,
+      offset = DEFAULT_SESSION_LIST_OFFSET,
       viewerUserId,
     } = options;
 
@@ -416,18 +424,12 @@ export class SessionIndexStore {
       params.push(excludeStatus);
     }
 
-    const archivedSubtreesCte =
-      excludeStatus === "archived"
-        ? `WITH RECURSIVE archived_subtrees(id) AS (
-             SELECT id FROM sessions WHERE status = 'archived'
-             UNION
-             SELECT child.id
-             FROM sessions AS child
-             JOIN archived_subtrees ON child.parent_session_id = archived_subtrees.id
-           )`
-        : "";
-    if (archivedSubtreesCte) {
-      conditions.push("sessions.id NOT IN (SELECT id FROM archived_subtrees)");
+    if (excludeAutomationLineage) {
+      // The "Mine" view excludes sessions no human initiated in the app.
+      // github-bot sessions are attributed to the webhook sender (the verified
+      // actor), but auto reviews and review-request handling are bot-initiated,
+      // so they are lineage-excluded alongside automation runs.
+      conditions.push("automation_id IS NULL AND spawn_source NOT IN ('automation', 'github-bot')");
     }
 
     // Repo filters match against the membership table so a session is found
@@ -460,84 +462,36 @@ export class SessionIndexStore {
       params.push(...createdByUserIds);
     }
 
-    if (mode === "tree" && cursor) {
-      conditions.push("(updated_at < ? OR (updated_at = ? AND id < ?))");
-      params.push(cursor.updatedAt, cursor.updatedAt, cursor.id);
-    }
-
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
-    if (mode === "tree") {
-      const recursiveCtes = [
-        ...(archivedSubtreesCte ? [archivedSubtreesCte.replace("WITH RECURSIVE ", "")] : []),
-        `base_candidates AS (
-           SELECT * FROM sessions ${where}
-           ORDER BY updated_at DESC, id DESC
-           LIMIT ?
-         )`,
-        `base AS (
-           SELECT * FROM base_candidates
-           ORDER BY updated_at DESC, id DESC
-           LIMIT ?
-         )`,
-        `ancestors(id) AS (
-           SELECT parent_session_id FROM base WHERE parent_session_id IS NOT NULL
-           UNION
-           SELECT parent.parent_session_id
-           FROM sessions AS parent
-           JOIN ancestors ON parent.id = ancestors.id
-           WHERE parent.parent_session_id IS NOT NULL
-         )`,
-        `page_ids(id) AS (
-           SELECT id FROM base
-           UNION
-           SELECT id FROM ancestors
-         )`,
-      ];
-      const archiveClosureFilter = archivedSubtreesCte
-        ? "WHERE sessions.id NOT IN (SELECT id FROM archived_subtrees)"
-        : "";
-      const result = await this.db
-        .prepare(
-          `WITH RECURSIVE ${recursiveCtes.join(", ")}
-           SELECT sessions.*,
-                  CASE WHEN base.id IS NULL THEN 0 ELSE 1 END AS is_base,
-                  (SELECT COUNT(*) FROM base_candidates) AS candidate_count
-           FROM page_ids
-           JOIN sessions ON sessions.id = page_ids.id
-           LEFT JOIN base ON base.id = sessions.id
-           ${archiveClosureFilter}
-           ORDER BY sessions.updated_at DESC, sessions.id DESC`
-        )
-        .bind(...params, limit + 1, limit)
-        .all<TreeSessionRow>();
-
-      const rows = result.results ?? [];
-      const baseRows = rows.filter((row) => row.is_base === 1);
-      const hasMore = (rows[0]?.candidate_count ?? 0) > limit;
-      const lastBaseRow = baseRows.at(-1);
-      const sessions = await this.decorateEntries(rows.map(toEntry), viewerUserId);
-
-      return {
-        sessions,
-        hasMore,
-        nextCursor:
-          hasMore && lastBaseRow
-            ? { updatedAt: epochMs(lastBaseRow.updated_at), id: lastBaseRow.id }
-            : null,
-      };
-    }
-
-    // Get paginated results
-    const result = await this.db
-      .prepare(
-        `${archivedSubtreesCte} SELECT * FROM sessions ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`
-      )
-      .bind(...params, limit + 1, offset)
-      .all<SessionRow>();
+    const pageSql = `SELECT * FROM sessions ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`;
+    const result = viewerUserId
+      ? await this.db
+          .prepare(
+            `WITH paged_sessions AS (${pageSql})
+             SELECT paged_sessions.*,
+                    ${unreadSql("paged_sessions")} AS unread
+             FROM paged_sessions
+             LEFT JOIN users viewer ON viewer.id = ?
+             LEFT JOIN session_read_states read_state
+               ON read_state.session_id = paged_sessions.id
+              AND read_state.user_id = viewer.id
+             ORDER BY paged_sessions.updated_at DESC`
+          )
+          .bind(...params, limit + 1, offset, viewerUserId)
+          .all<ViewerSessionRow>()
+      : await this.db
+          .prepare(pageSql)
+          .bind(...params, limit + 1, offset)
+          .all<SessionRow>();
 
     const rows = result.results || [];
-    const sessions = await this.decorateEntries(rows.slice(0, limit).map(toEntry), viewerUserId);
+    const sessions = await this.attachListMetadata(
+      rows.slice(0, limit).map((row) => ({
+        ...toEntry(row),
+        ...(viewerUserId ? { readState: readStateFromRow(row as ViewerSessionRow) } : {}),
+      }))
+    );
 
     return {
       sessions,
@@ -545,92 +499,145 @@ export class SessionIndexStore {
     };
   }
 
-  /**
-   * Attach repository lists and PR status summaries to the paged
-   * entries. The two lookups are independent — each is one grouped query
-   * keyed by the same session ids — so they run in parallel and merge onto
-   * the entries in a single pass. Sessions without rows are returned without
-   * the field: consumers fall back to the scalar repo columns, and PR state
-   * never influences session ordering (this only decorates paged rows).
-   */
-  private async decorateEntries(
-    sessions: SessionEntry[],
-    viewerUserId?: string
-  ): Promise<SessionEntry[]> {
-    if (sessions.length === 0) return sessions;
-    const sessionIds = sessions.map((session) => session.id);
-
-    const [repositoriesBySession, summariesBySession, unreadBySession] = await Promise.all([
-      this.repositoriesForSessions(sessionIds),
-      new SessionPullRequestStore(this.db).summariesForSessions(sessionIds),
-      viewerUserId
-        ? this.unreadForSessions(sessionIds, viewerUserId)
-        : Promise.resolve(new Map<string, boolean>()),
-    ]);
-
-    return sessions.map((session) => {
-      const repositories = repositoriesBySession.get(session.id);
-      const pullRequestSummary = summariesBySession.get(session.id);
-      return {
-        ...session,
-        ...(repositories ? { repositories } : {}),
-        ...(pullRequestSummary ? { pullRequestSummary } : {}),
-        ...(viewerUserId ? { unread: unreadBySession.get(session.id) ?? false } : {}),
-      };
-    });
+  async listInbox(options: ListSessionInboxOptions): Promise<ListSessionInboxResult> {
+    return new SessionInboxStore(this.db).list(options);
   }
 
-  private async unreadForSessions(
-    sessionIds: readonly string[],
-    userId: string
-  ): Promise<Map<string, boolean>> {
-    const placeholders = sessionIds.map(() => "?").join(", ");
+  async listInboxSnapshot(
+    options: Omit<ListSessionInboxOptions, "category" | "cursor">
+  ): Promise<ListSessionInboxSnapshotResult> {
+    return new SessionInboxStore(this.db).snapshot(options);
+  }
+
+  private async attachListMetadata<T extends { id: string }>(sessions: T[]): Promise<T[]> {
+    return attachSessionListMetadata(this.db, sessions);
+  }
+
+  async recordLatestTerminalMessage(input: {
+    sessionId: string;
+    messageId: string;
+    messageCreatedAt: number;
+    terminalMessageCompletedAt: number;
+  }): Promise<boolean> {
     const result = await this.db
       .prepare(
-        `SELECT sessions.id,
-           CASE WHEN read_state.manually_unread = 1 OR (
-             sessions.latest_output_message_id IS NOT NULL AND (
-               read_state.read_output_message_id IS NULL
-               OR read_state.read_output_message_id != sessions.latest_output_message_id
+        `UPDATE sessions
+         SET latest_terminal_message_id = ?,
+             latest_terminal_message_created_at = ?,
+             latest_terminal_message_completed_at = ?
+         WHERE id = ?
+           AND (
+             latest_terminal_message_created_at IS NULL
+             OR latest_terminal_message_created_at < ?
+             OR (
+               latest_terminal_message_created_at = ?
+               AND latest_terminal_message_id < ?
              )
-           ) THEN 1 ELSE 0 END AS unread
-         FROM sessions
-         LEFT JOIN session_read_states AS read_state
-           ON read_state.session_id = sessions.id AND read_state.user_id = ?
-         WHERE sessions.id IN (${placeholders})`
+           )`
       )
-      .bind(userId, ...sessionIds)
-      .all<{ id: string; unread: number }>();
-
-    return new Map((result.results ?? []).map((row) => [row.id, row.unread === 1]));
+      .bind(
+        input.messageId,
+        input.messageCreatedAt,
+        input.terminalMessageCompletedAt,
+        input.sessionId,
+        input.messageCreatedAt,
+        input.messageCreatedAt,
+        input.messageId
+      )
+      .run();
+    return (result.meta.changes ?? 0) > 0;
   }
 
-  /** Repository lists for the given sessions, in one query. */
-  private async repositoriesForSessions(
-    sessionIds: readonly string[]
-  ): Promise<Map<string, SessionIndexRepository[]>> {
-    const placeholders = sessionIds.map(() => "?").join(", ");
-    const result = await this.db
-      .prepare(
-        `SELECT * FROM session_repositories
-         WHERE session_id IN (${placeholders})
-         ORDER BY session_id, position`
-      )
-      .bind(...sessionIds)
-      .all<SessionRepositoryRow>();
+  /** Current single-tenant visibility boundary; future grants belong here. */
+  async getVisibleForUser(sessionId: string, _userId: string): Promise<SessionEntry | null> {
+    return this.get(sessionId);
+  }
 
-    const bySession = new Map<string, SessionIndexRepository[]>();
-    for (const row of result.results || []) {
-      const list = bySession.get(row.session_id) ?? [];
-      list.push({
-        repoOwner: row.repo_owner,
-        repoName: row.repo_name,
-        repoId: row.repo_id,
-        baseBranch: row.base_branch,
-      });
-      bySession.set(row.session_id, list);
+  async updateReadState(
+    userId: string,
+    sessionId: string,
+    action: SessionReadAction
+  ): Promise<SessionReadResult | null> {
+    let writeApplied: boolean;
+    if (action.action === "mark_message_read") {
+      const result = await this.db
+        .prepare(
+          `INSERT INTO session_read_states
+             (user_id, session_id, last_read_message_id, updated_at)
+           SELECT ?, id, latest_terminal_message_id, ?
+           FROM sessions
+           WHERE id = ? AND latest_terminal_message_id = ?
+           ON CONFLICT(user_id, session_id) DO UPDATE SET
+              last_read_message_id = excluded.last_read_message_id,
+              updated_at = excluded.updated_at
+            WHERE session_read_states.last_read_message_id
+              != excluded.last_read_message_id`
+        )
+        .bind(userId, Date.now(), sessionId, action.messageId)
+        .run();
+      writeApplied = (result.meta.changes ?? 0) > 0;
+    } else {
+      const result = await this.db
+        .prepare(
+          `INSERT INTO session_read_states
+             (user_id, session_id, last_read_message_id, updated_at)
+           SELECT ?, id, latest_terminal_message_id, ?
+           FROM sessions
+           WHERE id = ? AND latest_terminal_message_id IS NOT NULL
+           ON CONFLICT(user_id, session_id) DO UPDATE SET
+              last_read_message_id = excluded.last_read_message_id,
+              updated_at = excluded.updated_at
+            WHERE session_read_states.last_read_message_id
+              != excluded.last_read_message_id`
+        )
+        .bind(userId, Date.now(), sessionId)
+        .run();
+      writeApplied = (result.meta.changes ?? 0) > 0;
     }
-    return bySession;
+
+    const currentReadState = await this.readStateForSession(userId, sessionId);
+    if (!currentReadState) return null;
+    const latestMessageId = currentReadState.latestMessageId;
+    if (latestMessageId === null) {
+      return {
+        sessionId,
+        outcome: "no_terminal_message",
+        unread: false,
+        latestMessageId: null,
+      };
+    }
+    const outcome =
+      action.action === "mark_message_read" && latestMessageId !== action.messageId
+        ? "not_latest"
+        : writeApplied
+          ? "marked_read"
+          : "already_read";
+    return {
+      sessionId,
+      outcome,
+      unread: currentReadState.unread,
+      latestMessageId,
+    };
+  }
+
+  private async readStateForSession(
+    userId: string,
+    sessionId: string
+  ): Promise<SessionReadState | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT sessions.latest_terminal_message_id,
+                ${unreadSql("sessions")} AS unread
+         FROM sessions
+         LEFT JOIN users viewer ON viewer.id = ?
+         LEFT JOIN session_read_states read_state
+           ON read_state.session_id = sessions.id
+          AND read_state.user_id = viewer.id
+         WHERE sessions.id = ?`
+      )
+      .bind(userId, sessionId)
+      .first<ViewerReadStateRow>();
+    return row ? readStateFromRow(row) : null;
   }
 
   async updateTitle(id: string, title: string): Promise<boolean> {
@@ -661,132 +668,7 @@ export class SessionIndexStore {
     return (result.meta?.changes ?? 0) > 0;
   }
 
-  async recordOutput(id: string, messageId: string, completedAt: number): Promise<boolean> {
-    const result = await this.db
-      .prepare(
-        `UPDATE sessions
-         SET latest_output_message_id = ?, latest_output_at = ?
-         WHERE id = ? AND (latest_output_at IS NULL OR latest_output_at <= ?)`
-      )
-      .bind(messageId, completedAt, id, completedAt)
-      .run();
-    return (result.meta?.changes ?? 0) > 0;
-  }
-
-  async updateReadState(
-    sessionId: string,
-    userId: string,
-    update: SessionReadUpdate
-  ): Promise<boolean | null> {
-    const session = await this.db
-      .prepare("SELECT latest_output_message_id FROM sessions WHERE id = ?")
-      .bind(sessionId)
-      .first<{ latest_output_message_id: string | null }>();
-    if (!session) return null;
-
-    const now = Date.now();
-    if (update.action === "mark_unread") {
-      await this.db
-        .prepare(
-          `INSERT INTO session_read_states
-             (user_id, session_id, read_output_message_id, manually_unread, updated_at)
-           VALUES (?, ?, NULL, 1, ?)
-           ON CONFLICT(user_id, session_id) DO UPDATE SET
-             manually_unread = 1,
-             updated_at = excluded.updated_at`
-        )
-        .bind(userId, sessionId, now)
-        .run();
-      return true;
-    }
-
-    if (update.action === "viewed") {
-      await this.db
-        .prepare(
-          `INSERT INTO session_read_states
-             (user_id, session_id, read_output_message_id, manually_unread, updated_at)
-           VALUES (?, ?, ?, 0, ?)
-           ON CONFLICT(user_id, session_id) DO UPDATE SET
-              read_output_message_id = CASE
-                WHEN session_read_states.manually_unread = 0
-                  AND (
-                    session_read_states.read_output_message_id IS NULL
-                    OR excluded.read_output_message_id = ?
-                  )
-                THEN excluded.read_output_message_id
-                ELSE session_read_states.read_output_message_id
-              END,
-              updated_at = excluded.updated_at`
-        )
-        .bind(userId, sessionId, update.messageId, now, session.latest_output_message_id)
-        .run();
-    } else {
-      await this.db
-        .prepare(
-          `INSERT INTO session_read_states
-             (user_id, session_id, read_output_message_id, manually_unread, updated_at)
-           VALUES (?, ?, ?, 0, ?)
-           ON CONFLICT(user_id, session_id) DO UPDATE SET
-             read_output_message_id = excluded.read_output_message_id,
-             manually_unread = 0,
-             updated_at = excluded.updated_at`
-        )
-        .bind(userId, sessionId, session.latest_output_message_id, now)
-        .run();
-    }
-
-    const unread = await this.unreadForSessions([sessionId], userId);
-    return unread.get(sessionId) ?? false;
-  }
-
-  async updateMetrics(
-    id: string,
-    metrics: {
-      totalCost: number;
-      activeDurationMs: number;
-      messageCount: number;
-      prCount: number;
-    }
-  ): Promise<boolean> {
-    const result = await this.db
-      .prepare(
-        `UPDATE sessions SET total_cost = MAX(total_cost, ?), active_duration_ms = ?, message_count = ?, pr_count = ?
-         WHERE id = ?`
-      )
-      .bind(metrics.totalCost, metrics.activeDurationMs, metrics.messageCount, metrics.prCount, id)
-      .run();
-    return (result.meta?.changes ?? 0) > 0;
-  }
-
-  async touchUpdatedAt(id: string): Promise<boolean> {
-    const result = await this.db
-      .prepare("UPDATE sessions SET updated_at = ? WHERE id = ?")
-      .bind(Date.now(), id)
-      .run();
-    return (result.meta?.changes ?? 0) > 0;
-  }
-
-  async delete(id: string): Promise<boolean> {
-    // Member rows are removed explicitly for clarity; the FK's ON DELETE
-    // CASCADE also covers callers that delete the session row directly.
-    const [, result] = await this.db.batch([
-      this.db.prepare("DELETE FROM session_repositories WHERE session_id = ?").bind(id),
-      this.db.prepare("DELETE FROM sessions WHERE id = ?").bind(id),
-    ]);
-
-    return (result.meta?.changes ?? 0) > 0;
-  }
-
-  /** List children of a parent session, newest first. */
-  async listByParent(parentSessionId: string): Promise<SessionEntry[]> {
-    const result = await this.db
-      .prepare(`SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY created_at DESC`)
-      .bind(parentSessionId)
-      .all<SessionRow>();
-    return (result.results || []).map(toEntry);
-  }
-
-  async archiveDescendants(parentSessionId: string, updatedAt: EpochMs): Promise<void> {
+  async archiveDescendants(parentSessionId: string, updatedAt: number): Promise<void> {
     await this.db
       .prepare(
         `WITH RECURSIVE subtree(id, path) AS (
@@ -817,7 +699,7 @@ export class SessionIndexStore {
       .run();
   }
 
-  async restoreArchivedSession(id: string, updatedAt: EpochMs): Promise<boolean> {
+  async restoreArchivedSession(id: string, updatedAt: number): Promise<boolean> {
     const result = await this.db
       .prepare(
         `UPDATE sessions
@@ -829,60 +711,202 @@ export class SessionIndexStore {
     return (result.meta?.changes ?? 0) > 0;
   }
 
-  async closeSpawningAndListDescendantIds(parentSessionId: string): Promise<string[]> {
-    const closeSpawning = this.db
+  async updateMetrics(
+    id: string,
+    metrics: {
+      totalCost: number;
+      activeDurationMs: number;
+      messageCount: number;
+      prCount: number;
+    }
+  ): Promise<boolean> {
+    const result = await this.db
       .prepare(
-        `WITH RECURSIVE subtree(id, path) AS (
-           SELECT id, '/' || hex(CAST(id AS BLOB)) || '/'
-           FROM sessions WHERE id = ?
-           UNION ALL
-           SELECT sessions.id, subtree.path || hex(CAST(sessions.id AS BLOB)) || '/'
-           FROM sessions
-           JOIN subtree ON sessions.parent_session_id = subtree.id
-           WHERE instr(
-             subtree.path,
-             '/' || hex(CAST(sessions.id AS BLOB)) || '/'
-           ) = 0
-         )
-         UPDATE sessions
-         SET spawn_closed = 1
-         WHERE id IN (SELECT id FROM subtree)`
+        `UPDATE sessions SET total_cost = ?, active_duration_ms = ?, message_count = ?, pr_count = ?
+         WHERE id = ?`
       )
-      .bind(parentSessionId);
-    const listDescendants = this.db
+      .bind(metrics.totalCost, metrics.activeDurationMs, metrics.messageCount, metrics.prCount, id)
+      .run();
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
+  /**
+   * Warm sessions that never received a prompt, untouched since `staleBefore`.
+   *
+   * `created` is the status a session holds until its first prompt is enqueued,
+   * so a row still sitting there long after its last update was abandoned before
+   * any work started. Ordered oldest-first, which drains a backlog only while
+   * every visited row leaves this set — see `archiveOrphanedDraft` and
+   * `repairStatus` for the two cases where that had to be made true.
+   */
+  async listAbandonedDraftSessionIds(staleBefore: number, limit: number): Promise<string[]> {
+    const result = await this.db
       .prepare(
-        `WITH RECURSIVE descendants(id, depth, path) AS (
-           SELECT id, 1,
-             '/' || hex(CAST(? AS BLOB)) || '/' || hex(CAST(id AS BLOB)) || '/'
-           FROM sessions WHERE parent_session_id = ?
+        `SELECT id FROM sessions
+         WHERE status = 'created' AND updated_at < ?
+         ORDER BY updated_at ASC
+         LIMIT ?`
+      )
+      .bind(staleBefore, limit)
+      .all<{ id: string }>();
+
+    return (result.results ?? []).map((row) => row.id);
+  }
+
+  /**
+   * Retire an index row whose Durable Object holds no session at all.
+   *
+   * A 404 from the expiry route is definitive rather than transient: there is no
+   * Durable Object state for this row to diverge from, so the index can be
+   * corrected on its own. Guarded on `created` so a row that acquired a real
+   * session between the sweep's read and this write is left alone.
+   */
+  async archiveOrphanedDraft(id: string): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        "UPDATE sessions SET status = 'archived', updated_at = ? WHERE id = ? AND status = 'created'"
+      )
+      .bind(Date.now(), id)
+      .run();
+
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
+  /**
+   * Correct a draft status projection that drifted away from its Durable Object.
+   *
+   * Deliberately not `updateStatus`, which carries an `updated_at` and refuses
+   * writes that would move it backwards. That guard keeps concurrent transitions
+   * ordered, but it silently drops a repair: the Durable Object sends its own
+   * timestamp, which is behind D1's whenever `touchUpdatedAt` has run, so the
+   * write matches no rows and reports success as `false`. This repair asserts
+   * only the stale shape the draft sweep selected: D1 still says `created`, and
+   * the Durable Object says otherwise. Only that status column is written,
+   * leaving `updated_at` to keep meaning "last real activity".
+   */
+  async repairStatus(id: string, status: SessionStatus): Promise<boolean> {
+    const result = await this.db
+      .prepare("UPDATE sessions SET status = ? WHERE id = ? AND status = 'created' AND status != ?")
+      .bind(status, id, status)
+      .run();
+
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
+  async touchUpdatedAt(id: string): Promise<boolean> {
+    const result = await this.db
+      .prepare("UPDATE sessions SET updated_at = ? WHERE id = ?")
+      .bind(Date.now(), id)
+      .run();
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
+  async delete(id: string): Promise<boolean> {
+    // Member rows are removed explicitly for clarity; the FK's ON DELETE
+    // CASCADE also covers callers that delete the session row directly.
+    const [, result] = await this.db.batch([
+      this.db.prepare("DELETE FROM session_repositories WHERE session_id = ?").bind(id),
+      this.db.prepare("DELETE FROM sessions WHERE id = ?").bind(id),
+    ]);
+
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
+  /** List children of a parent session, newest first. */
+  async listByParent(parentSessionId: string): Promise<SessionEntry[]> {
+    const result = await this.db
+      .prepare(`SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY created_at DESC`)
+      .bind(parentSessionId)
+      .all<SessionRow>();
+    return this.attachListMetadata((result.results || []).map(toEntry));
+  }
+
+  /** List non-terminal descendants, deepest first, so cancellation cascades bottom-up. */
+  async listActiveDescendantIds(parentSessionId: string): Promise<string[]> {
+    const result = await this.db
+      .prepare(
+        `WITH RECURSIVE descendants(id, status, depth) AS (
+           SELECT id, status, 1 FROM sessions WHERE parent_session_id = ?
            UNION ALL
-           SELECT sessions.id, descendants.depth + 1,
-             descendants.path || hex(CAST(sessions.id AS BLOB)) || '/'
+           SELECT sessions.id, sessions.status, descendants.depth + 1
            FROM sessions
            JOIN descendants ON sessions.parent_session_id = descendants.id
-           WHERE instr(
-             descendants.path,
-             '/' || hex(CAST(sessions.id AS BLOB)) || '/'
-           ) = 0
+           WHERE descendants.depth < ${MAX_DESCENDANT_DEPTH}
          )
-         SELECT id FROM descendants ORDER BY depth DESC`
+         SELECT id FROM descendants
+         WHERE status NOT IN (${TERMINAL_STATUS_SQL})
+         ORDER BY depth DESC`
       )
-      .bind(parentSessionId, parentSessionId);
-
-    const [, result] = await this.db.batch<{ id: string }>([closeSpawning, listDescendants]);
+      .bind(parentSessionId)
+      .all<{ id: string }>();
     return (result.results || []).map(({ id }) => id);
   }
 
-  /** Count active (non-terminal) children for concurrent cap enforcement. */
-  async countActiveChildren(parentSessionId: string): Promise<number> {
-    const result = await this.db
+  /** Atomically claim parent concurrency capacity for a child spawn or resume. */
+  async acquireChildAdmissionLease(
+    parentSessionId: string,
+    childSessionId: string,
+    maxConcurrentChildren: number
+  ): Promise<ChildAdmissionLease | null> {
+    const now = Date.now();
+    const lease: ChildAdmissionLease = {
+      token: crypto.randomUUID(),
+      childSessionId,
+      expiresAt: now + CHILD_ADMISSION_LEASE_TTL_MS,
+    };
+    await this.db
+      .prepare("DELETE FROM child_admission_leases WHERE expires_at <= ?")
+      .bind(now)
+      .run();
+    const inserted = await this.db
       .prepare(
-        `SELECT COUNT(*) as count FROM sessions
-         WHERE parent_session_id = ? AND status NOT IN (${TERMINAL_STATUS_SQL})`
+        `INSERT INTO child_admission_leases
+           (lease_token, parent_session_id, child_session_id, expires_at)
+         SELECT ?, ?, ?, ?
+         WHERE (
+           SELECT COUNT(*) FROM (
+             SELECT id AS child_session_id FROM sessions
+             WHERE parent_session_id = ? AND status NOT IN (${TERMINAL_STATUS_SQL})
+             UNION
+             SELECT child_session_id FROM child_admission_leases
+             WHERE parent_session_id = ? AND expires_at > ?
+           ) admitted_children
+         ) < ?
+         ON CONFLICT(child_session_id) DO UPDATE SET
+           lease_token = excluded.lease_token,
+           parent_session_id = excluded.parent_session_id,
+           expires_at = excluded.expires_at
+         WHERE child_admission_leases.expires_at <= ?`
       )
-      .bind(parentSessionId)
-      .first<{ count: number }>();
-    return result?.count ?? 0;
+      .bind(
+        lease.token,
+        parentSessionId,
+        childSessionId,
+        lease.expiresAt,
+        parentSessionId,
+        parentSessionId,
+        now,
+        maxConcurrentChildren,
+        now
+      )
+      .run();
+    return (inserted.meta?.changes ?? 0) > 0 ? lease : null;
+  }
+
+  /** Release only the lease owned by this caller. */
+  async releaseChildAdmissionLease(lease: ChildAdmissionLease): Promise<void> {
+    await this.db
+      .prepare("DELETE FROM child_admission_leases WHERE child_session_id = ? AND lease_token = ?")
+      .bind(lease.childSessionId, lease.token)
+      .run();
+  }
+
+  /** Finalize capacity after the child-owned active projection succeeds. */
+  async finalizeChildAdmission(childSessionId: string): Promise<void> {
+    await this.db
+      .prepare("DELETE FROM child_admission_leases WHERE child_session_id = ?")
+      .bind(childSessionId)
+      .run();
   }
 
   /** Count total children ever spawned for rate-limit enforcement. */

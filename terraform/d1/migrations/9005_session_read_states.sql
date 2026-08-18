@@ -1,14 +1,8 @@
+-- Fork-local: manual unread markers on top of upstream's read-state table (0055).
+-- Upstream's session_read_states tracks the last-read cursor; the fork adds a
+-- manual marker that survives auto-clear so a participant can pin a session as
+-- unread regardless of the latest-output projection.
+ALTER TABLE session_read_states ADD COLUMN manually_unread INTEGER NOT NULL DEFAULT 0;
+
 ALTER TABLE sessions ADD COLUMN latest_output_message_id TEXT;
 ALTER TABLE sessions ADD COLUMN latest_output_at INTEGER;
-
-CREATE TABLE session_read_states (
-  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  read_output_message_id TEXT,
-  manually_unread INTEGER NOT NULL DEFAULT 0,
-  updated_at INTEGER NOT NULL,
-  PRIMARY KEY (user_id, session_id)
-);
-
-CREATE INDEX idx_session_read_states_session
-  ON session_read_states(session_id, user_id);

@@ -6,7 +6,8 @@
  */
 
 import { z } from "zod";
-import type { InstallationRepository, PullRequestStatus } from "@open-inspect/shared";
+import type { InstallationRepository } from "@open-inspect/shared/types/repository-catalog";
+import type { PullRequestStatus } from "@open-inspect/shared/types/artifacts";
 import type {
   SourceControlProvider,
   SourceControlAuthContext,
@@ -28,7 +29,7 @@ import type { GitLabProviderConfig } from "./types";
 import { USER_AGENT } from "./constants";
 
 /** GitLab API base URL. */
-export const GITLAB_API_BASE = "https://gitlab.com/api/v4";
+const GITLAB_API_BASE = "https://gitlab.com/api/v4";
 
 /** Default per_page for paginated GitLab API requests (GitLab API maximum). */
 const PER_PAGE = 100;
@@ -113,6 +114,42 @@ const gitlabProjectLocationSchema = z.object({
   namespace: z.object({ full_path: z.string() }),
 });
 
+/** Wire shape of a GitLab project response, limited to fields used for repo metadata. */
+const gitlabRepositoryInfoSchema = z.object({
+  id: z.number().int(),
+  path: z.string(),
+  path_with_namespace: z.string(),
+  namespace: z.object({ full_path: z.string() }),
+  default_branch: z.string().optional(),
+  visibility: z.enum(["private", "internal", "public"]),
+});
+
+/** Wire shape used when validating PAT access to a GitLab project. */
+const gitlabRepositoryAccessSchema = z.object({
+  id: z.number().int(),
+  namespace: z.object({ full_path: z.string() }),
+  path: z.string(),
+  default_branch: z.string().optional(),
+  archived: z.boolean(),
+});
+
+/** Wire shape of list-projects results, limited to fields displayed downstream. */
+const gitlabRepositoryListSchema = z.array(
+  gitlabRepositoryAccessSchema.extend({
+    path_with_namespace: z.string(),
+    description: z.string().nullable(),
+    visibility: z.enum(["private", "internal", "public"]),
+  })
+);
+
+/** Wire shape of a GitLab branch response, limited to the head commit ID. */
+const gitlabBranchHeadSchema = z.object({
+  commit: z.object({ id: z.string().min(1) }),
+});
+
+/** Wire shape of list-branches results, limited to the branch name. */
+const gitlabBranchListSchema = z.array(z.object({ name: z.string() }));
+
 /** Parse a GitLab ISO-8601 timestamp into epoch ms; undefined when absent/invalid. */
 function parseProviderTimestamp(value: string | null | undefined): number | undefined {
   if (!value) return undefined;
@@ -172,15 +209,18 @@ export class GitLabSourceControlProvider implements SourceControlProvider {
       );
     }
 
-    const data = (await response.json()) as {
-      id: number;
-      name: string;
-      path: string;
-      path_with_namespace: string;
-      namespace: { full_path: string };
-      default_branch: string;
-      visibility: string;
-    };
+    const data = await parseProviderResponse(
+      response,
+      gitlabRepositoryInfoSchema,
+      "Failed to get repository"
+    );
+
+    if (data.default_branch === undefined) {
+      throw new SourceControlProviderError(
+        "Failed to get repository: token cannot read repository code",
+        "permanent"
+      );
+    }
 
     // full_path, not path: nested groups ("group/subgroup") need the
     // entire namespace so owner/name lookups reconstruct the project path.
@@ -376,15 +416,13 @@ export class GitLabSourceControlProvider implements SourceControlProvider {
         );
       }
 
-      const data = (await response.json()) as {
-        id: number;
-        namespace: { full_path: string };
-        path: string;
-        default_branch: string;
-        archived: boolean;
-      };
+      const data = await parseProviderResponse(
+        response,
+        gitlabRepositoryAccessSchema,
+        "Failed to check repository access"
+      );
 
-      if (data.archived) {
+      if (data.archived || data.default_branch === undefined) {
         return null;
       }
 
@@ -430,20 +468,17 @@ export class GitLabSourceControlProvider implements SourceControlProvider {
         );
       }
 
-      const data = (await response.json()) as Array<{
-        id: number;
-        name: string;
-        path: string;
-        path_with_namespace: string;
-        namespace: { full_path: string };
-        description: string | null;
-        visibility: string;
-        default_branch: string;
-        archived: boolean;
-      }>;
+      const data = await parseProviderResponse(
+        response,
+        gitlabRepositoryListSchema,
+        "Failed to list repositories"
+      );
 
       return data
-        .filter((project) => !project.archived)
+        .filter(
+          (project): project is typeof project & { default_branch: string } =>
+            !project.archived && project.default_branch !== undefined
+        )
         .map((project) => ({
           id: project.id,
           owner: project.namespace.full_path,
@@ -486,7 +521,11 @@ export class GitLabSourceControlProvider implements SourceControlProvider {
         );
       }
 
-      const data = (await response.json()) as Array<{ name: string }>;
+      const data = await parseProviderResponse(
+        response,
+        gitlabBranchListSchema,
+        "GitLab list branches"
+      );
       return data.map((b) => ({ name: b.name }));
     } catch (error) {
       if (error instanceof SourceControlProviderError) {
@@ -494,6 +533,39 @@ export class GitLabSourceControlProvider implements SourceControlProvider {
       }
       throw SourceControlProviderError.fromFetchError(
         `Failed to list branches: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  async getBranchHead(config: GetRepositoryConfig & { branch: string }): Promise<string | null> {
+    const projectPath = encodeProjectPath(config.owner, config.name);
+    try {
+      const response = await fetchWithTimeout(
+        `${GITLAB_API_BASE}/projects/${projectPath}/repository/branches/${encodeURIComponent(
+          config.branch
+        )}`,
+        { headers: this.headers(this.accessToken) }
+      );
+      if (response.status === 404) return null;
+      if (!response.ok) {
+        const error = await response.text();
+        throw SourceControlProviderError.fromFetchError(
+          `Failed to resolve branch head: ${response.status} ${error}`,
+          new Error(error),
+          response.status
+        );
+      }
+      const data = await parseProviderResponse(
+        response,
+        gitlabBranchHeadSchema,
+        "Failed to resolve branch head"
+      );
+      return data.commit.id;
+    } catch (error) {
+      if (error instanceof SourceControlProviderError) throw error;
+      throw SourceControlProviderError.fromFetchError(
+        `Failed to resolve branch head: ${error instanceof Error ? error.message : String(error)}`,
         error
       );
     }

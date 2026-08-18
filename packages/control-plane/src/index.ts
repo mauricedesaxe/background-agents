@@ -6,10 +6,20 @@
 
 import { handleRequest } from "./router";
 import { createLogger } from "./logger";
+import type { Env } from "./types";
+import { consumeImageBuildFinalizations } from "./image-builds/finalization-consumer";
+import { IMAGE_BUILD_SCHEDULER_CRON, runImageBuildScheduler } from "./image-builds/scheduler";
+import {
+  ABANDONED_DRAFT_SWEEP_CRON,
+  AbandonedDraftSweep,
+  SessionDraftExpiryClient,
+} from "./session/abandoned-draft-sweep";
+import { createRequestMetrics, instrumentD1, type RequestMetrics } from "./db/instrumented-d1";
+import { SessionIndexStore } from "./db/session-index";
+import type { SqlDatabase } from "./db/sql-database";
+import { createCloudflareBackgroundJobDispatcher } from "./cloudflare/background-job-dispatcher";
 import { SessionInternalPaths } from "./session/contracts";
 import { createSessionRuntimeClient } from "./session/runtime-client";
-import type { Env } from "./types";
-import { nowMs } from "./time";
 import {
   BOARD_INSPECTION_TOKEN_PREFIX,
   verifyBoardInspectionToken,
@@ -29,24 +39,45 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    // WebSocket upgrade for session or board
+    // WebSocket upgrade for session
     const upgradeHeader = request.headers.get("Upgrade");
     if (upgradeHeader?.toLowerCase() === "websocket") {
-      const boardMatch = url.pathname.match(/^\/sessions\/([^/]+)\/board\/([^/]+)\/ws$/);
-      if (boardMatch) {
-        return handleBoardWebSocket(request, env, url, boardMatch[1], boardMatch[2]);
-      }
-      return handleWebSocket(request, env, url);
+      const metrics = createRequestMetrics();
+      // eslint-disable-next-line no-restricted-syntax -- composition root: construct the request-scoped database adapter
+      const db = instrumentD1(env.DB, metrics);
+      return handleWebSocket(request, env, url, db, metrics);
     }
 
     // Regular API request — logged by the router with requestId and timing
-    return handleRequest(request, env, ctx);
+    return handleRequest(request, env, createCloudflareBackgroundJobDispatcher(ctx));
   },
 
   /**
    * Cron trigger handler — wakes the SchedulerDO to process overdue automations.
    */
-  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
+  async scheduled(event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
+    if (event.cron === IMAGE_BUILD_SCHEDULER_CRON) {
+      const requestId = crypto.randomUUID();
+      // eslint-disable-next-line no-restricted-syntax -- scheduled composition root: the one cron env.DB read
+      await runImageBuildScheduler(env, env.DB, {
+        request_id: requestId,
+        trace_id: requestId,
+      });
+      return;
+    }
+    if (event.cron === ABANDONED_DRAFT_SWEEP_CRON) {
+      await new AbandonedDraftSweep(
+        // eslint-disable-next-line no-restricted-syntax -- scheduled composition root: the one cron env.DB read
+        new SessionIndexStore(env.DB),
+        new SessionDraftExpiryClient(env.SESSION),
+        logger
+      ).run(Date.now());
+      return;
+    }
+    if (event.cron !== "* * * * *") {
+      logger.warn("Unknown scheduled trigger", { cron: event.cron });
+      return;
+    }
     if (!env.SCHEDULER) {
       logger.debug("SCHEDULER binding not configured, skipping scheduled tick");
       return;
@@ -59,15 +90,79 @@ export default {
 
     await stub.fetch("http://internal/internal/tick", { method: "POST" });
   },
+
+  queue: consumeImageBuildFinalizations,
 };
 
 /**
- * Handle a board sync WebSocket. The browser presents its session ws-token in
- * the `?token=` query (a raw WebSocket can't send auth headers). Verification
- * lives in the session DO — that's where the participant table is — so we verify
- * there first and only forward the upgrade to the BoardRoom on success. A failed
- * verify closes the connection; an unreachable session DO returns 5xx rather
- * than falling through to an unauthenticated board socket.
+ * Handle WebSocket connections.
+ */
+async function handleWebSocket(
+  request: Request,
+  env: Env,
+  url: URL,
+  db: SqlDatabase,
+  metrics: RequestMetrics
+): Promise<Response> {
+  // Extract session ID from path: /sessions/:id/ws
+  const boardMatch = url.pathname.match(/^\/sessions\/([^/]+)\/board\/([^/]+)\/ws$/);
+  if (boardMatch) {
+    return handleBoardWebSocket(request, env, url, boardMatch[1], boardMatch[2]);
+  }
+
+  const match = url.pathname.match(/^\/sessions\/([^/]+)\/ws$/);
+
+  if (!match) {
+    logger.warn("Invalid WebSocket path", { event: "ws.invalid_path", http_path: url.pathname });
+    return new Response("Invalid WebSocket path", { status: 400 });
+  }
+
+  const sessionId = match[1];
+  if (!(await new SessionIndexStore(db).exists(sessionId))) {
+    logger.warn("WebSocket session not found", {
+      event: "ws.session_not_found",
+      http_path: url.pathname,
+      session_id: sessionId,
+      ...metrics.summarize(),
+    });
+    return new Response("Session not found", { status: 404 });
+  }
+
+  logger.info("WebSocket upgrade", {
+    event: "ws.connect",
+    http_path: url.pathname,
+    session_id: sessionId,
+    ...metrics.summarize(),
+  });
+
+  // Get Durable Object and forward WebSocket
+  const doId = env.SESSION.idFromName(sessionId);
+  const stub = env.SESSION.get(doId);
+
+  // Forward the WebSocket upgrade request to the DO
+  const response = await stub.fetch(request);
+
+  // If it's a WebSocket upgrade response, return it directly
+  // Add CORS headers for the upgrade response
+  if (response.webSocket) {
+    return new Response(null, {
+      status: 101,
+      webSocket: response.webSocket,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  }
+
+  return response;
+}
+
+/**
+ * Board sync WebSocket hop. The browser presents a session ws-token (or a
+ * board inspection token) in the `?token=` query because a raw WebSocket
+ * cannot send auth headers. Participant verification happens in the session
+ * DO — that is where the participant table lives — and only a successful
+ * verify forwards the upgrade to the BoardRoom DO.
  */
 async function handleBoardWebSocket(
   request: Request,
@@ -86,7 +181,7 @@ async function handleBoardWebSocket(
     const result = await verifyBoardInspectionToken(token, env.TOKEN_ENCRYPTION_KEY, {
       sessionId,
       boardId,
-      nowMs: nowMs(),
+      nowMs: Date.now(),
     });
     if (!result.ok) {
       logger.warn("board.ws.inspection_auth_failed", {
@@ -149,46 +244,5 @@ async function handleBoardWebSocket(
       headers: { "Access-Control-Allow-Origin": "*" },
     });
   }
-  return response;
-}
-
-/**
- * Handle WebSocket connections.
- */
-async function handleWebSocket(request: Request, env: Env, url: URL): Promise<Response> {
-  // Extract session ID from path: /sessions/:id/ws
-  const match = url.pathname.match(/^\/sessions\/([^/]+)\/ws$/);
-
-  if (!match) {
-    logger.warn("Invalid WebSocket path", { event: "ws.invalid_path", http_path: url.pathname });
-    return new Response("Invalid WebSocket path", { status: 400 });
-  }
-
-  const sessionId = match[1];
-  logger.info("WebSocket upgrade", {
-    event: "ws.connect",
-    http_path: url.pathname,
-    session_id: sessionId,
-  });
-
-  // Get Durable Object and forward WebSocket
-  const doId = env.SESSION.idFromName(sessionId);
-  const stub = env.SESSION.get(doId);
-
-  // Forward the WebSocket upgrade request to the DO
-  const response = await stub.fetch(request);
-
-  // If it's a WebSocket upgrade response, return it directly
-  // Add CORS headers for the upgrade response
-  if (response.webSocket) {
-    return new Response(null, {
-      status: 101,
-      webSocket: response.webSocket,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-      },
-    });
-  }
-
   return response;
 }

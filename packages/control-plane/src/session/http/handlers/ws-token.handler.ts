@@ -1,5 +1,5 @@
 import type { Logger } from "../../../logger";
-import type { SessionRepository } from "../../repository";
+import type { ParticipantRepository } from "../../participant-repository";
 import type { ParticipantRow } from "../../types";
 import { z } from "zod";
 
@@ -7,10 +7,10 @@ const nullableOptionalString = z.string().nullable().optional();
 
 const generateWsTokenRequestSchema = z.object({
   userId: z.string().optional(),
+  canonicalUserId: nullableOptionalString,
   scmUserId: nullableOptionalString,
   scmLogin: nullableOptionalString,
   scmName: nullableOptionalString,
-  authName: nullableOptionalString,
   scmEmail: nullableOptionalString,
   scmTokenEncrypted: nullableOptionalString,
   scmRefreshTokenEncrypted: nullableOptionalString,
@@ -20,17 +20,12 @@ const generateWsTokenRequestSchema = z.object({
 type GenerateWsTokenRequest = z.infer<typeof generateWsTokenRequestSchema>;
 
 export interface WsTokenHandlerDeps {
-  repository: Pick<
-    SessionRepository,
-    "createParticipant" | "updateParticipantCoalesce" | "updateParticipantWsToken"
-  >;
+  repository: ParticipantRepository;
   getParticipantByUserId: (userId: string) => ParticipantRow | null;
-  getParticipantByWsTokenHash: (tokenHash: string) => ParticipantRow | null;
   generateId: (bytes?: number) => string;
   hashToken: (token: string) => Promise<string>;
-  /** ws-token lifetime; a token older than this is rejected. */
-  wsTokenTtlMs: number;
   now: () => number;
+  wsTokenTtlMs: number;
 }
 
 export interface WsTokenHandler {
@@ -82,10 +77,10 @@ export function createWsTokenHandler(deps: WsTokenHandlerDeps): WsTokenHandler {
           (participant.scm_refresh_token_encrypted == null || shouldUpdateTokens);
 
         deps.repository.updateParticipantCoalesce(participant.id, {
+          ...(body.canonicalUserId ? { canonicalUserId: body.canonicalUserId } : {}),
           scmUserId: body.scmUserId ?? null,
           scmLogin: body.scmLogin ?? null,
           scmName: body.scmName ?? null,
-          authName: body.authName ?? null,
           scmEmail: body.scmEmail ?? null,
           scmAccessTokenEncrypted: shouldUpdateTokens ? (body.scmTokenEncrypted ?? null) : null,
           scmRefreshTokenEncrypted: shouldUpdateRefreshToken
@@ -98,10 +93,10 @@ export function createWsTokenHandler(deps: WsTokenHandlerDeps): WsTokenHandler {
         deps.repository.createParticipant({
           id,
           userId: body.userId,
+          ...(body.canonicalUserId ? { canonicalUserId: body.canonicalUserId } : {}),
           scmUserId: body.scmUserId ?? null,
           scmLogin: body.scmLogin ?? null,
           scmName: body.scmName ?? null,
-          authName: body.authName ?? null,
           scmEmail: body.scmEmail ?? null,
           scmAccessTokenEncrypted: body.scmTokenEncrypted ?? null,
           scmRefreshTokenEncrypted: body.scmRefreshTokenEncrypted ?? null,
@@ -138,7 +133,7 @@ export function createWsTokenHandler(deps: WsTokenHandlerDeps): WsTokenHandler {
       }
 
       const tokenHash = await deps.hashToken(token);
-      const participant = deps.getParticipantByWsTokenHash(tokenHash);
+      const participant = deps.repository.getParticipantByWsTokenHash(tokenHash);
       if (!participant) {
         return Response.json({ error: "Invalid token" }, { status: 401 });
       }

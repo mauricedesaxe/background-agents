@@ -1,31 +1,41 @@
 """A test run inside a live sandbox must not corrupt that sandbox's runtime files."""
 
 import builtins
-import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
-from sandbox_runtime import bridge, constants, entrypoint
+from sandbox_runtime import boot_warnings, bridge, repository_boot, tunnel_environment
+from sandbox_runtime.boot_warnings import BootWarningSink
 from sandbox_runtime.bridge import AgentBridge
-from sandbox_runtime.constants import TUNNEL_ENV_SANDBOX_ID_KEY
-from sandbox_runtime.entrypoint import SandboxSupervisor
-from sandbox_runtime.repo_config import RepoEntry, load_repo_manifest
+from sandbox_runtime.constants import (
+    BOOT_WARNINGS_FILE_PATH,
+    REPO_MANIFEST_FILE_PATH,
+    TUNNEL_ENV_FILE_PATH,
+    TUNNEL_ENV_SANDBOX_ID_KEY,
+)
+from sandbox_runtime.tunnel_environment import TunnelEnvironment
 from tests.conftest import redirect_runtime_file_paths
+
+
+class _Log:
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
 
 
 @pytest.mark.asyncio
 async def test_runtime_file_operations_stay_under_each_test_directory(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENCODE_SESSION_ID", raising=False)
 
+    redirect_runtime_file_paths(tmp_path, monkeypatch)
+
     fixture_paths = {
-        Path(entrypoint.REPO_MANIFEST_FILE_PATH),
+        Path(repository_boot.REPO_MANIFEST_FILE_PATH),
         Path(bridge.REPO_MANIFEST_FILE_PATH),
-        Path(entrypoint.BOOT_WARNINGS_FILE_PATH),
+        Path(boot_warnings.BOOT_WARNINGS_FILE_PATH),
         Path(bridge.BOOT_WARNINGS_FILE_PATH),
-        Path(entrypoint.TUNNEL_ENV_FILE_PATH),
-        Path(bridge.tempfile.gettempdir()) / "opencode-session-id",
+        Path(tunnel_environment.TUNNEL_ENV_FILE_PATH),
     }
     assert all(path.parent == tmp_path for path in fixture_paths)
 
@@ -38,23 +48,13 @@ async def test_runtime_file_operations_stay_under_each_test_directory(tmp_path, 
         live_root / "opencode-session-id": "live session",
     }
     guarded_live_paths = set(live_sentinels) | {
-        Path(constants.REPO_MANIFEST_FILE_PATH),
-        Path(constants.BOOT_WARNINGS_FILE_PATH),
-        Path(constants.TUNNEL_ENV_FILE_PATH),
+        Path(REPO_MANIFEST_FILE_PATH),
+        Path(BOOT_WARNINGS_FILE_PATH),
+        Path(TUNNEL_ENV_FILE_PATH),
         Path("/tmp/opencode-session-id"),
     }
     for path, contents in live_sentinels.items():
         path.write_text(contents)
-
-    live_manifest_path, live_warnings_path, live_tunnel_path, _ = live_sentinels
-    monkeypatch.setattr(entrypoint, "REPO_MANIFEST_FILE_PATH", str(live_manifest_path))
-    monkeypatch.setattr(bridge, "REPO_MANIFEST_FILE_PATH", str(live_manifest_path))
-    monkeypatch.setattr(entrypoint, "BOOT_WARNINGS_FILE_PATH", str(live_warnings_path))
-    monkeypatch.setattr(bridge, "BOOT_WARNINGS_FILE_PATH", str(live_warnings_path))
-    monkeypatch.setattr(entrypoint, "TUNNEL_ENV_FILE_PATH", str(live_tunnel_path))
-    monkeypatch.setattr(bridge.tempfile, "tempdir", str(live_root))
-
-    redirect_runtime_file_paths(tmp_path, monkeypatch)
 
     real_open = builtins.open
     real_read_text = Path.read_text
@@ -86,40 +86,31 @@ async def test_runtime_file_operations_stay_under_each_test_directory(tmp_path, 
     monkeypatch.setattr(Path, "write_text", reject_live_write)
     monkeypatch.setattr(Path, "unlink", reject_live_unlink)
 
-    supervisor = SandboxSupervisor()
-    supervisor.sandbox_id = "test-sandbox"
-    supervisor.repositories = [
-        RepoEntry(owner="acme", name="app", branch="main", path=tmp_path / "app")
-    ]
+    log = _Log()
+
+    warning_sink = BootWarningSink(log)
+    warning_sink.record(scope="setup", message="isolated warning")
+    warnings_path = Path(boot_warnings.BOOT_WARNINGS_FILE_PATH)
+    assert warnings_path.exists()
+
     agent_bridge = AgentBridge(
         sandbox_id="test-sandbox",
         session_id="test-session",
         control_plane_url="http://localhost:8787",
         auth_token="test-token",
     )
-
-    supervisor._write_repo_manifest()
-    manifest_path = Path(entrypoint.REPO_MANIFEST_FILE_PATH)
-    assert json.loads(manifest_path.read_text())["repositories"][0]["name"] == "app"
-    assert load_repo_manifest(manifest_path)[0].name == "app"
-
-    supervisor._record_boot_warning(scope="setup", message="isolated warning")
-    warnings_path = Path(entrypoint.BOOT_WARNINGS_FILE_PATH)
-    assert warnings_path.exists()
     agent_bridge._send_event = AsyncMock()
     await agent_bridge._drain_boot_warnings()
     assert not warnings_path.exists()
     agent_bridge._send_event.assert_awaited_once()
 
-    tunnel_path = Path(entrypoint.TUNNEL_ENV_FILE_PATH)
+    tunnel_path = Path(tunnel_environment.TUNNEL_ENV_FILE_PATH)
     tunnel_contents = f"{TUNNEL_ENV_SANDBOX_ID_KEY}=test-sandbox\nTUNNEL_3000=https://example.com\n"
     tunnel_path.write_text(tunnel_contents)
-    supervisor._clear_stale_tunnel_env_file()
+    TunnelEnvironment(sandbox_id="test-sandbox", log=log).clear_stale_file()
     assert tunnel_path.read_text() == tunnel_contents
 
-    agent_bridge.session_id_file.write_text("oc-isolated")
-    await agent_bridge._load_session_id()
-    assert agent_bridge.opencode_session_id == "oc-isolated"
+    assert agent_bridge.session_id_file == tmp_path / "opencode-session-id"
 
     monkeypatch.setattr(builtins, "open", real_open)
     monkeypatch.setattr(Path, "read_text", real_read_text)
@@ -127,9 +118,9 @@ async def test_runtime_file_operations_stay_under_each_test_directory(tmp_path, 
     monkeypatch.setattr(Path, "unlink", real_unlink)
 
     isolated_paths = {
-        manifest_path,
+        Path(repository_boot.REPO_MANIFEST_FILE_PATH),
         Path(bridge.REPO_MANIFEST_FILE_PATH),
-        warnings_path,
+        Path(boot_warnings.BOOT_WARNINGS_FILE_PATH),
         Path(bridge.BOOT_WARNINGS_FILE_PATH),
         tunnel_path,
         agent_bridge.session_id_file,

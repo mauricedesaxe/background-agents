@@ -11,21 +11,22 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   automationEventSchema,
-  nextCronOccurrence,
   matchesConditions,
   conditionRegistry,
-  computeHmacHex,
-  DEFAULT_ENABLED_MODELS,
-  isValidModel,
-  type RepositoryRef,
-  type AutomationCallbackContext,
-  type AutomationInvocationSource,
+  buildSlackContextBlock,
+  slackChannelLabel,
   type SlackAutomationEvent,
-  type SlackCallbackContext,
   type TriggerConfig,
-} from "@open-inspect/shared";
+} from "@open-inspect/shared/triggers";
+import { nextCronOccurrence } from "@open-inspect/shared/cron";
+import type { AutomationInvocationSource } from "@open-inspect/shared/types/automations";
+import type {
+  AutomationCallbackContext,
+  SlackCallbackContext,
+} from "@open-inspect/shared/types/session-api";
+import { computeHmacHex } from "@open-inspect/shared/auth";
 import { z } from "zod";
-import { callbackSigningSecret } from "../auth/callback-signing";
+import { callbackSigningSecret } from "../auth/service/callback-signing";
 import {
   AutomationStore,
   toAutomationRun,
@@ -37,9 +38,8 @@ import {
   type AutomationRepositoryInsert,
   type AutomationEnvironmentRow,
 } from "../db/automation-store";
-import { ApiTokenStore } from "../db/api-tokens";
-import { UpstreamExchangeStore } from "../db/upstream-exchange-store";
 import { SlackChannelStore } from "../db/slack-channel-store";
+import { IntegrationSettingsStore } from "../db/integration-settings";
 import {
   buildSlackCompletionNotification,
   buildSlackSkipNotification,
@@ -48,25 +48,21 @@ import {
   type SlackCompletionContext,
 } from "./slack-completion";
 import { UserStore } from "../db/user-store";
-import { ModelPreferencesStore } from "../db/model-preferences";
 import { createRequestMetrics } from "../db/instrumented-d1";
 import { generateId } from "../auth/crypto";
 import { createLogger, parseLogLevel } from "../logger";
 import type { Logger } from "../logger";
 import type { Env } from "../types";
 import type { SqlDatabase } from "../db/sql-database";
-import { initializeSession, SessionInitializationRejectedError } from "../session/initialize";
-import { buildSessionInternalUrl, SessionInternalPaths } from "../session/contracts";
-import { SessionIndexStore, SessionReplayConflictError } from "../db/session-index";
+import { createCloudflareBackgroundJobDispatcher } from "../cloudflare/background-job-dispatcher";
+import { initializeSession } from "../session/initialize";
 import { resolveSessionScopedSettings } from "../session/integration-settings-resolution";
+import { resolveManagedSkills } from "../session/skill-resolution";
+import type { EnqueuePromptRequest } from "../session/enqueue-prompt-contract";
 import { resolveAutomationRepositories } from "../automation/repository";
-import {
-  resolveAutomationSessionTarget,
-  type AutomationSessionTarget,
-} from "../automation/session-target";
+import { resolveAutomationSessionTarget } from "../automation/session-target";
 import type { RequestContext } from "../routes/shared";
-import { resolveGitHubEnrichment } from "../session/identity";
-import { DEFAULT_EXECUTION_TIMEOUT_MS } from "../sandbox/lifecycle/decisions";
+import { deliverWithRetry } from "../session/callback-delivery";
 
 /** Max automations to process per tick (backpressure). */
 const MAX_PER_TICK = 25;
@@ -88,21 +84,8 @@ const AUTOMATION_LAUNCH_CONCURRENCY = 4;
 /** Threshold for detecting orphaned "starting" runs (5 minutes). */
 const ORPHAN_THRESHOLD_MS = 5 * 60 * 1000;
 
-const repositorySetSchema = z.array(
-  z.object({
-    repoOwner: z.string(),
-    repoName: z.string(),
-    repoId: z.number(),
-    baseBranch: z.string(),
-  })
-);
-
-class RetryableAutomationLaunchError extends Error {
-  constructor(cause: unknown) {
-    super(cause instanceof Error ? cause.message : String(cause));
-    this.name = "RetryableAutomationLaunchError";
-  }
-}
+/** Default execution timeout for detecting timed-out runs (90 minutes). */
+const DEFAULT_EXECUTION_TIMEOUT_MS = 90 * 60 * 1000;
 
 /** Consecutive failure threshold for auto-pause. */
 const AUTO_PAUSE_THRESHOLD = 3;
@@ -126,6 +109,15 @@ const INVOCATION_SWEEP_WINDOW_MS = 24 * 60 * 60 * 1000;
 const SLACK_THREAD_CONTINUITY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
+ * Bound on the thread-context request. It sits between admission and launch, so
+ * a slow Slack read would hold every child in `starting` until the orphan sweep
+ * repairs them. Matches the callback-delivery attempt timeout; on expiry the run
+ * launches with no thread history, which is the same fallback as any other
+ * failure.
+ */
+const SLACK_THREAD_CONTEXT_TIMEOUT_MS = 10_000;
+
+/**
  * Repository label for user-facing surfaces (Slack), read from the run's
  * firing-time snapshot — the automation row's selection may have been edited
  * since this run started.
@@ -136,8 +128,26 @@ function formatRunRepositoryLabel(
   return run?.repo_owner && run?.repo_name ? `${run.repo_owner}/${run.repo_name}` : "No repository";
 }
 
+async function getSlackSessionInstructions(db: SqlDatabase): Promise<string | undefined> {
+  try {
+    const instructions = (await new IntegrationSettingsStore(db).getGlobal("slack"))?.defaults
+      ?.sessionInstructions;
+    return typeof instructions === "string" && instructions.trim() ? instructions : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function appendSlackSessionInstructions(prompt: string, instructions: string | undefined): string {
+  return instructions ? `${prompt}\n\n## Additional Instructions\n\n${instructions}` : prompt;
+}
+
 const manualTriggerBodySchema = z.object({
   automationId: z.string().min(1),
+});
+
+const slackThreadContextResponseSchema = z.object({
+  threadContext: z.string(),
 });
 
 const runCompleteBodySchema = z.object({
@@ -171,7 +181,16 @@ interface StartInvocationParams {
   repositories?: AutomationRepositoryInsert[];
   /** Pre-fetched environment selection (the tick passes its batched fetch). */
   environments?: AutomationEnvironmentRow[];
+  /** Complete prompt to use directly, or as the fallback for a lazy override. */
   instructionsOverride?: string;
+  /**
+   * Lazy alternative to `instructionsOverride`, resolved only after the
+   * invocation is admitted. Slack runs use it so thread history is fetched for
+   * runs that actually start — never for unmatched events, steers, concurrency
+   * skips or deduplicated firings. If resolution fails, startInvocation uses
+   * `instructionsOverride` so admitted children cannot be stranded.
+   */
+  instructionsOverrideFactory?: () => Promise<string>;
 }
 
 type StartInvocationResult =
@@ -183,6 +202,13 @@ type StartInvocationResult =
   | { outcome: "blocked" }
   /** Idempotency/dedup collision — another firing owns this slot or event. */
   | { outcome: "deduplicated" };
+
+type SchedulerPromptRequest = Pick<
+  EnqueuePromptRequest,
+  "content" | "authorId" | "canonicalUserId" | "source"
+> & {
+  callbackContext: AutomationCallbackContext | SlackCallbackContext;
+};
 
 export class SchedulerDO extends DurableObject<Env> {
   private readonly log: Logger;
@@ -198,8 +224,7 @@ export class SchedulerDO extends DurableObject<Env> {
 
   /**
    * Increment the automation's failure streak and auto-pause at the threshold.
-   * Callers gate this per-invocation via the failure_counted_at CAS; only the
-   * legacy rollback-window path (runs without an invocation) calls it directly.
+   * Callers gate this per-invocation via the failure_counted_at CAS.
    */
   private async trackAutomationFailure(
     store: AutomationStore,
@@ -285,11 +310,11 @@ export class SchedulerDO extends DurableObject<Env> {
     const invocationId = generateId();
     const scheduledAt = params.scheduledAt ?? now;
 
-    const childBase = (): Omit<AutomationRunRow, "status"> => ({
+    const childBase = () => ({
       id: generateId(),
       automation_id: automation.id,
       invocation_id: invocationId,
-      session_id: generateId(),
+      session_id: null,
       skip_reason: null,
       failure_reason: null,
       scheduled_at: scheduledAt,
@@ -301,68 +326,37 @@ export class SchedulerDO extends DurableObject<Env> {
       repo_id: null,
       base_branch: null,
       environment_id: null,
-      prompt_content: params.instructionsOverride ?? automation.instructions,
-      repository_set: null,
     });
 
-    const repositoryChildren = resolutions.map(
-      (resolution): AutomationRunRow => ({
-        ...childBase(),
-        status: resolution.error ? "failed" : "starting",
-        failure_reason: resolution.error,
-        completed_at: resolution.error ? now : null,
-        repo_owner: resolution.repository?.repoOwner ?? resolution.requested.repo_owner,
-        repo_name: resolution.repository?.repoName ?? resolution.requested.repo_name,
-        repo_id: resolution.repository?.repoId ?? resolution.requested.repo_id,
-        base_branch: resolution.repository?.baseBranch ?? resolution.requested.base_branch,
-      })
-    );
-    const environmentChildren = environmentSelection.map(
-      (environment): AutomationRunRow => ({
-        ...childBase(),
-        status: "starting",
-        environment_id: environment.environment_id,
-      })
-    );
-    const children: AutomationRunRow[] =
-      automation.trigger_type === "once"
-        ? [oneShotChild(childBase, repositoryChildren, environmentChildren, now)]
-        : [...repositoryChildren, ...environmentChildren];
+    // One child per target. Repository children snapshot the resolved repo; a
+    // failed resolution pre-fails its child (snapshot from the selection row)
+    // without blocking siblings. Environment children snapshot the environment
+    // id — the workspace itself resolves at launch time (design §13.3), so a
+    // deleted environment fails through the launch-failure path. No targets →
+    // one repo-less child.
+    const children: AutomationRunRow[] = [
+      ...resolutions.map(
+        (resolution): AutomationRunRow => ({
+          ...childBase(),
+          status: resolution.error ? "failed" : "starting",
+          failure_reason: resolution.error,
+          completed_at: resolution.error ? now : null,
+          repo_owner: resolution.repository?.repoOwner ?? resolution.requested.repo_owner,
+          repo_name: resolution.repository?.repoName ?? resolution.requested.repo_name,
+          repo_id: resolution.repository?.repoId ?? resolution.requested.repo_id,
+          base_branch: resolution.repository?.baseBranch ?? resolution.requested.base_branch,
+        })
+      ),
+      ...environmentSelection.map(
+        (environment): AutomationRunRow => ({
+          ...childBase(),
+          status: "starting",
+          environment_id: environment.environment_id,
+        })
+      ),
+    ];
     if (children.length === 0) {
       children.push({ ...childBase(), status: "starting" });
-    }
-    if (automation.trigger_type === "once" && children[0]?.status === "starting") {
-      try {
-        const child = children[0];
-        const repositorySet = child.environment_id
-          ? ((
-              await resolveAutomationSessionTarget(
-                this.env,
-                child,
-                {
-                  trace_id: `automation:${automation.id}`,
-                  request_id: child.id,
-                  metrics: createRequestMetrics(),
-                  db: this.db,
-                },
-                this.log
-              )
-            ).repositories ?? [])
-          : resolutions.map((resolution) => ({
-              repoOwner: resolution.repository!.repoOwner,
-              repoName: resolution.repository!.repoName,
-              repoId: resolution.repository!.repoId,
-              baseBranch: resolution.repository!.baseBranch,
-            }));
-        child.repository_set = JSON.stringify(repositorySet);
-      } catch (error) {
-        children[0] = {
-          ...children[0],
-          status: "failed",
-          failure_reason: error instanceof Error ? error.message : String(error),
-          completed_at: now,
-        };
-      }
     }
 
     const invocation: AutomationInvocationRow = {
@@ -389,10 +383,6 @@ export class SchedulerDO extends DurableObject<Env> {
           source === "schedule" && params.advanceToNextRunAt !== undefined
             ? { nextRunAt: params.advanceToNextRunAt }
             : undefined,
-        consumeOnce:
-          automation.trigger_type === "once" && params.scheduledAt !== undefined
-            ? { dueAt: params.scheduledAt, now }
-            : undefined,
       }));
     } catch (e) {
       if (isDuplicateKeyError(e)) {
@@ -410,42 +400,42 @@ export class SchedulerDO extends DurableObject<Env> {
     }
 
     if (!inserted) {
-      if (automation.trigger_type === "once") {
-        return { outcome: "deduplicated" };
-      }
       // Raced an active invocation between the pre-check and the batch. The
       // batch's schedule advance already ran (deliberately unconditional), so
       // the skip record must not advance again.
       return this.recordOverlapSkip(store, params, { advanceSchedule: false });
     }
 
+    // Admitted. Only now is it worth paying for anything the prompt needs.
+    // Contain provider failures here: children already exist in `starting`, so
+    // a rejected lazy override must not escape and strand persisted state.
+    let instructionsOverride = params.instructionsOverride;
+    if (params.instructionsOverrideFactory) {
+      try {
+        instructionsOverride = await params.instructionsOverrideFactory();
+      } catch (error) {
+        this.log.warn("Failed to resolve lazy instructions; using fallback", {
+          event: "scheduler.instructions_override_failed",
+          automation_id: automation.id,
+          invocation_id: invocationId,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
+    }
+
     const launchChild = async (child: AutomationRunRow): Promise<void> => {
       try {
-        const sessionId = child.session_id!;
-        await this.createSessionForAutomationRun(automation, child);
-        await this.sendPromptToSession(
-          sessionId,
-          automation,
-          child.id,
-          params.instructionsOverride
-        );
+        const { sessionId } = await this.createSessionForAutomationRun(automation, child);
+        await this.sendPromptToSession(sessionId, automation, child.id, instructionsOverride);
         await store.updateRun(child.id, {
           status: "running",
+          session_id: sessionId,
           started_at: Date.now(),
         });
         child.status = "running";
+        child.session_id = sessionId;
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
-        if (e instanceof RetryableAutomationLaunchError) {
-          this.log.warn("Automation launch response was ambiguous; recovery will replay it", {
-            event: "scheduler.launch_ambiguous",
-            automation_id: automation.id,
-            invocation_id: invocationId,
-            run_id: child.id,
-            error: message,
-          });
-          return;
-        }
         this.log.error("Failed to launch automation run", {
           event: "scheduler.session_creation_failed",
           automation_id: automation.id,
@@ -581,11 +571,7 @@ export class SchedulerDO extends DurableObject<Env> {
     // 1. Recovery sweep
     await this.recoverySweep(store);
 
-    // 2. Retention sweep: purge api_tokens rows long past expiry — nothing
-    // else ever deletes them (rotation mints 2 rows per user per period).
-    await this.apiTokenRetentionSweep(now);
-
-    // 3. Process overdue automations, bounded by the per-tick child budget.
+    // 2. Process overdue automations, bounded by the per-tick child budget.
     const overdue = await store.getOverdueAutomations(now, MAX_PER_TICK);
     const [repositoriesByAutomation, environmentsByAutomation] = await Promise.all([
       store.getRepositoriesForAutomationIds(overdue.map((automation) => automation.id)),
@@ -612,10 +598,10 @@ export class SchedulerDO extends DurableObject<Env> {
         break;
       }
       try {
-        const nextRunAt =
-          automation.trigger_type === "schedule"
-            ? nextCronOccurrence(automation.schedule_cron!, automation.schedule_tz).getTime()
-            : undefined;
+        const nextRunAt = nextCronOccurrence(
+          automation.schedule_cron!,
+          automation.schedule_tz
+        ).getTime();
 
         const result = await this.startInvocation(store, {
           automation,
@@ -631,7 +617,7 @@ export class SchedulerDO extends DurableObject<Env> {
             // Summary parity with the pre-invocations tick: a firing that
             // launched nothing (every child pre-failed or failed to launch)
             // reports as failed, not processed.
-            if (result.launched > 0 || result.runs.some((run) => run.status === "starting")) {
+            if (result.launched > 0) {
               processed++;
             } else {
               failed++;
@@ -665,25 +651,6 @@ export class SchedulerDO extends DurableObject<Env> {
     return new Response(JSON.stringify({ processed, skipped, failed }), {
       headers: { "Content-Type": "application/json" },
     });
-  }
-
-  // ─── Retention sweep ─────────────────────────────────────────────────────
-
-  private async apiTokenRetentionSweep(now: number): Promise<void> {
-    try {
-      const deleted = await new ApiTokenStore(this.db).deleteExpired(now);
-      if (deleted > 0) {
-        this.log.info("Expired api_tokens rows purged", {
-          event: "scheduler.api_token_retention",
-          deleted,
-        });
-      }
-    } catch (e) {
-      this.log.error("api_tokens retention sweep failed", {
-        event: "scheduler.api_token_retention_error",
-        error: e instanceof Error ? e.message : String(e),
-      });
-    }
   }
 
   // ─── Recovery sweep ──────────────────────────────────────────────────────
@@ -747,54 +714,19 @@ export class SchedulerDO extends DurableObject<Env> {
     const now = Date.now();
     const recoveredRuns: AutomationRunRow[] = [];
 
-    const replayableOrphans = orphaned.filter((run) => run.session_id != null);
-    const legacyOrphans = orphaned.filter((run) => run.session_id == null);
-
-    for (const run of replayableOrphans) {
-      try {
-        const automation = await store.getById(run.automation_id);
-        if (!automation) throw new Error("Automation not found during recovery");
-        await this.createSessionForAutomationRun(automation, run, { recovery: true });
-        await this.sendPromptToSession(
-          run.session_id!,
-          automation,
-          run.id,
-          run.prompt_content ?? undefined
-        );
-        await store.updateRun(run.id, { status: "running", started_at: Date.now() });
-      } catch (e) {
-        const reason = e instanceof Error ? e.message : String(e);
-        if (e instanceof RetryableAutomationLaunchError) {
-          this.log.warn("Recovered launch response was ambiguous; leaving run replayable", {
-            event: "scheduler.recovery.launch_ambiguous",
-            automation_id: run.automation_id,
-            run_id: run.id,
-            error: reason,
-          });
-          continue;
-        }
-        await store.updateRun(run.id, {
-          status: "failed",
-          failure_reason: reason,
-          completed_at: Date.now(),
-        });
-        recoveredRuns.push(run);
-      }
-    }
-
-    if (legacyOrphans.length > 0) {
+    if (orphaned.length > 0) {
       try {
         await store.bulkFailRuns(
-          legacyOrphans.map((run) => run.id),
+          orphaned.map((r) => r.id),
           "session_creation_timeout",
           now
         );
-        recoveredRuns.push(...legacyOrphans);
+        recoveredRuns.push(...orphaned);
       } catch (e) {
         this.log.error("Recovery sweep failed to mark orphaned runs as failed", {
           event: "scheduler.recovery.bulk_fail_error",
           category: "orphaned",
-          count: legacyOrphans.length,
+          count: orphaned.length,
           error: e instanceof Error ? e.message : String(e),
         });
       }
@@ -824,17 +756,10 @@ export class SchedulerDO extends DurableObject<Env> {
     }
 
     // Failure accounting: strikes are per INVOCATION (CAS-deduped), so two
-    // stuck children of one fan-out cost one strike, not two. Runs without an
-    // invocation link (rollback-window writes by pre-invocation code) keep the
-    // legacy per-run bulk accounting until the backfill repairs them.
+    // stuck children of one fan-out cost one strike, not two.
     const affectedInvocations = new Map<string, string>(); // invocation id → automation id
-    const legacyCounts = new Map<string, number>();
     for (const run of recoveredRuns) {
-      if (run.invocation_id) {
-        affectedInvocations.set(run.invocation_id, run.automation_id);
-      } else {
-        legacyCounts.set(run.automation_id, (legacyCounts.get(run.automation_id) ?? 0) + 1);
-      }
+      affectedInvocations.set(run.invocation_id, run.automation_id);
     }
 
     for (const [invocationId, automationId] of affectedInvocations) {
@@ -847,39 +772,6 @@ export class SchedulerDO extends DurableObject<Env> {
           invocation_id: invocationId,
           error: e instanceof Error ? e.message : String(e),
         });
-      }
-    }
-
-    if (legacyCounts.size > 0) {
-      let newCounts: Map<string, number>;
-      try {
-        newCounts = await store.bulkIncrementFailures(legacyCounts);
-      } catch (e) {
-        this.log.error("Recovery sweep failed to track failures", {
-          event: "scheduler.recovery.bulk_track_error",
-          error: e instanceof Error ? e.message : String(e),
-        });
-        newCounts = new Map();
-      }
-
-      for (const [automationId, count] of newCounts) {
-        if (count < AUTO_PAUSE_THRESHOLD) continue;
-
-        try {
-          await store.autoPause(automationId);
-          this.log.warn("Automation auto-paused due to consecutive failures", {
-            event: "scheduler.auto_pause",
-            automation_id: automationId,
-            consecutive_failures: count,
-          });
-        } catch (e) {
-          this.log.error("Recovery sweep failed to auto-pause automation", {
-            event: "scheduler.recovery.auto_pause_error",
-            automation_id: automationId,
-            consecutive_failures: count,
-            error: e instanceof Error ? e.message : String(e),
-          });
-        }
       }
     }
 
@@ -968,6 +860,15 @@ export class SchedulerDO extends DurableObject<Env> {
         break;
     }
 
+    // One thread read per event, shared by every automation admitted for it and
+    // created only on the first admission. Several automations can watch the
+    // same channel; they must not each re-read the thread.
+    let slackContextPromise: Promise<string> | undefined;
+    const slackContextBlock = (): Promise<string> => {
+      slackContextPromise ??= this.buildSlackContextWithThread(event as SlackAutomationEvent);
+      return slackContextPromise;
+    };
+
     let triggered = 0;
     let skipped = 0;
     // Follow-ups routed into an already-active thread's session (slack steering).
@@ -975,6 +876,8 @@ export class SchedulerDO extends DurableObject<Env> {
     // Surface at most one concurrency-skip ephemeral per event, even when
     // several automations watch the same thread and all skip.
     let concurrencySkipped = false;
+    let slackSessionInstructions: string | undefined;
+    let slackSettingsLoaded = false;
 
     for (const automation of candidates) {
       const now = Date.now();
@@ -1010,19 +913,37 @@ export class SchedulerDO extends DurableObject<Env> {
         continue;
       }
 
+      if (event.source === "slack" && !slackSettingsLoaded) {
+        slackSessionInstructions = await getSlackSessionInstructions(this.db);
+        slackSettingsLoaded = true;
+      }
+
       // Event firings are invocations of 1 (or 0 children when skipped): same
       // per-key concurrency, same trigger_key dedup — both now enforced on the
       // invocation, atomically. The overlap skip also covers the brief slack
       // window before a run has created its session (no steerable row yet), so
       // a reply racing the initial trigger gets the "already active" notice
       // instead of a second session.
+      const instructionsOverride = appendSlackSessionInstructions(
+        `${event.contextBlock}\n---\n\n${automation.instructions}`,
+        slackSessionInstructions
+      );
       const result = await this.startInvocation(store, {
         automation,
         source: "event",
         triggerKey: event.triggerKey,
         concurrencyKey: event.concurrencyKey,
         triggerMetadata: event.source === "slack" ? serializeSlackTriggerMetadata(event) : null,
-        instructionsOverride: `${event.contextBlock}\n---\n\n${automation.instructions}`,
+        instructionsOverride,
+        ...(event.source === "slack"
+          ? {
+              instructionsOverrideFactory: async () =>
+                appendSlackSessionInstructions(
+                  `${await slackContextBlock()}\n---\n\n${automation.instructions}`,
+                  slackSessionInstructions
+                ),
+            }
+          : {}),
       });
 
       switch (result.outcome) {
@@ -1081,15 +1002,6 @@ export class SchedulerDO extends DurableObject<Env> {
         status: 404,
         headers: { "Content-Type": "application/json" },
       });
-    }
-    if (automation.trigger_type === "once") {
-      return new Response(
-        JSON.stringify({ error: "One-shot tasks cannot be triggered manually" }),
-        {
-          status: 404,
-          headers: { "Content-Type": "application/json" },
-        }
-      );
     }
 
     const result = await this.startInvocation(store, { automation, source: "manual" });
@@ -1159,35 +1071,20 @@ export class SchedulerDO extends DurableObject<Env> {
       });
     }
 
-    let completionSuccess = body.success;
-    let completionError = body.error;
-    let exchangeRunTransitioned: boolean | null = null;
-    if (completionSuccess) {
-      const finalization = await new UpstreamExchangeStore(this.db).finalizeForRun(body.runId);
-      if (finalization.kind === "finalized") {
-        exchangeRunTransitioned = finalization.runTransitioned;
-      } else if (finalization.kind === "blocked") {
-        completionSuccess = false;
-        completionError = `Upstream exchange scan could not finalize: ${finalization.reason}`;
-      }
-    }
-
     // SQL-guarded transition: only an active run may go terminal. When the
     // guard suppresses the write (recovery sweep or a concurrent callback got
     // there first) the callback is acknowledged as ignored — a terminal child
     // must never transition again.
-    const transitioned =
-      exchangeRunTransitioned ??
-      (await store.updateRun(
-        body.runId,
-        completionSuccess
-          ? { status: "completed", completed_at: Date.now() }
-          : {
-              status: "failed",
-              failure_reason: completionError || "Unknown error",
-              completed_at: Date.now(),
-            }
-      ));
+    const transitioned = await store.updateRun(
+      body.runId,
+      body.success
+        ? { status: "completed", completed_at: Date.now() }
+        : {
+            status: "failed",
+            failure_reason: body.error || "Unknown error",
+            completed_at: Date.now(),
+          }
+    );
 
     if (!transitioned) {
       this.log.warn("Ignoring run-complete callback for non-active run", {
@@ -1202,18 +1099,10 @@ export class SchedulerDO extends DurableObject<Env> {
     }
 
     // Invocation-level accounting: one CAS-guarded strike per invocation on
-    // first failure; streak reset once every sibling completed. Runs without
-    // an invocation link (rollback-window writes) keep the legacy per-run
-    // accounting until the backfill repairs them.
-    if (run.invocation_id) {
-      await this.applyInvocationAccounting(store, body.automationId, run.invocation_id);
-    } else if (completionSuccess) {
-      await store.resetConsecutiveFailures(body.automationId);
-    } else {
-      await this.trackAutomationFailure(store, body.automationId);
-    }
+    // first failure; streak reset once every sibling completed.
+    await this.applyInvocationAccounting(store, body.automationId, run.invocation_id);
 
-    if (completionSuccess) {
+    if (body.success) {
       this.log.info("Run completed successfully", {
         event: "scheduler.run_complete",
         automation_id: body.automationId,
@@ -1226,7 +1115,7 @@ export class SchedulerDO extends DurableObject<Env> {
         automation_id: body.automationId,
         run_id: body.runId,
         session_id: body.sessionId,
-        error: completionError,
+        error: body.error,
       });
     }
 
@@ -1234,15 +1123,15 @@ export class SchedulerDO extends DurableObject<Env> {
     // thread and clear the `eyes` reaction when they finish. The scheduler owns
     // this fan-out (not the session callback path) because the message
     // coordinates live on the invocation. Best-effort.
-    const invocation = run.invocation_id ? await store.getInvocationById(run.invocation_id) : null;
+    const invocation = await store.getInvocationById(run.invocation_id);
     const slackMeta = parseSlackTriggerMetadata(invocation?.trigger_metadata ?? null);
     if (slackMeta) {
       const automation = await store.getById(body.automationId);
       await this.notifySlackCompletion(run, slackMeta, {
         sessionId: body.sessionId,
         messageId: body.messageId,
-        success: completionSuccess,
-        error: completionError,
+        success: body.success,
+        error: body.error,
         repoFullName: formatRunRepositoryLabel(run),
         model: automation?.model ?? "",
         reasoningEffort: automation?.reasoning_effort ?? undefined,
@@ -1274,28 +1163,90 @@ export class SchedulerDO extends DurableObject<Env> {
     const body = buildSlackCompletionNotification(meta, ctx);
     if (!body) return;
 
-    try {
-      const signature = await computeHmacHex(JSON.stringify(body), secret);
-      const response = await binding.fetch("https://internal/callbacks/automation-complete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...body, signature }),
-      });
-      if (!response.ok) {
+    const signature = await computeHmacHex(JSON.stringify(body), secret);
+    await deliverWithRetry(
+      (signal) =>
+        binding.fetch("https://internal/callbacks/automation-complete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...body, signature }),
+          signal,
+        }),
+      (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      ({ attempt, response, error }) => {
         this.log.warn("Slack completion callback failed", {
           event: "scheduler.slack_complete_failed",
           automation_id: run.automation_id,
           run_id: run.id,
-          http_status: response.status,
+          attempt,
+          ...(response ? { http_status: response.status } : {}),
+          ...(error !== undefined
+            ? { error: error instanceof Error ? error : new Error(String(error)) }
+            : {}),
         });
       }
-    } catch (e) {
-      this.log.warn("Slack completion callback errored", {
-        event: "scheduler.slack_complete_failed",
-        automation_id: run.automation_id,
-        run_id: run.id,
-        error: e instanceof Error ? e : new Error(String(e)),
+    );
+  }
+
+  /**
+   * Rebuild a Slack event's context block with the thread the message was posted
+   * in, asking slack-bot to fetch and render it.
+   *
+   * Called only after an invocation has been admitted, so the read is paid for
+   * exactly when a run will consume it. The bot owns the Slack token and
+   * display-name resolution; the scheduler only splices the rendered block into
+   * the same layout the ingress path used.
+   *
+   * Every failure path returns the original context block: thread history is an
+   * enhancement and must never prevent a run from starting.
+   */
+  private async buildSlackContextWithThread(event: SlackAutomationEvent): Promise<string> {
+    if (!event.threadTs) return event.contextBlock;
+
+    const binding = this.env.SLACK_BOT;
+    const secret = callbackSigningSecret(this.env, "slack-bot");
+    if (!binding || !secret) return event.contextBlock;
+
+    try {
+      const body = {
+        channel: event.channelId,
+        threadTs: event.threadTs,
+        ts: event.ts,
+      };
+      const signature = await computeHmacHex(JSON.stringify(body), secret);
+      const response = await binding.fetch("https://internal/internal/thread-context", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...body, signature }),
+        signal: AbortSignal.timeout(SLACK_THREAD_CONTEXT_TIMEOUT_MS),
       });
+      if (!response.ok) {
+        this.log.warn("Slack thread context request failed", {
+          event: "scheduler.slack_thread_context_failed",
+          channel: event.channelId,
+          http_status: response.status,
+        });
+        return event.contextBlock;
+      }
+
+      const parsed = slackThreadContextResponseSchema.safeParse(await response.json());
+      const threadContext = parsed.success ? parsed.data.threadContext : "";
+      if (!threadContext) return event.contextBlock;
+
+      return buildSlackContextBlock({
+        channelLabel: slackChannelLabel(event.channelId, event.channelName),
+        actorUserId: event.actorUserId,
+        permalink: event.permalink,
+        text: event.text,
+        threadContext,
+      });
+    } catch (error) {
+      this.log.warn("Slack thread context request threw", {
+        event: "scheduler.slack_thread_context_failed",
+        channel: event.channelId,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+      return event.contextBlock;
     }
   }
 
@@ -1359,23 +1310,21 @@ export class SchedulerDO extends DurableObject<Env> {
 
   private async createSessionForAutomationRun(
     automation: AutomationRow,
-    run: AutomationRunRow,
-    options: { recovery?: boolean } = {}
+    run: AutomationRunRow
   ): Promise<{ sessionId: string }> {
-    const sessionId = run.session_id;
-    if (!sessionId) throw new Error("Automation run has no stable session ID");
+    const sessionId = generateId();
 
     // Resolve the canonical user_id for the session index.
     // Automations created through the web UI populate user_id at creation time
     // (handleCreateAutomation resolves it for both GitHub and Google users), so this
     // lookup is skipped for them. The fallback below only covers legacy rows with
     // user_id = NULL: those predate Google login and store the GitHub numeric user ID
-    // in created_by (from NextAuth session.user.id), so a github-only identity lookup
+    // in created_by (from the canonical browser principal), so a GitHub-only identity lookup
     // recovers the canonical user. It becomes dead code once legacy rows are backfilled.
     let userId = automation.user_id;
-    const userStore = new UserStore(this.db);
     if (!userId && automation.created_by && automation.created_by !== "anonymous") {
       try {
+        const userStore = new UserStore(this.db);
         const identity = await userStore.getIdentity("github", automation.created_by);
         if (identity) {
           userId = identity.userId;
@@ -1390,72 +1339,14 @@ export class SchedulerDO extends DurableObject<Env> {
       request_id: run.id,
       metrics: createRequestMetrics(),
       db: this.db,
+      executionCtx: createCloudflareBackgroundJobDispatcher(this.ctx),
     };
-
-    const indexedSession = options.recovery
-      ? await new SessionIndexStore(this.db).get(sessionId)
-      : null;
-    const sessionInitialized = indexedSession ? await this.isSessionInitialized(sessionId) : false;
-    if (!options.recovery || !sessionInitialized) {
-      const enabledModels =
-        (await new ModelPreferencesStore(this.db).getEnabledModels()) ?? DEFAULT_ENABLED_MODELS;
-      if (!isValidModel(automation.model) || !enabledModels.includes(automation.model)) {
-        throw new Error(`Model is no longer available: ${automation.model}`);
-      }
-    }
-    let enrichment = null;
-    if (userId) {
-      try {
-        enrichment = await resolveGitHubEnrichment(this.env, this.db, userStore, userId);
-      } catch (error) {
-        this.log.warn("GitHub enrichment failed during automation launch", {
-          event: "scheduler.identity_enrichment_failed",
-          automation_id: automation.id,
-          run_id: run.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
 
     // What the session opens — the run's repository snapshot or, for
     // environment-bound automations, the environment's workspace. All target
     // semantics live in resolveAutomationSessionTarget; a resolution failure
     // throws into launchChild's failure path.
-    let repositorySet: RepositoryRef[] | undefined;
-    if (run.repository_set) {
-      repositorySet = repositorySetSchema.parse(JSON.parse(run.repository_set));
-    }
-    if (!repositorySet && indexedSession) {
-      const indexedRepositories = await new SessionIndexStore(this.db).repositoriesForSession(
-        sessionId
-      );
-      repositorySet = indexedRepositories.map((repository) => {
-        if (repository.repoId == null) {
-          throw new Error(
-            `Session repository is unresolved: ${repository.repoOwner}/${repository.repoName}`
-          );
-        }
-        return { ...repository, repoId: repository.repoId };
-      });
-    } else if (!repositorySet && automation.trigger_type === "once" && !run.environment_id) {
-      const storedRepositories = await new AutomationStore(this.db).getRepositoriesForAutomation(
-        automation.id
-      );
-      const resolutions = await resolveAutomationRepositories(this.env, storedRepositories);
-      const failure = resolutions.find((resolution) => resolution.error);
-      if (failure?.error) throw new Error(failure.error);
-      repositorySet = resolutions.map((resolution) => ({
-        repoOwner: resolution.repository!.repoOwner,
-        repoName: resolution.repository!.repoName,
-        repoId: resolution.repository!.repoId,
-        baseBranch: resolution.repository!.baseBranch,
-      }));
-    }
-    const target = repositorySet
-      ? sessionTargetFromIndex(run.environment_id, repositorySet)
-      : indexedSession
-        ? sessionTargetFromIndex(run.environment_id, [])
-        : await resolveAutomationSessionTarget(this.env, run, ctx, this.log);
+    const target = await resolveAutomationSessionTarget(this.env, run, ctx, this.log);
 
     // Session-scoped integration settings resolve from the primary member
     // (design §6.2), with environment-bound runs layering that environment's
@@ -1465,68 +1356,48 @@ export class SchedulerDO extends DurableObject<Env> {
       (target.repoOwner && target.repoName
         ? [{ repoOwner: target.repoOwner, repoName: target.repoName }]
         : []);
-    const { codeServerEnabled, sandboxSettings } = await resolveSessionScopedSettings(
+    const { codeServerEnabled, vncEnabled, sandboxSettings } = await resolveSessionScopedSettings(
       this.db,
       scopeMembers,
-      target.environmentId,
-      { strict: true }
+      target.environmentId
+    );
+    // Automation runs use all target-applicable shared skills. Personal
+    // profiles are interactive-user choices and are not automation policy.
+    const managedSkillsManifest = await resolveManagedSkills(
+      this.db,
+      {
+        repositories: scopeMembers,
+        environmentId: target.environmentId,
+      },
+      { mode: "all" },
+      userId
     );
 
-    try {
-      await initializeSession(
-        this.env,
-        {
-          sessionId,
-          ...target,
-          title: `[Auto] ${automation.name}`,
-          model: automation.model,
-          reasoningEffort: automation.reasoning_effort,
-          participantUserId: automation.created_by,
-          platformUserId: userId,
-          scmLogin: enrichment?.scmLogin,
-          scmName: enrichment?.displayName,
-          scmEmail: enrichment?.email,
-          scmUserId: enrichment?.scmUserId,
-          scmTokenEncrypted: enrichment?.accessTokenEncrypted ?? null,
-          scmRefreshTokenEncrypted: enrichment?.refreshTokenEncrypted ?? null,
-          scmTokenExpiresAt: enrichment?.tokenExpiresAt,
-          codeServerEnabled,
-          sandboxSettings,
-          spawnSource: "automation",
-          spawnDepth: 0,
-          automationId: automation.id,
-          automationRunId: run.id,
-        },
-        ctx,
-        { replayable: true }
-      );
-    } catch (error) {
-      if (
-        error instanceof SessionInitializationRejectedError ||
-        error instanceof SessionReplayConflictError
-      ) {
-        throw error;
-      }
-      throw new RetryableAutomationLaunchError(error);
-    }
+    await initializeSession(
+      this.env,
+      {
+        sessionId,
+        ...target,
+        title: `[Auto] ${automation.name}`,
+        model: automation.model,
+        reasoningEffort: automation.reasoning_effort,
+        participantUserId: automation.created_by,
+        platformUserId: userId,
+        scmTokenEncrypted: null,
+        scmRefreshTokenEncrypted: null,
+        codeServerEnabled,
+        vncEnabled,
+        sandboxSettings,
+        spawnSource: "automation",
+        spawnDepth: 0,
+        automationId: automation.id,
+        automationRunId: run.id,
+        managedSkillsManifest,
+      },
+      ctx
+    );
 
     return { sessionId };
-  }
-
-  private async isSessionInitialized(sessionId: string): Promise<boolean> {
-    const stub = this.env.SESSION.get(this.env.SESSION.idFromName(sessionId));
-    let response: Response;
-    try {
-      response = await stub.fetch(buildSessionInternalUrl(SessionInternalPaths.state), {
-        method: "GET",
-      });
-    } catch (error) {
-      throw new RetryableAutomationLaunchError(error);
-    }
-    if (response.status >= 500) {
-      throw new RetryableAutomationLaunchError(`Session state returned ${response.status}`);
-    }
-    return response.ok;
   }
 
   private async sendPromptToSession(
@@ -1543,9 +1414,9 @@ export class SchedulerDO extends DurableObject<Env> {
     };
 
     await this.enqueueSessionPrompt(sessionId, {
-      messageId: `automation-run:${runId}`,
       content: instructionsOverride ?? automation.instructions,
       authorId: automation.created_by,
+      canonicalUserId: automation.user_id,
       source: "automation",
       callbackContext,
     });
@@ -1577,12 +1448,17 @@ export class SchedulerDO extends DurableObject<Env> {
       repoFullName: formatRunRepositoryLabel(run),
       model: automation.model,
       reasoningEffort: automation.reasoning_effort ?? undefined,
+      // Marks the turn as automation-owned: a follow-up completes through the
+      // interactive callback, which would otherwise treat it as a user request.
+      automationId: automation.id,
     };
 
     try {
+      const identity = await new UserStore(this.db).getIdentity("slack", event.actorUserId);
       await this.enqueueSessionPrompt(sessionId, {
         content: event.text,
         authorId: `slack:${event.actorUserId}`,
+        canonicalUserId: identity?.userId,
         source: "slack",
         callbackContext,
       });
@@ -1607,69 +1483,19 @@ export class SchedulerDO extends DurableObject<Env> {
   /** Enqueue a prompt onto a session's queue via its DO `/internal/prompt` route. */
   private async enqueueSessionPrompt(
     sessionId: string,
-    body: {
-      messageId?: string;
-      content: string;
-      authorId: string;
-      source: string;
-      callbackContext: AutomationCallbackContext | SlackCallbackContext;
-    }
+    body: SchedulerPromptRequest
   ): Promise<void> {
     const stub = this.env.SESSION.get(this.env.SESSION.idFromName(sessionId));
-    let promptResponse: Response;
-    try {
-      promptResponse = await stub.fetch("http://internal/internal/prompt", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-    } catch (error) {
-      throw new RetryableAutomationLaunchError(error);
-    }
+    const promptResponse = await stub.fetch("http://internal/internal/prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
-    if (promptResponse.status >= 500) {
-      throw new RetryableAutomationLaunchError(`Prompt enqueue returned ${promptResponse.status}`);
-    }
     if (!promptResponse.ok) {
       throw new Error(`Prompt enqueue failed with status ${promptResponse.status}`);
     }
   }
-}
-
-function oneShotChild(
-  childBase: () => Omit<AutomationRunRow, "status">,
-  repositoryChildren: AutomationRunRow[],
-  environmentChildren: AutomationRunRow[],
-  now: number
-): AutomationRunRow {
-  const environment = environmentChildren[0];
-  if (environment) return environment;
-
-  const primary = repositoryChildren[0];
-  if (!primary) return { ...childBase(), status: "starting" };
-
-  const failure = repositoryChildren.find((child) => child.failure_reason);
-  return {
-    ...primary,
-    status: failure ? "failed" : "starting",
-    failure_reason: failure?.failure_reason ?? null,
-    completed_at: failure ? now : null,
-  };
-}
-
-function sessionTargetFromIndex(
-  environmentId: string | null,
-  repositories: RepositoryRef[]
-): AutomationSessionTarget {
-  const primary = repositories[0];
-  return {
-    repoOwner: primary?.repoOwner ?? null,
-    repoName: primary?.repoName ?? null,
-    repoId: primary?.repoId ?? null,
-    defaultBranch: primary?.baseBranch ?? null,
-    repositories: repositories.length ? repositories : undefined,
-    environmentId,
-  };
 }
 
 /**

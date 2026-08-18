@@ -8,10 +8,11 @@ import {
   type AutomationFormValues,
 } from "@/components/automations/automation-form";
 import { WebhookConfig } from "@/components/automations/webhook-config";
-import { getTemplateById } from "@/lib/automation-templates";
+import { automationTemplates } from "@/lib/automation-templates";
 import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/ui/error-banner";
 import { BackIcon } from "@/components/ui/icons";
+import { browserApiFetch } from "@/lib/browser-api-fetch";
 import Link from "next/link";
 
 function NewAutomationContent() {
@@ -31,7 +32,8 @@ function NewAutomationContent() {
   // A template id (from the gallery) pre-fills the form. Repository is never
   // pre-filled, so the repo-required-at-creation invariant is untouched. The
   // form coerces a template's suggested model against the user's enabled set.
-  const template = getTemplateById(searchParams.get("template") ?? "");
+  const templateId = searchParams.get("template");
+  const template = automationTemplates.find((candidate) => candidate.id === templateId);
   const initialValues: Partial<AutomationFormValues> | undefined = template?.prefill;
 
   const handleSubmit = async (values: AutomationFormValues) => {
@@ -39,7 +41,7 @@ function NewAutomationContent() {
     setError("");
 
     try {
-      const res = await fetch("/api/automations", {
+      const res = await browserApiFetch("/api/automations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(values),
@@ -82,9 +84,11 @@ function NewAutomationContent() {
           </header>
         )}
 
-        <div className="flex-1 overflow-y-auto p-8">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
           <div className="max-w-2xl mx-auto">
-            <h1 className="text-3xl font-semibold text-foreground mb-2">Automation Created</h1>
+            <h1 className="mb-2 text-2xl font-semibold text-foreground sm:text-3xl">
+              Automation Created
+            </h1>
             {webhookResult.sentryWebhookUrl ? (
               <>
                 <p className="text-sm text-muted-foreground mb-6">
@@ -137,9 +141,11 @@ function NewAutomationContent() {
         </header>
       )}
 
-      <div className="flex-1 overflow-y-auto p-8">
+      <div className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
         <div className="max-w-2xl mx-auto">
-          <h1 className="text-3xl font-semibold text-foreground mb-6">Create Automation</h1>
+          <h1 className="mb-6 text-2xl font-semibold text-foreground sm:text-3xl">
+            Create Automation
+          </h1>
 
           {error && (
             <ErrorBanner className="mb-4" role="alert">

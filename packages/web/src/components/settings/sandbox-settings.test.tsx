@@ -9,8 +9,9 @@ import { SWRConfig } from "swr";
 import {
   DEFAULT_MAX_CONCURRENT_CHILD_SESSIONS,
   DEFAULT_MAX_TOTAL_CHILD_SESSIONS,
+  DEFAULT_VNC_PORT,
   MAX_TUNNEL_PORTS,
-} from "@open-inspect/shared";
+} from "@open-inspect/shared/types/integrations";
 import { SandboxSettingsEditor, SandboxSettingsPage } from "./sandbox-settings";
 
 expect.extend(matchers);
@@ -81,6 +82,57 @@ describe("SandboxSettingsPage — tunnel ports editor", () => {
   it("shows empty state when no ports configured", () => {
     renderWithSWR({ integrationId: "sandbox", settings: null });
     expect(screen.getByText("No tunnel ports configured.")).toBeInTheDocument();
+  });
+
+  it("groups related sandbox controls under accessible names", () => {
+    renderWithSWR({ integrationId: "sandbox", settings: null });
+
+    for (const name of ["Service Ports", "Tunnel Ports", "Child Sessions", "Resources"]) {
+      expect(screen.getByRole("group", { name })).toBeInTheDocument();
+    }
+  });
+
+  it("displays session timeout in minutes and saves milliseconds", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "PUT") return new Response(JSON.stringify({}), { status: 200 });
+      throw new Error("unexpected fetch");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <SWRConfig
+        value={{
+          provider: () => new Map(),
+          fallback: {
+            [SETTINGS_KEY]: {
+              integrationId: "sandbox",
+              settings: { defaults: { sandboxTimeoutMs: 7_200_000 } },
+            },
+          },
+          dedupingInterval: Infinity,
+          revalidateOnFocus: false,
+          revalidateIfStale: false,
+          revalidateOnReconnect: false,
+        }}
+      >
+        <SandboxSettingsPage />
+      </SWRConfig>
+    );
+
+    const input = screen.getByLabelText("Session Timeout (minutes)");
+    expect(input).toHaveValue(120);
+    await user.clear(input);
+    await user.type(input, "240");
+    await user.click(screen.getByText("Save Settings"));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        SETTINGS_KEY,
+        expect.objectContaining({
+          method: "PUT",
+          body: expect.stringContaining('"sandboxTimeoutMs":14400000'),
+        })
+      );
+    });
   });
 
   it("renders existing ports as individual input rows", () => {
@@ -205,7 +257,7 @@ describe("SandboxSettingsPage — tunnel ports editor", () => {
     });
   });
 
-  it("includes configured code-server and terminal ports in the save payload", async () => {
+  it("includes configured code-server, VNC, and terminal ports in the save payload", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === "PUT") {
         return new Response(JSON.stringify({}), { status: 200 });
@@ -230,6 +282,10 @@ describe("SandboxSettingsPage — tunnel ports editor", () => {
     );
 
     await user.type(screen.getByPlaceholderText("8080"), "8081");
+    await user.type(
+      screen.getByPlaceholderText(String(DEFAULT_VNC_PORT)),
+      String(DEFAULT_VNC_PORT + 1)
+    );
     await user.type(screen.getByPlaceholderText("7680"), "7000");
     await user.click(screen.getByText("Save Settings"));
 
@@ -244,6 +300,7 @@ describe("SandboxSettingsPage — tunnel ports editor", () => {
                 tunnelPorts: [],
                 terminalEnabled: false,
                 codeServerPort: 8081,
+                vncPort: DEFAULT_VNC_PORT + 1,
                 terminalPort: 7000,
                 maxConcurrentChildSessions: DEFAULT_MAX_CONCURRENT_CHILD_SESSIONS,
                 maxTotalChildSessions: DEFAULT_MAX_TOTAL_CHILD_SESSIONS,
@@ -254,6 +311,36 @@ describe("SandboxSettingsPage — tunnel ports editor", () => {
         })
       );
     });
+  });
+
+  it("rejects a tunnel port that collides with the default VNC port", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <SWRConfig
+        value={{
+          provider: () => new Map(),
+          fallback: { [SETTINGS_KEY]: globalSettings([], ["acme/app"]) },
+          dedupingInterval: Infinity,
+          revalidateOnFocus: false,
+          revalidateIfStale: false,
+          revalidateOnReconnect: false,
+        }}
+      >
+        <SandboxSettingsPage />
+      </SWRConfig>
+    );
+
+    await user.click(screen.getByText("Add port"));
+    await user.type(screen.getByPlaceholderText("e.g. 3000"), String(DEFAULT_VNC_PORT));
+    await user.click(screen.getByText("Save Settings"));
+
+    expect(screen.getByText(/must all be different/)).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      SETTINGS_KEY,
+      expect.objectContaining({ method: "PUT" })
+    );
   });
 
   it("rejects a service port that duplicates a tunnel port", async () => {
@@ -382,19 +469,6 @@ describe("SandboxSettingsPage — tunnel ports editor", () => {
     expect(screen.getByLabelText("Max total child sessions")).toHaveValue(9);
   });
 
-  it("accepts a zero child session limit as the fan-out kill switch", () => {
-    renderWithSWR(
-      globalSettings([], undefined, {
-        maxConcurrentChildSessions: 0,
-        maxTotalChildSessions: 0,
-      })
-    );
-
-    expect(screen.getByLabelText("Max concurrent child sessions")).toHaveValue(0);
-    expect(screen.getByLabelText("Max total child sessions")).toHaveValue(0);
-    expect(screen.getByLabelText("Max total child sessions")).toHaveAttribute("min", "0");
-  });
-
   it("sends child session limits in the global payload", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === "PUT") {
@@ -446,61 +520,15 @@ describe("SandboxSettingsPage — tunnel ports editor", () => {
     });
   });
 
-  it("saves a zero child session limit instead of rejecting it", async () => {
-    // Zero is the fan-out kill switch, so the save path has to let it through.
-    // The rendered min attribute alone doesn't prove that; this drives Save.
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (init?.method === "PUT") {
-        return new Response(JSON.stringify({}), { status: 200 });
-      }
-      throw new Error(`unexpected fetch: ${String(input)}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(
-      <SWRConfig
-        value={{
-          provider: () => new Map(),
-          fallback: { [SETTINGS_KEY]: globalSettings([], ["acme/app"]) },
-          dedupingInterval: Infinity,
-          revalidateOnFocus: false,
-          revalidateIfStale: false,
-          revalidateOnReconnect: false,
-        }}
-      >
-        <SandboxSettingsPage />
-      </SWRConfig>
-    );
-
-    await user.clear(screen.getByLabelText("Max concurrent child sessions"));
-    await user.type(screen.getByLabelText("Max concurrent child sessions"), "0");
-    await user.clear(screen.getByLabelText("Max total child sessions"));
-    await user.type(screen.getByLabelText("Max total child sessions"), "0");
-    await user.click(screen.getByText("Save Settings"));
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        SETTINGS_KEY,
-        expect.objectContaining({ method: "PUT" })
-      );
-    });
-    const put = fetchMock.mock.calls.find(
-      ([, init]) => (init as RequestInit | undefined)?.method === "PUT"
-    );
-    const sent = JSON.parse(String((put?.[1] as RequestInit).body));
-    expect(sent.settings.defaults.maxConcurrentChildSessions).toBe(0);
-    expect(sent.settings.defaults.maxTotalChildSessions).toBe(0);
-  });
-
-  it("blocks a fractional child session limit", async () => {
+  it("blocks invalid child session limits", async () => {
     const { fetchMock } = renderWithSWR(globalSettings([]));
 
     await user.clear(screen.getByLabelText("Max concurrent child sessions"));
-    await user.type(screen.getByLabelText("Max concurrent child sessions"), "1.5");
+    await user.type(screen.getByLabelText("Max concurrent child sessions"), "0");
     await user.click(screen.getByText("Save Settings"));
 
     expect(
-      screen.getByText("Child session limits must be whole numbers, 0 or greater.")
+      screen.getByText("Child session limits must be positive whole numbers.")
     ).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalledWith(
       SETTINGS_KEY,
@@ -1092,7 +1120,14 @@ describe("SandboxSettingsEditor — environment scope", () => {
     const { fetchMock } = renderEnvironmentEditor({
       [SETTINGS_KEY]: {
         integrationId: "sandbox",
-        settings: { defaults: { tunnelPorts: [], cpuCores: 2, buildTimeoutSeconds: 600 } },
+        settings: {
+          defaults: {
+            tunnelPorts: [],
+            cpuCores: 2,
+            buildTimeoutSeconds: 600,
+            sandboxTimeoutMs: 7_200_000,
+          },
+        },
       },
       [repoSettingsKey]: { integrationId: "sandbox", repo: "acme/app", settings: null },
       [environmentSettingsKey]: {
@@ -1105,6 +1140,8 @@ describe("SandboxSettingsEditor — environment scope", () => {
     await user.clear(screen.getByLabelText("Image Build Timeout"));
     await user.type(screen.getByLabelText("Image Build Timeout"), "2400");
     await user.click(screen.getByText("Save Settings"));
+
+    expect(screen.getByLabelText("Session Timeout (minutes)")).toHaveValue(120);
 
     // Only the edited field is pinned — inherited cpu and the inherited
     // build-timeout base stay inherited.

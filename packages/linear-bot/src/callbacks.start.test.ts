@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { callbacksRouter } from "./callbacks";
 import { createStartCallbackRouter } from "./callbacks/start-callback";
-import { computeHmacHex } from "@open-inspect/shared";
+import { computeHmacHex } from "@open-inspect/shared/auth";
 import { createFakeKV, makeExecutionContext, makeLinearBotEnv } from "./test-helpers";
 import type { LinearApiClient } from "./utils/linear-client";
 
@@ -70,6 +70,30 @@ describe("POST /start", () => {
     expect(await response.json()).toEqual({ ok: true, outcome: "transitioned" });
     expect(getLinearClient).toHaveBeenCalledWith(expect.anything(), "org-1", "app-user-1");
     expect(transitionIssueToStarted).toHaveBeenCalledWith(client, "issue-1");
+  });
+
+  it("verifies the original callback field order after schema validation", async () => {
+    const getLinearClient = vi.fn(async () => client);
+    const transitionIssueToStarted = vi.fn(async () => ({
+      outcome: "already_started" as const,
+      previousStateType: "started",
+    }));
+    const router = createStartCallbackRouter({
+      getLinearClient,
+      transitionIssueToStarted,
+      now: () => NOW,
+    });
+    const base = await signedPayload();
+    const context = {
+      ...base.context,
+      emitToolProgressActivities: true,
+      transitionIssueOnStart: true,
+    };
+
+    const response = await postStart(router, signedPayload({ context }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, outcome: "already_started" });
   });
 
   it("rejects malformed JSON", async () => {

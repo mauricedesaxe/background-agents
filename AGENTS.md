@@ -1,13 +1,8 @@
 # AGENTS.md
 
 Open-Inspect is a background coding agent system that spawns sandboxed dev environments to work on
-GitHub repositories. Single-tenant design. Stack: Cloudflare Workers (TypeScript), Python sandbox
-providers, Next.js (React), Terraform.
-
-This repo is a **tracked fork** of `ColeMurray/background-agents`. Before syncing with upstream, or
-before changing anything that looks like it came from upstream, read [docs/FORK.md](docs/FORK.md).
-It records what diverges on purpose, the reserved migration range, and why test files are merged by
-hand rather than replaced.
+GitHub repositories. Single-tenant design. Stack: Cloudflare Workers (TypeScript), Modal (Python),
+Next.js (React), Terraform.
 
 ## Architecture
 
@@ -18,10 +13,8 @@ Three tiers connected by WebSockets:
 2. **Control Plane** (Cloudflare Workers + Durable Objects) — session lifecycle, WebSocket hub,
    GitHub/auth integration. Each session is a Durable Object with SQLite storage. Uses D1 for the
    session index, repo metadata, environments, and encrypted secrets.
-3. **Data Plane** (Python) — sandboxed environments running coding agents. Manages sandbox creation,
-   snapshots, and repository/environment image builds. Several providers ship (`daytona-infra`,
-   `modal-infra`, `opencomputer-infra`, Vercel); **this deployment runs Daytona**, and it is the
-   only one carrying fork-local work beyond the shared harness install.
+3. **Data Plane** (Modal, Python) — sandboxed environments running coding agents. Manages sandbox
+   creation, snapshots, and repository/environment image builds.
 
 **Bot integrations** — all Cloudflare Workers using Hono:
 
@@ -29,8 +22,8 @@ Three tiers connected by WebSockets:
 - `github-bot` — PR review assignments and @mention commands
 - `linear-bot` — Linear agent webhooks → coding sessions
 
-**Data flow**: User prompt → web client → control plane DO (WebSocket) → sandbox → streaming events
-back through the same WebSocket chain.
+**Data flow**: User prompt → web client → control plane DO (WebSocket) → Modal sandbox → streaming
+events back through the same WebSocket chain.
 
 ### Package Dependency Graph
 
@@ -43,18 +36,15 @@ it at build time.
 
 ## Package Overview
 
-| Package              | Lang / Framework                   | Purpose                                                     |
-| -------------------- | ---------------------------------- | ----------------------------------------------------------- |
-| `shared`             | TypeScript                         | Shared types, auth utilities, model definitions             |
-| `control-plane`      | TypeScript / CF Workers + DO       | Session management, WebSocket streaming, GitHub integration |
-| `web`                | TypeScript / Next.js 16 + React 19 | User-facing dashboard, OAuth, real-time UI                  |
-| `slack-bot`          | TypeScript / CF Workers + Hono     | Slack event handler, session creation                       |
-| `github-bot`         | TypeScript / CF Workers + Hono     | PR review and @mention webhook handler                      |
-| `linear-bot`         | TypeScript / CF Workers + Hono     | Linear agent webhook handler                                |
-| `sandbox-runtime`    | Python 3.12 + Node                 | In-sandbox agent bridge, skills, harness install            |
-| `daytona-infra`      | Python 3.12 / Daytona              | **The provider this deployment runs.** Image + lifecycle    |
-| `modal-infra`        | Python 3.12 / Modal + FastAPI      | Modal provider: sandbox lifecycle and image build           |
-| `opencomputer-infra` | TypeScript                         | OpenComputer provider: image build                          |
+| Package         | Lang / Framework                   | Purpose                                                     |
+| --------------- | ---------------------------------- | ----------------------------------------------------------- |
+| `shared`        | TypeScript                         | Shared types, auth utilities, model definitions             |
+| `control-plane` | TypeScript / CF Workers + DO       | Session management, WebSocket streaming, GitHub integration |
+| `web`           | TypeScript / Next.js 16 + React 19 | User-facing dashboard, OAuth, real-time UI                  |
+| `slack-bot`     | TypeScript / CF Workers + Hono     | Slack event handler, session creation                       |
+| `github-bot`    | TypeScript / CF Workers + Hono     | PR review and @mention webhook handler                      |
+| `linear-bot`    | TypeScript / CF Workers + Hono     | Linear agent webhook handler                                |
+| `modal-infra`   | Python 3.12 / Modal + FastAPI      | Sandbox lifecycle, WebSocket bridge to control plane        |
 
 ## Common Commands
 
@@ -65,9 +55,8 @@ npm run build                                    # all packages
 npm run build -w @open-inspect/shared            # shared only (build first!)
 
 # Lint & format
-npm run lint:fix                                 # ESLint only — does NOT run Prettier
-npm run format                                   # Prettier write
-npm run format:check                             # Prettier check — CI runs this separately
+npm run lint:fix                                 # ESLint + Prettier fix
+npm run format                                   # Prettier only
 npm run typecheck                                # tsc across all TS packages
 
 # Tests — TypeScript (Vitest)
@@ -79,7 +68,6 @@ npm test -w @open-inspect/slack-bot
 npm test -w @open-inspect/linear-bot
 
 # Tests — Python (pytest)
-cd packages/sandbox-runtime && pytest tests/ -v      # the bridge
 cd packages/modal-infra && pytest tests/ -v
 
 # Python linting
@@ -97,7 +85,6 @@ All TypeScript packages use **Vitest**; Python uses **pytest** + pytest-asyncio.
   `@cloudflare/vitest-pool-workers` with real D1 bindings
 - **web, slack-bot, linear-bot**: co-located `src/**/*.test.ts`
 - **github-bot**: separate `test/*.test.ts`
-- **sandbox-runtime**: `tests/test_*.py` and `tests/*.test.mjs`
 - **modal-infra**: `tests/test_*.py`
 
 ### Control-plane integration tests
@@ -129,21 +116,6 @@ These run inside a real `workerd` runtime with Miniflare, using the `cloudflareT
   (naming, types, units) is correct — don't blindly propagate it. Fix bad names or units in the same
   change rather than spreading the problem.
 
-### Fork rules that bite silently
-
-Both of these fail quietly rather than loudly, which is why they are here and not only in
-[docs/FORK.md](docs/FORK.md), where the reasoning lives.
-
-- **Fork-local session-schema migrations use identifiers from `FORK_MIGRATION_ID_FLOOR` (9000) up.**
-  Upstream owns everything below it. Migrations are applied by id and already-recorded ids are
-  skipped with no content check, so reusing one upstream later claims means upstream's version
-  silently never runs. A high id is an identity, not an ordering: execution follows the array order
-  of `MIGRATIONS`, so a migration that depends on an upstream one must sit after it in the array.
-- **Never replace one of our test files with upstream's.** Merge test files by hand. Upstream's
-  tests pass against upstream's behaviour, so a wholesale take goes green at the exact moment it
-  deletes the evidence that our behaviour existed. A test that needs editing to go green after a
-  port means the port dropped a behaviour.
-
 ### Commit messages
 
 Use conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `test:`. Keep the subject
@@ -157,53 +129,38 @@ under 72 characters. Use the PR body for details, not the commit message.
 - **Durable Object bindings**: new DO bindings require a two-phase Terraform deploy — first with
   `enable_durable_object_bindings = false`, then `true`.
 - **No `wrangler.toml`**: control-plane config is generated by Terraform, not checked in.
-- **Modal deployment**: never deploy `src/app.py` directly — use `modal deploy deploy.py` or
-  `modal deploy -m src`. The `app.py` file doesn't import function modules.
+- **Modal deployment**: from `packages/modal-infra`, run
+  `uv run python deploy.py --build-sandbox-image` before `uv run modal deploy deploy.py` (or
+  `uv run modal deploy -m src`). Never deploy `src/app.py` directly; it doesn't import function
+  modules.
 - **Modal image rebuild**: update `CACHE_BUSTER` in `src/images/base.py` to force a rebuild.
 - **Web platform choice**: set `web_platform = "cloudflare"` in Terraform variables to deploy the
   web app to Cloudflare Workers via OpenNext instead of Vercel. When using Cloudflare, Vercel
   credentials are not required (dummy defaults are used). `NEXT_PUBLIC_WS_URL` must be available at
   build time since Next.js inlines `NEXT_PUBLIC_*` vars into the client bundle.
+- **Repo owners can be nested namespaces**: a `repo_owner` is not always a single segment. GitHub
+  owners are (`octocat`), but GitLab subgroups nest (`group/subgroup`), so an owner may contain `/`.
+  Only `repo_name` is a single path segment (it's the checkout directory under `/workspace`); the
+  owner remains part of the repository identity in clone URLs, API routes, manifests, and storage
+  keys. Don't validate or split owners as single segments. Use the shared repository identity
+  helpers in TypeScript; where a full `owner/name` string is unavoidable, split on the **last** `/`
+  and encode the owner as one API route segment. `repo_config.parse_repositories` accepts `/`-joined
+  owners (see `is_safe_repo_owner`).
 
 ## CI/CD
 
-**CI runs** lint, typecheck, and tests for all TypeScript and Python packages on every push to
-`main` and every PR. Actions were enabled on this fork on 2026-07-19. Before that they had never run
-once, across any workflow, so a PR reporting `mergeable: MERGEABLE / state: CLEAN` meant nothing had
-been checked rather than that checks had passed. Anything merged before that date was verified only
-by whatever someone ran by hand.
-
-**Deploys run.** Actions secrets were populated on 2026-07-19, `check-secrets` passes, and `apply`
-has run to success several times since. Merging to `main` deploys changed services:
+Pushing to `main` auto-deploys changed services:
 
 - **Terraform** → control plane + D1 migrations + web app if `web_platform = "cloudflare"`
   (triggers: `terraform/`, `packages/*/`)
 - **Vercel** → web app when `web_platform = "vercel"` (triggers: `packages/web/`,
   `packages/shared/`)
-- **Sandbox providers** → data plane (triggers: `packages/sandbox-runtime/`, `packages/*-infra/`,
-  deployed via Terraform apply; Daytona is the one this deployment runs)
+- **Modal** → data plane (triggers: `packages/modal-infra/`, deployed via Terraform apply)
 
-The `apply` job runs under `environment: production`, and that environment carries no protection
-rules. The required reviewer was removed deliberately, because it made every deploy wait on a click.
-So a merge to `main` ships to production unattended, and the PR is the only gate there is.
-
-Things that are not obvious from the workflow files:
-
-- **Confirm the merge created a run.** A rebase-merge has been observed producing zero workflow runs
-  at all, which leaves the change sitting on `main` looking deployed with nothing having run (issue
-  #75). `gh run list --branch main` after merging, and force it with
-  `gh workflow run terraform.yml --ref main` if nothing appeared.
-- **A healthy post-deploy plan is not empty.** `always_run = timestamp()` means every worker always
-  shows as replaced. The signal to look for is that nothing says `will be created`.
-- **A harness pin bump alone ships nothing on Daytona.** The harness installs at image build time,
-  but Daytona's `source_hash` excludes `*.sh`, so editing `HARNESS_REF` in `install-harness.sh` does
-  not invalidate the snapshot (issue #94). `SANDBOX_VERSION` has to move too, and an apply has to
-  rebuild the snapshot, before a harness change reaches a Daytona sandbox. Modal, Vercel, and
-  OpenComputer hash the installer directly, so the pin change invalidates their images on its own.
+CI runs lint, typecheck, and tests for all TypeScript and Python packages on every push and PR.
 
 ## Further Reading
 
-- [docs/FORK.md](docs/FORK.md) — what diverges from upstream on purpose, and why
 - [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — deploy your own instance
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) — detailed architecture and session lifecycle
 - [CONTRIBUTING.md](CONTRIBUTING.md) — contribution guidelines

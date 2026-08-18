@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { CollapsedSidebarControls, useSidebarContext } from "@/components/sidebar-layout";
 import { SettingsNav, type SettingsCategory } from "@/components/settings/settings-nav";
@@ -11,9 +11,11 @@ import { DataControlsSettings } from "@/components/settings/data-controls-settin
 import { KeyboardShortcutsSettings } from "@/components/settings/keyboard-shortcuts-settings";
 import { IntegrationsSettings } from "@/components/settings/integrations-settings";
 import { SandboxSettingsPage } from "@/components/settings/sandbox-settings";
+import { ScmSettingsPage } from "@/components/settings/scm-settings";
 import { ImagesSettings } from "@/components/settings/images-settings";
 import { McpServersSettings } from "@/components/settings/mcp-servers-settings";
 import { AppearanceSettings } from "@/components/settings/appearance-settings";
+import { SkillsSettings } from "@/components/settings/skills-settings";
 import { BackIcon } from "@/components/ui/icons";
 import { useIsMobile } from "@/hooks/use-media-query";
 import { supportsRepoImages } from "@/lib/sandbox-provider";
@@ -27,7 +29,9 @@ const CATEGORY_LABELS: Record<SettingsCategory, string> = {
   "keyboard-shortcuts": "Keyboard",
   "data-controls": "Data Controls",
   sandbox: "Sandbox",
+  scm: "SCM Settings",
   integrations: "Integrations",
+  skills: "Skills",
   "mcp-servers": "MCP Servers",
 };
 
@@ -40,7 +44,9 @@ const VALID_CATEGORIES = new Set<string>([
   "keyboard-shortcuts",
   "data-controls",
   "sandbox",
+  "scm",
   "integrations",
+  "skills",
   "mcp-servers",
 ]);
 
@@ -48,7 +54,7 @@ function isValidCategory(tab: string | null): tab is SettingsCategory {
   return tab !== null && VALID_CATEGORIES.has(tab);
 }
 
-export default function SettingsPage() {
+function SettingsPageContent() {
   const { isOpen } = useSidebarContext();
   const searchParams = useSearchParams();
   const tabParam = searchParams.get("tab");
@@ -90,7 +96,9 @@ export default function SettingsPage() {
       {activeCategory === "keyboard-shortcuts" && <KeyboardShortcutsSettings />}
       {activeCategory === "data-controls" && <DataControlsSettings />}
       {activeCategory === "sandbox" && <SandboxSettingsPage />}
+      {activeCategory === "scm" && <ScmSettingsPage />}
       {activeCategory === "integrations" && <IntegrationsSettings />}
+      {activeCategory === "skills" && <SkillsSettings />}
       {activeCategory === "mcp-servers" && <McpServersSettings />}
     </>
   );
@@ -157,5 +165,13 @@ export default function SettingsPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function SettingsPage() {
+  return (
+    <Suspense fallback={null}>
+      <SettingsPageContent />
+    </Suspense>
   );
 }

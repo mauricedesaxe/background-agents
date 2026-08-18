@@ -1,67 +1,32 @@
 import type { Logger } from "../../../logger";
 import type { ParticipantRow, SandboxRow, SessionRow } from "../../types";
-import {
-  getValidModelOrDefault,
-  isValidModel,
-  type RepositoryRef,
-  type SandboxSettings,
-} from "@open-inspect/shared";
-import type { SessionStatus, SpawnSource } from "../../../types";
-import type { SessionRepository } from "../../repository";
+import type { RepositoryRef } from "@open-inspect/shared/types/repositories";
+import { getValidModelOrDefault, isValidModel } from "@open-inspect/shared/models";
+import { normalizeSandboxSettings } from "../../../sandbox/settings";
+import type {
+  SandboxStatus,
+  SessionStatus,
+  SpawnSource,
+} from "@open-inspect/shared/types/sessions";
+import type { SessionCoreRepository } from "../../session-core-repository";
+import type { SandboxRepository } from "../../sandbox-repository";
+import type { MessageRepository } from "../../message-repository";
+import type { ParticipantRepository } from "../../participant-repository";
 import type { SessionStatusService } from "../../session-status-service";
-import { isDeadSandboxStatus } from "../../../sandbox/lifecycle/decisions";
 import {
   normalizeSessionTitle,
   type SessionTitleUpdateOptions,
   type SessionTitleUpdateResult,
 } from "../../title";
+import { z } from "zod";
 
 const TERMINAL_STATUSES = new Set<SessionStatus>(["completed", "archived", "cancelled", "failed"]);
 
-/**
- * Request body for the /internal/init endpoint.
- * The router constructs this from SessionInitInput — see session/initialize.ts.
- * Note: `userId` here is the participantUserId from SessionInitInput.
- */
-interface InitRequest {
-  sessionName: string;
-  repoOwner: string | null;
-  repoName: string | null;
-  repoId?: number | null;
-  defaultBranch?: string | null;
-  branch?: string | null;
-  /**
-   * Ordered member list ([0] = primary, matching the scalar fields).
-   * initialize.ts always sends it for repository sessions (synthesizing a
-   * one-entry list for scalar callers) and an empty list for repo-less ones.
-   */
-  repositories?: RepositoryRef[];
-  /** Launch environment provenance; null for repo-launched/ad-hoc sessions. */
-  environmentId?: string | null;
-  title?: string;
-  model?: string;
-  reasoningEffort?: string;
-  userId: string;
-  scmLogin?: string;
-  scmName?: string;
-  scmEmail?: string;
-  scmToken?: string | null;
-  scmTokenEncrypted?: string | null;
-  scmRefreshTokenEncrypted?: string | null;
-  scmTokenExpiresAt?: number | null;
-  scmUserId?: string | null;
-  parentSessionId?: string | null;
-  spawnSource?: SpawnSource;
-  spawnDepth?: number;
-  codeServerEnabled?: boolean;
-  sandboxSettings?: SandboxSettings;
-}
-
 export interface SessionLifecycleHandlerDeps {
-  repository: Pick<
-    SessionRepository,
-    "upsertSession" | "replaceSessionRepositories" | "createSandbox" | "createParticipant"
-  >;
+  sessionCoreRepository: SessionCoreRepository;
+  sandboxRepository: SandboxRepository;
+  messageRepository: MessageRepository;
+  participantRepository: ParticipantRepository;
   getDurableObjectId: () => string;
   tokenEncryptionKey?: string;
   encryptToken: (token: string, encryptionKey: string) => Promise<string>;
@@ -69,10 +34,8 @@ export interface SessionLifecycleHandlerDeps {
   generateId: (bytes?: number) => string;
   now: () => number;
   scheduleWarmSandbox: () => void;
-  canInitializeSession: (sessionId: string) => Promise<boolean>;
   getSession: () => SessionRow | null;
   getSandbox: () => SandboxRow | null;
-  getSessionRepositoryRows: () => ReturnType<SessionRepository["getSessionRepositoryRows"]>;
   getPublicSessionId: (session: SessionRow) => string;
   getParticipantByUserId: (userId: string) => ParticipantRow | null;
   statusService: SessionStatusService;
@@ -80,11 +43,10 @@ export interface SessionLifecycleHandlerDeps {
     title: string,
     options?: SessionTitleUpdateOptions
   ) => SessionTitleUpdateResult;
-  stopExecution: (options?: { suppressStatusReconcile?: boolean }) => Promise<void>;
+  cancelSession: () => Promise<void>;
   getSandboxSocket: () => WebSocket | null;
   sendToSandbox: (ws: WebSocket, message: string | object) => boolean;
-  /** Mark the sandbox dead and stop the provider sandbox with it. */
-  terminateSandbox: (reason: string) => Promise<void>;
+  updateSandboxStatus: (status: SandboxStatus) => void;
 }
 
 function sessionTitleUpdateStatus(
@@ -104,22 +66,110 @@ export interface SessionLifecycleHandler {
   init: (request: Request, log: Logger) => Promise<Response>;
   getState: () => Response;
   updateTitle: (request: Request) => Promise<Response>;
-  archive: (request: Request, log: Logger) => Promise<Response>;
+  archive: (request: Request) => Promise<Response>;
+  archiveCascade: () => Promise<Response>;
   unarchive: (request: Request) => Promise<Response>;
-  archiveCascade: (request: Request, url: URL, log: Logger) => Promise<Response>;
+  expireDraft: () => Promise<Response>;
   cancel: () => Promise<Response>;
 }
 
-function parseUserIdBody(body: unknown): { userId?: string } {
-  return body as { userId?: string };
-}
+const repositoryRefSchema = z.object({
+  repoOwner: z.string(),
+  repoName: z.string(),
+  repoId: z.number(),
+  baseBranch: z.string(),
+}) satisfies z.ZodType<RepositoryRef>;
+
+const spawnSourceSchema = z.enum([
+  "user",
+  "agent",
+  "automation",
+  "github-bot",
+  "linear-bot",
+  "slack-bot",
+] satisfies [SpawnSource, ...SpawnSource[]]);
+
+/**
+ * Request body for the /internal/init endpoint.
+ * The router constructs this from SessionInitInput — see session/initialize.ts.
+ * Note: `userId` here is the participantUserId from SessionInitInput.
+ */
+const initRequestSchema = z.object({
+  sessionName: z.string(),
+  repoOwner: z.string().nullable(),
+  repoName: z.string().nullable(),
+  repoId: z.number().nullable().optional(),
+  defaultBranch: z.string().nullable().optional(),
+  branch: z.string().nullable().optional(),
+  /**
+   * Ordered member list ([0] = primary, matching the scalar fields).
+   * initialize.ts always sends it for repository sessions (synthesizing a
+   * one-entry list for scalar callers) and an empty list for repo-less ones.
+   */
+  repositories: z.array(repositoryRefSchema).optional(),
+  /** Launch environment provenance; null for repo-launched/ad-hoc sessions. */
+  environmentId: z.string().nullable().optional(),
+  title: z.string().optional(),
+  model: z.string().optional(),
+  reasoningEffort: z.string().nullable().optional(),
+  userId: z.string(),
+  /** Canonical platform user ID for analytics attribution; null when unresolved. */
+  canonicalUserId: z.string().nullable().optional(),
+  scmLogin: z.string().nullable().optional(),
+  scmName: z.string().nullable().optional(),
+  scmEmail: z.string().nullable().optional(),
+  scmToken: z.string().nullable().optional(),
+  scmTokenEncrypted: z.string().nullable().optional(),
+  scmRefreshTokenEncrypted: z.string().nullable().optional(),
+  scmTokenExpiresAt: z.number().nullable().optional(),
+  scmUserId: z.string().nullable().optional(),
+  parentSessionId: z.string().nullable().optional(),
+  spawnSource: spawnSourceSchema.optional(),
+  spawnDepth: z.number().optional(),
+  codeServerEnabled: z.boolean().optional(),
+  vncEnabled: z.boolean().optional(),
+  /**
+   * Opaque here on purpose: `normalizeSandboxSettings` is the single boundary
+   * validator for this blob (port ranges, collisions, timeout shape). Restating
+   * the field list as a Zod object would silently strip any setting added to
+   * SandboxSettings later, so the shape is validated at the use site instead.
+   */
+  sandboxSettings: z.unknown().optional(),
+});
+
+type InitRequest = z.infer<typeof initRequestSchema>;
+
+const userIdBodySchema = z.object({
+  userId: z.string().optional(),
+});
+
+type UserIdBody = z.infer<typeof userIdBodySchema>;
+
+const titleUpdateBodySchema = z.object({
+  userId: z.string().optional(),
+  title: z.string().optional(),
+});
+
+type TitleUpdateBody = z.infer<typeof titleUpdateBodySchema>;
 
 export function createSessionLifecycleHandler(
   deps: SessionLifecycleHandlerDeps
 ): SessionLifecycleHandler {
   return {
     async init(request: Request, log: Logger): Promise<Response> {
-      const body = (await request.json()) as InitRequest;
+      let raw: unknown;
+      try {
+        raw = await request.json();
+      } catch {
+        return Response.json({ error: "Invalid request body" }, { status: 400 });
+      }
+
+      const parseResult = initRequestSchema.safeParse(raw);
+      if (!parseResult.success) {
+        return Response.json({ error: "Invalid request body" }, { status: 400 });
+      }
+
+      const body: InitRequest = parseResult.data;
 
       const sessionId = deps.getDurableObjectId();
       const sessionName = body.sessionName;
@@ -160,7 +210,10 @@ export function createSessionLifecycleHandler(
         });
       }
 
-      const reasoningEffort = deps.validateReasoningEffort(model, body.reasoningEffort);
+      const reasoningEffort = deps.validateReasoningEffort(
+        model,
+        body.reasoningEffort ?? undefined
+      );
       const baseBranch = hasRepoOwner ? body.branch || body.defaultBranch || "main" : null;
 
       const repositories = body.repositories ?? [];
@@ -179,101 +232,15 @@ export function createSessionLifecycleHandler(
           );
         }
       } else if (hasRepoOwner && body.repositories !== undefined) {
+        // An explicit empty list alongside scalar context is a producer bug —
+        // initialize.ts synthesizes a one-entry list for scalar callers.
         return Response.json(
           { error: "repositories must include the scalar repository" },
           { status: 400 }
         );
       }
-      const memberRepositories: RepositoryRef[] =
-        repositories.length > 0
-          ? repositories
-          : repoOwner !== null && repoName !== null && body.repoId != null && baseBranch !== null
-            ? [{ repoOwner, repoName, repoId: body.repoId, baseBranch }]
-            : [];
 
-      if (!(await deps.canInitializeSession(sessionName))) {
-        return Response.json({ error: "Session initialization was cancelled" }, { status: 409 });
-      }
-
-      const existing = deps.getSession();
-      if (existing) {
-        const matches =
-          existing.session_name === sessionName &&
-          existing.repo_owner === repoOwner &&
-          existing.repo_name === repoName &&
-          existing.repo_id === (hasRepoOwner ? body.repoId : null) &&
-          existing.base_branch === baseBranch &&
-          existing.model === model &&
-          existing.reasoning_effort === reasoningEffort &&
-          existing.parent_session_id === (body.parentSessionId ?? null) &&
-          existing.spawn_source === (body.spawnSource ?? "user") &&
-          existing.spawn_depth === (body.spawnDepth ?? 0) &&
-          existing.environment_id === (body.environmentId ?? null);
-        if (!matches) {
-          return Response.json({ error: "Session ID belongs to another session" }, { status: 409 });
-        }
-        const storedRepositories = deps.getSessionRepositoryRows();
-        const repositoriesAreMatchingPrefix = storedRepositories.every((stored, position) => {
-          const requested = memberRepositories[position];
-          return (
-            requested !== undefined &&
-            stored.position === position &&
-            stored.repo_owner === requested.repoOwner &&
-            stored.repo_name === requested.repoName &&
-            stored.repo_id === requested.repoId &&
-            stored.base_branch === requested.baseBranch
-          );
-        });
-        const repositoriesMatch =
-          storedRepositories.length === memberRepositories.length && repositoriesAreMatchingPrefix;
-        const sandbox = deps.getSandbox();
-        const participant = deps.getParticipantByUserId(body.userId);
-        const canRepairRepositoryPrefix = !sandbox && !participant;
-        if (!repositoriesMatch && (!repositoriesAreMatchingPrefix || !canRepairRepositoryPrefix)) {
-          return Response.json({ error: "Session ID belongs to another session" }, { status: 409 });
-        }
-        if (!repositoriesMatch) {
-          deps.repository.replaceSessionRepositories(
-            memberRepositories.map((repo, position) => ({
-              position,
-              repoOwner: repo.repoOwner,
-              repoName: repo.repoName,
-              repoId: repo.repoId,
-              baseBranch: repo.baseBranch,
-            }))
-          );
-        }
-        let repaired = false;
-        if (!sandbox) {
-          deps.repository.createSandbox({
-            id: deps.generateId(),
-            status: "pending",
-            gitSyncStatus: "pending",
-            createdAt: 0,
-          });
-          repaired = true;
-        }
-        if (!participant) {
-          deps.repository.createParticipant({
-            id: deps.generateId(),
-            userId: body.userId,
-            scmUserId: body.scmUserId ?? null,
-            scmLogin: body.scmLogin ?? null,
-            scmName: body.scmName ?? null,
-            scmEmail: body.scmEmail ?? null,
-            scmAccessTokenEncrypted: encryptedToken,
-            scmRefreshTokenEncrypted: body.scmRefreshTokenEncrypted ?? null,
-            scmTokenExpiresAt: body.scmTokenExpiresAt ?? null,
-            role: "owner",
-            joinedAt: now,
-          });
-          repaired = true;
-        }
-        if (repaired) deps.scheduleWarmSandbox();
-        return Response.json({ sessionId, status: existing.status });
-      }
-
-      deps.repository.upsertSession({
+      deps.sessionCoreRepository.upsertSession({
         id: sessionId,
         sessionName,
         title: body.title ?? null,
@@ -288,13 +255,24 @@ export function createSessionLifecycleHandler(
         spawnSource: body.spawnSource ?? "user",
         spawnDepth: body.spawnDepth ?? 0,
         codeServerEnabled: body.codeServerEnabled ?? false,
-        sandboxSettings: body.sandboxSettings ? JSON.stringify(body.sandboxSettings) : null,
+        vncEnabled: body.vncEnabled ?? false,
+        sandboxSettings: body.sandboxSettings
+          ? JSON.stringify(normalizeSandboxSettings(body.sandboxSettings, { invalid: "omit" }))
+          : null,
         environmentId: body.environmentId ?? null,
         createdAt: now,
         updatedAt: now,
       });
 
-      deps.repository.replaceSessionRepositories(
+      // Legacy scalar producers (spawn paths not yet list-aware) still get a
+      // member row so spawn/read paths have one source of truth.
+      const memberRepositories: RepositoryRef[] =
+        repositories.length > 0
+          ? repositories
+          : repoOwner !== null && repoName !== null && body.repoId != null && baseBranch !== null
+            ? [{ repoOwner, repoName, repoId: body.repoId, baseBranch }]
+            : [];
+      deps.sessionCoreRepository.replaceSessionRepositories(
         memberRepositories.map((repo, position) => ({
           position,
           repoOwner: repo.repoOwner,
@@ -303,9 +281,8 @@ export function createSessionLifecycleHandler(
           baseBranch: repo.baseBranch,
         }))
       );
-
       const sandboxId = deps.generateId();
-      deps.repository.createSandbox({
+      deps.sandboxRepository.createSandbox({
         id: sandboxId,
         status: "pending",
         gitSyncStatus: "pending",
@@ -313,9 +290,10 @@ export function createSessionLifecycleHandler(
       });
 
       const participantId = deps.generateId();
-      deps.repository.createParticipant({
+      deps.participantRepository.createParticipant({
         id: participantId,
         userId: body.userId,
+        ...(body.canonicalUserId ? { canonicalUserId: body.canonicalUserId } : {}),
         scmUserId: body.scmUserId ?? null,
         scmLogin: body.scmLogin ?? null,
         scmName: body.scmName ?? null,
@@ -374,12 +352,19 @@ export function createSessionLifecycleHandler(
         return Response.json({ error: "Session not found" }, { status: 404 });
       }
 
-      let body: { userId?: string; title?: string };
+      let raw: unknown;
       try {
-        body = (await request.json()) as { userId?: string; title?: string };
+        raw = await request.json();
       } catch {
         return Response.json({ error: "Invalid request body" }, { status: 400 });
       }
+
+      const parseResult = titleUpdateBodySchema.safeParse(raw);
+      if (!parseResult.success) {
+        return Response.json({ error: "Invalid request body" }, { status: 400 });
+      }
+
+      const body: TitleUpdateBody = parseResult.data;
 
       if (!body.userId) {
         return Response.json({ error: "userId is required" }, { status: 400 });
@@ -406,15 +391,19 @@ export function createSessionLifecycleHandler(
       return Response.json({ title: result.title });
     },
 
-    async archive(request: Request, _log: Logger): Promise<Response> {
+    async archive(request: Request): Promise<Response> {
       const session = deps.getSession();
       if (!session) {
         return Response.json({ error: "Session not found" }, { status: 404 });
       }
 
-      let body: { userId?: string };
+      let body: UserIdBody;
       try {
-        body = parseUserIdBody(await request.json());
+        const result = userIdBodySchema.safeParse(await request.json());
+        if (!result.success) {
+          return Response.json({ error: "Invalid request body" }, { status: 400 });
+        }
+        body = result.data;
       } catch {
         return Response.json({ error: "Invalid request body" }, { status: 400 });
       }
@@ -428,13 +417,18 @@ export function createSessionLifecycleHandler(
         return Response.json({ error: "Not authorized to archive this session" }, { status: 403 });
       }
 
-      const result = await deps.statusService.archive("session_archived", {
-        beforeProviderArchive: async () => {
-          if (!TERMINAL_STATUSES.has(session.status)) {
-            await deps.stopExecution({ suppressStatusReconcile: true });
-          }
-        },
-      });
+      if (session.status === "cancelled") {
+        return Response.json({ error: "Cancelled sessions cannot be archived" }, { status: 409 });
+      }
+
+      if (deps.messageRepository.getPendingOrProcessingCount() > 0) {
+        return Response.json(
+          { error: "Cannot archive a session with queued work" },
+          { status: 409 }
+        );
+      }
+
+      const result = await deps.statusService.archive("session_archived");
       if (result === "in_progress") {
         return Response.json({ error: "Session archive is already in progress" }, { status: 409 });
       }
@@ -445,15 +439,87 @@ export function createSessionLifecycleHandler(
       return Response.json({ status: "archived" });
     },
 
+    async archiveCascade(): Promise<Response> {
+      const session = deps.getSession();
+      if (!session) {
+        return Response.json({ status: "archived" });
+      }
+
+      const result = await deps.statusService.archive("session_archived", {
+        retryOnFailure: true,
+      });
+      if (result !== "archived") {
+        return Response.json({ status: "archive_pending" }, { status: 202 });
+      }
+
+      return Response.json({ status: "archived" });
+    },
+
+    /**
+     * Retire a warm session that never received a prompt.
+     *
+     * The web client warms a session on the first keystroke, so navigating away
+     * without submitting leaves a `created` row whose sandbox idles out — and no
+     * other transition reaches it, because `active` needs an enqueued prompt and
+     * the terminal statuses need a finished execution.
+     *
+     * The sweep selects candidates from the D1 index, which it may have read
+     * before a prompt arrived. Re-checking here is what makes that safe: the
+     * Durable Object is the authority on the session's own state and runs
+     * single-threaded, so a session that started work in the meantime is left
+     * alone rather than archived out from under its author.
+     */
+    async expireDraft(): Promise<Response> {
+      const session = deps.getSession();
+      if (!session) {
+        return Response.json({ error: "Session not found" }, { status: 404 });
+      }
+
+      if (session.status !== "created") {
+        // Reaching here means the index still reads `created` while this session
+        // has moved on — which is exactly what happens when an earlier
+        // transition's D1 projection failed (they are logged and swallowed).
+        // Repairing the mirror is what stops the row being selected instead of
+        // being retried every sweep forever.
+        await deps.statusService.repairIndexStatus();
+        return Response.json({ outcome: "not_draft", status: session.status });
+      }
+
+      if (
+        deps.messageRepository.getPendingOrProcessingCount() > 0 ||
+        deps.messageRepository.getMessageCount() > 0
+      ) {
+        // A session holding messages while still `created` is a broken aggregate:
+        // enqueueing a prompt inserts the message and transitions to `active` in
+        // the same Durable Object turn, so current code cannot produce this. It
+        // survives only on rows predating that guarantee, and answering without
+        // changing anything is what let them pin the head of the sweep's
+        // oldest-first batch forever. Settle the status to what the messages say
+        // instead. A queued prompt is left for the dispatch timeout rather than
+        // archived: archiving discards a real request, and `archived` is not
+        // promptable, so the author could not resume it either.
+        const settled = await deps.statusService.settleFromMessageState();
+        return Response.json({ outcome: "has_work", status: settled });
+      }
+
+      await deps.statusService.transition("archived");
+
+      return Response.json({ outcome: "archived", status: "archived" });
+    },
+
     async unarchive(request: Request): Promise<Response> {
       const session = deps.getSession();
       if (!session) {
         return Response.json({ error: "Session not found" }, { status: 404 });
       }
 
-      let body: { userId?: string };
+      let body: UserIdBody;
       try {
-        body = parseUserIdBody(await request.json());
+        const result = userIdBodySchema.safeParse(await request.json());
+        if (!result.success) {
+          return Response.json({ error: "Invalid request body" }, { status: 400 });
+        }
+        body = result.data;
       } catch {
         return Response.json({ error: "Invalid request body" }, { status: 400 });
       }
@@ -477,39 +543,6 @@ export function createSessionLifecycleHandler(
       return Response.json({ status: "active" });
     },
 
-    /**
-     * Trusted DO-to-DO archive used by the parent→child archive cascade. The
-     * only caller is another SessionDO (never a client), so there is no
-     * participant check. Any in-flight execution is stopped with the status
-     * reconcile suppressed so the archived status sticks instead of being
-     * flipped back to active/completed once the current run finishes.
-     *
-     * transitionSessionStatus("archived") cascades onward to this session's own
-     * children, so grandchildren are archived without extra recursion here.
-     */
-    async archiveCascade(_request: Request, _url: URL, _log: Logger): Promise<Response> {
-      const session = deps.getSession();
-      // Child DO may never have been created (or was already torn down); the
-      // cascade is best-effort, so treat a missing session as already done.
-      if (!session) {
-        return Response.json({ status: "archived" });
-      }
-
-      const result = await deps.statusService.archive("session_archived", {
-        retryOnFailure: true,
-        beforeProviderArchive: async () => {
-          if (session.status !== "archived" && !TERMINAL_STATUSES.has(session.status)) {
-            await deps.stopExecution({ suppressStatusReconcile: true });
-          }
-        },
-      });
-      if (result !== "archived") {
-        return Response.json({ status: "archive_pending" }, { status: 202 });
-      }
-
-      return Response.json({ status: "archived" });
-    },
-
     async cancel(): Promise<Response> {
       const session = deps.getSession();
       if (!session) {
@@ -520,21 +553,15 @@ export function createSessionLifecycleHandler(
         return Response.json({ error: `Session already ${session.status}` }, { status: 409 });
       }
 
-      await deps.statusService.transition("cancelled");
-      await deps.stopExecution({ suppressStatusReconcile: true });
+      await deps.cancelSession();
 
       const sandbox = deps.getSandbox();
-      if (sandbox) {
-        if (!isDeadSandboxStatus(sandbox.status)) {
-          const sandboxWs = deps.getSandboxSocket();
-          if (sandboxWs) {
-            deps.sendToSandbox(sandboxWs, { type: "shutdown" });
-          }
+      if (sandbox && sandbox.status !== "stopped" && sandbox.status !== "failed") {
+        const sandboxWs = deps.getSandboxSocket();
+        if (sandboxWs) {
+          deps.sendToSandbox(sandboxWs, { type: "shutdown" });
         }
-        // Dead rows go through too. terminateSandbox owns the policy: it no-ops
-        // on a row whose stop already landed, and retries one whose stop didn't.
-        // Filtering them out here is what left a `stale` row's VM running.
-        await deps.terminateSandbox("session_cancelled");
+        deps.updateSandboxStatus("stopped");
       }
 
       return Response.json({ status: "cancelled" });

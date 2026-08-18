@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  formatSessionRepositoriesLabel,
-  formatSessionRepositoriesListLabel,
-  NO_REPOSITORY_LABEL,
-} from "./repo-label";
+import { formatSessionRepositoriesLabel, NO_REPOSITORY_LABEL } from "./repo-label";
 
 describe("formatSessionRepositoriesLabel", () => {
   it("renders the scalar repo when there is no member list", () => {
@@ -37,16 +33,5 @@ describe("formatSessionRepositoriesLabel", () => {
         { repoOwner: "acme", repoName: "api" },
       ])
     ).toBe("acme/web +1");
-  });
-});
-
-describe("formatSessionRepositoriesListLabel", () => {
-  it("names every repository in a multi-repository session", () => {
-    expect(
-      formatSessionRepositoriesListLabel("acme", "web", [
-        { repoOwner: "acme", repoName: "web" },
-        { repoOwner: "acme", repoName: "api" },
-      ])
-    ).toBe("acme/web, acme/api");
   });
 });

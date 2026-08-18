@@ -1,11 +1,11 @@
 import type { Artifact } from "@/types/session";
-import { toDisplayStatus } from "@open-inspect/shared";
-import type {
-  PullRequestDisplayStatus,
-  ScreenshotArtifactMetadata,
-  SessionArtifact,
-  VideoArtifactMetadata,
-} from "@open-inspect/shared";
+import {
+  toDisplayStatus,
+  type PullRequestDisplayStatus,
+  type ScreenshotArtifactMetadata,
+  type SessionArtifact,
+  type VideoArtifactMetadata,
+} from "@open-inspect/shared/types/artifacts";
 
 /**
  * Maps the wire artifact shape (`SessionArtifact`, with loosely-typed
@@ -44,7 +44,6 @@ const MEDIA_MIME_TYPES = new Set<MediaMimeType>([
   "image/png",
   "image/jpeg",
   "image/webp",
-  "image/svg+xml",
   "video/mp4",
 ]);
 
@@ -110,9 +109,6 @@ export function toUiArtifact(artifact: SessionArtifact): Artifact {
               : undefined,
           repoOwner: typeof meta.repoOwner === "string" ? meta.repoOwner : undefined,
           repoName: typeof meta.repoName === "string" ? meta.repoName : undefined,
-          // Board artifacts point at a BoardRoom DO; the whiteboard card needs these.
-          boardId: typeof meta.boardId === "string" ? meta.boardId : undefined,
-          title: typeof meta.title === "string" ? meta.title : undefined,
         }
       : undefined,
   };

@@ -100,23 +100,6 @@ describe("toUiArtifact", () => {
     );
   });
 
-  it("narrows the board id and title a whiteboard card needs to open the room", () => {
-    const artifact = toUiArtifact({
-      id: "artifact-board-1",
-      type: "board",
-      url: null,
-      metadata: { boardId: "board-1", title: "System design", mimeType: "image/svg+xml" },
-      createdAt: 100,
-    });
-    expect(artifact.metadata).toEqual(
-      expect.objectContaining({
-        boardId: "board-1",
-        title: "System design",
-        mimeType: "image/svg+xml",
-      })
-    );
-  });
-
   it("leaves metadata undefined when the artifact has none", () => {
     const artifact = toUiArtifact({
       id: "artifact-branch-1",

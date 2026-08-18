@@ -2,21 +2,29 @@
  * Session-specific type definitions.
  */
 
+import type { ResolvedSessionAttachment } from "@open-inspect/shared/types/session-attachments";
 import type {
-  ResolvedSessionAttachment,
   SessionStatus,
   SandboxStatus,
-  GitSyncStatus,
   MessageStatus,
   MessageSource,
   ParticipantRole,
   SpawnSource,
-  ArtifactType,
-  EventType,
-} from "../types";
+} from "@open-inspect/shared/types/sessions";
+import type { ArtifactType } from "@open-inspect/shared/types/artifacts";
+import type { EventType, GitSyncStatus } from "@open-inspect/shared/types/sandbox-events";
 import type { GitPushSpec } from "../source-control";
+import { z } from "zod";
 
 // Database row types (match SQLite schema)
+
+export type PromptGitIdentity =
+  | {
+      mode: "attributed-user";
+      name: string;
+      email: string;
+    }
+  | { mode: "agent-only" };
 
 export interface SessionRow {
   id: string;
@@ -37,12 +45,13 @@ export interface SessionRow {
   spawn_source: SpawnSource;
   spawn_depth: number;
   code_server_enabled: number; // 0 = disabled (default), 1 = enabled
+  vnc_enabled: number; // 0 = disabled (default), 1 = enabled
   total_cost: number; // Running aggregate of step_finish event costs
   sandbox_settings: string | null; // JSON blob of SandboxSettings
-  environment_id: string | null; // Launch environment provenance; NULL for repo-launched/ad-hoc sessions
-  terminal_at: number | null;
-  archive_requested_at: number | null;
-  archive_claimed_at: number | null;
+  environment_id: string | null;
+  terminal_at?: number | null;
+  archive_requested_at?: number | null;
+  archive_claimed_at?: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -52,6 +61,20 @@ export type RepositorySessionRow = SessionRow & {
   repo_name: string;
 };
 
+/**
+ * One member repository row, in position order (position 0 = primary).
+ */
+export interface SessionRepositoryRow {
+  position: number;
+  repo_owner: string;
+  repo_name: string;
+  repo_id: number | null;
+  base_branch: string;
+  branch_name: string | null;
+  base_sha: string | null;
+  current_sha: string | null;
+}
+
 export function sessionHasRepository(session: SessionRow): session is RepositorySessionRow {
   return Boolean(session.repo_owner && session.repo_name);
 }
@@ -59,6 +82,7 @@ export function sessionHasRepository(session: SessionRow): session is Repository
 export interface ParticipantRow {
   id: string;
   user_id: string;
+  canonical_user_id?: string | null;
   scm_user_id: string | null;
   scm_login: string | null;
   scm_email: string | null;
@@ -82,12 +106,27 @@ export interface MessageRow {
   reasoning_effort: string | null; // Reasoning effort for per-message override
   attachments: string | null; // JSON
   callback_context: string | null; // JSON: { channel, threadTs, repoFullName, model }
+  client_request_id: string | null;
+  request_fingerprint: string | null;
   status: MessageStatus;
   error_message: string | null;
+  stop_confirmation_deadline: number | null;
   created_at: number;
   started_at: number | null;
   completed_at: number | null;
 }
+
+export const sessionAttachmentRowSchema = z.object({
+  id: z.string(),
+  mime_type: z.string(),
+  size_bytes: z.number(),
+  object_key: z.string(),
+  message_id: z.string().nullable(), // Set once a prompt references this upload
+  cleanup_claimed_at: z.number().nullable(), // Retained until object deletion is acknowledged
+  created_at: z.number(),
+});
+
+export type SessionAttachmentRow = z.infer<typeof sessionAttachmentRowSchema>;
 
 export interface EventRow {
   id: string;
@@ -95,6 +134,7 @@ export interface EventRow {
   data: string; // JSON
   message_id: string | null;
   created_at: number;
+  timeline_sequence?: number;
 }
 
 export interface ArtifactRow {
@@ -121,10 +161,10 @@ export interface SandboxRow {
   last_activity: number | null; // Last activity timestamp for inactivity-based snapshot
   last_spawn_error: string | null;
   last_spawn_error_at: number | null;
-  stop_unreconciled_at: number | null;
-  stop_unreconciled_provider_id: string | null;
   code_server_url: string | null;
   code_server_password: string | null;
+  vnc_url: string | null;
+  vnc_password: string | null;
   tunnel_urls: string | null; // JSON mapping of port -> tunnel URL
   ttyd_url: string | null;
   ttyd_token: string | null;
@@ -133,7 +173,7 @@ export interface SandboxRow {
 
 // Command types for sandbox communication
 
-export interface PromptCommand {
+interface PromptCommand {
   type: "prompt";
   messageId: string;
   content: string;
@@ -141,63 +181,42 @@ export interface PromptCommand {
   reasoningEffort?: string; // Reasoning effort level
   author: {
     userId: string;
-    scmName: string | null;
-    scmEmail: string | null;
+    gitIdentity: PromptGitIdentity;
   };
   attachments?: ResolvedSessionAttachment[];
 }
 
-export interface StopCommand {
+interface StopCommand {
   type: "stop";
 }
 
-export interface CompactContextCommand {
-  type: "compact_context";
-  requestId: string;
-  model: string;
-}
-
-export interface SnapshotCommand {
+interface SnapshotCommand {
   type: "snapshot";
 }
 
-export interface ShutdownCommand {
+interface ShutdownCommand {
   type: "shutdown";
 }
 
-export interface AckCommand {
+interface AckCommand {
   type: "ack";
   ackId: string;
 }
 
-export interface PushCommand {
+interface PushCommand {
   type: "push";
   pushSpec: GitPushSpec;
 }
 
+interface RefreshDiffCommand {
+  type: "refresh_diff";
+}
+
 export type SandboxCommand =
   | PromptCommand
-  | CompactContextCommand
   | StopCommand
   | SnapshotCommand
   | ShutdownCommand
   | AckCommand
-  | PushCommand;
-
-// Internal session update types
-
-export interface SessionUpdate {
-  title?: string;
-  branchName?: string;
-  baseSha?: string;
-  currentSha?: string;
-  opencodeSessionId?: string;
-  status?: SessionStatus;
-}
-
-export interface SandboxUpdate {
-  modalSandboxId?: string;
-  snapshotId?: string;
-  status?: SandboxStatus;
-  gitSyncStatus?: GitSyncStatus;
-}
+  | PushCommand
+  | RefreshDiffCommand;

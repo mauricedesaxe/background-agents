@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 export const MAX_SESSION_ATTACHMENTS_PER_MESSAGE = 6;
+/** Per-image byte cap, enforced by the attachment store and every producer. */
+export const SESSION_ATTACHMENT_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 export const SESSION_ATTACHMENT_IMAGE_MIME_TYPES = [
   "image/png",
   "image/jpeg",
@@ -41,3 +43,17 @@ export type ResolvedSessionAttachment = z.infer<typeof resolvedSessionAttachment
 export const resolvedSessionAttachmentsSchema = z
   .array(resolvedSessionAttachmentSchema)
   .max(MAX_SESSION_ATTACHMENTS_PER_MESSAGE);
+
+/**
+ * Body of a successful upload to `POST /sessions/:id/attachments`, parsed by
+ * every client that turns an upload into a prompt reference. The id is the
+ * canonical one, so an id that the prompt schema would reject is treated as a
+ * failed upload where it arrives rather than being carried into client state
+ * and failing later at prompt validation. Unknown keys are ignored so the
+ * endpoint can add response fields without breaking deployed clients.
+ */
+export const sessionAttachmentUploadResponseSchema = z.object({
+  attachmentId: sessionAttachmentIdSchema,
+  mimeType: sessionAttachmentMimeTypeSchema,
+});
+export type SessionAttachmentUploadResponse = z.infer<typeof sessionAttachmentUploadResponseSchema>;

@@ -1,4 +1,4 @@
-import { DEFAULT_APP_NAME } from "@open-inspect/shared";
+import { DEFAULT_APP_NAME } from "@open-inspect/shared/app-name";
 import { z } from "zod";
 
 const collaboratorPermissionResponseSchema = z.object({
@@ -7,18 +7,6 @@ const collaboratorPermissionResponseSchema = z.object({
 
 const installationTokenResponseSchema = z.object({
   token: z.string(),
-});
-
-const pullRequestResponseSchema = z.object({
-  title: z.string(),
-  body: z.string().nullable(),
-  user: z.object({ login: z.string() }),
-  head: z.object({
-    ref: z.string(),
-    sha: z.string(),
-    repo: z.object({ full_name: z.string() }).nullable(),
-  }),
-  base: z.object({ ref: z.string(), repo: z.object({ full_name: z.string() }) }),
 });
 
 export interface GitHubAppConfig {
@@ -185,81 +173,4 @@ export async function postReaction(
   } catch {
     return false;
   }
-}
-
-export async function postIssueComment(
-  token: string,
-  owner: string,
-  repo: string,
-  issueNumber: number,
-  body: string,
-  userAgent: string = DEFAULT_APP_NAME
-): Promise<boolean> {
-  try {
-    const response = await fetch(
-      `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}/comments`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: "application/vnd.github+json",
-          "X-GitHub-Api-Version": "2022-11-28",
-          "User-Agent": userAgent,
-        },
-        body: JSON.stringify({ body }),
-      }
-    );
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-export async function fetchPullRequest(
-  token: string,
-  owner: string,
-  repo: string,
-  pullNumber: number,
-  userAgent: string = DEFAULT_APP_NAME
-): Promise<{
-  title: string;
-  body: string | null;
-  author: string;
-  head: string;
-  headSha: string;
-  headRepository: string | null;
-  base: string;
-  baseRepository: string;
-  isCrossRepository: boolean;
-}> {
-  const response = await fetch(
-    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}`,
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": userAgent,
-      },
-    }
-  );
-  if (!response.ok) {
-    throw new Error(`Failed to fetch pull request: ${response.status}`);
-  }
-  const parsed = pullRequestResponseSchema.safeParse(await response.json());
-  if (!parsed.success) throw new Error("Failed to fetch pull request: invalid response");
-  const headRepository = parsed.data.head.repo?.full_name ?? null;
-  const baseRepository = parsed.data.base.repo.full_name;
-  return {
-    title: parsed.data.title,
-    body: parsed.data.body,
-    author: parsed.data.user.login,
-    head: parsed.data.head.ref,
-    headSha: parsed.data.head.sha,
-    headRepository,
-    base: parsed.data.base.ref,
-    baseRepository,
-    isCrossRepository:
-      headRepository === null || headRepository.toLowerCase() !== baseRepository.toLowerCase(),
-  };
 }

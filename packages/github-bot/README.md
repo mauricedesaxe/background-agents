@@ -5,8 +5,8 @@ sessions. It provides two capabilities:
 
 1. **Code Review** — Review newly opened PRs when auto-review is enabled and submit structured
    feedback.
-2. **Comment-Triggered Actions** — Use `/open-inspect` or @mention the bot on an issue or PR. It
-   responds with analysis, implementation work, a summary comment, or a review-thread reply.
+2. **Comment-Triggered Actions** — @mention the bot in a PR comment; it reads the PR context and
+   responds with analysis, a summary comment, or a review-thread reply.
 
 For day-to-day usage, see the user-facing
 [GitHub integration guide](../../docs/integrations/GITHUB.md).
@@ -51,9 +51,8 @@ Key design decisions:
   sandbox.
 - **No session reuse**: Every non-duplicate webhook delivery creates a fresh session. Delivery
   dedupe is handled separately in KV using `X-GitHub-Delivery`.
-- **PR branch resolution**: Conversation comments do not contain PR branch metadata, so the bot
-  fetches that PR before creating a session on its head branch. The agent gathers diffs, prior
-  comments, and file contents itself using `gh` CLI.
+- **No PR context fetching**: The bot only uses metadata already in the webhook payload. The agent
+  gathers additional context (diffs, prior comments, file contents) itself using `gh` CLI.
 
 ## Deployment
 
@@ -82,9 +81,15 @@ The bot is deployed via Terraform as a standalone Cloudflare Worker alongside th
 
 ### GitHub App Configuration
 
-The existing GitHub App needs these additions:
+The GitHub bot uses the same repository permissions configured for the main GitHub App setup. In
+particular, it requires:
 
 **Permissions**: `Pull requests: Read & write`, `Issues: Read & write`
+
+The control plane does not need Issues permission to label session-created pull requests; the
+required `Pull requests: Read & write` permission authorizes those label operations. See the
+[GitHub App setup](../../docs/GETTING_STARTED.md#step-3-create-github-app) for the complete
+permission list.
 
 **Event subscriptions**: `Pull request`, `Issue comment`, `Pull request review comment`
 
@@ -109,12 +114,12 @@ access model and can authenticate auxiliary private repos on the configured SCM 
 
 ## Webhook Events
 
-| Event                         | Action             | Trigger                    | Handler                   |
-| ----------------------------- | ------------------ | -------------------------- | ------------------------- |
-| `pull_request`                | `opened`           | Non-draft PR opened        | `handlePullRequestOpened` |
-| `pull_request`                | `review_requested` | Compatibility event path   | `handleReviewRequested`   |
-| `issue_comment`               | `created`          | Command on an issue or PR  | `handleIssueComment`      |
-| `pull_request_review_comment` | `created`          | Command in a review thread | `handleReviewComment`     |
+| Event                         | Action             | Trigger                     | Handler                   |
+| ----------------------------- | ------------------ | --------------------------- | ------------------------- |
+| `pull_request`                | `opened`           | Non-draft PR opened         | `handlePullRequestOpened` |
+| `pull_request`                | `review_requested` | Compatibility event path    | `handleReviewRequested`   |
+| `issue_comment`               | `created`          | @mention in a PR comment    | `handleIssueComment`      |
+| `pull_request_review_comment` | `created`          | @mention in a review thread | `handleReviewComment`     |
 
 All events are processed asynchronously via `executionCtx.waitUntil()`. The webhook endpoint returns
 200 immediately after signature verification and delivery dedupe.
@@ -124,10 +129,12 @@ All events are processed asynchronously via `executionCtx.waitUntil()`. The webh
 **Pull Request Opened (Auto-Review):**
 
 1. Check `pull_request.draft` — skip draft PRs
-2. Check `pull_request.user.login !== GITHUB_BOT_USERNAME` — prevent loops on bot-created PRs
+2. Apply the configured trigger-user gate — bot-created PRs are reviewed when the bot login is
+   explicitly listed in `allowedTriggerUsers`
 3. Post eyes reaction on the PR (fire-and-forget)
 4. Create session via control plane
-5. Send code review prompt (includes PR metadata + `gh` CLI instructions)
+5. Send code review prompt (includes PR metadata + `gh` CLI instructions). Reviews of the bot's own
+   PRs use `COMMENT`, because GitHub does not allow pull request authors to approve their own PRs.
 
 **Review Requested (compatibility path):**
 
@@ -141,11 +148,10 @@ people to request the GitHub App bot through the PR reviewer picker.
 
 **Issue Comment:**
 
-1. Ignore bot-authored comments, quoted examples, code blocks, and comments without a command
-2. Accept `/open-inspect <instruction>` or the configured bot mention
-3. Apply repository scope and caller authorization
-4. Post an eyes reaction and create a session on the issue default branch or PR head branch
-5. Send an issue-specific or PR-specific action prompt
+1. Check `issue.pull_request` exists — ignore non-PR comments
+2. Check comment body contains `@{GITHUB_BOT_USERNAME}` — ignore if no mention
+3. Check `sender.login !== GITHUB_BOT_USERNAME` — prevent loops
+4. Strip @mention, post eyes reaction, create session, send comment action prompt
 
 **Review Comment:** Same as issue comment, but the prompt additionally includes `filePath`,
 `diffHunk`, and `commentId` for thread-specific context and reply threading.

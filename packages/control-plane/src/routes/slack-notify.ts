@@ -5,28 +5,28 @@
 
 import {
   getPermalink,
-  postMessage,
+  postBlocks,
   sanitizeAgentText,
+  splitIntoSlackSections,
   SLACK_DENIAL_STATUS,
-  type SlackGlobalSettings,
   type SlackNotifySuccessOutput,
   type SlackWireDenialReason,
-} from "@open-inspect/shared";
+} from "@open-inspect/shared/slack";
+import type { SlackGlobalSettings } from "@open-inspect/shared/types/integrations";
 import { IntegrationSettingsStore, resolveSlackSettings } from "../db/integration-settings";
 import { SessionIndexStore } from "../db/session-index";
-import {
-  UpstreamExchangeConflictError,
-  UpstreamExchangeStore,
-} from "../db/upstream-exchange-store";
 import { createLogger } from "../logger";
 import type { Env } from "../types";
 import { error, json, type RequestContext } from "./shared";
 
 const logger = createLogger("slack-notify");
 
-/** Maximum text length before truncation; fits within Slack's section block. */
-const SLACK_TEXT_MAX_LENGTH = 2900;
-/** Hard cap on the raw text we accept and persist verbatim in event args. */
+/**
+ * Hard cap on the raw text we accept and persist verbatim in event args. Also
+ * the sanitizer's ceiling: text longer than one Slack section is split across
+ * consecutive sections rather than cut, so the section limit is not a limit on
+ * what an agent may post.
+ */
 const RAW_TEXT_INPUT_MAX_LENGTH = 12_000;
 /** Channel name length cap (Slack max is 80). */
 const CHANNEL_INPUT_MAX_LENGTH = 80;
@@ -38,7 +38,6 @@ interface ParsedBody {
   text: string;
   threadTs: string | undefined;
   reason: string | undefined;
-  scanId: string | undefined;
 }
 
 interface AuditFields {
@@ -74,22 +73,6 @@ export async function handleSlackNotify(
     repo: repoScope,
   };
 
-  if (parsed.scanId) {
-    if (!session.automationId || !session.automationRunId) {
-      return failureResponse("invalid_input", "scanId requires an automation run.");
-    }
-    try {
-      await new UpstreamExchangeStore(ctx.db).assertOpenScan(
-        parsed.scanId,
-        session.automationId,
-        session.automationRunId
-      );
-    } catch (cause) {
-      if (!(cause instanceof UpstreamExchangeConflictError)) throw cause;
-      return failureResponse("invalid_input", cause.message);
-    }
-  }
-
   const token = env.SLACK_BOT_TOKEN;
   if (!token) {
     // Error (not warn): a missing token is a deployment misconfig and must reach alerting.
@@ -124,7 +107,7 @@ export async function handleSlackNotify(
 
   const sanitized = sanitizeAgentText(parsed.text, {
     mentionsPolicy,
-    maxLength: SLACK_TEXT_MAX_LENGTH,
+    maxLength: RAW_TEXT_INPUT_MAX_LENGTH,
   });
 
   if (sanitized.text.trim().length === 0) {
@@ -135,16 +118,16 @@ export async function handleSlackNotify(
     );
   }
 
+  const sections = splitIntoSlackSections(sanitized.text);
   const blocks = buildBlocks({
-    text: sanitized.text,
+    sections,
     sessionId,
     appName: env.APP_NAME ?? "Open-Inspect",
     webAppUrl: env.WEB_APP_URL,
   });
-
-  const post = await postMessage(token, parsed.channel, sanitized.text, {
+  // Without top-level text, Slack derives screen-reader text from the blocks.
+  const post = await postBlocks(token, parsed.channel, blocks, {
     thread_ts: parsed.threadTs,
-    blocks,
   });
 
   if (!post.ok) {
@@ -156,23 +139,7 @@ export async function handleSlackNotify(
   const channelId = post.channel;
   const messageTs = post.ts;
   const permalinkResp = await getPermalink(token, channelId, messageTs);
-  if (!permalinkResp.ok) {
-    const reasonCode = mapSlackError(permalinkResp.error);
-    logDenial(sessionId, ctx, parsed, audit, reasonCode, permalinkResp.retryAfter);
-    return failureResponse(reasonCode, permalinkResp.error, permalinkResp.retryAfter);
-  }
-  const permalink = permalinkResp.permalink;
-
-  if (parsed.scanId) {
-    await new UpstreamExchangeStore(ctx.db).recordSlackDelivery({
-      scanId: parsed.scanId,
-      automationId: session.automationId!,
-      automationRunId: session.automationRunId!,
-      channelId,
-      messageTs,
-      permalink,
-    });
-  }
+  const permalink = permalinkResp.ok ? permalinkResp.permalink : "";
 
   const result: SlackNotifySuccessOutput = {
     ok: true,
@@ -180,6 +147,9 @@ export async function handleSlackNotify(
     channelId,
     messageTs,
     permalink,
+    // Only the raw-input cap can truncate now: the splitter's own ceiling
+    // (MAX_RESPONSE_SECTIONS sections) is far above RAW_TEXT_INPUT_MAX_LENGTH,
+    // and text that merely exceeds one section is split rather than cut.
     truncated: sanitized.truncated,
     strippedBroadcasts: sanitized.strippedBroadcasts,
     mentionsModified: sanitized.mentionsModified,
@@ -238,34 +208,26 @@ async function parseBody(request: Request): Promise<ParsedBody | Response> {
     typeof body.thread_ts === "string" && body.thread_ts.length > 0 ? body.thread_ts : undefined;
   const rawReason = typeof body.reason === "string" ? body.reason : undefined;
   const reason = rawReason ? rawReason.slice(0, REASON_MAX_LENGTH) : undefined;
-  const scanId = typeof body.scan_id === "string" ? body.scan_id : undefined;
-  if (
-    scanId &&
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(scanId)
-  ) {
-    return failureResponse("invalid_input", "scan_id must be a UUID.");
-  }
 
   return {
     channel: channelValue,
     text,
     threadTs,
     reason,
-    scanId,
   };
 }
 
 function buildBlocks(opts: {
-  text: string;
+  sections: string[];
   sessionId: string;
   appName: string;
   webAppUrl: string | undefined;
 }): unknown[] {
   const blocks: unknown[] = [
-    {
+    ...opts.sections.map((section) => ({
       type: "section",
-      text: { type: "mrkdwn", text: opts.text },
-    },
+      text: { type: "mrkdwn", text: section },
+    })),
     {
       type: "context",
       elements: [

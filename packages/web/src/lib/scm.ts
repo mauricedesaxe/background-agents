@@ -6,7 +6,7 @@
  * defaulting to "github" for upstream compatibility.
  */
 
-export type ScmProvider = "github" | "gitlab" | "bitbucket";
+type ScmProvider = "github" | "gitlab" | "bitbucket";
 
 const BASE_URLS: Record<ScmProvider, string> = {
   github: "https://github.com",
@@ -20,14 +20,20 @@ function getProvider(): ScmProvider {
   return "github";
 }
 
+function encodeOwner(provider: ScmProvider, owner: string): string {
+  return provider === "gitlab"
+    ? owner.split("/").map(encodeURIComponent).join("/")
+    : encodeURIComponent(owner);
+}
+
 export function getScmRepoUrl(owner: string, name: string): string {
   const provider = getProvider();
-  return `${BASE_URLS[provider]}/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+  return `${BASE_URLS[provider]}/${encodeOwner(provider, owner)}/${encodeURIComponent(name)}`;
 }
 
 export function getScmBranchUrl(owner: string, name: string, branch: string): string {
   const provider = getProvider();
-  const encodedOwner = encodeURIComponent(owner);
+  const encodedOwner = encodeOwner(provider, owner);
   const encodedName = encodeURIComponent(name);
   const encodedBranch = encodeURIComponent(branch);
   if (provider === "gitlab") {

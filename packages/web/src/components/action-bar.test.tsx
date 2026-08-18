@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 /// <reference types="@testing-library/jest-dom" />
 
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import * as matchers from "@testing-library/jest-dom/matchers";
 import { ActionBar } from "./action-bar";
+import { MobileSessionActions } from "./mobile-session-actions";
 
 expect.extend(matchers);
 
@@ -92,54 +92,136 @@ describe("ActionBar", () => {
     expect(screen.queryByText(/Media/)).not.toBeInTheDocument();
   });
 
-  it("offers context compaction only while the session is idle", async () => {
-    const user = userEvent.setup();
-    const { unmount } = render(
-      <ActionBar
-        sessionId="session-1"
-        sessionStatus="active"
-        artifacts={[]}
-        onCompactContext={() => undefined}
-      />
-    );
-    await user.click(screen.getAllByRole("button").at(-1)!);
-    expect(screen.getByRole("menuitem", { name: "Compact context" })).toBeEnabled();
-
-    unmount();
+  it("consolidates all session actions into the menu on mobile", () => {
+    const onOpenDetails = vi.fn();
+    const onOpenMedia = vi.fn();
     render(
-      <ActionBar
+      <MobileSessionActions
+        sessionId="session-1"
+        sessionStatus="active"
+        artifacts={[
+          {
+            id: "artifact-preview-1",
+            type: "preview",
+            url: "https://preview.example.com",
+            metadata: { previewStatus: "active" },
+            createdAt: 1234,
+          },
+          {
+            id: "artifact-pr-1",
+            type: "pr",
+            url: "https://github.com/acme/web-app/pull/42",
+            metadata: { prNumber: 42 },
+            createdAt: 1235,
+          },
+          {
+            id: "artifact-shot-1",
+            type: "screenshot",
+            url: "sessions/session-1/media/artifact-shot-1.png",
+            metadata: { mimeType: "image/png" },
+            createdAt: 1236,
+          },
+        ]}
+        onOpenDetails={onOpenDetails}
+        onOpenMedia={onOpenMedia}
+        triggerRef={{ current: null }}
+      />
+    );
+
+    const trigger = screen.getByRole("button", { name: "Session actions" });
+    expect(trigger.parentElement).toHaveClass("md:hidden");
+    expect(screen.queryByRole("button", { name: "Archive" })).not.toBeInTheDocument();
+
+    fireEvent.pointerDown(trigger, {
+      button: 0,
+      ctrlKey: false,
+    });
+
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Details",
+      "View preview",
+      "View PR",
+      "Media (1)",
+      "Copy link",
+      "Archive",
+    ]);
+    expect(screen.getByRole("separator")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "Details" }));
+    expect(onOpenDetails).toHaveBeenCalledOnce();
+
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Media (1)" }));
+    expect(onOpenMedia).toHaveBeenCalledOnce();
+  });
+
+  it("confirms archive and keeps the action pending until the callback settles", async () => {
+    let resolveArchive: (() => void) | undefined;
+    const onArchive = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveArchive = resolve;
+        })
+    );
+    render(
+      <MobileSessionActions
         sessionId="session-1"
         sessionStatus="active"
         artifacts={[]}
-        isProcessing
-        onCompactContext={() => undefined}
+        onArchive={onArchive}
+        onOpenDetails={vi.fn()}
+        onOpenMedia={vi.fn()}
+        triggerRef={{ current: null }}
       />
     );
-    await user.click(screen.getAllByRole("button").at(-1)!);
-    expect(screen.getByRole("menuitem", { name: "Compact context" })).toHaveAttribute(
-      "aria-disabled",
-      "true"
+
+    const trigger = screen.getByRole("button", { name: "Session actions" });
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Archive" }));
+
+    expect(onArchive).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+    expect(onArchive).toHaveBeenCalledOnce();
+
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    expect(screen.getByRole("menuitem", { name: "Archive" })).toHaveAttribute("data-disabled");
+
+    resolveArchive?.();
+    await waitFor(() =>
+      expect(screen.getByRole("menuitem", { name: "Archive" })).not.toHaveAttribute("data-disabled")
     );
   });
 });
 
-describe("repository-aware PR selection", () => {
+describe("multi-PR sessions", () => {
   const webPr = {
     id: "artifact-pr-web",
     type: "pr" as const,
     url: "https://github.com/acme/web/pull/1",
-    metadata: { prNumber: 1, repoOwner: "acme", repoName: "web" },
+    metadata: {
+      prNumber: 1,
+      prState: "merged" as const,
+      head: "feat/first",
+      repoOwner: "acme",
+      repoName: "web",
+    },
     createdAt: 1,
   };
   const backendPr = {
     id: "artifact-pr-backend",
     type: "pr" as const,
     url: "https://github.com/acme/backend/pull/9",
-    metadata: { prNumber: 9, repoOwner: "acme", repoName: "backend" },
+    metadata: {
+      prNumber: 9,
+      prState: "open" as const,
+      head: "feat/second",
+      repoOwner: "acme",
+      repoName: "backend",
+    },
     createdAt: 2,
   };
 
-  it("selects the primary repo's PR, not the first PR artifact", () => {
+  it("lists every PR in a picker, labeling PRs outside the primary repo", () => {
     render(
       <ActionBar
         sessionId="session-1"
@@ -149,16 +231,64 @@ describe("repository-aware PR selection", () => {
       />
     );
 
-    const link = screen.getByRole("link", { name: /view pr/i });
-    expect(link).toHaveAttribute("href", "https://github.com/acme/web/pull/1");
+    expect(screen.queryByRole("link", { name: /view pr/i })).not.toBeInTheDocument();
+    fireEvent.pointerDown(screen.getByRole("button", { name: /view prs \(2\)/i }), {
+      button: 0,
+      ctrlKey: false,
+    });
+
+    const items = screen.getAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).toEqual([
+      "#1 · feat/firstmerged",
+      "acme/backend#9 · feat/secondopen",
+    ]);
+    expect(items[0]).toHaveAttribute("href", "https://github.com/acme/web/pull/1");
+    expect(items[1]).toHaveAttribute("href", "https://github.com/acme/backend/pull/9");
   });
 
-  it("falls back to the first PR artifact without repo context", () => {
+  it("drops the More-menu GitHub link when several PRs exist", () => {
     render(
-      <ActionBar sessionId="session-1" sessionStatus="active" artifacts={[backendPr, webPr]} />
+      <ActionBar
+        sessionId="session-1"
+        sessionStatus="active"
+        artifacts={[backendPr, webPr]}
+        primaryRepo={{ repoOwner: "acme", repoName: "web" }}
+      />
     );
 
-    const link = screen.getByRole("link", { name: /view pr/i });
-    expect(link).toHaveAttribute("href", "https://github.com/acme/backend/pull/9");
+    fireEvent.pointerDown(screen.getByRole("button", { name: "More session actions" }), {
+      button: 0,
+      ctrlKey: false,
+    });
+
+    expect(screen.getByRole("menuitem", { name: "Copy link" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "View in GitHub" })).not.toBeInTheDocument();
+  });
+
+  it("lists every PR in the mobile menu", () => {
+    render(
+      <MobileSessionActions
+        sessionId="session-1"
+        sessionStatus="active"
+        artifacts={[backendPr, webPr]}
+        primaryRepo={{ repoOwner: "acme", repoName: "web" }}
+        onOpenDetails={vi.fn()}
+        onOpenMedia={vi.fn()}
+        triggerRef={{ current: null }}
+      />
+    );
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Session actions" }), {
+      button: 0,
+      ctrlKey: false,
+    });
+
+    const prItems = screen
+      .getAllByRole("menuitem")
+      .filter((item) => item.getAttribute("href")?.includes("/pull/"));
+    expect(prItems.map((item) => item.textContent)).toEqual([
+      "#1 · feat/firstmerged",
+      "acme/backend#9 · feat/secondopen",
+    ]);
   });
 });
