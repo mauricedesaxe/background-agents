@@ -40,6 +40,13 @@ def env_set(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
+def clean_cp_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip ambient control-plane env vars so no-CP paths are deterministic."""
+    for key in ("CONTROL_PLANE_URL", "SANDBOX_AUTH_TOKEN", "SESSION_CONFIG"):
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture
 def clean_gh_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Strip ambient gh tokens so gh-token mint decisions are deterministic.
 
@@ -382,6 +389,7 @@ def test_failure_does_not_fall_back_to_stale_cache(cache_dir: Path, env_set: Non
     assert "401" in err
 
 
+@pytest.mark.usefixtures("clean_cp_env")
 def test_missing_env_exits_nonzero(cache_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Request passes scoping (host + path), but no control-plane env and no
     # VCS_CLONE_TOKEN fallback → the credential fetch fails.
@@ -395,6 +403,7 @@ def test_missing_env_exits_nonzero(cache_dir: Path, monkeypatch: pytest.MonkeyPa
     assert out == ""
 
 
+@pytest.mark.usefixtures("clean_cp_env")
 def test_falls_back_to_env_var_token_in_image_build_mode(
     cache_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -665,6 +674,7 @@ def test_gh_token_action_prints_nothing_for_non_github_host(
     assert calls[0] == 0
 
 
+@pytest.mark.usefixtures("clean_cp_env")
 def test_gh_token_action_prints_nothing_when_mint_fails(
     cache_dir: Path, clean_gh_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

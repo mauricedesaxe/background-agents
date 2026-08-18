@@ -153,6 +153,7 @@ async def test_start_deploys_xai_plugin_from_marker(tmp_path):
         supervisor._install_skills = MagicMock()
         supervisor._install_bin_scripts = MagicMock()
         supervisor._wait_for_health = AsyncMock()
+        supervisor._install_mcp_packages = AsyncMock()
 
         await supervisor.start((), supervisor.workspace_path)
 
