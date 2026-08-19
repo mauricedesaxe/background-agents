@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useMemo, useCallback } from "react";
+import { useMemo, useCallback, useState } from "react";
 import { useAuthSession } from "@/lib/auth-session";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
 import { useIsMobile } from "@/hooks/use-media-query";
@@ -101,6 +101,8 @@ export function SessionSidebar({
     handleMarkUnread,
   } = useSidebarSessions();
 
+  const [sourceFilter, setSourceFilter] = useState<SessionSourceFilter | "all">("all");
+
   // Archiving the session on screen leaves nothing to show, so fall back to the home page.
   const handleArchivedSession = useCallback(
     async (sessionId: string) => {
@@ -146,6 +148,16 @@ export function SessionSidebar({
     if (groupSessions.length === 0 && !pagination.error) return null;
 
     const repositoryGroups = buildGroupedSessionList(groupSessions);
+    const filteredGroups =
+      sourceFilter === "all"
+        ? repositoryGroups
+        : repositoryGroups
+            .map((repositoryGroup) => ({
+              ...repositoryGroup,
+              buckets: repositoryGroup.buckets.filter((bucket) => bucket.source === sourceFilter),
+            }))
+            .filter((repositoryGroup) => repositoryGroup.buckets.length > 0);
+    if (filteredGroups.length === 0 && !pagination.error) return null;
 
     return (
       <section aria-labelledby={`session-group-${title.toLowerCase().replaceAll(" ", "-")}`}>
@@ -159,7 +171,7 @@ export function SessionSidebar({
             {title}
           </h2>
         </div>
-        {repositoryGroups.map((repositoryGroup) => (
+        {filteredGroups.map((repositoryGroup) => (
           <div key={repositoryGroup.key} role="group" aria-label={repositoryGroup.label}>
             <h3 className="px-4 pb-0.5 pt-2 text-xs font-medium text-muted-foreground truncate">
               {repositoryGroup.label}
@@ -300,6 +312,39 @@ export function SessionSidebar({
             className="h-7 rounded-sm text-xs data-[state=on]:bg-background data-[state=on]:text-foreground"
           >
             Mine
+          </ToggleGroupItem>
+        </ToggleGroup>
+      </div>
+
+      <div className="px-3 pb-2">
+        <ToggleGroup
+          type="single"
+          value={sourceFilter}
+          onValueChange={(value) => {
+            if (value === "all" || value === "manual" || value === "automatic") {
+              setSourceFilter(value);
+            }
+          }}
+          className="grid grid-cols-3 rounded-md border border-border-muted bg-muted p-0.5"
+          aria-label="Session source filter"
+        >
+          <ToggleGroupItem
+            value="all"
+            className="h-7 rounded-sm text-xs data-[state=on]:bg-background data-[state=on]:text-foreground"
+          >
+            All
+          </ToggleGroupItem>
+          <ToggleGroupItem
+            value="manual"
+            className="h-7 rounded-sm text-xs data-[state=on]:bg-background data-[state=on]:text-foreground"
+          >
+            Manual
+          </ToggleGroupItem>
+          <ToggleGroupItem
+            value="automatic"
+            className="h-7 rounded-sm text-xs data-[state=on]:bg-background data-[state=on]:text-foreground"
+          >
+            Automatic
           </ToggleGroupItem>
         </ToggleGroup>
       </div>
