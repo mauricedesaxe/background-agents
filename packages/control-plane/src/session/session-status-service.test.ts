@@ -230,6 +230,7 @@ describe("SessionStatusService.transition", () => {
       childSessionId: "public-session-1",
       status: "completed",
       title: "Session title",
+      deliverResult: true,
     });
     expect(h.waitUntil).toHaveBeenCalled();
   });
@@ -406,6 +407,7 @@ describe("SessionStatusService.notifyParentOfChildUpdate", () => {
       childSessionId: "public-session-1",
       status: "active",
       title: "New title",
+      deliverResult: false,
     });
     expect(h.waitUntil).toHaveBeenCalledTimes(1);
   });

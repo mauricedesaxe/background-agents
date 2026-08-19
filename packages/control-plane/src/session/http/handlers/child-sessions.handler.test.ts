@@ -168,6 +168,7 @@ function createHandler() {
     status: "queued" as const,
   }));
   const messageService = { enqueuePrompt };
+  const onTerminalChild = vi.fn();
 
   const handler = createChildSessionsHandler({
     messageRepository: repository as unknown as MessageRepository,
@@ -180,6 +181,7 @@ function createHandler() {
     parseArtifactMetadata,
     messenger,
     messageService,
+    onTerminalChild,
   });
 
   return {
@@ -192,6 +194,7 @@ function createHandler() {
     parseArtifactMetadata,
     broadcast,
     enqueuePrompt,
+    onTerminalChild,
   };
 }
 
@@ -1076,5 +1079,53 @@ describe("createChildSessionsHandler", () => {
       status: "active",
       title: null,
     });
+  });
+
+  it("delivers child results only on terminal status-transition notifies", async () => {
+    const { handler, onTerminalChild } = createHandler();
+
+    await handler.childSessionUpdate(
+      new Request("http://internal/internal/child-session/update", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          childSessionId: "child-1",
+          status: "completed",
+          title: "Done",
+          deliverResult: true,
+        }),
+      })
+    );
+    expect(onTerminalChild).toHaveBeenCalledWith("child-1");
+    expect(onTerminalChild).toHaveBeenCalledTimes(1);
+
+    onTerminalChild.mockClear();
+
+    await handler.childSessionUpdate(
+      new Request("http://internal/internal/child-session/update", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          childSessionId: "child-1",
+          status: "completed",
+          title: "Retitled after complete",
+        }),
+      })
+    );
+    expect(onTerminalChild).not.toHaveBeenCalled();
+
+    await handler.childSessionUpdate(
+      new Request("http://internal/internal/child-session/update", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          childSessionId: "child-2",
+          status: "active",
+          title: "Still running",
+          deliverResult: true,
+        }),
+      })
+    );
+    expect(onTerminalChild).not.toHaveBeenCalled();
   });
 });

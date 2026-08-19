@@ -106,6 +106,9 @@ import {
   createChildSessionsHandler,
   type ChildSessionsHandler,
 } from "./http/handlers/child-sessions.handler";
+import type { ChildSessionDetail } from "@open-inspect/shared/types/session-api";
+import { buildSessionInternalUrl, SessionInternalPaths } from "./contracts";
+import { buildChildResultPrompt } from "./child-result-prompt";
 import { createSandboxHandler, type SandboxHandler } from "./http/handlers/sandbox.handler";
 import { AttachmentsHandler } from "./http/handlers/attachments.handler";
 import { createWsTokenHandler, type WsTokenHandler } from "./http/handlers/ws-token.handler";
@@ -612,10 +615,60 @@ export class SessionDO extends DurableObject<Env> {
         parseArtifactMetadata: (artifact) => this.parseArtifactMetadata(artifact),
         messenger: this.messenger,
         messageService: this.messageService,
+        onTerminalChild: (childSessionId) => {
+          this.ctx.waitUntil(this.deliverChildResult(childSessionId));
+        },
       });
     }
 
     return this._childSessionsHandler;
+  }
+
+  /**
+   * Fetch a finished child session's result and deliver it to this (parent)
+   * agent as a prompt, which resumes the sandbox if it has stopped and lets the
+   * parent agent act on the subtask outcome. Fire-and-forget from the child
+   * update handler's perspective (run via `ctx.waitUntil`).
+   */
+  private async deliverChildResult(childSessionId: string): Promise<void> {
+    const session = this.getSession();
+    if (!session) return;
+    if (session.status === "archived" || session.status === "cancelled") return;
+
+    const sessions = this.env.SESSION;
+    if (!sessions) return;
+
+    const owner = this.participantRepository
+      .listParticipants()
+      .find((participant) => participant.role === "owner");
+    if (!owner) return;
+
+    const childSummaryUrl = buildSessionInternalUrl(
+      SessionInternalPaths.childSummary,
+      "?includeFinalResponse=true"
+    );
+    let detail: ChildSessionDetail;
+    try {
+      const response = await sessions
+        .get(sessions.idFromName(childSessionId))
+        .fetch(childSummaryUrl);
+      if (!response.ok) return;
+      detail = (await response.json()) as ChildSessionDetail;
+    } catch (error) {
+      this.log.error("child_result.fetch_failed", { child_id: childSessionId, error });
+      return;
+    }
+
+    const content = buildChildResultPrompt(childSessionId, detail);
+    try {
+      await this.messageService.enqueuePrompt({
+        content,
+        authorId: owner.user_id,
+        source: "agent",
+      });
+    } catch (error) {
+      this.log.error("child_result.deliver_failed", { child_id: childSessionId, error });
+    }
   }
 
   private get sandboxHandler(): SandboxHandler {
