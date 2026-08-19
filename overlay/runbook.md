@@ -85,6 +85,14 @@ window itself.
   the terraform apply, and that the served cert carries the hostname SAN. A dropped reapply of the
   `custom_domain` declaration takes the site to NXDOMAIN on the next deploy.
 
+## Gate 6 — Fork ops notes in the root doc (card 18), at reapply time
+
+- Grep the root doc (`CLAUDE.md` / `AGENTS.md`) for the ops markers: `SANDBOX_VERSION`,
+  `gh run list --branch main`, the `production` environment gate, and the `9000` migration floor.
+- All present -> pass. Any missing -> the sync overwrote the root doc with upstream's and the notes
+  were not reapplied. Block and reapply from card 18.
+- Deterministic, no live infra — run it alongside the rebuild, before deploy.
+
 ## Note
 
 The connect path (snapshot sizing, the bridge SSE loop, the handshake, the jj PR helper) changes
