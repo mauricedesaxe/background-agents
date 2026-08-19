@@ -22,7 +22,7 @@ OPENCODE_VERSION = "1.18.18"
 CODE_SERVER_VERSION = "4.109.5"
 AGENT_BROWSER_VERSION = "0.21.2"
 # Bump when changing image contents to invalidate the Daytona snapshot.
-SANDBOX_VERSION = "daytona-v7-8gb-vnc-opencode-1-18-18"
+SANDBOX_VERSION = "daytona-v8-8gb-vnc-opencode-1-18-18"
 
 
 def build_base_image(repo_root: Path) -> Image:
@@ -94,6 +94,7 @@ def build_base_image(repo_root: Path) -> Image:
             }
         )
         .add_local_dir(str(sandbox_runtime_dir), "/app/sandbox_runtime")
+        .run_commands("HOME=/root bash /app/sandbox_runtime/scripts/install-harness.sh --install")
         .workdir("/workspace")
     )
 
