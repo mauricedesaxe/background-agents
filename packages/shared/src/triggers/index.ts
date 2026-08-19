@@ -10,6 +10,7 @@ export type {
   GitHubPullRequestEventFacts,
   LinearAutomationEvent,
   SentryAutomationEvent,
+  BetterstackAutomationEvent,
   WebhookAutomationEvent,
   SlackAutomationEvent,
   TriggerSourceDefinition,
@@ -27,6 +28,7 @@ export {
   githubAutomationEventSchema,
   linearAutomationEventSchema,
   sentryAutomationEventSchema,
+  betterstackAutomationEventSchema,
   webhookAutomationEventSchema,
   slackAutomationEventSchema,
   triggerConfigSchema,
@@ -60,6 +62,15 @@ export type {
   SentryIssueWebhookPayload,
   SentryMetricAlertPayload,
 } from "./sentry";
+
+export {
+  betterstackSource,
+  normalizeBetterstackEvent,
+  buildBetterstackContextBlock,
+  verifyBetterstackSecret,
+  BETTERSTACK_SECRET_HEADER,
+} from "./betterstack";
+export type { BetterstackIncidentPayload } from "./betterstack";
 
 // Webhook source module
 export {

@@ -27,6 +27,7 @@ function NewAutomationContent() {
     webhookApiKey?: string;
     webhookUrl?: string;
     sentryWebhookUrl?: string;
+    betterstackWebhookUrl?: string;
   } | null>(null);
 
   // A template id (from the gallery) pre-fills the form. Repository is never
@@ -50,12 +51,13 @@ function NewAutomationContent() {
       if (res.ok) {
         const data = await res.json();
         // For webhook/sentry automations, show post-create info before navigating
-        if (data.webhookApiKey || data.sentryWebhookUrl) {
+        if (data.webhookApiKey || data.sentryWebhookUrl || data.betterstackWebhookUrl) {
           setWebhookResult({
             automationId: data.automation.id,
             webhookApiKey: data.webhookApiKey,
             webhookUrl: data.webhookUrl,
             sentryWebhookUrl: data.sentryWebhookUrl,
+            betterstackWebhookUrl: data.betterstackWebhookUrl,
           });
           setSubmitting(false);
         } else {
@@ -98,6 +100,18 @@ function NewAutomationContent() {
                   webhookUrl={webhookResult.sentryWebhookUrl}
                   automationId={webhookResult.automationId}
                   variant="sentry"
+                />
+              </>
+            ) : webhookResult.betterstackWebhookUrl ? (
+              <>
+                <p className="text-sm text-muted-foreground mb-6">
+                  Add the webhook URL below to BetterStack, with your secret as the{" "}
+                  <code>X-Betterstack-Secret</code> header.
+                </p>
+                <WebhookConfig
+                  webhookUrl={webhookResult.betterstackWebhookUrl}
+                  automationId={webhookResult.automationId}
+                  variant="betterstack"
                 />
               </>
             ) : (

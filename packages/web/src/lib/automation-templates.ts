@@ -203,6 +203,27 @@ export const automationTemplates: AutomationTemplate[] = [
     },
   },
   {
+    id: "diagnose-betterstack-incident",
+    title: "Diagnose BetterStack incidents",
+    description:
+      "When BetterStack reports a new incident, diagnose it from the codebase and signals, then report.",
+    categories: ["incidents"],
+    primaryOutput: "pr",
+    setupNote:
+      "Requires a shared webhook secret at creation and completing the BetterStack webhook setup shown afterward.",
+    prefill: {
+      name: "Diagnose BetterStack incidents",
+      triggerType: "betterstack",
+      eventType: "incident.started",
+      instructions:
+        "A BetterStack incident was reported (details are included above). Diagnose it: correlate the " +
+        "incident cause with this codebase and any available signals, determine the most likely root " +
+        "cause, and assess the blast radius.\n\n" +
+        "Open a pull request with a clear write-up of the root cause and a proposed fix. If a safe, " +
+        "minimal fix is clear, implement it in the same pull request; otherwise propose the approach.",
+    },
+  },
+  {
     id: "triage-ci-failures",
     title: "Triage failed CI",
     description:

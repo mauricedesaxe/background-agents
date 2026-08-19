@@ -477,6 +477,7 @@ async function handleCreateAutomation(
   const validTriggerTypes: AutomationTriggerType[] = [
     "schedule",
     "sentry",
+    "betterstack",
     "webhook",
     "github_event",
     "linear_event",
@@ -518,9 +519,8 @@ async function handleCreateAutomation(
     }
   }
 
-  // Event-type validation for sentry triggers
-  if (triggerType === "sentry" && !body.eventType) {
-    return error("eventType is required for sentry triggers", 400);
+  if ((triggerType === "sentry" || triggerType === "betterstack") && !body.eventType) {
+    return error(`eventType is required for ${triggerType} triggers`, 400);
   }
 
   // Validate conditions
@@ -576,6 +576,19 @@ async function handleCreateAutomation(
       return error("Encryption key not configured", 503);
     }
     triggerAuthData = await encryptSentrySecret(sentrySecret, env.REPO_SECRETS_ENCRYPTION_KEY);
+  } else if (triggerType === "betterstack") {
+    const betterstackSecret = body.betterstackWebhookSecret;
+    if (
+      !betterstackSecret ||
+      typeof betterstackSecret !== "string" ||
+      betterstackSecret.trim().length === 0
+    ) {
+      return error("betterstackWebhookSecret is required for betterstack triggers", 400);
+    }
+    if (!env.REPO_SECRETS_ENCRYPTION_KEY) {
+      return error("Encryption key not configured", 503);
+    }
+    triggerAuthData = await encryptSentrySecret(betterstackSecret, env.REPO_SECRETS_ENCRYPTION_KEY);
   }
 
   // Resolve the canonical user model ID fail-closed from the verified
@@ -653,6 +666,7 @@ async function handleCreateAutomation(
     webhookApiKey?: string;
     webhookUrl?: string;
     sentryWebhookUrl?: string;
+    betterstackWebhookUrl?: string;
   } = { automation };
 
   if (webhookApiKey) {
@@ -662,6 +676,10 @@ async function handleCreateAutomation(
 
   if (triggerType === "sentry") {
     result.sentryWebhookUrl = `${workerUrl}/webhooks/sentry/${id}`;
+  }
+
+  if (triggerType === "betterstack") {
+    result.betterstackWebhookUrl = `${workerUrl}/webhooks/betterstack/${id}`;
   }
 
   if (nextRunAt && nextRunAt - now > FAR_FUTURE_THRESHOLD_MS) {
@@ -1198,8 +1216,35 @@ async function handleRegenerateKey(
     });
   }
 
+  if (automation.trigger_type === "betterstack") {
+    const body = await parseJsonBody<{ betterstackWebhookSecret?: string }>(request);
+    if (body instanceof Response) return body;
+    if (!body.betterstackWebhookSecret || typeof body.betterstackWebhookSecret !== "string") {
+      return error("betterstackWebhookSecret is required", 400);
+    }
+    if (!env.REPO_SECRETS_ENCRYPTION_KEY) {
+      return error("Encryption key not configured", 503);
+    }
+    const encrypted = await encryptSentrySecret(
+      body.betterstackWebhookSecret,
+      env.REPO_SECRETS_ENCRYPTION_KEY
+    );
+    await store.update(id, { trigger_auth_data: encrypted } as Record<string, unknown>);
+
+    logger.info("automation.secret_updated", {
+      event: "automation.secret_updated",
+      automation_id: id,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+
+    return json({
+      betterstackWebhookUrl: `${workerUrl}/webhooks/betterstack/${id}`,
+    });
+  }
+
   if (automation.trigger_type !== "webhook") {
-    return error("Only webhook and sentry automations support key regeneration", 400);
+    return error("Only webhook, sentry, and betterstack automations support key regeneration", 400);
   }
 
   // Webhook: generate a new API key

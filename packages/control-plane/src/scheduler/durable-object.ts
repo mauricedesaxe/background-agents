@@ -833,7 +833,8 @@ export class SchedulerDO extends DurableObject<Env> {
           automation && automation.enabled === 1 && !automation.deleted_at ? [automation] : [];
         break;
       }
-      case "sentry": {
+      case "sentry":
+      case "betterstack": {
         const automation = await store.getById(event.automationId);
         candidates =
           automation &&

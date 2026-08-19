@@ -102,6 +102,8 @@ export interface CreateAutomationRequest {
   eventType?: string;
   triggerConfig?: TriggerConfig;
   sentryClientSecret?: string;
+  /** Shared secret BetterStack presents as a custom header (betterstack triggers). */
+  betterstackWebhookSecret?: string;
   /** Repositories to run against (0..MAX_AUTOMATION_REPOSITORIES). */
   repositories?: AutomationRepositoryInput[];
   /** Environments to fan out over, one workspace session each (design §13.3). */

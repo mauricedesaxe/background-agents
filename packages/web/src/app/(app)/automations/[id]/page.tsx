@@ -219,6 +219,7 @@ export default function AutomationDetailPage({ params }: { params: Promise<{ id:
                       : "Schedule (no cron)"
                     : {
                         sentry: "Sentry Alert",
+                        betterstack: "BetterStack Incident",
                         webhook: "Inbound Webhook",
                         github_event: "GitHub Event",
                         linear_event: "Linear Event",
