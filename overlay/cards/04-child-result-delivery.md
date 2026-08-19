@@ -49,7 +49,9 @@ existing machinery, not a full-stack rebuild.
 
 ## Dated evidence (2026-08-19, non-binding hints)
 
-- Delivery wiring lived in `child-result-prompt.ts` + ~54 lines in `durable-object.ts`.
+- Delivery wiring lived in `child-result-prompt.ts` plus the terminal-child hook in
+  `durable-object.ts` (on the current baseline this hook is in the child->parent notify path, not
+  the DO itself).
 - Summary builder already upstream as `child-session-summary.ts`.
 - Tests to port onto the upstream shape: `child-result-prompt.test.ts`,
   `child-sessions.handler.test.ts`.

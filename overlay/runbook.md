@@ -61,11 +61,23 @@ is simply absent, which is the point.
 
 ## Gate 4 — Connect smoke check (card 06), AFTER deploy
 
+Wait for the snapshot rebuild first — see the sandbox-outage note below — then:
+
 1. Create a session against a known repo, send a trivial prompt.
 2. Assert the session reaches **connected within 90 s** and produces a **first response within 180
    s** (not just "sandbox created").
 3. Assert idle-stop fires **4-7 min** later.
 4. On any failure: the sync is NOT good. Block / roll back.
+
+### Expected: a few-minutes sandbox-creation outage while the snapshot rebuilds
+
+Any card that bumps `SANDBOX_VERSION` (01 sizing, 15 harness, 17 jj — any image change) makes the
+apply **rebuild the Daytona base snapshot from scratch** (~4-5 min, the terraform
+`null_resource.*_snapshot`). While it rebuilds and the control plane switches to the new version,
+new sandboxes have no ready snapshot and fail to start. This is expected, not a regression — a live
+session that failed to start during the window just needs a retry once the apply finishes. Run Gate
+4 only **after** the apply reports the snapshot creation complete, or it will red on the rebuild
+window itself.
 
 ## Gate 5 — Web custom domain (card 16), AFTER the web deploy
 

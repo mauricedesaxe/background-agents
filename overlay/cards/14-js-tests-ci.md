@@ -33,12 +33,11 @@ Both fork and upstream write `.mjs` suites, but **neither fork nor upstream CI r
 there is no `node --test` step in the CI workflow. So the JS-half tests never execute on either
 side. This is exactly the #327 failure class: per-half tests that pass while the feature is broken.
 
-## Worth reporting upstream
+## Upstream-issue candidate (deferred, not now)
 
 Upstream's own `.mjs` tests never run in its CI either — arguably an upstream bug, not just a fork
-gap. Restoring the job fixes it for both sides, and it is clean and low-risk to push upstream so we
-are not the only ones carrying it. File or link an upstream issue when convenient (same batch as the
-card `05-provider-stall` upstream-issue note).
+gap. Restoring the job fixes it for both sides, so it is a clean thing to push upstream later.
+Recorded as a candidate only. Not filing now. Same batch as the card `05-provider-stall` candidate.
 
 ## Priority
 
