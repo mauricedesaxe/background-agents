@@ -290,9 +290,7 @@ class TestPinnedHarness:
         # verifiable rather than merely plausible.
         assert "## §31. Code style" in philosophy
 
-        # The skills the sandbox used to fork under different names.
-        assert (opencode / "skills" / "lazar-review" / "SKILL.md").is_file()
-        assert (opencode / "skills" / "matt-implement" / "SKILL.md").is_file()
+        assert not (opencode / "skills").exists()  # removed by install-harness.sh; runtime owns it
 
         # The reviewer agents, in OpenCode's dialect. The sandbox's hand-copied clarity-reviewer
         # never had `mode:`, so OpenCode defaulted it to `all` and offered a reviewer as a
