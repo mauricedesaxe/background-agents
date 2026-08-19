@@ -275,6 +275,7 @@ export class SessionDO extends DurableObject<Env> {
     updateTitle: (request) => this.sessionLifecycleHandler.updateTitle(request),
     archive: (request) => this.sessionLifecycleHandler.archive(request),
     unarchive: (request) => this.sessionLifecycleHandler.unarchive(request),
+    archiveCascade: () => this.sessionLifecycleHandler.archiveCascade(),
     expireDraft: () => this.sessionLifecycleHandler.expireDraft(),
     verifySandboxToken: (request, _url, log) =>
       this.sandboxHandler.verifySandboxToken(request, log),
@@ -759,6 +760,7 @@ export class SessionDO extends DurableObject<Env> {
         cancelSession: async () => {
           await this.statusService.cancel(() => this.messageQueue.cancelExecution());
         },
+        stopExecution: (options) => this.stopExecution(options),
         getSandboxSocket: () => this.wsManager.getSandboxSocket(),
         sendToSandbox: (ws, message) => this.wsManager.send(ws, message),
         updateSandboxStatus: (status) => this.updateSandboxStatus(status),
