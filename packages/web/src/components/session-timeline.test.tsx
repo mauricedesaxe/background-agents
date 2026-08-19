@@ -128,6 +128,35 @@ describe("user message authors", () => {
       "https://historical.example/avatar"
     );
   });
+
+  it("names the provider and the reason when a turn is stuck retrying", () => {
+    const providerRetry: SandboxEvent = {
+      type: "provider_retry",
+      attempt: 3,
+      message: "Usage limit reached. It will reset in 45 hours",
+      nextAttemptAtMs: Date.parse("2026-08-06T09:30:00Z"),
+      providerName: "zai-coding-plan",
+      sandboxId: "sandbox-1",
+      timestamp: 1_700_000_000,
+    };
+
+    render(
+      <EventItem
+        event={providerRetry}
+        sessionId="session-1"
+        currentParticipantId={null}
+        participantProfiles={{}}
+        onOpenMedia={vi.fn()}
+      />
+    );
+
+    const nextAt = new Date(providerRetry.nextAttemptAtMs).toLocaleTimeString();
+    expect(
+      screen.getByText(
+        `zai-coding-plan retry 3 at ${nextAt}: Usage limit reached. It will reset in 45 hours`
+      )
+    ).toBeInTheDocument();
+  });
 });
 
 describe("context compaction", () => {

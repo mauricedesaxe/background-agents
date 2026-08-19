@@ -13,6 +13,7 @@ import pytest
 from sandbox_runtime.constants import MAX_SNAPSHOT_RESERVE_SECONDS
 from sandbox_runtime.opencode_identifier import OpenCodeIdentifier
 from sandbox_runtime.prompt_stream import (
+    MAX_PROVIDER_RETRY_ATTEMPTS,
     OpenCodePromptStream,
     _Disposition,
     _message_created_epoch_ms,
@@ -117,6 +118,104 @@ class TestApplySseEventDispositions:
         )
 
         assert step.disposition is _Disposition.FINISHED_IDLE
+
+    def test_parent_provider_retry_surfaces_event_without_ending_stream(self):
+        step = make_stream()._apply_sse_event(
+            make_state(),
+            sse(
+                "session.status",
+                {
+                    "sessionID": PARENT_SESSION_ID,
+                    "status": {
+                        "type": "retry",
+                        "attempt": 3,
+                        "message": "Usage limit reached. It will reset in 45 hours",
+                        "next": 1786006100468,
+                        "action": {"reason": "account_rate_limit", "provider": "zai-coding-plan"},
+                    },
+                },
+            ),
+        )
+
+        assert step.disposition is _Disposition.CONTINUE
+        assert step.events == [
+            {
+                "type": "provider_retry",
+                "attempt": 3,
+                "message": "Usage limit reached. It will reset in 45 hours",
+                "nextAttemptAtMs": 1786006100468,
+                "providerName": "zai-coding-plan",
+            }
+        ]
+
+    def test_sibling_provider_retry_is_ignored(self):
+        step = make_stream()._apply_sse_event(
+            make_state(),
+            sse(
+                "session.status",
+                {
+                    "sessionID": "oc-session-other",
+                    "status": {
+                        "type": "retry",
+                        "attempt": 1,
+                        "message": "Rate limited",
+                        "next": 1786006100468,
+                    },
+                },
+            ),
+        )
+
+        assert step.disposition is _Disposition.CONTINUE
+        assert [event for event in step.events if event["type"] == "provider_retry"] == []
+
+    def test_provider_retry_stops_and_surfaces_failure_at_the_cap(self):
+        stream = make_stream()
+        state = make_state()
+
+        def retry(attempt: int):
+            return sse(
+                "session.status",
+                {
+                    "sessionID": PARENT_SESSION_ID,
+                    "status": {
+                        "type": "retry",
+                        "attempt": attempt,
+                        "message": "Usage limit reached",
+                        "next": 1786006100468,
+                        "action": {"provider": "zai-coding-plan"},
+                    },
+                },
+            )
+
+        steps = [
+            stream._apply_sse_event(state, retry(attempt))
+            for attempt in range(1, MAX_PROVIDER_RETRY_ATTEMPTS + 1)
+        ]
+
+        for step in steps[:-1]:
+            assert step.disposition is _Disposition.CONTINUE
+            assert [event["type"] for event in step.events] == ["provider_retry"]
+
+        final = steps[-1]
+        assert final.disposition is _Disposition.FAILED
+        assert [event["type"] for event in final.events] == ["provider_retry", "error"]
+        error_event = final.events[-1]
+        assert error_event["messageId"] == "cp-msg-1"
+        assert "zai-coding-plan" in error_event["error"]
+        assert str(MAX_PROVIDER_RETRY_ATTEMPTS) in error_event["error"]
+
+    def test_slow_live_session_without_rejections_is_not_capped(self):
+        stream = make_stream()
+        state = make_state()
+
+        steps = [
+            stream._apply_sse_event(state, sse("server.heartbeat", {}))
+            for _ in range(MAX_PROVIDER_RETRY_ATTEMPTS * 3)
+        ]
+
+        assert all(step.disposition is _Disposition.CONTINUE for step in steps)
+        assert all(step.events == [] for step in steps)
+        assert state.provider_retry_count == 0
 
     def test_parent_session_error_fails_stream(self):
         step = make_stream()._apply_sse_event(
