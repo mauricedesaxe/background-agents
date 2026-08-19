@@ -322,6 +322,16 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
+      # The jj-colocated push tests spawn a real jj binary; without it they fail loudly
+      # rather than silently skip (PHILOSOPHY §18: no env-guarded skips).
+      - name: Install jj (Jujutsu)
+        run: |
+          curl -fsSL "https://github.com/jj-vcs/jj/releases/download/v0.44.0/jj-v0.44.0-x86_64-unknown-linux-musl.tar.gz" -o /tmp/jj.tar.gz
+          mkdir -p /tmp/jjx
+          tar -xzf /tmp/jj.tar.gz -C /tmp/jjx
+          sudo install /tmp/jjx/jj /usr/local/bin/jj
+          jj --version
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
