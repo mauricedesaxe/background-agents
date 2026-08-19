@@ -18,9 +18,9 @@ timeline shows it: a `provider_retry` event ("provider retrying, attempt N, next
 Pure visibility, no behavior change. High value for a background-agent product, where a usage-limit
 stall currently looks identical to a session that is thinking.
 
-**Part B — bound the retry (requirement locked, implementation open).** The agent must NOT retry a
-rejected provider request forever. On a structural failure it stops after **at most a few minutes**.
-No multi-day silent retry.
+**Part B — bound the retry (locked).** The agent must NOT retry a rejected provider request forever.
+On a structural failure it stops after **at most a few minutes** and surfaces the failure. No
+multi-day silent retry.
 
 ## Acceptance test (the contract)
 
@@ -34,27 +34,23 @@ Rebuilt in the **upstream-owned tree**, reapplied each sync. Part A crosses the 
 protocol -> web timeline; port its origin tests. Depends on card `06-sandbox-connect` (same
 connect/SSE path); sequence after it.
 
-## Implementation is open for Part B — do NOT port the fork shape as-is
+## How Part B is bounded (decided): an attempt cap, not a silence deadline
 
-The fork implementation (`bfac2fc` + `4e9376c`) is a second "progress" deadline that fails the
-prompt at 10 min of no message/session events. Two problems:
+Bound the retry by **counting the provider's explicit rejections** and stopping after a small cap,
+then surfacing the failure. The cap keys off the same reject signal Part A surfaces, so it never
+fires on silence — a slow-but-live turn with no rejections is never killed.
 
-1. It actively kills sessions, so a legitimately slow operation with no output for >10 min gets
-   false-killed.
-2. Its 10-min threshold was calibrated against a fork-specific 5-min compaction bound that does not
-   appear on clean upstream, so the calibration premise may not hold.
+Do NOT rebuild the fork's shape (a no-message "progress" deadline): it kills a legitimately slow
+operation with no output, and it was calibrated against a fork-only compaction bound that clean
+upstream lacks. The attempt cap avoids both.
 
-Before rebuilding B, decide the right shape: an attempt cap on the retry itself, a shorter fail
-deadline, or re-establishing the compaction bound it leaned on.
+## Upstream-issue candidate (deferred, not now)
 
-## Action — upstream issue (when convenient)
-
-The uncapped silent provider retry is a candidate to raise upstream, not only patch here. The
-retry-forever behavior is OpenCode's; the missing surfacing/bounding is background-agents'. Check
-for an existing issue and decide the target repo before filing. Batch with the card `14-js-tests-ci`
-upstream-issue note.
+The uncapped silent provider retry is a candidate to raise upstream rather than only patch here (the
+retry-forever behavior is OpenCode's; the missing bounding is background-agents'). Recorded as a
+candidate only. Not filing now. Same batch as the card `14-js-tests-ci` candidate.
 
 ## Dated evidence (2026-08-19, non-binding hints)
 
-- Part A origin `647303c` (~175 lines), the bridge SSE loop.
-- Part B reference-only origins `bfac2fc`, `4e9376c`.
+- Part A origin `647303c`, the bridge SSE loop (relocated to the current SSE handler on rebuild).
+- Part B reference-only origins `bfac2fc`, `4e9376c` — reference, not a patch to port.

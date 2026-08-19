@@ -26,19 +26,23 @@ for this workflow. Four parts, one cohesive system, all non-negotiable:
 
 Render the sidebar with a realistic set (multiple repos, automatic + manual, parent + children) and
 assert: repo grouping, automatic/manual separation, child-tree collapse, and the unread marker all
-render. Storybook states per PHILOSOPHY §18, plus unit tests on the grouping data-model transform.
-This is the guardrail against a half-rebuilt sidebar.
+render. Per-state render tests (this repo has no Storybook; use its view-test convention), plus unit
+tests on the grouping data-model transform. This is the guardrail against a half-rebuilt sidebar.
 
 ## Placement decision (durable)
 
 - Rebuilt in the **upstream-owned tree**, reapplied each sync.
-- **Reuse migrations 9005 and 9008, never re-add them** (Rule 3). 9008
-  (`session_tree_pagination_indexes`) supports child-tree pagination; 9005 (`manually_unread`
-  columns) supports #21. Both are already applied in prod D1. The code that uses them is what
-  regressed and needs rebuilding, not the schema.
-- Prefer **layering the fork's grouped data-model on upstream's sidebar shell** where that is
-  cheaper to reapply than a wholesale component replacement. The UX is fixed; the mechanism (layer
-  vs replace) is the rebuild agent's call based on the actual diff at sync time.
+- **Restore migrations 9005 and 9008 verbatim at their original ids** (Rule 3). The blind sync wipes
+  these fork-local files, but prod has the rows applied, so prod skips them by id and a fresh D1
+  (CI, a new environment) applies them. Restoring is required so the sidebar's columns/indexes exist
+  off a clean tree. 9005 adds `manually_unread` (#21); 9008 adds keyset-pagination indexes for the
+  child trees. 9008 is NOT a duplicate of upstream's own session indexes — it creates
+  differently-named composites with `id DESC` for stable keyset pagination.
+- **Keep upstream's server-paginated status sections and creator filter; layer the fork's repo
+  grouping + automatic/manual separation inside them.** Do not replace the sections with a flat
+  client-side grouped list — that discards the server-side pagination heavy fan-out needs. The UX
+  (grouping + auto/manual + child collapse + unread) is fixed; how the grouping nests inside the
+  current sections is the reapply agent's call.
 
 ## This is the highest reapply-cost line in the plan
 
