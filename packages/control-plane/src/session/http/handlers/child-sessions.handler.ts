@@ -1,6 +1,6 @@
 import { childFollowUpPromptRequestSchema } from "@open-inspect/shared/types/session-api";
 import { z } from "zod";
-import { sessionStatusSchema } from "@open-inspect/shared/types/sessions";
+import { sessionStatusSchema, type SessionStatus } from "@open-inspect/shared/types/sessions";
 import { parsePersistedSandboxSettings } from "../../../sandbox/settings";
 import type { SessionMessenger } from "../../messenger";
 import {
@@ -38,6 +38,7 @@ export interface ChildSessionsHandlerDeps {
   ) => Record<string, unknown> | null;
   messenger: SessionMessenger;
   messageService: Pick<MessageService, "enqueuePrompt">;
+  onTerminalChild: (childSessionId: string) => void;
 }
 
 export interface ChildSessionsHandler {
@@ -57,7 +58,14 @@ const childSessionUpdateBodySchema = z.object({
   childSessionId: z.string().min(1),
   status: sessionStatusSchema,
   title: z.string().nullable().optional(),
+  deliverResult: z.boolean().optional(),
 });
+
+const TERMINAL_CHILD_STATUSES = new Set<SessionStatus>(["completed", "failed", "cancelled"]);
+
+function isTerminalStatus(status: SessionStatus): boolean {
+  return TERMINAL_CHILD_STATUSES.has(status);
+}
 
 function resolvePromptAuthorParticipant(
   messageRepository: MessageRepository,
@@ -264,6 +272,10 @@ export function createChildSessionsHandler(deps: ChildSessionsHandlerDeps): Chil
       }
 
       const body = result.data;
+
+      if (body.deliverResult === true && isTerminalStatus(body.status)) {
+        deps.onTerminalChild(body.childSessionId);
+      }
 
       deps.messenger.broadcast({
         type: "child_session_update",

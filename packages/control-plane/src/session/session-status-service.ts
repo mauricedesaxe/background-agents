@@ -173,7 +173,7 @@ export class SessionStatusService {
   notifyParentOfChildUpdate(
     session: Pick<SessionRow, "parent_session_id" | "title">,
     childSessionId: string,
-    update: { status: SessionStatus; title: string | null }
+    update: { status: SessionStatus; title: string | null; deliverResult?: boolean }
   ): void {
     const parentId = session.parent_session_id;
     if (!parentId || !this.parentSessions) return;
@@ -190,6 +190,7 @@ export class SessionStatusService {
             childSessionId,
             status: update.status,
             title: update.title,
+            deliverResult: update.deliverResult === true,
           }),
         })
       ),
@@ -212,6 +213,7 @@ export class SessionStatusService {
     this.notifyParentOfChildUpdate(session, childSessionId, {
       status,
       title: session.title,
+      deliverResult: true,
     });
   }
 
