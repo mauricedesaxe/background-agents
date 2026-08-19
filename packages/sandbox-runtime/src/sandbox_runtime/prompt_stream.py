@@ -39,6 +39,8 @@ if TYPE_CHECKING:
 MAX_PENDING_PART_EVENTS: Final = 2000
 CONTEXT_OVERFLOW_ERROR_NAME: Final = "ContextOverflowError"
 
+MAX_PROVIDER_RETRY_ATTEMPTS: Final = 6  # bound OpenCode's otherwise-uncapped provider retry loop
+
 # Anthropic extended thinking budget tokens by reasoning effort level.
 # "max" uses 31,999 — the API maximum for streaming responses.
 # "high" uses 16,000 — a balanced level for faster responses with good reasoning.
@@ -91,6 +93,7 @@ class _PromptState:
     pending_drop_logged: bool = False
     child_activity: ChildActivityCorrelator = field(default_factory=ChildActivityCorrelator)
     emitted_error_messages: set[str] = field(default_factory=set)
+    provider_retry_count: int = 0
     # Set when a parent context-overflow announcement was swallowed; cleared by
     # session.compacted. If still set at idle with no error emitted, the
     # promised compaction never happened and the prompt must fail.
@@ -358,11 +361,13 @@ class OpenCodePromptStream:
 
         elif event_type == "session.status":
             status = props.get("status", {})
-            # Only parent status=idle terminates the stream
             if props.get("sessionID") == state.opencode_session_id and status.get("type") == "idle":
                 self._log_parent_idle(state, "bridge.session_status_idle")
                 events.extend(self._unrecovered_overflow_events(state))
                 return _StreamStep(events=events, disposition=_Disposition.FINISHED_IDLE)
+            retry_event = self._provider_retry_event_from_status(state, props)
+            if retry_event is not None:
+                return self._on_provider_retry(state, retry_event)
 
         elif event_type == "session.error":
             return self._on_session_error(state, props)
@@ -577,6 +582,77 @@ class OpenCodePromptStream:
             )
 
         return _StreamStep(events=[], disposition=_Disposition.CONTINUE)
+
+    def _provider_retry_event_from_status(
+        self, state: _PromptState, props: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Build a `provider_retry` event from the parent session's retry status, else None.
+
+        OpenCode retries a rejected provider request on its own schedule, honouring the
+        provider's `retry-after`, and emits nothing but heartbeats while it waits. A usage
+        limit therefore reads as a session that is simply thinking (issue #278). The retry
+        status carries OpenCode's own normalized provider message, the attempt number, and
+        the next-attempt time, so forwarding it covers every provider without parsing any
+        vendor's error body. Only the parent qualifies; a child's retry is not this
+        prompt's news.
+        """
+        if props.get("sessionID") != state.opencode_session_id:
+            return None
+
+        status = props.get("status")
+        if not isinstance(status, dict) or status.get("type") != "retry":
+            return None
+
+        event: dict[str, Any] = {
+            "type": "provider_retry",
+            "attempt": status.get("attempt", 0),
+            "message": str(status.get("message") or "").strip()
+            or "The provider rejected the request.",
+            "nextAttemptAtMs": status.get("next", 0),
+        }
+        action = status.get("action")
+        if isinstance(action, dict) and action.get("provider"):
+            event["providerName"] = str(action["provider"])
+        return event
+
+    def _on_provider_retry(self, state: _PromptState, retry_event: dict[str, Any]) -> _StreamStep:
+        """Forward a parent provider retry, and fail the stream once the attempt cap is hit.
+
+        OpenCode never gives up on a structural rejection, so a usage-limit stall would
+        otherwise hold the stream open until the ~90-min prompt_max_duration ceiling. The
+        cap trips on the explicit retry status, not on silence, so a slow-but-live turn
+        with no rejections is never false-killed.
+        """
+        state.provider_retry_count += 1
+        self._log.warn(
+            "bridge.provider_retry",
+            attempt=retry_event["attempt"],
+            provider=retry_event.get("providerName"),
+            next_attempt_at_ms=retry_event["nextAttemptAtMs"],
+            reason=retry_event["message"],
+            retry_count=state.provider_retry_count,
+        )
+
+        if state.provider_retry_count < MAX_PROVIDER_RETRY_ATTEMPTS:
+            return _StreamStep(events=[retry_event], disposition=_Disposition.CONTINUE)
+
+        who = retry_event.get("providerName")
+        provider = f"{who} " if who else ""
+        failure = self._parent_error_event_once(
+            state,
+            f"The {provider}provider rejected the request "
+            f"{state.provider_retry_count} times in a row: {retry_event['message']}",
+        )
+        self._log.error(
+            "bridge.provider_retry_cap_reached",
+            message_id=state.message_id,
+            retry_count=state.provider_retry_count,
+            provider=who,
+        )
+        events = [retry_event]
+        if failure:
+            events.append(failure)
+        return _StreamStep(events=events, disposition=_Disposition.FAILED)
 
     def _unrecovered_overflow_events(self, state: _PromptState) -> list[dict[str, Any]]:
         """Fail the prompt if a swallowed overflow's promised compaction never came.
