@@ -5,6 +5,7 @@
 import type { ConditionRegistry } from "./conditions";
 import type { TriggerSourceDefinition } from "./types";
 import { sentrySource, sentryConditions } from "./sentry";
+import { betterstackSource } from "./betterstack";
 import { webhookSource, webhookConditions } from "./webhook";
 import { githubSource } from "./github";
 import { slackSource, slackConditions } from "./slack";
@@ -124,6 +125,7 @@ export const conditionRegistry: ConditionRegistry = {
  */
 export const triggerSources: TriggerSourceDefinition[] = [
   sentrySource,
+  betterstackSource,
   webhookSource,
   githubSource,
   slackSource,

@@ -383,6 +383,99 @@ describe("POST /webhooks/sentry/:id", () => {
   });
 });
 
+const BETTERSTACK_TEST_SECRET = "test-betterstack-shared-secret";
+
+async function createBetterstackAutomation(
+  overrides: Partial<AutomationRow> = {}
+): Promise<AutomationRow> {
+  const store = new AutomationStore(env.DB);
+  const encrypted = await encryptToken(BETTERSTACK_TEST_SECRET, env.REPO_SECRETS_ENCRYPTION_KEY);
+  const automation = makeAutomation({
+    trigger_type: "betterstack",
+    event_type: "incident.started",
+    schedule_cron: null,
+    next_run_at: null,
+    trigger_auth_data: encrypted,
+    ...overrides,
+  });
+  await store.create(automation);
+  return automation;
+}
+
+const betterstackIncidentPayload = {
+  data: {
+    id: "incident-123",
+    type: "Incident",
+    attributes: {
+      name: "API is down",
+      url: "https://uptime.betterstack.com/incidents/123",
+      cause: "HTTP 500 for 3 checks in a row",
+      started_at: "2026-08-19T12:00:00Z",
+      status: "started",
+    },
+  },
+};
+
+describe("POST /webhooks/betterstack/:id", () => {
+  beforeEach(cleanD1Tables);
+
+  it("launches a run for an incident with the correct shared secret", async () => {
+    const automation = await createBetterstackAutomation();
+    const body = JSON.stringify(betterstackIncidentPayload);
+
+    const response = await SELF.fetch(`https://test.local/webhooks/betterstack/${automation.id}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-betterstack-secret": BETTERSTACK_TEST_SECRET,
+      },
+      body,
+    });
+
+    expect(response.status).toBe(200);
+    const result = await response.json<{ ok: boolean; skipped?: boolean; triggered?: number }>();
+    expect(result.ok).toBe(true);
+    expect(result.skipped).not.toBe(true);
+    expect(result.triggered).toBeGreaterThanOrEqual(1);
+
+    const runs = await fetchRuns(automation.id);
+    expect(runs).toHaveLength(1);
+  });
+
+  it("rejects a request with a wrong shared secret", async () => {
+    const automation = await createBetterstackAutomation();
+    const body = JSON.stringify(betterstackIncidentPayload);
+
+    const response = await SELF.fetch(`https://test.local/webhooks/betterstack/${automation.id}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-betterstack-secret": "wrong-secret",
+      },
+      body,
+    });
+
+    expect(response.status).toBe(401);
+    const runs = await fetchRuns(automation.id);
+    expect(runs).toHaveLength(0);
+  });
+
+  it("rejects a request with no shared secret header", async () => {
+    const automation = await createBetterstackAutomation();
+    const body = JSON.stringify(betterstackIncidentPayload);
+
+    const response = await SELF.fetch(`https://test.local/webhooks/betterstack/${automation.id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+
+    expect(response.status).toBe(401);
+    const runs = await fetchRuns(automation.id);
+    expect(runs).toHaveLength(0);
+  });
+});
+
 // ─── Automation webhook tests ─────────────────────────────────────────────────
 
 describe("POST /webhooks/automation/:id", () => {

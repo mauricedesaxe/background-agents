@@ -8,7 +8,7 @@ interface WebhookConfigProps {
   webhookUrl?: string;
   webhookApiKey?: string;
   automationId?: string;
-  variant?: "webhook" | "sentry";
+  variant?: "webhook" | "sentry" | "betterstack";
   onRegenerate?: () => Promise<{ webhookApiKey?: string; webhookUrl?: string }>;
 }
 
@@ -25,7 +25,13 @@ export function WebhookConfig({
   const [copied, setCopied] = useState<"url" | "key" | "curl" | null>(null);
 
   const isSentry = variant === "sentry";
-  const urlLabel = isSentry ? "Sentry Webhook URL" : "Webhook URL";
+  const isBetterstack = variant === "betterstack";
+  const isSecretOnly = isSentry || isBetterstack;
+  const urlLabel = isBetterstack
+    ? "BetterStack Webhook URL"
+    : isSentry
+      ? "Sentry Webhook URL"
+      : "Webhook URL";
   const keyLabel = isSentry ? "Sentry Client Secret" : "API Key";
 
   const handleCopy = async (text: string, type: "url" | "key" | "curl") => {
@@ -47,16 +53,18 @@ export function WebhookConfig({
   };
 
   const curlCommand =
-    !isSentry && currentUrl && currentKey
+    !isSecretOnly && currentUrl && currentKey
       ? `curl -X POST "${currentUrl}" \\\n  -H "Authorization: Bearer ${currentKey}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"test": true}'`
       : "";
 
   if (!currentUrl && !currentKey) {
     return (
       <div className="text-sm text-muted-foreground p-4 border border-border-muted rounded-md">
-        {isSentry
-          ? "Sentry webhook URL will be shown after the automation is created."
-          : "Webhook URL and API key will be shown after the automation is created."}
+        {isBetterstack
+          ? "BetterStack webhook URL will be shown after the automation is created."
+          : isSentry
+            ? "Sentry webhook URL will be shown after the automation is created."
+            : "Webhook URL and API key will be shown after the automation is created."}
       </div>
     );
   }
@@ -91,6 +99,12 @@ export function WebhookConfig({
         {isSentry && (
           <p className="text-xs text-muted-foreground mt-1">
             Paste this URL into your Sentry Custom Integration webhook settings.
+          </p>
+        )}
+        {isBetterstack && (
+          <p className="text-xs text-muted-foreground mt-1">
+            Paste this URL into your BetterStack webhook integration, and add your secret as the{" "}
+            <code>X-Betterstack-Secret</code> header.
           </p>
         )}
       </div>

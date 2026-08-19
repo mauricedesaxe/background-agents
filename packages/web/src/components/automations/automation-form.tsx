@@ -120,6 +120,7 @@ export interface AutomationFormValues {
   eventType?: string;
   triggerConfig?: TriggerConfig;
   sentryClientSecret?: string;
+  betterstackWebhookSecret?: string;
 }
 
 interface AutomationFormProps {
@@ -158,6 +159,7 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
     initialValues?.triggerConfig?.conditions ?? []
   );
   const [sentryClientSecret, setSentryClientSecret] = useState("");
+  const [betterstackWebhookSecret, setBetterstackWebhookSecret] = useState("");
 
   const isSchedule = triggerType === "schedule";
   // Multi-repository selections are schedule-only (the server rejects them for
@@ -277,6 +279,8 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
       return;
     }
     if (triggerType === "sentry" && mode === "create" && !sentryClientSecret.trim()) return;
+    if (triggerType === "betterstack" && mode === "create" && !betterstackWebhookSecret.trim())
+      return;
     if (!slackConditionsValid) return;
     if (showEventTypeSelector && !eventType) {
       setEventTypeError("Event type is required.");
@@ -311,6 +315,9 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
       values.triggerConfig = { conditions };
       if (triggerType === "sentry" && mode === "create" && sentryClientSecret.trim()) {
         values.sentryClientSecret = sentryClientSecret.trim();
+      }
+      if (triggerType === "betterstack" && mode === "create" && betterstackWebhookSecret.trim()) {
+        values.betterstackWebhookSecret = betterstackWebhookSecret.trim();
       }
     }
 
@@ -397,6 +404,7 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
             {{
               schedule: "Schedule",
               sentry: "Sentry Alert",
+              betterstack: "BetterStack Incident",
               webhook: "Inbound Webhook",
               github_event: "GitHub Event",
               linear_event: "Linear Event",
@@ -861,6 +869,31 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
         </div>
       )}
 
+      {/* BetterStack shared secret (create mode only) */}
+      {triggerType === "betterstack" && mode === "create" && (
+        <div>
+          <label
+            htmlFor="betterstack-webhook-secret"
+            className="block text-sm font-medium text-foreground mb-1.5"
+          >
+            BetterStack Webhook Secret
+          </label>
+          <Input
+            id="betterstack-webhook-secret"
+            type="password"
+            value={betterstackWebhookSecret}
+            onChange={(e) => setBetterstackWebhookSecret(e.target.value)}
+            placeholder="Choose a strong secret to authenticate BetterStack webhooks"
+            required
+          />
+          <p className="text-xs text-muted-foreground mt-1">
+            BetterStack does not sign its webhooks. Set this same value as a custom{" "}
+            <code>X-Betterstack-Secret</code> header on the BetterStack webhook. It will be
+            encrypted and stored securely.
+          </p>
+        </div>
+      )}
+
       {/* Conditions (for non-schedule types) */}
       {!isSchedule && TRIGGER_TYPE_TO_SOURCE[triggerType] && (
         <fieldset className="m-0 min-w-0 border-0 p-0">
@@ -947,7 +980,8 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
             !isScheduleValid ||
             !slackConditionsValid ||
             (showEventTypeSelector && !eventType) ||
-            (triggerType === "sentry" && mode === "create" && !sentryClientSecret.trim())
+            (triggerType === "sentry" && mode === "create" && !sentryClientSecret.trim()) ||
+            (triggerType === "betterstack" && mode === "create" && !betterstackWebhookSecret.trim())
           }
         >
           {submitting

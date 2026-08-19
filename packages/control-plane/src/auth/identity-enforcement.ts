@@ -273,6 +273,7 @@ const EVENT_SOURCE_SERVICE: Record<AutomationEventSource, ServiceName | null> = 
   github: "github-bot",
   linear: null,
   sentry: null,
+  betterstack: null,
   webhook: null,
 };
 

@@ -56,6 +56,7 @@ export async function POST(request: NextRequest) {
       eventType: body.eventType,
       triggerConfig: body.triggerConfig,
       sentryClientSecret: body.sentryClientSecret,
+      betterstackWebhookSecret: body.betterstackWebhookSecret,
       repositories: body.repositories,
       environmentIds: body.environmentIds,
     };
