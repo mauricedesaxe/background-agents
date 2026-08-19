@@ -8,6 +8,7 @@ import { z } from "zod";
 
 export const automationTriggerTypeSchema = z.enum([
   "schedule",
+  "once",
   "github_event",
   "linear_event",
   "sentry",

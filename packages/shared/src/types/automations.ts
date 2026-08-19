@@ -194,3 +194,26 @@ export interface ListAutomationInvocationsResponse {
   /** Counts invocations (each firing is one row regardless of fan-out width). */
   total: number;
 }
+
+/** A `trigger_type: "once"` automation that fires once at `executeAt` (ISO-8601 with offset). */
+export interface CreateScheduledTaskRequest {
+  instructions: string;
+  executeAt: string;
+  scheduleTz: string;
+  model?: string;
+  reasoningEffort?: string | null;
+  repositories?: AutomationRepositoryInput[];
+  environmentIds?: string[];
+}
+
+export type ScheduledTaskState = "scheduled" | "cancelled" | AutomationInvocationStatus;
+
+export interface ScheduledTask {
+  automation: Automation;
+  state: ScheduledTaskState;
+  invocation: AutomationInvocation | null;
+}
+
+export interface ListScheduledTasksResponse {
+  tasks: ScheduledTask[];
+}

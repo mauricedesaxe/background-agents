@@ -173,6 +173,8 @@ interface StartInvocationParams {
   scheduledAt?: number;
   /** Next cron slot, advanced atomically with the insert (schedule source only). */
   advanceToNextRunAt?: number;
+  /** One-shot firing: disable the automation on fire so no later tick re-picks it. */
+  completeOnce?: boolean;
   triggerKey?: string | null;
   concurrencyKey?: string | null;
   /** Source-specific JSON stored on the invocation (slack message coordinates). */
@@ -383,6 +385,7 @@ export class SchedulerDO extends DurableObject<Env> {
           source === "schedule" && params.advanceToNextRunAt !== undefined
             ? { nextRunAt: params.advanceToNextRunAt }
             : undefined,
+        completeOnce: params.completeOnce,
       }));
     } catch (e) {
       if (isDuplicateKeyError(e)) {
@@ -393,6 +396,9 @@ export class SchedulerDO extends DurableObject<Env> {
           // Monotonic: never rewind the schedule. A stale duplicate for an old
           // slot must not move next_run_at behind a newer tick's advance.
           await store.advanceNextRunAt(automation.id, params.advanceToNextRunAt);
+        }
+        if (params.completeOnce) {
+          await store.completeOnce(automation.id); // rollback dropped the once-disable; reapply it
         }
         return { outcome: "deduplicated" };
       }
@@ -532,6 +538,9 @@ export class SchedulerDO extends DurableObject<Env> {
         ? { nextRunAt: params.advanceToNextRunAt }
         : undefined
     );
+    if (params.completeOnce) {
+      await store.completeOnce(params.automation.id); // a skipped once task must never re-fire
+    }
     return { outcome: "skipped" };
   }
 
@@ -598,19 +607,27 @@ export class SchedulerDO extends DurableObject<Env> {
         break;
       }
       try {
-        const nextRunAt = nextCronOccurrence(
-          automation.schedule_cron!,
-          automation.schedule_tz
-        ).getTime();
-
-        const result = await this.startInvocation(store, {
-          automation,
-          source: "schedule",
-          scheduledAt: automation.next_run_at!,
-          advanceToNextRunAt: nextRunAt,
-          repositories,
-          environments,
-        });
+        const isOnce = automation.trigger_type === "once";
+        const result = isOnce
+          ? await this.startInvocation(store, {
+              automation,
+              source: "schedule",
+              scheduledAt: automation.next_run_at!,
+              completeOnce: true,
+              repositories,
+              environments,
+            })
+          : await this.startInvocation(store, {
+              automation,
+              source: "schedule",
+              scheduledAt: automation.next_run_at!,
+              advanceToNextRunAt: nextCronOccurrence(
+                automation.schedule_cron!,
+                automation.schedule_tz
+              ).getTime(),
+              repositories,
+              environments,
+            });
 
         switch (result.outcome) {
           case "started":

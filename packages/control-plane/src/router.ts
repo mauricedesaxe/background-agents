@@ -40,6 +40,7 @@ import { environmentRoutes } from "./routes/environments";
 import { environmentSecretsRoutes } from "./routes/environment-secrets";
 import { imageBuildRoutes } from "./routes/image-builds";
 import { automationRoutes } from "./routes/automations";
+import { scheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { mcpServerRoutes } from "./routes/mcp-servers";
 import { analyticsRoutes } from "./routes/analytics";
 import { skillRoutes } from "./routes/skills";
@@ -313,6 +314,7 @@ export const routes: Route[] = [
 
   // Automations
   ...automationRoutes,
+  ...scheduledTaskRoutes,
 
   // MCP servers
   ...mcpServerRoutes,

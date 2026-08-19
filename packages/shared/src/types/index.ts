@@ -172,6 +172,10 @@ export type {
   ListAutomationsResponse,
   AutomationInvocation,
   ListAutomationInvocationsResponse,
+  CreateScheduledTaskRequest,
+  ScheduledTaskState,
+  ScheduledTask,
+  ListScheduledTasksResponse,
 } from "./automations";
 
 export type {

@@ -403,6 +403,7 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
           <div className="text-sm text-muted-foreground px-3 py-2 border border-border-muted rounded-md bg-muted/30">
             {{
               schedule: "Schedule",
+              once: "One-shot",
               sentry: "Sentry Alert",
               betterstack: "BetterStack Incident",
               webhook: "Inbound Webhook",
