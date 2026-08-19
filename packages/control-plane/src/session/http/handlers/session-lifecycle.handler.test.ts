@@ -122,6 +122,7 @@ function createHandler() {
   } as unknown as SessionStatusService;
   const applySessionTitleUpdate = vi.fn((title: string) => ({ ok: true as const, title }));
   const cancelSession = vi.fn();
+  const stopExecution = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
   const getSandboxSocket = vi.fn<() => WebSocket | null>();
   const sendToSandbox = vi.fn();
   const updateSandboxStatus = vi.fn();
@@ -145,6 +146,7 @@ function createHandler() {
     statusService,
     applySessionTitleUpdate,
     cancelSession,
+    stopExecution,
     getSandboxSocket,
     sendToSandbox,
     updateSandboxStatus,
@@ -177,6 +179,7 @@ function createHandler() {
     settleFromMessageState,
     applySessionTitleUpdate,
     cancelSession,
+    stopExecution,
     getSandboxSocket,
     sendToSandbox,
     updateSandboxStatus,
@@ -1031,6 +1034,44 @@ describe("createSessionLifecycleHandler", () => {
     );
 
     expect(response.status).toBe(409);
+    expect(transition).not.toHaveBeenCalled();
+  });
+
+  it("archive-cascades a running child, stopping its execution first", async () => {
+    const { handler, getSession, transition, stopExecution } = createHandler();
+    getSession.mockReturnValue(createSession({ status: "active" }));
+    transition.mockResolvedValue(true);
+
+    const response = await handler.archiveCascade();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "archived" });
+    expect(stopExecution).toHaveBeenCalledWith({ suppressStatusReconcile: true });
+    expect(transition).toHaveBeenCalledWith("archived");
+  });
+
+  it("archive-cascades a terminal child without stopping execution", async () => {
+    const { handler, getSession, transition, stopExecution } = createHandler();
+    getSession.mockReturnValue(createSession({ status: "completed" }));
+    transition.mockResolvedValue(true);
+
+    const response = await handler.archiveCascade();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "archived" });
+    expect(stopExecution).not.toHaveBeenCalled();
+    expect(transition).toHaveBeenCalledWith("archived");
+  });
+
+  it("archive-cascade is a no-op on an already-archived child", async () => {
+    const { handler, getSession, transition, stopExecution } = createHandler();
+    getSession.mockReturnValue(createSession({ status: "archived" }));
+
+    const response = await handler.archiveCascade();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "archived" });
+    expect(stopExecution).not.toHaveBeenCalled();
     expect(transition).not.toHaveBeenCalled();
   });
 

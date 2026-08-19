@@ -44,6 +44,7 @@ export interface SessionLifecycleHandlerDeps {
     options?: SessionTitleUpdateOptions
   ) => SessionTitleUpdateResult;
   cancelSession: () => Promise<void>;
+  stopExecution: (options?: { suppressStatusReconcile?: boolean }) => Promise<void>;
   getSandboxSocket: () => WebSocket | null;
   sendToSandbox: (ws: WebSocket, message: string | object) => boolean;
   updateSandboxStatus: (status: SandboxStatus) => void;
@@ -68,6 +69,7 @@ export interface SessionLifecycleHandler {
   updateTitle: (request: Request) => Promise<Response>;
   archive: (request: Request) => Promise<Response>;
   unarchive: (request: Request) => Promise<Response>;
+  archiveCascade: () => Promise<Response>;
   expireDraft: () => Promise<Response>;
   cancel: () => Promise<Response>;
 }
@@ -520,6 +522,26 @@ export function createSessionLifecycleHandler(
       await deps.statusService.transition("active");
 
       return Response.json({ status: "active" });
+    },
+
+    /** Trusted DO-to-DO archive for the parent→child cascade; no participant check. */
+    async archiveCascade(): Promise<Response> {
+      const session = deps.getSession();
+      if (!session) {
+        return Response.json({ status: "archived" });
+      }
+
+      if (session.status === "archived") {
+        return Response.json({ status: "archived" });
+      }
+
+      if (!TERMINAL_STATUSES.has(session.status)) {
+        await deps.stopExecution({ suppressStatusReconcile: true });
+      }
+
+      await deps.statusService.transition("archived");
+
+      return Response.json({ status: "archived" });
     },
 
     async cancel(): Promise<Response> {

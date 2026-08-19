@@ -131,8 +131,62 @@ export class SessionStatusService {
       this.syncSessionMetrics(publicSessionId);
     }
 
-    // Notify parent session (if this is a child) so its UI can refresh
     this.notifyParentOfStatusChange(session, publicSessionId, status);
+
+    if (status === "archived") {
+      this.cascadeArchiveToChildren(publicSessionId);
+    }
+  }
+
+  /**
+   * Archive every child of the given session by calling each child DO's trusted
+   * archive endpoint, so archiving a parent removes its whole subtree from the
+   * sidebar instead of leaving orphaned "sub-task" rows.
+   *
+   * Gated on "archived" in projectTransition, so it fires once per real
+   * transition and each archived child cascades to its own children. Best-effort
+   * per child (an unreachable or evicted child DO is logged, not retried, and
+   * never fails the parent's archive), and children already archived are skipped
+   * so a re-archive does not re-walk the subtree.
+   */
+  private cascadeArchiveToChildren(parentSessionId: string): void {
+    if (!this.sessionIndex || !this.parentSessions) return;
+
+    const sessionBinding = this.parentSessions;
+    const sessionIndex = this.sessionIndex;
+
+    this.backgroundTasks.submit(
+      sessionIndex
+        .listByParent(parentSessionId)
+        .then((children) =>
+          Promise.all(
+            children
+              .filter((child) => child.status !== "archived")
+              .map((child) =>
+                sessionBinding
+                  .get(sessionBinding.idFromName(child.id))
+                  .fetch(
+                    new Request(buildSessionInternalUrl(SessionInternalPaths.archiveCascade), {
+                      method: "POST",
+                    })
+                  )
+                  .then(() => undefined)
+                  .catch((error) => {
+                    this.log.error("cascade_archive.child_failed", {
+                      parent_id: parentSessionId,
+                      child_id: child.id,
+                      error,
+                    });
+                  })
+              )
+          )
+        )
+        .then(() => undefined),
+      {
+        name: "session.cascade_archive",
+        context: { parent_id: parentSessionId },
+      }
+    );
   }
 
   /**

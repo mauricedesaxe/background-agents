@@ -25,6 +25,7 @@ export const SessionInternalPaths = {
   wsToken: "/internal/ws-token",
   archive: "/internal/archive",
   unarchive: "/internal/unarchive",
+  archiveCascade: "/internal/archive-cascade",
   expireDraft: "/internal/expire-draft",
   verifySandboxToken: "/internal/verify-sandbox-token",
   openaiTokenRefresh: "/internal/openai-token-refresh",

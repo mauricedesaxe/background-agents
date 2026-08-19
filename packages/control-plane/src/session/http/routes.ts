@@ -41,6 +41,7 @@ export interface SessionInternalRouteHandlers {
   updateTitle: SessionInternalRouteHandler;
   archive: SessionInternalRouteHandler;
   unarchive: SessionInternalRouteHandler;
+  archiveCascade: SessionInternalRouteHandler;
   expireDraft: SessionInternalRouteHandler;
   verifySandboxToken: SessionInternalRouteHandler;
   openaiTokenRefresh: SessionInternalRouteHandler;
@@ -113,6 +114,11 @@ export function createSessionInternalRoutes(
     { method: "POST", path: SessionInternalPaths.updateTitle, handler: handlers.updateTitle },
     { method: "POST", path: SessionInternalPaths.archive, handler: handlers.archive },
     { method: "POST", path: SessionInternalPaths.unarchive, handler: handlers.unarchive },
+    {
+      method: "POST",
+      path: SessionInternalPaths.archiveCascade,
+      handler: handlers.archiveCascade,
+    },
     { method: "POST", path: SessionInternalPaths.expireDraft, handler: handlers.expireDraft },
     {
       method: "POST",
