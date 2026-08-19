@@ -72,4 +72,13 @@ resolved=$(git -C "$checkout" rev-parse HEAD)
 
 HARNESS_SURFACE=sandbox "$checkout/install.sh" --install
 
+# managed_skills.py owns ~/.config/opencode/skills: every session it renames that directory
+# aside to swap in the session's skills. A copy baked here lands on the image layer, so the
+# rename fails with EXDEV and the runtime dies before OpenCode starts. The runtime replaces
+# this directory anyway, so drop it and let the runtime own it. The rest of the harness's
+# OpenCode surface (opencode.json, rules, plugin, agents) is untouched.
+rm -rf -- "$HOME/.config/opencode/skills" \
+  "$HOME/.config/opencode/.managed-skills-backup" \
+  "$HOME/.config/opencode/.managed-skills-swap"
+
 printf 'install-harness.sh: installed harness %s for the sandbox surface\n' "$HARNESS_REF"
