@@ -330,6 +330,25 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v
 
+  test-js-sandbox-runtime:
+    name: Test (JS - sandbox-runtime)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: packages/sandbox-runtime
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Run tests
+        run: node --test tests/*.mjs
+
   test-python:
     name: Test (Python - modal-infra)
     runs-on: ubuntu-latest
