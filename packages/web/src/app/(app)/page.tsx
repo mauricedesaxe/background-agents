@@ -47,6 +47,7 @@ import {
 } from "@/hooks/use-managed-skills";
 import type { SessionTargetRequestFields } from "@/lib/session-target";
 import type { PromptSkillSuggestionSource } from "@/lib/prompt-skill-completion";
+import { SchedulePromptPopover } from "@/components/schedule-prompt-popover";
 
 const LAST_SELECTED_MODEL_STORAGE_KEY = "open-inspect-last-selected-model";
 const LAST_SELECTED_REASONING_EFFORT_STORAGE_KEY = "open-inspect-last-selected-reasoning-effort";
@@ -69,6 +70,28 @@ function skillPreviewTarget(
     : {};
 }
 
+/** Map the picker's session-target fields to a scheduled-task target body. */
+function scheduledTargetFields(fields: SessionTargetRequestFields): {
+  repositories: Array<{ repoOwner: string; repoName: string; baseBranch?: string }>;
+  environmentIds: string[];
+} {
+  if ("environmentId" in fields) {
+    return { repositories: [], environmentIds: [fields.environmentId] };
+  }
+  if ("repositories" in fields) {
+    return { repositories: fields.repositories, environmentIds: [] };
+  }
+  if (fields.repoOwner && fields.repoName) {
+    return {
+      repositories: [
+        { repoOwner: fields.repoOwner, repoName: fields.repoName, baseBranch: fields.branch },
+      ],
+      environmentIds: [],
+    };
+  }
+  return { repositories: [], environmentIds: [] };
+}
+
 export default function Home() {
   const { data: session } = useAuthSession();
   const router = useRouter();
@@ -86,6 +109,7 @@ export default function Home() {
   const sessionAttachments = useSessionAttachments();
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
+  const [scheduleConfirmation, setScheduleConfirmation] = useState("");
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [isCreatingSession, setIsCreatingSession] = useState(false);
   const sessionCreationPromise = useRef<Promise<string | null> | null>(null);
@@ -331,6 +355,45 @@ export default function Home() {
     }
   };
 
+  const handleSchedule = async (instant: Date, timeZone: string): Promise<boolean> => {
+    setError("");
+    setScheduleConfirmation("");
+    const instructions = prompt.trim();
+    if (!instructions) {
+      setError("Enter a prompt before scheduling");
+      return false;
+    }
+    const targetRequestFields = buildRequestFields();
+    if (!targetRequestFields) {
+      setError("Please select a repository or environment");
+      return false;
+    }
+    try {
+      const res = await browserApiFetch("/api/scheduled-tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instructions,
+          executeAt: instant.toISOString(),
+          scheduleTz: timeZone,
+          model: selectedModel,
+          reasoningEffort,
+          ...scheduledTargetFields(targetRequestFields),
+        }),
+      });
+      if (res.ok) {
+        setScheduleConfirmation(`Scheduled for ${instant.toLocaleString()}.`);
+        return true;
+      }
+      const data = await res.json().catch(() => ({}));
+      setError(data.error || "Failed to schedule prompt");
+      return false;
+    } catch {
+      setError("Failed to schedule prompt");
+      return false;
+    }
+  };
+
   return (
     <HomeContent
       isAuthenticated={!!session}
@@ -351,7 +414,9 @@ export default function Home() {
       creating={creating}
       isCreatingSession={isCreatingSession}
       error={error}
+      scheduleConfirmation={scheduleConfirmation}
       handleSubmit={handleSubmit}
+      handleSchedule={handleSchedule}
       modelOptions={enabledModelOptions}
       skillSelection={skillSelection}
       setSkillSelection={setSkillSelection}
@@ -376,7 +441,9 @@ function HomeContent({
   creating,
   isCreatingSession,
   error,
+  scheduleConfirmation,
   handleSubmit,
+  handleSchedule,
   modelOptions,
   skillSelection,
   setSkillSelection,
@@ -403,7 +470,9 @@ function HomeContent({
   creating: boolean;
   isCreatingSession: boolean;
   error: string;
+  scheduleConfirmation: string;
   handleSubmit: (e: React.FormEvent) => void;
+  handleSchedule: (instant: Date, timeZone: string) => Promise<boolean>;
   modelOptions: ModelCategory[];
   skillSelection: SessionSkillSelection;
   setSkillSelection: (value: SessionSkillSelection) => void;
@@ -464,6 +533,11 @@ function HomeContent({
           {isAuthenticated && (
             <form onSubmit={handleSubmit}>
               {error && <ErrorBanner className="mb-4">{error}</ErrorBanner>}
+              {scheduleConfirmation && (
+                <div className="mb-4 border border-accent/40 bg-accent/10 px-4 py-2 text-sm text-accent">
+                  {scheduleConfirmation}
+                </div>
+              )}
 
               <div
                 className={`border border-border bg-input ${isDraggingOver ? "ring-2 ring-accent" : ""}`}
@@ -518,6 +592,10 @@ function HomeContent({
                     >
                       <PaperclipIcon className="w-5 h-5" />
                     </button>
+                    <SchedulePromptPopover
+                      disabled={attachmentsLocked || !isLaunchable || !prompt.trim()}
+                      onSchedule={handleSchedule}
+                    />
                     <button
                       type="submit"
                       disabled={

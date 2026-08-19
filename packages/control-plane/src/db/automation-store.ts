@@ -655,7 +655,7 @@ export class AutomationStore {
     const result = await this.db
       .prepare(
         `SELECT COUNT(*) as count FROM automations
-         WHERE enabled = 1 AND deleted_at IS NULL AND trigger_type = 'schedule'
+         WHERE enabled = 1 AND deleted_at IS NULL AND trigger_type IN ('schedule', 'once')
          AND next_run_at IS NOT NULL AND next_run_at <= ?`
       )
       .bind(now)
@@ -667,7 +667,7 @@ export class AutomationStore {
     const result = await this.db
       .prepare(
         `SELECT * FROM automations
-         WHERE enabled = 1 AND deleted_at IS NULL AND trigger_type = 'schedule'
+         WHERE enabled = 1 AND deleted_at IS NULL AND trigger_type IN ('schedule', 'once')
          AND next_run_at IS NOT NULL AND next_run_at <= ?
          ORDER BY next_run_at ASC
          LIMIT ?`
@@ -675,6 +675,142 @@ export class AutomationStore {
       .bind(now, limit)
       .all<AutomationRow>();
     return result.results || [];
+  }
+
+  /**
+   * Insert a `trigger_type: "once"` automation and its targets, but only if
+   * `next_run_at` is still in the future at commit time. The guard runs in-DB
+   * (INSERT...SELECT WHERE next_run_at > now) so a task can't persist already
+   * overdue and fire on the very next tick. Returns false when the guard
+   * suppressed the insert.
+   */
+  async insertOnceIfFuture(
+    row: AutomationRow,
+    repositories: AutomationRepositoryInsert[],
+    environmentIds: string[]
+  ): Promise<boolean> {
+    const automation = this.db
+      .prepare(
+        `INSERT INTO automations
+         (id, name, instructions,
+          trigger_type, schedule_cron, schedule_tz, model, reasoning_effort, enabled, next_run_at,
+          consecutive_failures, created_by, user_id, created_at, updated_at, deleted_at,
+          event_type, trigger_config, trigger_auth_data)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE ? > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)`
+      )
+      .bind(
+        row.id,
+        row.name,
+        row.instructions,
+        row.trigger_type,
+        row.schedule_cron,
+        row.schedule_tz,
+        row.model,
+        row.reasoning_effort,
+        row.enabled,
+        row.next_run_at,
+        row.consecutive_failures,
+        row.created_by,
+        row.user_id,
+        row.created_at,
+        row.updated_at,
+        row.deleted_at,
+        row.event_type,
+        row.trigger_config,
+        row.trigger_auth_data,
+        row.next_run_at
+      );
+    const repositoryStatements = repositories.map((repository) =>
+      this.db
+        .prepare(
+          `INSERT INTO automation_repositories
+           (automation_id, repo_owner, repo_name, repo_id, base_branch, created_at, updated_at)
+           SELECT ?, ?, ?, ?, ?, ?, ?
+           WHERE EXISTS (SELECT 1 FROM automations WHERE id = ?)`
+        )
+        .bind(
+          row.id,
+          repository.repo_owner,
+          repository.repo_name,
+          repository.repo_id,
+          repository.base_branch,
+          row.created_at,
+          row.updated_at,
+          row.id
+        )
+    );
+    const environmentStatements = environmentIds.map((environmentId) =>
+      this.db
+        .prepare(
+          `INSERT INTO automation_environments
+           (automation_id, environment_id, created_at, updated_at)
+           SELECT ?, ?, ?, ?
+           WHERE EXISTS (SELECT 1 FROM automations WHERE id = ?)`
+        )
+        .bind(row.id, environmentId, row.created_at, row.updated_at, row.id)
+    );
+    const results = await this.db.batch([
+      automation,
+      ...repositoryStatements,
+      ...environmentStatements,
+    ]);
+    return (results[0]?.meta?.changes ?? 0) > 0;
+  }
+
+  async getByIdForOwner(id: string, userId: string): Promise<AutomationRow | null> {
+    return this.db
+      .prepare("SELECT * FROM automations WHERE id = ? AND user_id = ? AND deleted_at IS NULL")
+      .bind(id, userId)
+      .first<AutomationRow>();
+  }
+
+  async listOnceForOwner(userId: string): Promise<AutomationRow[]> {
+    const result = await this.db
+      .prepare(
+        `SELECT * FROM automations
+         WHERE user_id = ? AND trigger_type = 'once' AND deleted_at IS NULL
+         ORDER BY created_at DESC`
+      )
+      .bind(userId)
+      .all<AutomationRow>();
+    return result.results ?? [];
+  }
+
+  /**
+   * Cancel a one-shot task before it fires: disable it, but only while it has
+   * no invocation yet. Once the scheduler has started firing, the guard
+   * suppresses the update and the caller reports a 409.
+   */
+  async cancelOnce(id: string, userId: string): Promise<boolean> {
+    const now = Date.now();
+    const result = await this.db
+      .prepare(
+        `UPDATE automations
+         SET enabled = 0, next_run_at = NULL, updated_at = ?
+         WHERE id = ? AND user_id = ? AND trigger_type = 'once'
+           AND enabled = 1 AND deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM automation_invocations WHERE automation_id = automations.id
+           )`
+      )
+      .bind(now, id, userId)
+      .run();
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
+  /**
+   * Disable a fired one-shot automation so no later tick re-picks it. The
+   * scheduler calls this atomically with the firing insert (and again on the
+   * dedup path); it is the replay-safe guard, not `next_run_at` advance.
+   */
+  async completeOnce(id: string): Promise<void> {
+    await this.db
+      .prepare(
+        "UPDATE automations SET enabled = 0, next_run_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NULL"
+      )
+      .bind(Date.now(), id)
+      .run();
   }
 
   // --- Run management ---
@@ -811,6 +947,8 @@ export class AutomationStore {
     children: AutomationRunRow[];
     overlapScope: InvocationOverlapScope;
     advanceSchedule?: { nextRunAt: number };
+    /** One-shot firing: disable the automation in the same batch (replay-safe). */
+    completeOnce?: boolean;
   }): Promise<{ inserted: boolean }> {
     const invocation = params.invocation;
     const overlap = this.overlapPredicate(invocation.automation_id, params.overlapScope);
@@ -882,6 +1020,17 @@ export class AutomationStore {
              WHERE id = ? AND deleted_at IS NULL`
           )
           .bind(params.advanceSchedule.nextRunAt, Date.now(), invocation.automation_id)
+      );
+    }
+
+    if (params.completeOnce) {
+      statements.push(
+        this.db
+          .prepare(
+            `UPDATE automations SET enabled = 0, next_run_at = NULL, updated_at = ?
+             WHERE id = ? AND deleted_at IS NULL`
+          )
+          .bind(Date.now(), invocation.automation_id)
       );
     }
 
