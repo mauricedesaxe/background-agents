@@ -2,7 +2,7 @@
 /// <reference types="@testing-library/jest-dom" />
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import * as matchers from "@testing-library/jest-dom/matchers";
 import { SessionSidebar } from "./session-sidebar";
 
@@ -125,6 +125,31 @@ describe("SessionSidebar", () => {
     );
   });
 
+  it("filters the session list by source", () => {
+    const value = mockHook();
+    const manual = session("manual-one", "Manual work");
+    const automatic = { ...session("auto-one", "Nightly run"), spawnSource: "automation" as const };
+    mockHook.mockReturnValue({
+      ...value,
+      needsAttention: [],
+      running: [],
+      recent: [manual, automatic],
+      childrenMap: new Map(),
+    });
+    render(<SessionSidebar />);
+
+    expect(screen.getByText("Manual work")).toBeInTheDocument();
+    expect(screen.getByText("Nightly run")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "Automatic" }));
+    expect(screen.queryByText("Manual work")).not.toBeInTheDocument();
+    expect(screen.getByText("Nightly run")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "Manual" }));
+    expect(screen.getByText("Manual work")).toBeInTheDocument();
+    expect(screen.queryByText("Nightly run")).not.toBeInTheDocument();
+  });
+
   it("shows a retry action when one category fails", () => {
     const value = mockHook();
     const retry = vi.fn(async () => undefined);
@@ -197,10 +222,11 @@ describe("SessionSidebar", () => {
     });
     render(<SessionSidebar />);
 
-    expect(screen.getByRole("group", { name: "acme/web" })).toBeInTheDocument();
+    const webGroup = screen.getByRole("group", { name: "acme/web" });
+    expect(webGroup).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "acme/api" })).toBeInTheDocument();
-    expect(screen.getByText("Manual")).toBeInTheDocument();
-    expect(screen.getByText("Automatic")).toBeInTheDocument();
+    expect(within(webGroup).getByText("Manual")).toBeInTheDocument();
+    expect(within(webGroup).getByText("Automatic")).toBeInTheDocument();
     expect(screen.getByText("Nested subtask")).toBeInTheDocument();
     expect(screen.getByText("Unread")).toBeInTheDocument();
   });
