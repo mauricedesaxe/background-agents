@@ -215,6 +215,86 @@ describe("session read state", () => {
     });
   });
 
+  it("pins a read session as unread and keeps the pin until it is read again", async () => {
+    const store = new SessionIndexStore(env.DB);
+    await createUser("user-a", 1_000);
+    await createSession(store, "pinned-session");
+    await store.recordLatestTerminalMessage({
+      sessionId: "pinned-session",
+      messageId: "message-a",
+      messageCreatedAt: 1_500,
+      terminalMessageCompletedAt: 2_000,
+    });
+
+    expect(
+      await store.updateReadState("user-a", "pinned-session", {
+        action: "mark_latest_message_read",
+      })
+    ).toEqual({
+      sessionId: "pinned-session",
+      outcome: "marked_read",
+      unread: false,
+      latestMessageId: "message-a",
+    });
+    expect((await store.list({ viewerUserId: "user-a" })).sessions[0].readState).toEqual({
+      unread: false,
+      latestMessageId: "message-a",
+    });
+
+    expect(
+      await store.updateReadState("user-a", "pinned-session", { action: "mark_unread" })
+    ).toEqual({
+      sessionId: "pinned-session",
+      outcome: "marked_unread",
+      unread: true,
+      latestMessageId: "message-a",
+    });
+    expect((await store.list({ viewerUserId: "user-a" })).sessions[0].readState).toEqual({
+      unread: true,
+      latestMessageId: "message-a",
+    });
+
+    expect(
+      await store.updateReadState("user-a", "pinned-session", {
+        action: "mark_latest_message_read",
+      })
+    ).toEqual({
+      sessionId: "pinned-session",
+      outcome: "marked_read",
+      unread: false,
+      latestMessageId: "message-a",
+    });
+    expect((await store.list({ viewerUserId: "user-a" })).sessions[0].readState).toEqual({
+      unread: false,
+      latestMessageId: "message-a",
+    });
+  });
+
+  it("categorizes a manually-unread session into the needs-attention inbox", async () => {
+    const store = new SessionIndexStore(env.DB);
+    await createUser("user-a", 1_000);
+    await createSession(store, "attention-session");
+    await store.recordLatestTerminalMessage({
+      sessionId: "attention-session",
+      messageId: "message-a",
+      messageCreatedAt: 1_500,
+      terminalMessageCompletedAt: 2_000,
+    });
+    await store.updateReadState("user-a", "attention-session", {
+      action: "mark_latest_message_read",
+    });
+    await store.updateReadState("user-a", "attention-session", { action: "mark_unread" });
+
+    const snapshot = await store.listInboxSnapshot({
+      limit: 20,
+      createdByUserIds: [],
+      excludeAutomationLineage: false,
+      viewerUserId: "user-a",
+    });
+    const attentionIds = snapshot.needs_attention.items.map((item) => item.rootSession.id);
+    expect(attentionIds).toContain("attention-session");
+  });
+
   it("does not surface outcomes completed before the user existed", async () => {
     const store = new SessionIndexStore(env.DB);
     await createUser("new-user", 5_000);

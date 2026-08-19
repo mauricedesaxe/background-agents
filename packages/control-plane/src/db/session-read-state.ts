@@ -5,9 +5,10 @@ export interface ViewerReadStateRow {
   latest_terminal_message_id: string | null;
 }
 
-/** Requires `users AS viewer` and `session_read_states AS read_state` joins. */
+/** Requires `users AS viewer` and `session_read_states AS read_state` joins; a manual mark (#21) ORs ahead of the last-read projection. */
 export function unreadSql(sessionAlias: string): string {
   return `CASE
+            WHEN read_state.manually_unread = 1 THEN 1
             WHEN ${sessionAlias}.latest_terminal_message_id IS NOT NULL
               AND ${sessionAlias}.latest_terminal_message_completed_at >= viewer.created_at
               AND (

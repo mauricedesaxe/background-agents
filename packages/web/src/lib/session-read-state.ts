@@ -33,7 +33,9 @@ async function patchSessionReadState(
 export function classifySessionReadAttempt(
   result: SessionReadResult
 ): SessionReadAttemptDisposition {
-  return result.outcome === "marked_read" || result.outcome === "already_read"
+  return result.outcome === "marked_read" ||
+    result.outcome === "already_read" ||
+    result.outcome === "marked_unread"
     ? "complete"
     : "retry";
 }
@@ -48,6 +50,12 @@ export function markMessageRead(sessionId: string, messageId: string): Promise<S
 export function markLatestMessageRead(sessionId: string): Promise<SessionReadResult> {
   return patchSessionReadState(sessionId, {
     action: "mark_latest_message_read",
+  });
+}
+
+export function markUnread(sessionId: string): Promise<SessionReadResult> {
+  return patchSessionReadState(sessionId, {
+    action: "mark_unread",
   });
 }
 

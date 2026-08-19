@@ -18,6 +18,7 @@ import {
 } from "@/lib/session-inbox-api";
 import {
   markLatestMessageRead,
+  markUnread,
   reconcileSessionReadState,
   readStateFromResult,
 } from "@/lib/session-read-state";
@@ -384,6 +385,26 @@ export function useSidebarSessions() {
     [refreshInbox, updateAttentionRetained, updateFinishedRetained, updateInProgressRetained]
   );
 
+  const handleMarkUnread = useCallback(
+    async (sessionId: string) => {
+      const result = await markUnread(sessionId);
+      await reconcileSessionReadState(result);
+      const readState = readStateFromResult(result);
+      const applyReadState = (item: SessionInboxItem): SessionInboxItem => ({
+        rootSession:
+          item.rootSession.id === sessionId ? { ...item.rootSession, readState } : item.rootSession,
+        descendantSessions: item.descendantSessions.map((session) =>
+          session.id === sessionId ? { ...session, readState } : session
+        ),
+      });
+      updateAttentionRetained(applyReadState);
+      updateInProgressRetained(applyReadState);
+      updateFinishedRetained(applyReadState);
+      await refreshInbox();
+    },
+    [refreshInbox, updateAttentionRetained, updateFinishedRetained, updateInProgressRetained]
+  );
+
   return {
     needsAttention: attentionItems.map((item) => item.rootSession),
     running: inProgressItems.map((item) => item.rootSession),
@@ -401,5 +422,6 @@ export function useSidebarSessions() {
     setSessionCreatorFilter,
     handleSessionArchived,
     handleMarkLatestMessageRead,
+    handleMarkUnread,
   };
 }

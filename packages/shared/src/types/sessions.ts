@@ -102,6 +102,7 @@ export const sessionReadActionSchema = z.discriminatedUnion("action", [
     })
     .strict(),
   z.object({ action: z.literal("mark_latest_message_read") }).strict(),
+  z.object({ action: z.literal("mark_unread") }).strict(),
 ]);
 export type SessionReadAction = z.infer<typeof sessionReadActionSchema>;
 
@@ -117,7 +118,7 @@ export const sessionReadResultSchema = z.union([
   z
     .object({
       sessionId: z.string(),
-      outcome: z.enum(["marked_read", "already_read", "not_latest"]),
+      outcome: z.enum(["marked_read", "already_read", "not_latest", "marked_unread"]),
       unread: z.boolean(),
       latestMessageId: z.string(),
     })

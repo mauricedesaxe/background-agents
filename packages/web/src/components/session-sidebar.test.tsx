@@ -81,6 +81,7 @@ beforeEach(() => {
     setSessionCreatorFilter: vi.fn(),
     handleSessionArchived: vi.fn(),
     handleMarkLatestMessageRead: vi.fn(),
+    handleMarkUnread: vi.fn(),
   });
 });
 
@@ -161,5 +162,46 @@ describe("SessionSidebar", () => {
     expect(screen.queryByText("No sessions yet")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(refreshSnapshot).toHaveBeenCalledOnce();
+  });
+
+  it("groups by repo, splits manual from automatic, nests children, and marks unread", () => {
+    const value = mockHook();
+    const webManual = {
+      ...session("web-manual", "Manual web work"),
+      repoOwner: "acme",
+      repoName: "web",
+      readState: { latestMessageId: "m1", unread: true } as const,
+    };
+    const webChild = {
+      ...session("web-child", "Nested subtask", webManual.id),
+      repoOwner: "acme",
+      repoName: "web",
+    };
+    const webAuto = {
+      ...session("web-auto", "Scheduled sweep"),
+      repoOwner: "acme",
+      repoName: "web",
+      spawnSource: "automation" as const,
+    };
+    const apiManual = {
+      ...session("api-manual", "API work"),
+      repoOwner: "acme",
+      repoName: "api",
+    };
+    mockHook.mockReturnValue({
+      ...value,
+      needsAttention: [webManual, webAuto, apiManual],
+      running: [],
+      recent: [],
+      childrenMap: new Map([[webManual.id, [webChild]]]),
+    });
+    render(<SessionSidebar />);
+
+    expect(screen.getByRole("group", { name: "acme/web" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "acme/api" })).toBeInTheDocument();
+    expect(screen.getByText("Manual")).toBeInTheDocument();
+    expect(screen.getByText("Automatic")).toBeInTheDocument();
+    expect(screen.getByText("Nested subtask")).toBeInTheDocument();
+    expect(screen.getByText("Unread")).toBeInTheDocument();
   });
 });
