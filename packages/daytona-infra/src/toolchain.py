@@ -21,8 +21,10 @@ if TYPE_CHECKING:
 OPENCODE_VERSION = "1.18.18"
 CODE_SERVER_VERSION = "4.109.5"
 AGENT_BROWSER_VERSION = "0.21.2"
-# Bump when changing image contents to invalidate the Daytona snapshot.
-SANDBOX_VERSION = "daytona-v8-8gb-vnc-opencode-1-18-18"
+JJ_VERSION = "0.44.0"
+SANDBOX_VERSION = (
+    "daytona-v9-8gb-jj-vnc-opencode-1-18-18"  # bump to invalidate the Daytona snapshot
+)
 
 
 def build_base_image(repo_root: Path) -> Image:
@@ -68,6 +70,11 @@ def build_base_image(repo_root: Path) -> Image:
             "rm /tmp/code-server.deb",
             f"npm install -g agent-browser@{AGENT_BROWSER_VERSION}",
             "agent-browser install",
+            f"curl -fsSL -o /tmp/jj.tar.gz "
+            f"https://github.com/jj-vcs/jj/releases/download/v{JJ_VERSION}/"
+            f"jj-v{JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz",
+            "mkdir -p /tmp/jjx && tar -xzf /tmp/jj.tar.gz -C /tmp/jjx",
+            "install /tmp/jjx/jj /usr/local/bin/jj && rm -rf /tmp/jj.tar.gz /tmp/jjx",
             "mkdir -p /workspace /app /tmp/opencode",
             # Install the SCM credential-helper shim and configure git
             # system-wide. The shim delegates to the Python helper module
