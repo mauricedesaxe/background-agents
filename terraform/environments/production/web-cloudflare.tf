@@ -63,6 +63,15 @@ resource "local_file" "web_app_wrangler_production" {
 
     # A custom-domain deployment has one canonical browser origin.
     workers_dev = ${local.web_custom_domain_enabled ? "false" : "true"}
+%{if local.web_custom_domain_enabled~}
+
+    # Declare the custom domain here so `wrangler deploy` preserves it. Without
+    # this route wrangler reconciles the worker's domains to its config on every
+    # deploy and prunes the out-of-band custom domain, dropping the site.
+    [[routes]]
+    pattern = "${local.web_custom_domain}"
+    custom_domain = true
+%{endif~}
 
     [vars]
     CONTROL_PLANE_URL = "${local.control_plane_url}"
