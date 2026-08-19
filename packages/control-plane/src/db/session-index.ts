@@ -199,6 +199,18 @@ function normalizeSessionRepositoryFields(session: SessionEntry): {
   };
 }
 
+function readStateOutcome(
+  action: SessionReadAction,
+  latestMessageId: string,
+  writeApplied: boolean
+): "marked_read" | "already_read" | "not_latest" | "marked_unread" {
+  if (action.action === "mark_unread") return "marked_unread";
+  if (action.action === "mark_message_read" && latestMessageId !== action.messageId) {
+    return "not_latest";
+  }
+  return writeApplied ? "marked_read" : "already_read";
+}
+
 export class SessionIndexStore {
   constructor(private readonly db: SqlDatabase) {}
 
@@ -563,32 +575,52 @@ export class SessionIndexStore {
       const result = await this.db
         .prepare(
           `INSERT INTO session_read_states
-             (user_id, session_id, last_read_message_id, updated_at)
-           SELECT ?, id, latest_terminal_message_id, ?
+             (user_id, session_id, last_read_message_id, manually_unread, updated_at)
+           SELECT ?, id, latest_terminal_message_id, 0, ?
            FROM sessions
            WHERE id = ? AND latest_terminal_message_id = ?
            ON CONFLICT(user_id, session_id) DO UPDATE SET
               last_read_message_id = excluded.last_read_message_id,
+              manually_unread = 0,
               updated_at = excluded.updated_at
             WHERE session_read_states.last_read_message_id
-              != excluded.last_read_message_id`
+              != excluded.last_read_message_id
+              OR session_read_states.manually_unread != 0`
         )
         .bind(userId, Date.now(), sessionId, action.messageId)
+        .run();
+      writeApplied = (result.meta.changes ?? 0) > 0;
+    } else if (action.action === "mark_latest_message_read") {
+      const result = await this.db
+        .prepare(
+          `INSERT INTO session_read_states
+             (user_id, session_id, last_read_message_id, manually_unread, updated_at)
+           SELECT ?, id, latest_terminal_message_id, 0, ?
+           FROM sessions
+           WHERE id = ? AND latest_terminal_message_id IS NOT NULL
+           ON CONFLICT(user_id, session_id) DO UPDATE SET
+              last_read_message_id = excluded.last_read_message_id,
+              manually_unread = 0,
+              updated_at = excluded.updated_at
+            WHERE session_read_states.last_read_message_id
+              != excluded.last_read_message_id
+              OR session_read_states.manually_unread != 0`
+        )
+        .bind(userId, Date.now(), sessionId)
         .run();
       writeApplied = (result.meta.changes ?? 0) > 0;
     } else {
       const result = await this.db
         .prepare(
           `INSERT INTO session_read_states
-             (user_id, session_id, last_read_message_id, updated_at)
-           SELECT ?, id, latest_terminal_message_id, ?
+             (user_id, session_id, last_read_message_id, manually_unread, updated_at)
+           SELECT ?, id, latest_terminal_message_id, 1, ?
            FROM sessions
            WHERE id = ? AND latest_terminal_message_id IS NOT NULL
            ON CONFLICT(user_id, session_id) DO UPDATE SET
-              last_read_message_id = excluded.last_read_message_id,
+              manually_unread = 1,
               updated_at = excluded.updated_at
-            WHERE session_read_states.last_read_message_id
-              != excluded.last_read_message_id`
+            WHERE session_read_states.manually_unread != 1`
         )
         .bind(userId, Date.now(), sessionId)
         .run();
@@ -606,15 +638,9 @@ export class SessionIndexStore {
         latestMessageId: null,
       };
     }
-    const outcome =
-      action.action === "mark_message_read" && latestMessageId !== action.messageId
-        ? "not_latest"
-        : writeApplied
-          ? "marked_read"
-          : "already_read";
     return {
       sessionId,
-      outcome,
+      outcome: readStateOutcome(action, latestMessageId, writeApplied),
       unread: currentReadState.unread,
       latestMessageId,
     };

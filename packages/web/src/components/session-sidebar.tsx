@@ -22,6 +22,12 @@ import { Button } from "@/components/ui/button";
 import { useEnvironments } from "@/hooks/use-environments";
 import { SessionWithChildren } from "@/components/session-with-children";
 import { UserMenu } from "@/components/sidebar-user-menu";
+import { buildGroupedSessionList, type SessionSourceFilter } from "@/lib/session-list";
+
+const SOURCE_LABELS: Record<SessionSourceFilter, string> = {
+  manual: "Manual",
+  automatic: "Automatic",
+};
 
 export type { SessionItem } from "@/hooks/use-sidebar-sessions";
 
@@ -92,6 +98,7 @@ export function SessionSidebar({
     setSessionCreatorFilter,
     handleSessionArchived,
     handleMarkLatestMessageRead,
+    handleMarkUnread,
   } = useSidebarSessions();
 
   // Archiving the session on screen leaves nothing to show, so fall back to the home page.
@@ -138,6 +145,8 @@ export function SessionSidebar({
   ) => {
     if (groupSessions.length === 0 && !pagination.error) return null;
 
+    const repositoryGroups = buildGroupedSessionList(groupSessions);
+
     return (
       <section aria-labelledby={`session-group-${title.toLowerCase().replaceAll(" ", "-")}`}>
         <div className="px-4 pb-1 pt-3">
@@ -150,20 +159,39 @@ export function SessionSidebar({
             {title}
           </h2>
         </div>
-        {groupSessions.map((session) => (
-          <SessionWithChildren
-            key={session.id}
-            session={session}
-            environmentName={
-              session.environmentId ? environmentNamesById.get(session.environmentId) : undefined
-            }
-            childrenMap={childrenMap}
-            currentSessionId={currentSessionId}
-            isMobile={isMobile}
-            onArchive={handleArchivedSession}
-            onSessionSelect={onSessionSelect}
-            onMarkLatestMessageRead={handleMarkLatestMessageRead}
-          />
+        {repositoryGroups.map((repositoryGroup) => (
+          <div key={repositoryGroup.key} role="group" aria-label={repositoryGroup.label}>
+            <h3 className="px-4 pb-0.5 pt-2 text-xs font-medium text-muted-foreground truncate">
+              {repositoryGroup.label}
+            </h3>
+            {repositoryGroup.buckets.map((bucket) => (
+              <div key={bucket.source}>
+                {(repositoryGroup.buckets.length > 1 || bucket.source === "automatic") && (
+                  <p className="px-4 pb-0.5 pt-1 text-[0.65rem] font-medium uppercase tracking-wider text-secondary-foreground">
+                    {SOURCE_LABELS[bucket.source]}
+                  </p>
+                )}
+                {bucket.sessions.map((session) => (
+                  <SessionWithChildren
+                    key={session.id}
+                    session={session}
+                    environmentName={
+                      session.environmentId
+                        ? environmentNamesById.get(session.environmentId)
+                        : undefined
+                    }
+                    childrenMap={childrenMap}
+                    currentSessionId={currentSessionId}
+                    isMobile={isMobile}
+                    onArchive={handleArchivedSession}
+                    onSessionSelect={onSessionSelect}
+                    onMarkLatestMessageRead={handleMarkLatestMessageRead}
+                    onMarkUnread={handleMarkUnread}
+                  />
+                ))}
+              </div>
+            ))}
+          </div>
         ))}
         {Boolean(pagination.error) && (
           <div className="mx-3 my-1 flex items-center justify-between gap-2 px-1 py-2 text-xs text-destructive">

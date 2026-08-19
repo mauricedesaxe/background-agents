@@ -13,6 +13,7 @@ export function SessionWithChildren({
   onArchive,
   onSessionSelect,
   onMarkLatestMessageRead,
+  onMarkUnread,
 }: {
   session: SessionItem;
   environmentName?: string;
@@ -22,6 +23,7 @@ export function SessionWithChildren({
   onArchive: (sessionId: string) => Promise<void>;
   onSessionSelect?: () => void;
   onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
+  onMarkUnread: (sessionId: string) => Promise<void>;
 }) {
   return (
     <>
@@ -33,6 +35,7 @@ export function SessionWithChildren({
         onArchive={onArchive}
         onSessionSelect={onSessionSelect}
         onMarkLatestMessageRead={onMarkLatestMessageRead}
+        onMarkUnread={onMarkUnread}
       />
       <ChildSessionTree
         parentId={session.id}
@@ -41,6 +44,7 @@ export function SessionWithChildren({
         isMobile={isMobile}
         onSessionSelect={onSessionSelect}
         onMarkLatestMessageRead={onMarkLatestMessageRead}
+        onMarkUnread={onMarkUnread}
         visitedIds={new Set([session.id])}
       />
     </>
@@ -54,6 +58,7 @@ function ChildSessionTree({
   isMobile,
   onSessionSelect,
   onMarkLatestMessageRead,
+  onMarkUnread,
   visitedIds,
   depth = 1,
 }: {
@@ -63,6 +68,7 @@ function ChildSessionTree({
   isMobile: boolean;
   onSessionSelect?: () => void;
   onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
+  onMarkUnread: (sessionId: string) => Promise<void>;
   visitedIds: Set<string>;
   depth?: number;
 }) {
@@ -83,6 +89,7 @@ function ChildSessionTree({
           isMobile={isMobile}
           onSessionSelect={onSessionSelect}
           onMarkLatestMessageRead={onMarkLatestMessageRead}
+          onMarkUnread={onMarkUnread}
           depth={depth}
         />
         <ChildSessionTree
@@ -92,6 +99,7 @@ function ChildSessionTree({
           isMobile={isMobile}
           onSessionSelect={onSessionSelect}
           onMarkLatestMessageRead={onMarkLatestMessageRead}
+          onMarkUnread={onMarkUnread}
           visitedIds={nextVisitedIds}
           depth={depth + 1}
         />

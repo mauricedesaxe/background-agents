@@ -30,6 +30,7 @@ export function SessionListItem({
   onArchive,
   onSessionSelect,
   onMarkLatestMessageRead,
+  onMarkUnread,
 }: {
   session: SessionItem;
   environmentName?: string;
@@ -38,6 +39,7 @@ export function SessionListItem({
   onArchive: (sessionId: string) => Promise<void>;
   onSessionSelect?: () => void;
   onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
+  onMarkUnread: (sessionId: string) => Promise<void>;
 }) {
   const timestamp = session.updatedAt || session.createdAt;
   const relativeTime = formatRelativeTime(timestamp);
@@ -59,6 +61,8 @@ export function SessionListItem({
   const [isArchiving, setIsArchiving] = useState(false);
   const [showArchiveDialog, setShowArchiveDialog] = useState(false);
   const [isMarkingLatestRead, setIsMarkingLatestRead] = useState(false);
+  const [isMarkingUnread, setIsMarkingUnread] = useState(false);
+  const canMarkUnread = !session.readState.unread && session.readState.latestMessageId !== null;
   const [title, setTitle] = useState(displayTitle);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const isStartingRenameRef = useRef(false);
@@ -110,6 +114,19 @@ export function SessionListItem({
       console.error("Failed to mark session read", error);
     } finally {
       setIsMarkingLatestRead(false);
+    }
+  };
+
+  const handleMarkUnread = async () => {
+    if (isMarkingUnread) return;
+    setIsActionsOpen(false);
+    setIsMarkingUnread(true);
+    try {
+      await onMarkUnread(session.id);
+    } catch (error) {
+      console.error("Failed to mark session unread", error);
+    } finally {
+      setIsMarkingUnread(false);
     }
   };
 
@@ -340,6 +357,11 @@ export function SessionListItem({
                   Mark as read
                 </DropdownMenuItem>
               )}
+              {canMarkUnread && (
+                <DropdownMenuItem onSelect={handleMarkUnread} disabled={isMarkingUnread}>
+                  Mark as unread
+                </DropdownMenuItem>
+              )}
               <DropdownMenuItem onClick={handleStartArchive} disabled={isArchiving}>
                 <ArchiveIcon className="w-4 h-4" />
                 Archive
@@ -365,6 +387,7 @@ export function ChildSessionListItem({
   onSessionSelect,
   depth,
   onMarkLatestMessageRead,
+  onMarkUnread,
 }: {
   session: SessionItem;
   isActive: boolean;
@@ -372,8 +395,11 @@ export function ChildSessionListItem({
   onSessionSelect?: () => void;
   depth: number;
   onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
+  onMarkUnread: (sessionId: string) => Promise<void>;
 }) {
   const [isMarkingLatestRead, setIsMarkingLatestRead] = useState(false);
+  const [isMarkingUnread, setIsMarkingUnread] = useState(false);
+  const canMarkUnread = !session.readState.unread && session.readState.latestMessageId !== null;
   const timestamp = session.updatedAt || session.createdAt;
   const relativeTime = formatRelativeTime(timestamp);
   const prDisplay = pullRequestSummaryDisplay(session.pullRequestSummary);
@@ -388,6 +414,17 @@ export function ChildSessionListItem({
       console.error("Failed to mark session read", error);
     } finally {
       setIsMarkingLatestRead(false);
+    }
+  };
+  const handleMarkUnread = async () => {
+    if (isMarkingUnread) return;
+    setIsMarkingUnread(true);
+    try {
+      await onMarkUnread(session.id);
+    } catch (error) {
+      console.error("Failed to mark session unread", error);
+    } finally {
+      setIsMarkingUnread(false);
     }
   };
   return (
@@ -421,7 +458,7 @@ export function ChildSessionListItem({
           )}
         </div>
       </Link>
-      {session.readState.unread && (
+      {(session.readState.unread || canMarkUnread) && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
@@ -437,9 +474,19 @@ export function ChildSessionListItem({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onSelect={handleMarkLatestMessageRead} disabled={isMarkingLatestRead}>
-              Mark as read
-            </DropdownMenuItem>
+            {session.readState.unread && (
+              <DropdownMenuItem
+                onSelect={handleMarkLatestMessageRead}
+                disabled={isMarkingLatestRead}
+              >
+                Mark as read
+              </DropdownMenuItem>
+            )}
+            {canMarkUnread && (
+              <DropdownMenuItem onSelect={handleMarkUnread} disabled={isMarkingUnread}>
+                Mark as unread
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       )}

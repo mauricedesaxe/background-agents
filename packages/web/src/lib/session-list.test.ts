@@ -2,14 +2,17 @@ import { describe, expect, it } from "vitest";
 import {
   applyTitleUpdate,
   applySessionReadState,
+  buildGroupedSessionList,
   buildSessionSearchValue,
   buildSessionsPageKey,
   CURRENT_USER_CREATED_BY,
   isArchivedSessionListKey,
   isSessionListKey,
   isUnarchivedSessionListKey,
+  sessionSource,
   type SessionListResponse,
 } from "./session-list";
+import type { SessionListItem } from "@open-inspect/shared/types/session-inbox";
 import type { Session } from "@open-inspect/shared/types/sessions";
 
 function session(id: string, overrides: Partial<Session> = {}): Session {
@@ -209,5 +212,88 @@ describe("applyTitleUpdate", () => {
     applyTitleUpdate(before, "a", "Mutated");
 
     expect(before).toEqual(beforeSnapshot);
+  });
+});
+
+function listItem(id: string, overrides: Partial<SessionListItem> = {}): SessionListItem {
+  return {
+    id,
+    title: id.toUpperCase(),
+    repoOwner: "open-inspect",
+    repoName: "background-agents",
+    baseBranch: "main",
+    status: "active",
+    parentSessionId: null,
+    spawnSource: "user",
+    environmentId: null,
+    createdAt: 1000,
+    updatedAt: 2000,
+    readState: { latestMessageId: null, unread: false },
+    ...overrides,
+  };
+}
+
+describe("buildGroupedSessionList", () => {
+  it("groups roots by repository", () => {
+    const groups = buildGroupedSessionList([
+      listItem("a", { repoOwner: "acme", repoName: "web", updatedAt: 30 }),
+      listItem("b", { repoOwner: "acme", repoName: "api", updatedAt: 20 }),
+      listItem("c", { repoOwner: "acme", repoName: "web", updatedAt: 10 }),
+    ]);
+
+    const web = groups.find((group) => group.label === "acme/web");
+    const api = groups.find((group) => group.label === "acme/api");
+    expect(groups).toHaveLength(2);
+    expect(web?.buckets.flatMap((bucket) => bucket.sessions.map((s) => s.id))).toEqual(["a", "c"]);
+    expect(api?.buckets.flatMap((bucket) => bucket.sessions.map((s) => s.id))).toEqual(["b"]);
+  });
+
+  it("buckets a no-repository session and a multi-repository session apart", () => {
+    const groups = buildGroupedSessionList([
+      listItem("scalar", { repoOwner: "acme", repoName: "web" }),
+      listItem("none", { repoOwner: null, repoName: null }),
+      listItem("multi", {
+        repoOwner: "acme",
+        repoName: "web",
+        repositories: [
+          { repoOwner: "acme", repoName: "web", repoId: 1, baseBranch: "main" },
+          { repoOwner: "acme", repoName: "api", repoId: 2, baseBranch: "main" },
+        ],
+      }),
+    ]);
+
+    const labels = groups.map((group) => group.label).sort();
+    expect(labels).toEqual(["Multiple repositories", "No repository", "acme/web"]);
+  });
+
+  it("separates automatic sessions from manual ones inside a repo group", () => {
+    const groups = buildGroupedSessionList([
+      listItem("manual", { spawnSource: "user" }),
+      listItem("scheduled", { spawnSource: "automation" }),
+      listItem("bot", { spawnSource: "github-bot" }),
+    ]);
+
+    expect(groups).toHaveLength(1);
+    const [group] = groups;
+    const manual = group.buckets.find((bucket) => bucket.source === "manual");
+    const automatic = group.buckets.find((bucket) => bucket.source === "automatic");
+    expect(manual?.sessions.map((s) => s.id).sort()).toEqual(["bot", "manual"]);
+    expect(automatic?.sessions.map((s) => s.id)).toEqual(["scheduled"]);
+    expect(group.buckets.map((bucket) => bucket.source)).toEqual(["manual", "automatic"]);
+  });
+
+  it("classifies only the automation spawn source as automatic", () => {
+    expect(sessionSource({ spawnSource: "automation" })).toBe("automatic");
+    expect(sessionSource({ spawnSource: "user" })).toBe("manual");
+    expect(sessionSource({ spawnSource: "linear-bot" })).toBe("manual");
+  });
+
+  it("orders groups by their most recent session", () => {
+    const groups = buildGroupedSessionList([
+      listItem("old", { repoOwner: "acme", repoName: "api", updatedAt: 5 }),
+      listItem("new", { repoOwner: "acme", repoName: "web", updatedAt: 99 }),
+    ]);
+
+    expect(groups.map((group) => group.label)).toEqual(["acme/web", "acme/api"]);
   });
 });
