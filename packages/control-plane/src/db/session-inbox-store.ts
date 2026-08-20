@@ -190,15 +190,33 @@ export class SessionInboxStore {
     >
   ): { sql: string; params: unknown[] } {
     const { conditions, params } = this.eligibility(options);
+    const eligibilityConditions = [
+      ...conditions,
+      "sessions.id NOT IN (SELECT id FROM archived_lineage)",
+    ];
     return {
-      sql: `WITH RECURSIVE eligible_sessions AS (
+      sql: `WITH RECURSIVE
+            -- A session under an archived ancestor is an orphan the archive cascade
+            -- did not reach (the cascade is best-effort). Drop the whole subtree so it
+            -- never re-roots into the sidebar as a stray top-level sub-task.
+            archived_lineage(id) AS (
+              SELECT child.id
+              FROM sessions child
+              JOIN sessions parent ON parent.id = child.parent_session_id
+              WHERE parent.status = 'archived'
+              UNION
+              SELECT descendant.id
+              FROM sessions descendant
+              JOIN archived_lineage ON archived_lineage.id = descendant.parent_session_id
+            ),
+            eligible_sessions AS (
               SELECT sessions.*, ${unreadSql("sessions")} AS unread
               FROM sessions
               LEFT JOIN users viewer ON viewer.id = ?
               LEFT JOIN session_read_states read_state
                 ON read_state.session_id = sessions.id
                AND read_state.user_id = viewer.id
-              WHERE ${conditions.join(" AND ")}
+              WHERE ${eligibilityConditions.join(" AND ")}
             ),
             -- Filtering can hide an ancestor. Re-root each resulting visible subtree
             -- while retaining the persisted root for uninterrupted lineages.
