@@ -1,13 +1,12 @@
-import { toast } from "sonner";
 import { browserApiFetch } from "@/lib/browser-api-fetch";
 
-/**
- * Archives a session via the API.
- *
- * Returns `true` when the request succeeds. Callers are responsible for
- * updating any client-side caches or navigation state.
- */
-export async function archiveSession(sessionId: string): Promise<boolean> {
+const ARCHIVE_CONCURRENCY = 4;
+
+export type ArchiveSessionOutcome =
+  | { kind: "archived"; sessionId: string }
+  | { kind: "failed"; sessionId: string; reason: string };
+
+export async function archiveSession(sessionId: string): Promise<ArchiveSessionOutcome> {
   try {
     const response = await browserApiFetch(`/api/sessions/${sessionId}/archive`, {
       method: "POST",
@@ -17,13 +16,31 @@ export async function archiveSession(sessionId: string): Promise<boolean> {
         .json()
         .then((body: { error?: unknown }) => (typeof body.error === "string" ? body.error : null))
         .catch(() => null);
-      toast.error(reason ?? "Failed to archive session");
-      return false;
+      return { kind: "failed", sessionId, reason: reason ?? "Failed to archive session" };
     }
 
-    return true;
+    return { kind: "archived", sessionId };
   } catch {
-    toast.error("Failed to archive session");
-    return false;
+    return { kind: "failed", sessionId, reason: "Failed to archive session" };
   }
+}
+
+export async function archiveSessions(
+  sessionIds: ReadonlySet<string>
+): Promise<ArchiveSessionOutcome[]> {
+  const ids = [...sessionIds];
+  const outcomes: ArchiveSessionOutcome[] = new Array(ids.length);
+  let nextIndex = 0;
+
+  await Promise.all(
+    Array.from({ length: Math.min(ARCHIVE_CONCURRENCY, ids.length) }, async () => {
+      while (nextIndex < ids.length) {
+        const index = nextIndex++;
+        const sessionId = ids[index];
+        if (sessionId) outcomes[index] = await archiveSession(sessionId);
+      }
+    })
+  );
+
+  return outcomes;
 }

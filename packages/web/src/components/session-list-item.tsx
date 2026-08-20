@@ -2,7 +2,9 @@
 
 import Link from "next/link";
 import { useState, useCallback, useEffect, useRef, type TouchEvent } from "react";
+import { toast } from "sonner";
 import { ArchiveSessionDialog } from "@/components/archive-session-dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import { archiveSession } from "@/lib/archive-session";
 import { pullRequestSummaryDisplay } from "@/lib/pr-summary";
 import { PullRequestStateIcon } from "@/components/pr-state-icon";
@@ -31,6 +33,7 @@ export function SessionListItem({
   onSessionSelect,
   onMarkLatestMessageRead,
   onMarkUnread,
+  selection,
 }: {
   session: SessionItem;
   environmentName?: string;
@@ -40,6 +43,7 @@ export function SessionListItem({
   onSessionSelect?: () => void;
   onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
   onMarkUnread: (sessionId: string) => Promise<void>;
+  selection?: { selected: boolean; onSelectedChange: (selected: boolean) => void };
 }) {
   const timestamp = session.updatedAt || session.createdAt;
   const relativeTime = formatRelativeTime(timestamp);
@@ -135,9 +139,11 @@ export function SessionListItem({
     setIsArchiving(true);
 
     try {
-      const didArchive = await archiveSession(session.id);
-      if (didArchive) {
+      const outcome = await archiveSession(session.id);
+      if (outcome.kind === "archived") {
         await onArchive(session.id);
+      } else {
+        toast.error(outcome.reason);
       }
     } finally {
       setIsArchiving(false);
@@ -247,128 +253,144 @@ export function SessionListItem({
             </div>
           </>
         ) : (
-          <Link
-            href={buildSessionHref(session)}
-            onClick={(event) => {
-              if (longPressTriggeredRef.current) {
-                event.preventDefault();
-                longPressTriggeredRef.current = false;
-                return;
-              }
-              if (isMobile) {
-                onSessionSelect?.();
-              }
-            }}
-            onContextMenu={(event) => {
-              if (isMobile) {
-                event.preventDefault();
-              }
-            }}
-            onTouchStart={handleTouchStart}
-            onTouchMove={handleTouchMove}
-            onTouchEnd={handleTouchEnd}
-            onTouchCancel={handleTouchEnd}
-            className="block pr-8"
-          >
-            <div className="flex items-center gap-1.5 text-sm text-foreground">
-              {session.readState.unread && (
-                <>
-                  <span
-                    aria-hidden="true"
-                    className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
-                  />
-                  <span className="sr-only">Unread</span>
-                </>
-              )}
-              {prDisplay && (
-                <PullRequestStateIcon state={prDisplay.state} label={prDisplay.label} />
-              )}
-              <span
-                className={`truncate ${session.readState.unread ? "font-semibold" : "font-medium"}`}
-              >
-                {displayTitle}
-              </span>
-              {session.status === "failed" && (
-                <span className="shrink-0 text-xs font-medium text-destructive">Failed</span>
-              )}
-            </div>
-            <div className="flex items-center gap-1 mt-0.5 text-xs text-muted-foreground">
-              <span>{relativeTime}</span>
-              <span>·</span>
-              <span className="truncate">{repoInfo}</span>
-              {environmentName && (
-                <>
-                  <span>·</span>
-                  <BoxIcon className="w-3 h-3 flex-shrink-0" />
-                  <span className="truncate">{environmentName}</span>
-                </>
-              )}
-              {isOrphanChild && (
-                <>
-                  <span>·</span>
-                  <span className="text-accent">sub-task</span>
-                </>
-              )}
-              {session.baseBranch && session.baseBranch !== "main" && (
-                <>
-                  <span>·</span>
-                  <BranchIcon className="w-3 h-3 flex-shrink-0" />
-                  <span className="truncate">{session.baseBranch}</span>
-                </>
-              )}
-            </div>
-          </Link>
-        )}
-
-        <div className="absolute inset-y-0 right-2 flex items-center">
-          <DropdownMenu open={isActionsOpen} onOpenChange={setIsActionsOpen}>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                aria-label="Session actions"
-                aria-hidden={isMobile && !session.readState.unread ? "true" : undefined}
-                tabIndex={isMobile && !session.readState.unread ? -1 : undefined}
-                className={`items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition data-[state=open]:opacity-100 ${
-                  isMobile
-                    ? session.readState.unread
-                      ? "flex h-10 w-10"
-                      : "pointer-events-none flex h-6 w-6 opacity-0"
-                    : "flex h-6 w-6 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
-                }`}
-              >
-                <MoreIcon className="w-4 h-4" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="end"
-              onCloseAutoFocus={(event) => {
-                if (isStartingRenameRef.current) {
+          <div className="flex items-start gap-2">
+            {selection && (
+              <Checkbox
+                checked={selection.selected}
+                onCheckedChange={(checked) => selection.onSelectedChange(checked === true)}
+                aria-label={`Select ${displayTitle}`}
+                className="mt-0.5"
+              />
+            )}
+            <Link
+              href={buildSessionHref(session)}
+              onClick={(event) => {
+                if (selection) {
                   event.preventDefault();
-                  isStartingRenameRef.current = false;
+                  return;
+                }
+                if (longPressTriggeredRef.current) {
+                  event.preventDefault();
+                  longPressTriggeredRef.current = false;
+                  return;
+                }
+                if (isMobile) {
+                  onSessionSelect?.();
                 }
               }}
+              onContextMenu={(event) => {
+                if (isMobile) {
+                  event.preventDefault();
+                }
+              }}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              onTouchCancel={handleTouchEnd}
+              className="block min-w-0 flex-1 pr-8"
             >
-              <DropdownMenuItem onSelect={handleStartRename}>Rename</DropdownMenuItem>
-              {session.readState.unread && (
-                <DropdownMenuItem
-                  onSelect={handleMarkLatestMessageRead}
-                  disabled={isMarkingLatestRead}
+              <div className="flex items-center gap-1.5 text-sm text-foreground">
+                {session.readState.unread && (
+                  <>
+                    <span
+                      aria-hidden="true"
+                      className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
+                    />
+                    <span className="sr-only">Unread</span>
+                  </>
+                )}
+                {prDisplay && (
+                  <PullRequestStateIcon state={prDisplay.state} label={prDisplay.label} />
+                )}
+                <span
+                  className={`truncate ${session.readState.unread ? "font-semibold" : "font-medium"}`}
                 >
-                  Mark as read
+                  {displayTitle}
+                </span>
+                {session.status === "failed" && (
+                  <span className="shrink-0 text-xs font-medium text-destructive">Failed</span>
+                )}
+              </div>
+              <div className="flex items-center gap-1 mt-0.5 text-xs text-muted-foreground">
+                <span>{relativeTime}</span>
+                <span>·</span>
+                <span className="truncate">{repoInfo}</span>
+                {environmentName && (
+                  <>
+                    <span>·</span>
+                    <BoxIcon className="w-3 h-3 flex-shrink-0" />
+                    <span className="truncate">{environmentName}</span>
+                  </>
+                )}
+                {isOrphanChild && (
+                  <>
+                    <span>·</span>
+                    <span className="text-accent">sub-task</span>
+                  </>
+                )}
+                {session.baseBranch && session.baseBranch !== "main" && (
+                  <>
+                    <span>·</span>
+                    <BranchIcon className="w-3 h-3 flex-shrink-0" />
+                    <span className="truncate">{session.baseBranch}</span>
+                  </>
+                )}
+              </div>
+            </Link>
+          </div>
+        )}
+
+        {!selection && (
+          <div className="absolute inset-y-0 right-2 flex items-center">
+            <DropdownMenu open={isActionsOpen} onOpenChange={setIsActionsOpen}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="Session actions"
+                  aria-hidden={isMobile && !session.readState.unread ? "true" : undefined}
+                  tabIndex={isMobile && !session.readState.unread ? -1 : undefined}
+                  className={`items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition data-[state=open]:opacity-100 ${
+                    isMobile
+                      ? session.readState.unread
+                        ? "flex h-10 w-10"
+                        : "pointer-events-none flex h-6 w-6 opacity-0"
+                      : "flex h-6 w-6 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+                  }`}
+                >
+                  <MoreIcon className="w-4 h-4" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="end"
+                onCloseAutoFocus={(event) => {
+                  if (isStartingRenameRef.current) {
+                    event.preventDefault();
+                    isStartingRenameRef.current = false;
+                  }
+                }}
+              >
+                <DropdownMenuItem onSelect={handleStartRename}>Rename</DropdownMenuItem>
+                {session.readState.unread && (
+                  <DropdownMenuItem
+                    onSelect={handleMarkLatestMessageRead}
+                    disabled={isMarkingLatestRead}
+                  >
+                    Mark as read
+                  </DropdownMenuItem>
+                )}
+                {canMarkUnread && (
+                  <DropdownMenuItem onSelect={handleMarkUnread} disabled={isMarkingUnread}>
+                    Mark as unread
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem onClick={handleStartArchive} disabled={isArchiving}>
+                  <ArchiveIcon className="w-4 h-4" />
+                  Archive
                 </DropdownMenuItem>
-              )}
-              {canMarkUnread && (
-                <DropdownMenuItem onSelect={handleMarkUnread} disabled={isMarkingUnread}>
-                  Mark as unread
-                </DropdownMenuItem>
-              )}
-              <DropdownMenuItem onClick={handleStartArchive} disabled={isArchiving}>
-                <ArchiveIcon className="w-4 h-4" />
-                Archive
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        )}
       </div>
 
       <ArchiveSessionDialog

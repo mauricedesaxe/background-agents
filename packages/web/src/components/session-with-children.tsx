@@ -15,6 +15,7 @@ export function SessionWithChildren({
   onSessionSelect,
   onMarkLatestMessageRead,
   onMarkUnread,
+  selection,
 }: {
   session: SessionItem;
   environmentName?: string;
@@ -25,6 +26,7 @@ export function SessionWithChildren({
   onSessionSelect?: () => void;
   onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
   onMarkUnread: (sessionId: string) => Promise<void>;
+  selection?: { selected: boolean; onSelectedChange: (selected: boolean) => void };
 }) {
   const childSessions = childrenMap.get(session.id) ?? [];
   const [expanded, setExpanded] = useState(false);
@@ -49,6 +51,7 @@ export function SessionWithChildren({
           onSessionSelect={onSessionSelect}
           onMarkLatestMessageRead={onMarkLatestMessageRead}
           onMarkUnread={onMarkUnread}
+          selection={selection}
         />
       </div>
       {expanded && (

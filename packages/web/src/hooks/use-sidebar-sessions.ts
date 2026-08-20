@@ -338,23 +338,51 @@ export function useSidebarSessions() {
     [updateAttentionRetained, updateFinishedRetained, updateInProgressRetained]
   );
 
-  const handleSessionArchived = useCallback(
-    async (sessionId: string) => {
-      updateAllRetainedItems((item) =>
-        item.rootSession.id === sessionId
-          ? null
-          : {
-              ...item,
-              descendantSessions: item.descendantSessions.filter(
-                (session) => session.id !== sessionId
-              ),
-            }
+  const handleSessionsArchived = useCallback(
+    async (sessionIds: ReadonlySet<string>) => {
+      const removeArchivedItems = (page: SessionInboxPage): SessionInboxPage => ({
+        ...page,
+        items: page.items.flatMap((item) =>
+          sessionIds.has(item.rootSession.id)
+            ? []
+            : [
+                {
+                  ...item,
+                  descendantSessions: item.descendantSessions.filter(
+                    (session) => !sessionIds.has(session.id)
+                  ),
+                },
+              ]
+        ),
+      });
+      updateAllRetainedItems((item) => {
+        const page = removeArchivedItems({ items: [item], hasMore: false, nextCursor: null });
+        return page.items[0] ?? null;
+      });
+      await refreshSnapshot(
+        (current) =>
+          current
+            ? {
+                ...current,
+                categories: {
+                  needs_attention: removeArchivedItems(current.categories.needs_attention),
+                  in_progress: removeArchivedItems(current.categories.in_progress),
+                  finished: removeArchivedItems(current.categories.finished),
+                },
+              }
+            : current,
+        { revalidate: false }
       );
       void refreshInbox().catch((error) => {
         console.error("Failed to refresh session inbox after archive", error);
       });
     },
-    [refreshInbox, updateAllRetainedItems]
+    [refreshInbox, refreshSnapshot, updateAllRetainedItems]
+  );
+
+  const handleSessionArchived = useCallback(
+    async (sessionId: string) => handleSessionsArchived(new Set([sessionId])),
+    [handleSessionsArchived]
   );
 
   const handleMarkLatestMessageRead = useCallback(
@@ -421,6 +449,7 @@ export function useSidebarSessions() {
     sessionCreatorFilter,
     setSessionCreatorFilter,
     handleSessionArchived,
+    handleSessionsArchived,
     handleMarkLatestMessageRead,
     handleMarkUnread,
   };

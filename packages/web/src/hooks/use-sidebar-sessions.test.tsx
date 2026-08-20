@@ -402,6 +402,28 @@ describe("useSidebarSessions", () => {
     expect(paginationRequests).toBe(2);
   });
 
+  it("removes successful roots and their descendants in one cache update", async () => {
+    const root = item("root");
+    const child = {
+      ...item("child").rootSession,
+      parentSessionId: "root",
+      spawnSource: "agent" as const,
+    };
+    const fetcher = vi.fn(async () =>
+      snapshot({
+        needs_attention: { ...page([]), items: [{ ...root, descendantSessions: [child] }] },
+      })
+    );
+    const { result } = renderHook(() => useSidebarSessions(), { wrapper: wrapper(fetcher) });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => result.current.handleSessionsArchived(new Set(["root", "running"])));
+
+    expect(result.current.needsAttention).toEqual([]);
+    expect(result.current.running).toEqual([]);
+    expect(result.current.childrenMap.has("root")).toBe(false);
+  });
+
   it("removes an archived session from retained pages", async () => {
     const fetcher = vi.fn(async (key: string) =>
       key.includes("category=")
