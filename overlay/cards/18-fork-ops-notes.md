@@ -22,11 +22,11 @@ Each note below is a production fact an agent needs to ship correctly on this fo
 present in the root doc after every sync. Reword freely to fit upstream's doc shape; keep the facts
 and the issue references.
 
-- **Deploy path.** Merging to `main` triggers `terraform.yml`. Plan always runs; **Apply is gated on
-  the `production` environment** (required reviewer). Terraform deploys the control-plane, the D1
-  migrations, and the web app when `web_platform = "cloudflare"`. Vercel deploys the web app when
-  `web_platform = "vercel"`. Sandbox providers deploy via the same Terraform apply. **Daytona is the
-  provider this deployment runs.**
+- **Deploy path.** Merging to `main` triggers `terraform.yml`. Plan always runs; **Apply runs
+  unattended — there is no `production` approval gate in practice.** Terraform deploys the
+  control-plane, the D1 migrations, and the web app when `web_platform = "cloudflare"`. Vercel
+  deploys the web app when `web_platform = "vercel"`. Sandbox providers deploy via the same
+  Terraform apply. **Daytona is the provider this deployment runs.**
 - **A merge can produce zero runs (#75).** A rebase-merge has been observed producing no workflow
   runs at all, leaving the change on `main` looking deployed with nothing to approve. Confirm with
   `gh run list --branch main` after merging; force with `gh workflow run terraform.yml --ref main`.
@@ -44,10 +44,11 @@ and the issue references.
 
 ## Acceptance test (the contract)
 
-After a sync, the root doc contains the ops markers. Gate 6 in `overlay/runbook.md` greps the root
-doc for `SANDBOX_VERSION`, `gh run list --branch main`, `production` environment, and the `9000`
-migration floor. All present -> pass. Any missing -> the sync dropped the notes; block / reapply.
-The check is a deterministic grep, so it runs at reapply time with no live infra.
+After a sync, the root doc contains the ops markers. A CI job (`fork-ops-notes` in `ci.yml`, the
+Gate 6 promotion) greps the root doc for `Daytona`, `SANDBOX_VERSION`, `gh run list --branch main`,
+and the `9000` migration floor. All present -> the job passes. Any missing -> the job reddens the
+PR, so a dropped reapply blocks in CI rather than depending on the sync agent. Gate 6 in
+`overlay/runbook.md` is the same grep as a runbook backstop.
 
 ## Placement decision (durable)
 

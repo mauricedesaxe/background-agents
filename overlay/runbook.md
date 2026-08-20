@@ -85,13 +85,15 @@ window itself.
   the terraform apply, and that the served cert carries the hostname SAN. A dropped reapply of the
   `custom_domain` declaration takes the site to NXDOMAIN on the next deploy.
 
-## Gate 6 — Fork ops notes in the root doc (card 18), at reapply time
+## Gate 6 — Fork ops notes in the root doc (card 18), enforced in CI
 
-- Grep the root doc (`CLAUDE.md` / `AGENTS.md`) for the ops markers: `SANDBOX_VERSION`,
-  `gh run list --branch main`, the `production` environment gate, and the `9000` migration floor.
-- All present -> pass. Any missing -> the sync overwrote the root doc with upstream's and the notes
-  were not reapplied. Block and reapply from card 18.
-- Deterministic, no live infra — run it alongside the rebuild, before deploy.
+- The `fork-ops-notes` job in `.github/workflows/ci.yml` greps the root doc (`AGENTS.md`, which
+  `CLAUDE.md` symlinks to) for the ops markers: `Daytona`, `SANDBOX_VERSION`,
+  `gh run list --branch main`, and the `9000` migration floor.
+- All present -> the job passes. Any missing -> the sync overwrote the root doc with upstream's and
+  the notes were not reapplied; the job reddens the PR. Reapply from card 18.
+- This is a real CI gate now, not a manual grep, so a dropped reapply blocks the merge on its own.
+  Run the same grep by hand as a backstop if reapplying outside CI.
 
 ## Note
 
