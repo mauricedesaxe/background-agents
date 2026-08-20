@@ -9,7 +9,7 @@ import {
 } from "../../src/db/automation-store";
 import { SessionIndexStore } from "../../src/db/session-index";
 import { cleanD1Tables } from "./cleanup";
-import { seedRun, fetchRuns } from "./run-helpers";
+import { seedRun, fetchRuns, makeRunRow } from "./run-helpers";
 
 function makeAutomation(overrides?: Partial<AutomationRow>): AutomationRow {
   const now = Date.now();
@@ -264,6 +264,28 @@ describe("AutomationStore (D1 integration)", () => {
       expect(byWeb.automations.map((a) => a.id)).toEqual(["auto-multi"]);
       const byOther = await store.list({ limit: 25, repoOwner: "acme", repoName: "other" });
       expect(byOther.automations).toHaveLength(0);
+    });
+
+    it("hides a settled one-shot but keeps a failed, pending, or non-once automation", async () => {
+      const store = new AutomationStore(env.DB);
+      await store.create(
+        makeAutomation({ id: "once-done", trigger_type: "once", schedule_cron: null, enabled: 0 })
+      );
+      await store.create(
+        makeAutomation({ id: "once-failed", trigger_type: "once", schedule_cron: null, enabled: 0 })
+      );
+      await store.create(
+        makeAutomation({ id: "once-pending", trigger_type: "once", schedule_cron: null })
+      );
+      await store.create(makeAutomation({ id: "sched-kept", trigger_type: "schedule" }));
+      await seedRun(makeRunRow("once-done", { status: "completed", completed_at: Date.now() }));
+      await seedRun(makeRunRow("once-failed", { status: "failed", completed_at: Date.now() }));
+
+      const ids = (await store.list({ limit: 25 })).automations.map((a) => a.id);
+      expect(ids).not.toContain("once-done");
+      expect(ids).toContain("once-failed");
+      expect(ids).toContain("once-pending");
+      expect(ids).toContain("sched-kept");
     });
 
     it("excludes soft-deleted automations", async () => {

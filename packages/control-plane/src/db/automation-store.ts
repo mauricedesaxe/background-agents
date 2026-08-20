@@ -245,6 +245,15 @@ const DERIVED_INVOCATION_STATUS_SQL = `CASE
   ELSE 'partial_failed'
 END`;
 
+/** Hides a `once` automation settled without error (completed/skipped); errored, in-progress, and never-fired stay. */
+const HIDE_SETTLED_ONCE_SQL = `NOT (automations.trigger_type = 'once' AND EXISTS (
+  SELECT 1 FROM automation_invocations ai
+  LEFT JOIN automation_runs r ON r.invocation_id = ai.id
+  WHERE ai.automation_id = automations.id
+  GROUP BY ai.id
+  HAVING (${DERIVED_INVOCATION_STATUS_SQL}) IN ('completed', 'skipped')
+))`;
+
 /** Derived completion time: latest child completion once all children are terminal. */
 const DERIVED_INVOCATION_COMPLETED_AT_SQL = `CASE
   WHEN COUNT(r.id) = 0 THEN NULL
@@ -357,7 +366,7 @@ export class AutomationStore {
     repoOwner?: string;
     repoName?: string;
   }): Promise<AutomationListResult> {
-    const conditions: string[] = ["deleted_at IS NULL"];
+    const conditions: string[] = ["deleted_at IS NULL", HIDE_SETTLED_ONCE_SQL];
     const params: unknown[] = [];
 
     if (options.nameSearch) {
