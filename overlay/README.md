@@ -71,6 +71,7 @@ overlay/
   README.md            this file — the sync contract
   rules.md             the 4 process rules every card obeys
   runbook.md           the blocking sync gate (connect check, tfvar assert, D1 check)
+  orchestrator.md      the weekly-sync orchestrator playbook (Phase 4, #328)
   cards/               one card per kept divergence
   drops/               do-not-rebuild cards
 ```
