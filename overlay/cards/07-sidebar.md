@@ -15,19 +15,27 @@ discussion: https://github.com/mauricedesaxe/background-agents/issues/328#issuec
 The session sidebar is grouped and usable under heavy fan-out. Upstream's flat list is inadequate
 for this workflow. Four parts, one cohesive system, all non-negotiable:
 
-- **Collapsible child-session trees** (#20). Heavy fan-out floods a flat list without it.
+- **Collapsible child-session trees** (#20), **collapsed by default**. Heavy fan-out floods a flat
+  list without it. A parent with children shows a disclosure control; its children are hidden until
+  the user expands that parent, and each parent in the tree collapses independently. Expanding the
+  parent is the only way its sub-tasks show.
 - **Per-repo grouping** — the structural core. Upstream only prints repo _labels_ on a flat list;
   the fork groups by repo.
-- **Automatic-vs-manual separation** — sessions split by whether a human or an automation started
-  them.
+- **Automatic-vs-manual separation** — the repo group **visually splits** sessions into a manual and
+  an automatic bucket. This is grouping, not a filter: there is deliberately **no** Manual/Automatic
+  filter control, because the Mine/All creator filter already excludes automation-started sessions
+  (Mine sets both `excludeAutomationLineage` and `createdByUserIds`). A separate source filter was
+  built and then removed as redundant.
 - **Per-user manual unread** (#21) — mark-a-session-unread, per user.
 
 ## Acceptance test (the contract)
 
 Render the sidebar with a realistic set (multiple repos, automatic + manual, parent + children) and
-assert: repo grouping, automatic/manual separation, child-tree collapse, and the unread marker all
-render. Per-state render tests (this repo has no Storybook; use its view-test convention), plus unit
-tests on the grouping data-model transform. This is the guardrail against a half-rebuilt sidebar.
+assert: repo grouping, automatic/manual separation, the unread marker, and that a parent's children
+are **hidden until its disclosure control is clicked** (default-collapsed, expand reveals, collapse
+hides again). Assert the sidebar renders **no** Manual/Automatic filter control. Per-state render
+tests (this repo has no Storybook; use its view-test convention), plus unit tests on the grouping
+data-model transform. This is the guardrail against a half-rebuilt sidebar.
 
 ## Placement decision (durable)
 
