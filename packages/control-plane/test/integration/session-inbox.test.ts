@@ -157,6 +157,45 @@ describe("session inbox", () => {
     ]);
   });
 
+  it("hides an active sub-task whose ancestor is archived", async () => {
+    const store = new SessionIndexStore(env.DB);
+    await store.create(session("visible", { status: "active", updatedAt: 5000 }));
+    await store.create(session("archived-parent", { status: "active", updatedAt: 4000 }));
+    await store.create(
+      session("orphan-child", {
+        status: "active",
+        parentSessionId: "archived-parent",
+        spawnSource: "agent",
+        spawnDepth: 1,
+        updatedAt: 3500,
+      })
+    );
+    await store.create(
+      session("orphan-grandchild", {
+        status: "active",
+        parentSessionId: "orphan-child",
+        spawnSource: "agent",
+        spawnDepth: 2,
+        updatedAt: 3000,
+      })
+    );
+
+    await store.updateStatus("archived-parent", "archived");
+
+    const response = await serviceFetch("https://example.com/sessions/inbox?category=in_progress");
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      items: Array<{ rootSession: { id: string }; descendantSessions: Array<{ id: string }> }>;
+    };
+    expect(body.items.map((item) => item.rootSession.id)).toEqual(["visible"]);
+    const everyRenderedId = body.items.flatMap((item) => [
+      item.rootSession.id,
+      ...item.descendantSessions.map(({ id }) => id),
+    ]);
+    expect(everyRenderedId).not.toContain("orphan-child");
+    expect(everyRenderedId).not.toContain("orphan-grandchild");
+  });
+
   it("puts active sessions with unread terminal output in needs attention", async () => {
     await serviceFetch("https://example.com/sessions/inbox?category=finished");
     const store = new SessionIndexStore(env.DB);
