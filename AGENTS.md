@@ -149,15 +149,33 @@ under 72 characters. Use the PR body for details, not the commit message.
 
 ## CI/CD
 
-Pushing to `main` auto-deploys changed services:
+**This deployment runs Daytona** as the data plane (deployed via Terraform, not Modal). Merging to
+`main` deploys changed services:
 
-- **Terraform** → control plane + D1 migrations + web app if `web_platform = "cloudflare"`
+- **Terraform** → control plane + D1 migrations + web app when `web_platform = "cloudflare"`
   (triggers: `terraform/`, `packages/*/`)
 - **Vercel** → web app when `web_platform = "vercel"` (triggers: `packages/web/`,
   `packages/shared/`)
-- **Modal** → data plane (triggers: `packages/modal-infra/`, deployed via Terraform apply)
+- **Sandbox providers** → the data plane, via the same Terraform apply; Daytona is the one this
+  deployment runs
 
-CI runs lint, typecheck, and tests for all TypeScript and Python packages on every push and PR.
+The Terraform Apply runs **unattended** — there is no `production` approval gate in practice. CI
+runs lint, typecheck, and tests for all TypeScript and Python packages on every push and PR.
+
+Gotchas that fail quietly:
+
+- **A rebase-merge can produce zero workflow runs (#75).** It can leave a change on `main` looking
+  deployed with nothing to run. Confirm with `gh run list --branch main` after merging; force it
+  with `gh workflow run terraform.yml --ref main`.
+- **A harness or skills change ships nothing without a `SANDBOX_VERSION` bump (#94).** Daytona's
+  `source_hash` only covers `.py`, `.js`, and `.ts`, so editing `HARNESS_REF` in
+  `install-harness.sh` does not invalidate the snapshot. `SANDBOX_VERSION` has to move too, and an
+  apply has to rebuild the snapshot. Modal and Vercel filter the same way; OpenComputer covers all
+  files and is the exception.
+- **A healthy post-deploy plan is not empty.** `always_run = timestamp()` shows every worker as
+  replaced; the signal is that nothing says `will be created`.
+- **Fork-local D1 migrations start at id 9000** (`FORK_MIGRATION_ID_FLOOR`); upstream owns below it,
+  append-only, id is identity not ordering. See `overlay/rules.md` Rule 3.
 
 ## Further Reading
 

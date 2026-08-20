@@ -11,6 +11,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  fork-ops-notes:
+    name: Fork ops notes present (Gate 6, card 18)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Assert the root agent doc carries the fork ops markers
+        run: |
+          doc=AGENTS.md
+          missing=0
+          for marker in "Daytona" "SANDBOX_VERSION" "gh run list --branch main" "9000"; do
+            if ! grep -qF -- "$marker" "$doc"; then
+              echo "::error file=$doc::missing fork ops marker: $marker"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "The root doc lost the fork deploy/CI/migration notes (overlay card 18). Reapply them."
+            exit 1
+          fi
+          echo "All fork ops markers present."
+
   lint-typescript:
     name: Lint & Format (TypeScript)
     runs-on: ubuntu-latest
