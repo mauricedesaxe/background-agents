@@ -36,6 +36,9 @@ is simply absent, which is the point.
 - `06-sandbox-connect` **before** `04-child-result-delivery` and `05-provider-stall` — both need
   children reaching terminal on a connecting sandbox.
 - `07-sidebar` is the highest reapply-cost line — careful/human reapply pass, not a rubber-stamp.
+- `20-archive-always-hides` is a **careful reapply** — it removes two guards inside the upstream-hot
+  session Durable Object lifecycle handler. Independent of the automations cards. It completes the
+  sidebar-cleanup cluster with `08-archive-cascade` and `19-orphan-subtask-hidden`.
 - `12-oneshot-popover`, `13-betterstack-template` are low priority — after the rest.
 
 ## Gate 1 — D1 migrations (Rule 3), check FIRST
