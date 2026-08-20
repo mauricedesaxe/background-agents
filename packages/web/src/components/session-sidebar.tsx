@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useMemo, useCallback } from "react";
+import { useMemo, useCallback, useEffect, useState } from "react";
+import { toast } from "sonner";
 import { useAuthSession } from "@/lib/auth-session";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
 import { useIsMobile } from "@/hooks/use-media-query";
@@ -19,15 +20,36 @@ import {
   ChevronRightIcon,
 } from "@/components/ui/icons";
 import { Button } from "@/components/ui/button";
+import { ArchiveSessionDialog } from "@/components/archive-session-dialog";
 import { useEnvironments } from "@/hooks/use-environments";
 import { SessionWithChildren } from "@/components/session-with-children";
 import { UserMenu } from "@/components/sidebar-user-menu";
 import { buildGroupedSessionList, type SessionSourceFilter } from "@/lib/session-list";
+import { archiveSessions } from "@/lib/archive-session";
 
 const SOURCE_LABELS: Record<SessionSourceFilter, string> = {
   manual: "Manual",
   automatic: "Automatic",
 };
+
+function includesSession(
+  rootSessionId: string,
+  currentSessionId: string,
+  childrenMap: Map<string, SessionItem[]>
+) {
+  const pendingIds = [rootSessionId];
+  const visitedIds = new Set<string>();
+
+  while (pendingIds.length > 0) {
+    const sessionId = pendingIds.pop();
+    if (!sessionId || visitedIds.has(sessionId)) continue;
+    if (sessionId === currentSessionId) return true;
+    visitedIds.add(sessionId);
+    pendingIds.push(...(childrenMap.get(sessionId) ?? []).map((session) => session.id));
+  }
+
+  return false;
+}
 
 export type { SessionItem } from "@/hooks/use-sidebar-sessions";
 
@@ -97,6 +119,7 @@ export function SessionSidebar({
     sessionCreatorFilter,
     setSessionCreatorFilter,
     handleSessionArchived,
+    handleSessionsArchived,
     handleMarkLatestMessageRead,
     handleMarkUnread,
   } = useSidebarSessions();
@@ -105,11 +128,11 @@ export function SessionSidebar({
   const handleArchivedSession = useCallback(
     async (sessionId: string) => {
       await handleSessionArchived(sessionId);
-      if (currentSessionId === sessionId) {
+      if (currentSessionId && includesSession(sessionId, currentSessionId, childrenMap)) {
         router.push("/");
       }
     },
-    [currentSessionId, handleSessionArchived, router]
+    [childrenMap, currentSessionId, handleSessionArchived, router]
   );
 
   // Environment provenance for the cards, resolved once for the whole list.
@@ -120,6 +143,83 @@ export function SessionSidebar({
     () => new Map(environments.map((environment) => [environment.id, environment.name])),
     [environments]
   );
+
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedSessionIds, setSelectedSessionIds] = useState<ReadonlySet<string>>(new Set());
+  const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
+  const [archivingSelected, setArchivingSelected] = useState(false);
+  const visibleRootSessionIds = useMemo(
+    () => new Set([...needsAttention, ...running, ...recent].map((session) => session.id)),
+    [needsAttention, recent, running]
+  );
+  const selectedVisibleRootSessionIds = useMemo(
+    () =>
+      new Set([...selectedSessionIds].filter((sessionId) => visibleRootSessionIds.has(sessionId))),
+    [selectedSessionIds, visibleRootSessionIds]
+  );
+
+  useEffect(() => {
+    if (selectedVisibleRootSessionIds.size === selectedSessionIds.size) return;
+    setSelectedSessionIds(selectedVisibleRootSessionIds);
+  }, [selectedSessionIds.size, selectedVisibleRootSessionIds]);
+
+  const toggleSelectedSession = useCallback((sessionId: string, selected: boolean) => {
+    setSelectedSessionIds((current) => {
+      const next = new Set(current);
+      if (selected) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }, []);
+
+  const cancelSelection = useCallback(() => {
+    setArchiveDialogOpen(false);
+    setSelectedSessionIds(new Set());
+    setSelectionMode(false);
+  }, []);
+
+  const handleArchiveSelected = useCallback(async () => {
+    setArchiveDialogOpen(false);
+    setArchivingSelected(true);
+    try {
+      const outcomes = await archiveSessions(selectedVisibleRootSessionIds);
+      const archivedSessionIds = new Set(
+        outcomes
+          .filter((outcome) => outcome.kind === "archived")
+          .map((outcome) => outcome.sessionId)
+      );
+      const failedSessionIds = new Set(
+        outcomes.filter((outcome) => outcome.kind === "failed").map((outcome) => outcome.sessionId)
+      );
+
+      if (archivedSessionIds.size > 0) {
+        await handleSessionsArchived(archivedSessionIds);
+        if (
+          currentSessionId &&
+          [...archivedSessionIds].some((sessionId) =>
+            includesSession(sessionId, currentSessionId, childrenMap)
+          )
+        ) {
+          router.push("/");
+        }
+      }
+
+      setSelectedSessionIds(failedSessionIds);
+      if (failedSessionIds.size > 0) {
+        toast.error(
+          `Failed to archive ${failedSessionIds.size} session${failedSessionIds.size === 1 ? "" : "s"}`
+        );
+      }
+    } finally {
+      setArchivingSelected(false);
+    }
+  }, [
+    childrenMap,
+    currentSessionId,
+    handleSessionsArchived,
+    router,
+    selectedVisibleRootSessionIds,
+  ]);
 
   const hasSessionListError = sessionsError;
   const emptyMessage =
@@ -188,6 +288,15 @@ export function SessionSidebar({
                     onSessionSelect={onSessionSelect}
                     onMarkLatestMessageRead={handleMarkLatestMessageRead}
                     onMarkUnread={handleMarkUnread}
+                    selection={
+                      selectionMode
+                        ? {
+                            selected: selectedVisibleRootSessionIds.has(session.id),
+                            onSelectedChange: (selected) =>
+                              toggleSelectedSession(session.id, selected),
+                          }
+                        : undefined
+                    }
                   />
                 ))}
               </div>
@@ -234,6 +343,25 @@ export function SessionSidebar({
           <SearchSessionsButton onClick={onSearchSessions} />
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          {selectionMode ? (
+            <>
+              <Button variant="ghost" size="sm" onClick={cancelSelection}>
+                Cancel
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={selectedVisibleRootSessionIds.size === 0 || archivingSelected}
+                onClick={() => setArchiveDialogOpen(true)}
+              >
+                Archive selected ({selectedVisibleRootSessionIds.size})
+              </Button>
+            </>
+          ) : (
+            <Button variant="ghost" size="sm" onClick={() => setSelectionMode(true)}>
+              Select sessions
+            </Button>
+          )}
           <NewSessionButton onClick={onNewSession} />
           <Link
             href="/settings"
@@ -350,6 +478,19 @@ export function SessionSidebar({
           </>
         )}
       </div>
+
+      <ArchiveSessionDialog
+        open={archiveDialogOpen}
+        onOpenChange={setArchiveDialogOpen}
+        onConfirm={() => void handleArchiveSelected()}
+        title={`Archive ${selectedVisibleRootSessionIds.size} session${
+          selectedVisibleRootSessionIds.size === 1 ? "" : "s"
+        }`}
+        description={`Archive ${selectedVisibleRootSessionIds.size} selected session${
+          selectedVisibleRootSessionIds.size === 1 ? "" : "s"
+        }? You can restore archived sessions from Settings > Data Controls.`}
+        actionLabel="Archive selected"
+      />
 
       <div className="border-t border-border-muted p-2">
         <UserMenu user={authSession?.user} />

@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { mutate } from "swr";
 import useSWRMutation from "swr/mutation";
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { toast } from "sonner";
 import { useSessionSocket } from "@/hooks/use-session-socket";
 import { useSessionSkills } from "@/hooks/use-session-skills";
 import { SessionTimeline } from "@/components/session-timeline";
@@ -553,7 +554,7 @@ function useSessionListActions(sessionId: string) {
 
   const handleArchive = useCallback(async () => {
     const didArchive = await archiveSession(sessionId);
-    if (didArchive) {
+    if (didArchive.kind === "archived") {
       await mutate<SessionListResponse>(
         isUnarchivedSessionListKey,
         (current) =>
@@ -563,6 +564,8 @@ function useSessionListActions(sessionId: string) {
         { revalidate: false, populateCache: true }
       );
       router.push("/");
+    } else {
+      toast.error(didArchive.reason);
     }
   }, [router, sessionId]);
 

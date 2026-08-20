@@ -8,8 +8,11 @@ import { SessionSidebar } from "./session-sidebar";
 
 expect.extend(matchers);
 
-const { mockHook } = vi.hoisted(() => ({
+const { mockArchiveSessions, mockHook, mockRouterPush, toastMock } = vi.hoisted(() => ({
+  mockArchiveSessions: vi.fn(),
   mockHook: vi.fn(),
+  mockRouterPush: vi.fn(),
+  toastMock: { error: vi.fn() },
 }));
 
 vi.mock("@/hooks/use-sidebar-sessions", () => ({ useSidebarSessions: mockHook }));
@@ -20,9 +23,14 @@ vi.mock("@/lib/auth-session", () => ({
 vi.mock("@/hooks/use-media-query", () => ({ useIsMobile: () => false }));
 vi.mock("@/hooks/use-environments", () => ({ useEnvironments: () => ({ environments: [] }) }));
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/",
-  useRouter: () => ({ push: vi.fn() }),
+  usePathname: () => "/session/child",
+  useRouter: () => ({ push: mockRouterPush }),
 }));
+vi.mock("@/lib/archive-session", () => ({
+  archiveSession: vi.fn(),
+  archiveSessions: mockArchiveSessions,
+}));
+vi.mock("sonner", () => ({ toast: toastMock }));
 
 function session(id: string, title: string, parentSessionId: string | null = null) {
   return {
@@ -80,6 +88,7 @@ beforeEach(() => {
     sessionCreatorFilter: "all",
     setSessionCreatorFilter: vi.fn(),
     handleSessionArchived: vi.fn(),
+    handleSessionsArchived: vi.fn(),
     handleMarkLatestMessageRead: vi.fn(),
     handleMarkUnread: vi.fn(),
   });
@@ -91,6 +100,48 @@ afterEach(() => {
 });
 
 describe("SessionSidebar", () => {
+  it("archives selected roots, keeps child rows out of selection, and redirects from a descendant", async () => {
+    const value = mockHook();
+    const handleSessionsArchived = vi.fn(async () => undefined);
+    mockHook.mockReturnValue({ ...value, handleSessionsArchived });
+    mockArchiveSessions.mockResolvedValue([{ kind: "archived", sessionId: "running" }]);
+    render(<SessionSidebar />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Select sessions" }));
+    expect(screen.getByRole("checkbox", { name: "Select Implementing inbox" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Expand 1 sub-task" }));
+    expect(
+      screen.queryByRole("checkbox", { name: "Select Checking tests" })
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Implementing inbox" }));
+    fireEvent.click(screen.getByRole("button", { name: "Archive selected (1)" }));
+    expect(screen.getByRole("heading", { name: "Archive 1 session" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Archive selected" }));
+
+    await vi.waitFor(() =>
+      expect(handleSessionsArchived).toHaveBeenCalledWith(new Set(["running"]))
+    );
+    expect(mockRouterPush).toHaveBeenCalledWith("/");
+  });
+
+  it("keeps failed roots selected and shows one failure summary", async () => {
+    mockArchiveSessions.mockResolvedValue([
+      { kind: "failed", sessionId: "attention", reason: "Denied" },
+    ]);
+    render(<SessionSidebar />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Select sessions" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Needs review" }));
+    fireEvent.click(screen.getByRole("button", { name: "Archive selected (1)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Archive selected" }));
+
+    await vi.waitFor(() =>
+      expect(toastMock.error).toHaveBeenCalledWith("Failed to archive 1 session")
+    );
+    expect(screen.getByRole("button", { name: "Archive selected (1)" })).toBeInTheDocument();
+  });
+
   it("renders server-classified sections and nested descendants", () => {
     render(<SessionSidebar />);
 
