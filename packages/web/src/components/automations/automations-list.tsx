@@ -11,6 +11,7 @@ import { FolderIcon, BoxIcon, ClockIcon, BoltIcon } from "@/components/ui/icons"
 import { useEnvironments } from "@/hooks/use-environments";
 import { formatFutureRelativeTime } from "@/lib/time";
 import { formatAutomationTargetsLabel } from "@/lib/repo-label";
+import { groupAutomationsByRepository } from "@/lib/group-automations-by-repository";
 
 interface AutomationsListProps {
   automations: Automation[];
@@ -98,86 +99,97 @@ export function AutomationsList({
     );
   }
 
-  return (
-    <div className="border border-border-muted rounded-md bg-card divide-y divide-border-muted">
-      {automations.map((automation) => (
-        <div key={automation.id} className="px-4 py-4">
-          {/* Header: Name + badge | Actions */}
-          <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
-            <div className="flex w-full min-w-0 items-center gap-2 sm:w-auto">
-              <Link
-                href={`/automations/${automation.id}`}
-                className="font-medium text-foreground hover:text-accent transition truncate"
-              >
-                {automation.name}
-              </Link>
-              <AutomationStatusBadge automation={automation} />
-            </div>
-            <div className="flex w-full flex-shrink-0 items-center justify-end gap-1 sm:w-auto">
-              {automation.enabled ? (
-                <Button variant="ghost" size="xs" onClick={() => onPause(automation.id)}>
-                  Pause
-                </Button>
-              ) : (
-                <Button variant="ghost" size="xs" onClick={() => onResume(automation.id)}>
-                  Resume
-                </Button>
-              )}
-              <Button variant="ghost" size="xs" onClick={() => onTrigger(automation.id)}>
-                <span className="flex items-center gap-1">
-                  <BoltIcon className="w-3 h-3" aria-hidden="true" />
-                  Trigger
-                </span>
-              </Button>
-              {confirmDeleteId === automation.id ? (
-                <div className="flex items-center gap-1">
-                  <Button
-                    variant="destructive"
-                    size="xs"
-                    onClick={() => {
-                      onDelete(automation.id);
-                      setConfirmDeleteId(null);
-                    }}
-                  >
-                    Confirm
-                  </Button>
-                  <Button variant="ghost" size="xs" onClick={() => setConfirmDeleteId(null)}>
-                    Cancel
-                  </Button>
-                </div>
-              ) : (
-                <Button
-                  variant="destructive"
-                  size="xs"
-                  onClick={() => setConfirmDeleteId(automation.id)}
-                >
-                  Delete
-                </Button>
-              )}
-            </div>
-          </div>
+  const groups = groupAutomationsByRepository(automations);
 
-          {/* Metadata: icon-paired items */}
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-xs text-muted-foreground">
-            <span className="inline-flex items-center gap-1">
-              {automation.environmentIds.length > 0 && automation.repositories.length === 0 ? (
-                <BoxIcon className="w-3 h-3 flex-shrink-0" aria-hidden="true" />
-              ) : (
-                <FolderIcon className="w-3 h-3 flex-shrink-0" aria-hidden="true" />
-              )}
-              {formatAutomationTargetsLabel(automation, environments)}
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <ClockIcon className="w-3 h-3 flex-shrink-0" aria-hidden="true" />
-              {describeTrigger(automation)}
-            </span>
-            {automation.triggerType === "schedule" && automation.nextRunAt && (
-              <span className="inline-flex items-center gap-1">
-                Next: {formatFutureRelativeTime(automation.nextRunAt)}
-              </span>
-            )}
-          </div>
+  const renderRow = (automation: Automation) => (
+    <div key={automation.id} className="px-4 py-4">
+      <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+        <div className="flex w-full min-w-0 items-center gap-2 sm:w-auto">
+          <Link
+            href={`/automations/${automation.id}`}
+            className="font-medium text-foreground hover:text-accent transition truncate"
+          >
+            {automation.name}
+          </Link>
+          <AutomationStatusBadge automation={automation} />
         </div>
+        <div className="flex w-full flex-shrink-0 items-center justify-end gap-1 sm:w-auto">
+          {automation.enabled ? (
+            <Button variant="ghost" size="xs" onClick={() => onPause(automation.id)}>
+              Pause
+            </Button>
+          ) : (
+            <Button variant="ghost" size="xs" onClick={() => onResume(automation.id)}>
+              Resume
+            </Button>
+          )}
+          <Button variant="ghost" size="xs" onClick={() => onTrigger(automation.id)}>
+            <span className="flex items-center gap-1">
+              <BoltIcon className="w-3 h-3" aria-hidden="true" />
+              Trigger
+            </span>
+          </Button>
+          {confirmDeleteId === automation.id ? (
+            <div className="flex items-center gap-1">
+              <Button
+                variant="destructive"
+                size="xs"
+                onClick={() => {
+                  onDelete(automation.id);
+                  setConfirmDeleteId(null);
+                }}
+              >
+                Confirm
+              </Button>
+              <Button variant="ghost" size="xs" onClick={() => setConfirmDeleteId(null)}>
+                Cancel
+              </Button>
+            </div>
+          ) : (
+            <Button
+              variant="destructive"
+              size="xs"
+              onClick={() => setConfirmDeleteId(automation.id)}
+            >
+              Delete
+            </Button>
+          )}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-xs text-muted-foreground">
+        <span className="inline-flex items-center gap-1">
+          {automation.environmentIds.length > 0 && automation.repositories.length === 0 ? (
+            <BoxIcon className="w-3 h-3 flex-shrink-0" aria-hidden="true" />
+          ) : (
+            <FolderIcon className="w-3 h-3 flex-shrink-0" aria-hidden="true" />
+          )}
+          {formatAutomationTargetsLabel(automation, environments)}
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <ClockIcon className="w-3 h-3 flex-shrink-0" aria-hidden="true" />
+          {describeTrigger(automation)}
+        </span>
+        {automation.triggerType === "schedule" && automation.nextRunAt && (
+          <span className="inline-flex items-center gap-1">
+            Next: {formatFutureRelativeTime(automation.nextRunAt)}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col gap-6">
+      {groups.map((group) => (
+        <section key={group.key} aria-label={group.label}>
+          <h2 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            {group.label}
+          </h2>
+          <div className="border border-border-muted rounded-md bg-card divide-y divide-border-muted">
+            {group.automations.map(renderRow)}
+          </div>
+        </section>
       ))}
     </div>
   );

@@ -41,6 +41,8 @@ is simply absent, which is the point.
   sidebar-cleanup cluster with `08-archive-cascade` and `19-orphan-subtask-hidden`.
 - `21-automations-hide-settled-once` — automations-page readability. Independent; no ordering
   constraint.
+- `22-automations-group-by-repo` — automations-page readability. Independent; no ordering
+  constraint.
 - `12-oneshot-popover`, `13-betterstack-template` are low priority — after the rest.
 
 ## Gate 1 — D1 migrations (Rule 3), check FIRST
