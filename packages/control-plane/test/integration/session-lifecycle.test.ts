@@ -64,6 +64,19 @@ describe("POST /internal/archive", () => {
 
     expect(res.status).toBe(403);
   });
+
+  it("archive authorizes the canonical user of a bot-rooted session", async () => {
+    const { stub } = await initSession({ userId: "slack:U0123", canonicalUserId: "canon-1" }); // bot-rooted owner: actor id in user_id, human in canonical_user_id
+
+    const res = await stub.fetch("http://internal/internal/archive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "canon-1" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect((await res.json<{ status: string }>()).status).toBe("archived");
+  });
 });
 
 describe("POST /internal/unarchive", () => {

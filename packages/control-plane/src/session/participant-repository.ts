@@ -39,6 +39,16 @@ export class ParticipantRepository {
     return (result.toArray() as ParticipantRow[])[0] ?? null;
   }
 
+  /** Match a caller by either identity column: a bot-rooted owner keeps the namespaced actor id in `user_id` and the human's id in `canonical_user_id`, and a web caller arrives as the latter. */
+  getParticipantByUserIdOrCanonical(userId: string): ParticipantRow | null {
+    const result = this.sql.exec(
+      `SELECT * FROM participants WHERE user_id = ? OR canonical_user_id = ?`,
+      userId,
+      userId
+    );
+    return (result.toArray() as ParticipantRow[])[0] ?? null;
+  }
+
   getParticipantByWsTokenHash(tokenHash: string): ParticipantRow | null {
     const result = this.sql.exec(`SELECT * FROM participants WHERE ws_auth_token = ?`, tokenHash);
     return (result.toArray() as ParticipantRow[])[0] ?? null;
