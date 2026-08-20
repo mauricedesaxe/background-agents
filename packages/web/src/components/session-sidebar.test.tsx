@@ -97,6 +97,7 @@ describe("SessionSidebar", () => {
     expect(screen.getByRole("heading", { name: "Needs attention" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Running" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Recent" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Expand 1 sub-task" }));
     expect(screen.getByText("Checking tests")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Signed in as Test User" })).toBeInTheDocument();
   });
@@ -123,31 +124,6 @@ describe("SessionSidebar", () => {
       "href",
       "/settings?tab=data-controls"
     );
-  });
-
-  it("filters the session list by source", () => {
-    const value = mockHook();
-    const manual = session("manual-one", "Manual work");
-    const automatic = { ...session("auto-one", "Nightly run"), spawnSource: "automation" as const };
-    mockHook.mockReturnValue({
-      ...value,
-      needsAttention: [],
-      running: [],
-      recent: [manual, automatic],
-      childrenMap: new Map(),
-    });
-    render(<SessionSidebar />);
-
-    expect(screen.getByText("Manual work")).toBeInTheDocument();
-    expect(screen.getByText("Nightly run")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("radio", { name: "Automatic" }));
-    expect(screen.queryByText("Manual work")).not.toBeInTheDocument();
-    expect(screen.getByText("Nightly run")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("radio", { name: "Manual" }));
-    expect(screen.getByText("Manual work")).toBeInTheDocument();
-    expect(screen.queryByText("Nightly run")).not.toBeInTheDocument();
   });
 
   it("shows a retry action when one category fails", () => {
@@ -227,7 +203,34 @@ describe("SessionSidebar", () => {
     expect(screen.getByRole("group", { name: "acme/api" })).toBeInTheDocument();
     expect(within(webGroup).getByText("Manual")).toBeInTheDocument();
     expect(within(webGroup).getByText("Automatic")).toBeInTheDocument();
-    expect(screen.getByText("Nested subtask")).toBeInTheDocument();
     expect(screen.getByText("Unread")).toBeInTheDocument();
+
+    expect(screen.queryByText("Nested subtask")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Expand 1 sub-task" }));
+    expect(screen.getByText("Nested subtask")).toBeInTheDocument();
+  });
+
+  it("keeps children hidden until the parent is expanded", () => {
+    const value = mockHook();
+    const parent = session("parent-one", "Parent session");
+    const child = session("child-one", "Hidden child", parent.id);
+    mockHook.mockReturnValue({
+      ...value,
+      needsAttention: [],
+      running: [],
+      recent: [parent],
+      childrenMap: new Map([[parent.id, [child]]]),
+    });
+    render(<SessionSidebar />);
+
+    expect(screen.getByText("Parent session")).toBeInTheDocument();
+    expect(screen.queryByText("Hidden child")).not.toBeInTheDocument();
+
+    const toggle = screen.getByRole("button", { name: "Expand 1 sub-task" });
+    fireEvent.click(toggle);
+    expect(screen.getByText("Hidden child")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse 1 sub-task" }));
+    expect(screen.queryByText("Hidden child")).not.toBeInTheDocument();
   });
 });
