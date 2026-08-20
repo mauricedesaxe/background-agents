@@ -754,7 +754,7 @@ export class SessionDO extends DurableObject<Env> {
         getSession: () => this.getSession(),
         getSandbox: () => this.getSandbox(),
         getPublicSessionId: (session) => this.getPublicSessionId(session),
-        getParticipantByUserId: (userId) => this.participantService.getByUserId(userId),
+        getParticipantForAuth: (userId) => this.participantService.getByUserIdOrCanonical(userId),
         statusService: this.statusService,
         applySessionTitleUpdate: (title, options) => this.applySessionTitleUpdate(title, options),
         cancelSession: async () => {

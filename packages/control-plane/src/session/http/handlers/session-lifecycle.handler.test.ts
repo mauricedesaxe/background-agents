@@ -111,7 +111,7 @@ function createHandler() {
   const getSession = vi.fn<() => SessionRow | null>();
   const getSandbox = vi.fn<() => SandboxRow | null>();
   const getPublicSessionId = vi.fn<(session: SessionRow) => string>();
-  const getParticipantByUserId = vi.fn<(userId: string) => ParticipantRow | null>();
+  const getParticipantForAuth = vi.fn<(userId: string) => ParticipantRow | null>();
   const transition = vi.fn<(status: SessionRow["status"]) => Promise<boolean>>();
   const repairIndexStatus = vi.fn<() => Promise<void>>();
   const settleFromMessageState = vi.fn<() => Promise<SessionRow["status"]>>();
@@ -142,7 +142,7 @@ function createHandler() {
     getSession,
     getSandbox,
     getPublicSessionId,
-    getParticipantByUserId,
+    getParticipantForAuth,
     statusService,
     applySessionTitleUpdate,
     cancelSession,
@@ -173,7 +173,7 @@ function createHandler() {
     getSession,
     getSandbox,
     getPublicSessionId,
-    getParticipantByUserId,
+    getParticipantForAuth,
     transition,
     repairIndexStatus,
     settleFromMessageState,
@@ -764,9 +764,9 @@ describe("createSessionLifecycleHandler", () => {
   });
 
   it("returns 403 when non-participant tries to update title", async () => {
-    const { handler, getSession, getParticipantByUserId } = createHandler();
+    const { handler, getSession, getParticipantForAuth } = createHandler();
     getSession.mockReturnValue(createSession());
-    getParticipantByUserId.mockReturnValue(null);
+    getParticipantForAuth.mockReturnValue(null);
 
     const response = await handler.updateTitle(
       new Request("http://internal/internal/update-title", {
@@ -780,10 +780,9 @@ describe("createSessionLifecycleHandler", () => {
   });
 
   it("applies a manual title update and returns the normalized title", async () => {
-    const { handler, getSession, getParticipantByUserId, applySessionTitleUpdate } =
-      createHandler();
+    const { handler, getSession, getParticipantForAuth, applySessionTitleUpdate } = createHandler();
     getSession.mockReturnValue(createSession());
-    getParticipantByUserId.mockReturnValue(createParticipant());
+    getParticipantForAuth.mockReturnValue(createParticipant());
 
     const response = await handler.updateTitle(
       new Request("http://internal/internal/update-title", {
@@ -815,7 +814,7 @@ describe("createSessionLifecycleHandler", () => {
   });
 
   it("returns 400 for malformed archive fields", async () => {
-    const { handler, getSession, getParticipantByUserId } = createHandler();
+    const { handler, getSession, getParticipantForAuth } = createHandler();
     getSession.mockReturnValue(createSession());
 
     const response = await handler.archive(
@@ -828,13 +827,13 @@ describe("createSessionLifecycleHandler", () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "Invalid request body" });
-    expect(getParticipantByUserId).not.toHaveBeenCalled();
+    expect(getParticipantForAuth).not.toHaveBeenCalled();
   });
 
   it("returns 403 when archive user is not a participant", async () => {
-    const { handler, getSession, getParticipantByUserId } = createHandler();
+    const { handler, getSession, getParticipantForAuth } = createHandler();
     getSession.mockReturnValue(createSession());
-    getParticipantByUserId.mockReturnValue(null);
+    getParticipantForAuth.mockReturnValue(null);
 
     const response = await handler.archive(
       new Request("http://internal/internal/archive", {
@@ -849,9 +848,9 @@ describe("createSessionLifecycleHandler", () => {
   });
 
   it("archives successfully for participant", async () => {
-    const { handler, getSession, getParticipantByUserId, transition } = createHandler();
+    const { handler, getSession, getParticipantForAuth, transition } = createHandler();
     getSession.mockReturnValue(createSession());
-    getParticipantByUserId.mockReturnValue(createParticipant());
+    getParticipantForAuth.mockReturnValue(createParticipant());
     transition.mockResolvedValue(true);
 
     const response = await handler.archive(
@@ -970,10 +969,10 @@ describe("createSessionLifecycleHandler", () => {
   });
 
   it("stops wedged execution and archives a session with stuck queued work", async () => {
-    const { handler, getSession, getParticipantByUserId, repository, stopExecution, transition } =
+    const { handler, getSession, getParticipantForAuth, repository, stopExecution, transition } =
       createHandler();
     getSession.mockReturnValue(createSession({ status: "active" }));
-    getParticipantByUserId.mockReturnValue(createParticipant());
+    getParticipantForAuth.mockReturnValue(createParticipant());
     repository.getPendingOrProcessingCount.mockReturnValue(1);
     transition.mockResolvedValue(true);
 
@@ -991,10 +990,10 @@ describe("createSessionLifecycleHandler", () => {
   });
 
   it("archives a cancelled session without stopping execution", async () => {
-    const { handler, getSession, getParticipantByUserId, stopExecution, transition } =
+    const { handler, getSession, getParticipantForAuth, stopExecution, transition } =
       createHandler();
     getSession.mockReturnValue(createSession({ status: "cancelled" }));
-    getParticipantByUserId.mockReturnValue(createParticipant());
+    getParticipantForAuth.mockReturnValue(createParticipant());
     transition.mockResolvedValue(true);
 
     const response = await handler.archive(
@@ -1011,9 +1010,9 @@ describe("createSessionLifecycleHandler", () => {
   });
 
   it("unarchives successfully for participant", async () => {
-    const { handler, getSession, getParticipantByUserId, transition } = createHandler();
+    const { handler, getSession, getParticipantForAuth, transition } = createHandler();
     getSession.mockReturnValue(createSession({ status: "archived" }));
-    getParticipantByUserId.mockReturnValue(createParticipant());
+    getParticipantForAuth.mockReturnValue(createParticipant());
     transition.mockResolvedValue(true);
 
     const response = await handler.unarchive(
@@ -1030,9 +1029,9 @@ describe("createSessionLifecycleHandler", () => {
   });
 
   it("returns 409 when unarchiving a session that is not archived", async () => {
-    const { handler, getSession, getParticipantByUserId, transition } = createHandler();
+    const { handler, getSession, getParticipantForAuth, transition } = createHandler();
     getSession.mockReturnValue(createSession({ status: "cancelled" }));
-    getParticipantByUserId.mockReturnValue(createParticipant());
+    getParticipantForAuth.mockReturnValue(createParticipant());
 
     const response = await handler.unarchive(
       new Request("http://internal/internal/unarchive", {

@@ -46,6 +46,16 @@ describe("ParticipantRepository", () => {
     expect(repository.getParticipantById("unknown")).toBeNull();
   });
 
+  it("looks a participant up by either the user id or the canonical id", () => {
+    const participant = { id: "p-2", user_id: "slack:U0123", canonical_user_id: "canon-1" };
+    mock.setRows(`SELECT * FROM participants WHERE user_id = ? OR canonical_user_id = ?`, [
+      participant,
+    ]);
+
+    expect(repository.getParticipantByUserIdOrCanonical("canon-1")).toEqual(participant);
+    expect(mock.calls.at(-1)?.params).toEqual(["canon-1", "canon-1"]);
+  });
+
   it("creates a participant with all fields", () => {
     repository.createParticipant({
       id: "p-1",

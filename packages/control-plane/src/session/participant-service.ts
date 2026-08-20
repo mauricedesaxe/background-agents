@@ -74,6 +74,11 @@ export class ParticipantService {
     return this.repository.getParticipantByUserId(userId);
   }
 
+  /** Authorization path; see the repository method for why both id columns match. */
+  getByUserIdOrCanonical(userId: string): ParticipantRow | null {
+    return this.repository.getParticipantByUserIdOrCanonical(userId);
+  }
+
   /**
    * Look up a participant by WebSocket token hash.
    */

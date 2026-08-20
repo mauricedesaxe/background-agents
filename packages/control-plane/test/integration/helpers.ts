@@ -159,6 +159,7 @@ export async function initSession(overrides?: {
   reasoningEffort?: string;
   sandboxSettings?: SandboxSettings;
   userId?: string;
+  canonicalUserId?: string;
   scmLogin?: string;
 }) {
   const id = env.SESSION.newUniqueId();

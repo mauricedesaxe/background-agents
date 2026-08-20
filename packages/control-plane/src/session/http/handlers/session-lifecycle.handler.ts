@@ -37,7 +37,7 @@ export interface SessionLifecycleHandlerDeps {
   getSession: () => SessionRow | null;
   getSandbox: () => SandboxRow | null;
   getPublicSessionId: (session: SessionRow) => string;
-  getParticipantByUserId: (userId: string) => ParticipantRow | null;
+  getParticipantForAuth: (userId: string) => ParticipantRow | null;
   statusService: SessionStatusService;
   applySessionTitleUpdate: (
     title: string,
@@ -385,7 +385,7 @@ export function createSessionLifecycleHandler(
         return Response.json({ error: normalizedTitle.error }, { status: 400 });
       }
 
-      const participant = deps.getParticipantByUserId(body.userId);
+      const participant = deps.getParticipantForAuth(body.userId);
       if (!participant) {
         return Response.json(
           { error: "Not authorized to update the session title" },
@@ -423,7 +423,7 @@ export function createSessionLifecycleHandler(
         return Response.json({ error: "userId is required" }, { status: 400 });
       }
 
-      const participant = deps.getParticipantByUserId(body.userId);
+      const participant = deps.getParticipantForAuth(body.userId);
       if (!participant) {
         return Response.json({ error: "Not authorized to archive this session" }, { status: 403 });
       }
@@ -504,7 +504,7 @@ export function createSessionLifecycleHandler(
         return Response.json({ error: "userId is required" }, { status: 400 });
       }
 
-      const participant = deps.getParticipantByUserId(body.userId);
+      const participant = deps.getParticipantForAuth(body.userId);
       if (!participant) {
         return Response.json(
           { error: "Not authorized to unarchive this session" },

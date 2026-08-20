@@ -39,6 +39,9 @@ is simply absent, which is the point.
 - `20-archive-always-hides` is a **careful reapply** — it removes two guards inside the upstream-hot
   session Durable Object lifecycle handler. Independent of the automations cards. It completes the
   sidebar-cleanup cluster with `08-archive-cascade` and `19-orphan-subtask-hidden`.
+- `23-archive-authz-canonical` is a **careful reapply** (authorization) — the DO lifecycle handler
+  must authorize archive/unarchive/rename by `user_id` **or** `canonical_user_id`. Pairs with card
+  20 in the sidebar-cleanup cluster; leave the ws-token lookup on `user_id` only.
 - `21-automations-hide-settled-once` — automations-page readability. Independent; no ordering
   constraint.
 - `22-automations-group-by-repo` — automations-page readability. Independent; no ordering
