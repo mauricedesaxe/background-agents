@@ -25,16 +25,19 @@ Only past both checks do you continue.
 
 ## 1. Build the base branch, then push it
 
-The automation started you with `baseBranch` set to a fresh `sync/<date>` branch. On it:
+You start on the repo's default branch (`main`). Create a fresh branch `sync/<date>`, where `<date>`
+is today (for example `sync/2026-08-23`). On that branch:
 
 1. Wipe the tree to upstream and restore `overlay/`, exactly as `overlay/runbook.md` describes under
    "The overwrite, concretely". The tree now equals upstream plus the `overlay/` directory.
 2. Write the new `upstream/main` SHA into `overlay/.last-synced`.
 3. Commit, and **push `sync/<date>` to the remote before you spawn anyone.**
 
-The push-before-spawn rule is load-bearing. Your sub-agents clone the base branch **from the
-remote**, not from your sandbox. They see none of your local work. If you spawn before you push,
-they reapply against stale code and their work is wrong.
+The push-before-spawn rule is load-bearing. Your sub-agents run in their own sandboxes and clone
+from the **remote**; they do not inherit your branch or your working copy. They clone the default
+branch, so you must tell each one, in its prompt, to `git fetch origin sync/<date>` and check it out
+before it does anything. If you spawn before you push `sync/<date>`, that branch is not on the
+remote and the children cannot get it.
 
 ## 2. Fan out the reapply, in waves, in dependency order
 
@@ -46,11 +49,12 @@ each card in that order.
 - **Dependencies.** A card that depends on another goes in a later wave. Spawn a dependent only
   after its prerequisite is merged and pushed, so the dependent's fresh clone already carries it.
   Example: `14-js-tests-ci` runs first, then the cards whose tests it arms.
-- **One card per child.** Each `spawn-task` child gets a prompt that names the one card, points it
-  at `overlay/README.md`, `overlay/rules.md`, and the card file, and tells it to: locate the code on
-  current upstream itself (the file paths in a card are dated hints, not binding), implement the
-  behavior, prove it with the card's acceptance test, and push a feature branch off the base named
-  `sync/<date>/<card-id>`.
+- **One card per child.** Each `spawn-task` child gets a prompt that tells it, in order, to: fetch
+  and check out `sync/<date>` (it clones the default branch, so it must move to the base branch
+  first); reapply the one named card, using `overlay/README.md`, `overlay/rules.md`, and the card
+  file; locate the code on current upstream itself (the file paths in a card are dated hints, not
+  binding); implement the behavior; prove it with the card's acceptance test; and push a feature
+  branch off the base named `sync/<date>/<card-id>`.
 
 ## 3. Verify and merge each branch yourself
 
