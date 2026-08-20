@@ -969,11 +969,13 @@ describe("createSessionLifecycleHandler", () => {
     expect(transition).not.toHaveBeenCalled();
   });
 
-  it("returns 409 when archiving a session with queued work", async () => {
-    const { handler, getSession, getParticipantByUserId, repository, transition } = createHandler();
-    getSession.mockReturnValue(createSession());
+  it("stops wedged execution and archives a session with stuck queued work", async () => {
+    const { handler, getSession, getParticipantByUserId, repository, stopExecution, transition } =
+      createHandler();
+    getSession.mockReturnValue(createSession({ status: "active" }));
     getParticipantByUserId.mockReturnValue(createParticipant());
     repository.getPendingOrProcessingCount.mockReturnValue(1);
+    transition.mockResolvedValue(true);
 
     const response = await handler.archive(
       new Request("http://internal/internal/archive", {
@@ -982,14 +984,18 @@ describe("createSessionLifecycleHandler", () => {
       })
     );
 
-    expect(response.status).toBe(409);
-    expect(transition).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "archived" });
+    expect(stopExecution).toHaveBeenCalledWith({ suppressStatusReconcile: true });
+    expect(transition).toHaveBeenCalledWith("archived");
   });
 
-  it("returns 409 when archiving a cancelled session", async () => {
-    const { handler, getSession, getParticipantByUserId, transition } = createHandler();
+  it("archives a cancelled session without stopping execution", async () => {
+    const { handler, getSession, getParticipantByUserId, stopExecution, transition } =
+      createHandler();
     getSession.mockReturnValue(createSession({ status: "cancelled" }));
     getParticipantByUserId.mockReturnValue(createParticipant());
+    transition.mockResolvedValue(true);
 
     const response = await handler.archive(
       new Request("http://internal/internal/archive", {
@@ -998,8 +1004,10 @@ describe("createSessionLifecycleHandler", () => {
       })
     );
 
-    expect(response.status).toBe(409);
-    expect(transition).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "archived" });
+    expect(stopExecution).not.toHaveBeenCalled();
+    expect(transition).toHaveBeenCalledWith("archived");
   });
 
   it("unarchives successfully for participant", async () => {

@@ -13,7 +13,11 @@ export async function archiveSession(sessionId: string): Promise<boolean> {
       method: "POST",
     });
     if (!response.ok) {
-      toast.error("Failed to archive session");
+      const reason = await response
+        .json()
+        .then((body: { error?: unknown }) => (typeof body.error === "string" ? body.error : null))
+        .catch(() => null);
+      toast.error(reason ?? "Failed to archive session");
       return false;
     }
 

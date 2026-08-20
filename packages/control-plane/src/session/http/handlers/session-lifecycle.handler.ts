@@ -156,6 +156,15 @@ type TitleUpdateBody = z.infer<typeof titleUpdateBodySchema>;
 export function createSessionLifecycleHandler(
   deps: SessionLifecycleHandlerDeps
 ): SessionLifecycleHandler {
+  /** Stop any live execution, then archive: a `processing` message never drains, so archiving must not wait on the queue. Shared by the user archive and the child-cascade. */
+  const stopThenArchive = async (session: SessionRow): Promise<Response> => {
+    if (!TERMINAL_STATUSES.has(session.status)) {
+      await deps.stopExecution({ suppressStatusReconcile: true });
+    }
+    await deps.statusService.transition("archived");
+    return Response.json({ status: "archived" });
+  };
+
   return {
     async init(request: Request, log: Logger): Promise<Response> {
       let raw: unknown;
@@ -392,6 +401,7 @@ export function createSessionLifecycleHandler(
       return Response.json({ title: result.title });
     },
 
+    /** Archive means "hide this session", so it always succeeds once the caller is authorized; no session state blocks it (see stopThenArchive). */
     async archive(request: Request): Promise<Response> {
       const session = deps.getSession();
       if (!session) {
@@ -418,20 +428,7 @@ export function createSessionLifecycleHandler(
         return Response.json({ error: "Not authorized to archive this session" }, { status: 403 });
       }
 
-      if (session.status === "cancelled") {
-        return Response.json({ error: "Cancelled sessions cannot be archived" }, { status: 409 });
-      }
-
-      if (deps.messageRepository.getPendingOrProcessingCount() > 0) {
-        return Response.json(
-          { error: "Cannot archive a session with queued work" },
-          { status: 409 }
-        );
-      }
-
-      await deps.statusService.transition("archived");
-
-      return Response.json({ status: "archived" });
+      return stopThenArchive(session);
     },
 
     /**
@@ -535,13 +532,7 @@ export function createSessionLifecycleHandler(
         return Response.json({ status: "archived" });
       }
 
-      if (!TERMINAL_STATUSES.has(session.status)) {
-        await deps.stopExecution({ suppressStatusReconcile: true });
-      }
-
-      await deps.statusService.transition("archived");
-
-      return Response.json({ status: "archived" });
+      return stopThenArchive(session);
     },
 
     async cancel(): Promise<Response> {
