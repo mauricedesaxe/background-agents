@@ -65,9 +65,9 @@ describe("AutomationsList repository labels", () => {
       />
     );
 
-  it("shows the repository name for a single-repository automation", () => {
+  it("groups a single-repository automation under an owner/name heading", () => {
     renderList([makeAutomation()]);
-    expect(screen.getByText("acme/web-app")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "acme/web-app" })).toBeInTheDocument();
   });
 
   it("shows a count for a multi-repository automation", () => {
