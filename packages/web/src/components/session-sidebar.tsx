@@ -289,7 +289,7 @@ export function SessionSidebar({
                     onMarkLatestMessageRead={handleMarkLatestMessageRead}
                     onMarkUnread={handleMarkUnread}
                     selection={
-                      selectionMode
+                      selectionMode && sessionCreatorFilter === "mine"
                         ? {
                             selected: selectedVisibleRootSessionIds.has(session.id),
                             onSelectedChange: (selected) =>
@@ -358,8 +358,15 @@ export function SessionSidebar({
               </Button>
             </>
           ) : (
-            <Button variant="ghost" size="sm" onClick={() => setSelectionMode(true)}>
-              Select sessions
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setSessionCreatorFilter("mine");
+                setSelectionMode(true);
+              }}
+            >
+              Select my sessions
             </Button>
           )}
           <NewSessionButton onClick={onNewSession} />
