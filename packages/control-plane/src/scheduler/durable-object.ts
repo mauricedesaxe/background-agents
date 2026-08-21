@@ -20,6 +20,7 @@ import {
 } from "@open-inspect/shared/triggers";
 import { nextCronOccurrence } from "@open-inspect/shared/cron";
 import type { AutomationInvocationSource } from "@open-inspect/shared/types/automations";
+import type { RepositoryRef } from "@open-inspect/shared/types/repositories";
 import type {
   AutomationCallbackContext,
   SlackCallbackContext,
@@ -328,35 +329,50 @@ export class SchedulerDO extends DurableObject<Env> {
       repo_id: null,
       base_branch: null,
       environment_id: null,
+      repository_set: null,
     });
 
-    // One child per target. Repository children snapshot the resolved repo; a
-    // failed resolution pre-fails its child (snapshot from the selection row)
-    // without blocking siblings. Environment children snapshot the environment
-    // id — the workspace itself resolves at launch time (design §13.3), so a
-    // deleted environment fails through the launch-failure path. No targets →
-    // one repo-less child.
-    const children: AutomationRunRow[] = [
-      ...resolutions.map(
-        (resolution): AutomationRunRow => ({
-          ...childBase(),
-          status: resolution.error ? "failed" : "starting",
-          failure_reason: resolution.error,
-          completed_at: resolution.error ? now : null,
-          repo_owner: resolution.repository?.repoOwner ?? resolution.requested.repo_owner,
-          repo_name: resolution.repository?.repoName ?? resolution.requested.repo_name,
-          repo_id: resolution.repository?.repoId ?? resolution.requested.repo_id,
-          base_branch: resolution.repository?.baseBranch ?? resolution.requested.base_branch,
-        })
-      ),
-      ...environmentSelection.map(
-        (environment): AutomationRunRow => ({
-          ...childBase(),
-          status: "starting",
-          environment_id: environment.environment_id,
-        })
-      ),
-    ];
+    const repositorySet: RepositoryRef[] = resolutions.flatMap((resolution) =>
+      resolution.repository ? [resolution.repository] : []
+    );
+    const sharedWorkspace = automation.execution_mode === "shared_workspace";
+    const sharedFailure = resolutions.find((resolution) => resolution.error)?.error ?? null;
+
+    const children: AutomationRunRow[] = sharedWorkspace
+      ? [
+          {
+            ...childBase(),
+            status: sharedFailure ? "failed" : "starting",
+            failure_reason: sharedFailure,
+            completed_at: sharedFailure ? now : null,
+            repo_owner: repositorySet[0]?.repoOwner ?? selection[0]?.repo_owner ?? null,
+            repo_name: repositorySet[0]?.repoName ?? selection[0]?.repo_name ?? null,
+            repo_id: repositorySet[0]?.repoId ?? selection[0]?.repo_id ?? null,
+            base_branch: repositorySet[0]?.baseBranch ?? selection[0]?.base_branch ?? null,
+            repository_set: JSON.stringify(repositorySet),
+          },
+        ]
+      : [
+          ...resolutions.map(
+            (resolution): AutomationRunRow => ({
+              ...childBase(),
+              status: resolution.error ? "failed" : "starting",
+              failure_reason: resolution.error,
+              completed_at: resolution.error ? now : null,
+              repo_owner: resolution.repository?.repoOwner ?? resolution.requested.repo_owner,
+              repo_name: resolution.repository?.repoName ?? resolution.requested.repo_name,
+              repo_id: resolution.repository?.repoId ?? resolution.requested.repo_id,
+              base_branch: resolution.repository?.baseBranch ?? resolution.requested.base_branch,
+            })
+          ),
+          ...environmentSelection.map(
+            (environment): AutomationRunRow => ({
+              ...childBase(),
+              status: "starting",
+              environment_id: environment.environment_id,
+            })
+          ),
+        ];
     if (children.length === 0) {
       children.push({ ...childBase(), status: "starting" });
     }
@@ -597,7 +613,10 @@ export class SchedulerDO extends DurableObject<Env> {
       // prevents the overshoot where a firing materializes and launches up to
       // 10 children before the budget is reconciled. Always admit the first
       // automation so a tick makes progress.
-      const estimatedChildren = Math.max(repositories.length + environments.length, 1);
+      const estimatedChildren =
+        automation.execution_mode === "shared_workspace"
+          ? 1
+          : Math.max(repositories.length + environments.length, 1);
       if (launchedChildren > 0 && launchedChildren + estimatedChildren > TICK_CHILD_LAUNCH_BUDGET) {
         this.log.info("Tick child budget reached; remaining overdue deferred to next tick", {
           event: "scheduler.tick_budget_exhausted",

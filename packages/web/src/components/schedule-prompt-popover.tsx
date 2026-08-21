@@ -1,6 +1,7 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { AutomationExecutionMode } from "@open-inspect/shared/types/automations";
 import { Button } from "@/components/ui/button";
 import { ClockIcon } from "@/components/ui/icons";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -8,11 +9,21 @@ import { resolveLocalDateTime, tomorrowMorning } from "@/lib/scheduling";
 
 interface SchedulePromptPopoverProps {
   disabled: boolean;
-  onSchedule: (instant: Date, timeZone: string) => Promise<boolean>;
+  sharedWorkspaceEligible: boolean;
+  onSchedule: (
+    instant: Date,
+    timeZone: string,
+    executionMode: AutomationExecutionMode
+  ) => Promise<boolean>;
 }
 
-export function SchedulePromptPopover({ disabled, onSchedule }: SchedulePromptPopoverProps) {
+export function SchedulePromptPopover({
+  disabled,
+  sharedWorkspaceEligible,
+  onSchedule,
+}: SchedulePromptPopoverProps) {
   const [open, setOpen] = useState(false);
+  const [executionMode, setExecutionMode] = useState<AutomationExecutionMode>("fanout");
   const [timeZone, setTimeZone] = useState(
     () => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
   );
@@ -20,6 +31,10 @@ export function SchedulePromptPopover({ disabled, onSchedule }: SchedulePromptPo
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const submissionInFlight = useRef(false);
+  useEffect(() => {
+    if (!sharedWorkspaceEligible && executionMode !== "fanout") setExecutionMode("fanout");
+  }, [executionMode, sharedWorkspaceEligible]);
+
   const supportedTimeZones =
     typeof Intl.supportedValuesOf === "function"
       ? Intl.supportedValuesOf("timeZone")
@@ -38,7 +53,11 @@ export function SchedulePromptPopover({ disabled, onSchedule }: SchedulePromptPo
     setSaving(true);
     setError("");
     try {
-      const saved = await onSchedule(instant, timeZone);
+      const saved = await onSchedule(
+        instant,
+        timeZone,
+        sharedWorkspaceEligible ? executionMode : "fanout"
+      );
       if (saved) setOpen(false);
     } finally {
       submissionInFlight.current = false;
@@ -79,6 +98,29 @@ export function SchedulePromptPopover({ disabled, onSchedule }: SchedulePromptPo
           <p className="font-medium text-sm">Run later</p>
           <p className="text-xs text-muted-foreground mt-1">No sandbox starts until this is due.</p>
         </div>
+        {sharedWorkspaceEligible && (
+          <fieldset>
+            <legend className="text-xs text-muted-foreground">Workspace mode</legend>
+            <label className="mt-1 flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="scheduled-task-execution-mode"
+                checked={executionMode === "fanout"}
+                onChange={() => setExecutionMode("fanout")}
+              />
+              One session per repository
+            </label>
+            <label className="mt-1 flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="scheduled-task-execution-mode"
+                checked={executionMode === "shared_workspace"}
+                onChange={() => setExecutionMode("shared_workspace")}
+              />
+              One shared workspace
+            </label>
+          </fieldset>
+        )}
         <div className="grid grid-cols-3 gap-2">
           <Button
             variant="outline"

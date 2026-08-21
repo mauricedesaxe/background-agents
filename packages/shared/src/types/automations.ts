@@ -14,6 +14,9 @@ import type { RepositoryInput, RepositoryRef } from "./repositories";
 
 export type AutomationRunStatus = "starting" | "running" | "completed" | "failed" | "skipped";
 
+export const automationExecutionModeSchema = z.enum(["fanout", "shared_workspace"]);
+export type AutomationExecutionMode = z.infer<typeof automationExecutionModeSchema>;
+
 export type AutomationInvocationSource = "schedule" | "manual" | "event";
 
 /**
@@ -85,6 +88,7 @@ const automationSchema = z.object({
   deletedAt: z.number().nullable(),
   eventType: z.string().nullable(),
   triggerConfig: triggerConfigSchema.nullable(),
+  executionMode: automationExecutionModeSchema.optional(),
   repositories: z.array(automationRepositorySchema),
   environmentIds: z.array(z.string()),
 });
@@ -104,6 +108,8 @@ export interface CreateAutomationRequest {
   sentryClientSecret?: string;
   /** Shared secret BetterStack presents as a custom header (betterstack triggers). */
   betterstackWebhookSecret?: string;
+  /** Fan out by default, or create one shared multi-repository session. */
+  executionMode?: AutomationExecutionMode;
   /** Repositories to run against (0..MAX_AUTOMATION_REPOSITORIES). */
   repositories?: AutomationRepositoryInput[];
   /** Environments to fan out over, one workspace session each (design §13.3). */
@@ -119,6 +125,8 @@ export interface UpdateAutomationRequest {
   reasoningEffort?: string | null;
   eventType?: string;
   triggerConfig?: TriggerConfig;
+  /** Fan out by default, or create one shared multi-repository session. */
+  executionMode?: AutomationExecutionMode;
   /** Replaces the full repository selection when present. */
   repositories?: AutomationRepositoryInput[];
   /** Replaces the full environment selection when present (empty clears). */
@@ -202,6 +210,7 @@ export interface CreateScheduledTaskRequest {
   scheduleTz: string;
   model?: string;
   reasoningEffort?: string | null;
+  executionMode?: AutomationExecutionMode;
   repositories?: AutomationRepositoryInput[];
   environmentIds?: string[];
 }

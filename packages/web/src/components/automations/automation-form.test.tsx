@@ -609,6 +609,30 @@ describe("repository selection", () => {
     ]);
   });
 
+  it("offers shared workspace mode only for two direct repositories", () => {
+    const onSubmit = vi.fn();
+    const { container } = render(
+      <AutomationForm
+        mode="create"
+        submitting={false}
+        onSubmit={onSubmit}
+        initialValues={scheduleBase}
+      />
+    );
+
+    expect(screen.queryByText("One shared workspace")).not.toBeInTheDocument();
+    openRepositoryPicker();
+    fireEvent.click(screen.getByRole("button", { name: "Select Multiple" }));
+    fireEvent.click(screen.getByLabelText("open-inspect/background-agents"));
+    fireEvent.click(screen.getByLabelText("open-inspect/control-plane"));
+    fireEvent.click(screen.getByText("One shared workspace"));
+    fireEvent.submit(container.querySelector("form")!);
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({ executionMode: "shared_workspace" })
+    );
+  });
+
   it("always sends the full selection in edit mode, even when untouched", () => {
     const onSubmit = vi.fn();
     const { container } = render(

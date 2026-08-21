@@ -355,7 +355,11 @@ export default function Home() {
     }
   };
 
-  const handleSchedule = async (instant: Date, timeZone: string): Promise<boolean> => {
+  const handleSchedule = async (
+    instant: Date,
+    timeZone: string,
+    executionMode: "fanout" | "shared_workspace"
+  ): Promise<boolean> => {
     setError("");
     setScheduleConfirmation("");
     const instructions = prompt.trim();
@@ -378,6 +382,7 @@ export default function Home() {
           scheduleTz: timeZone,
           model: selectedModel,
           reasoningEffort,
+          executionMode,
           ...scheduledTargetFields(targetRequestFields),
         }),
       });
@@ -472,7 +477,11 @@ function HomeContent({
   error: string;
   scheduleConfirmation: string;
   handleSubmit: (e: React.FormEvent) => void;
-  handleSchedule: (instant: Date, timeZone: string) => Promise<boolean>;
+  handleSchedule: (
+    instant: Date,
+    timeZone: string,
+    executionMode: "fanout" | "shared_workspace"
+  ) => Promise<boolean>;
   modelOptions: ModelCategory[];
   skillSelection: SessionSkillSelection;
   setSkillSelection: (value: SessionSkillSelection) => void;
@@ -594,6 +603,9 @@ function HomeContent({
                     </button>
                     <SchedulePromptPopover
                       disabled={attachmentsLocked || !isLaunchable || !prompt.trim()}
+                      sharedWorkspaceEligible={
+                        sessionTarget?.kind === "repos" && sessionTarget.repoFullNames.length >= 2
+                      }
                       onSchedule={handleSchedule}
                     />
                     <button

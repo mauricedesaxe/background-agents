@@ -11,7 +11,10 @@ import {
   type TriggerConfig,
 } from "@open-inspect/shared/triggers";
 import { MAX_AUTOMATION_REPOSITORIES } from "@open-inspect/shared/types/automations";
-import type { AutomationRepositoryInput } from "@open-inspect/shared/types/automations";
+import type {
+  AutomationExecutionMode,
+  AutomationRepositoryInput,
+} from "@open-inspect/shared/types/automations";
 import {
   DEFAULT_MODEL,
   getReasoningConfig,
@@ -113,6 +116,7 @@ export interface AutomationFormValues {
   environmentIds?: string[];
   model: string;
   reasoningEffort: string | null;
+  executionMode: AutomationExecutionMode;
   scheduleCron: string;
   scheduleTz: string;
   instructions: string;
@@ -160,6 +164,9 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
   );
   const [sentryClientSecret, setSentryClientSecret] = useState("");
   const [betterstackWebhookSecret, setBetterstackWebhookSecret] = useState("");
+  const [executionMode, setExecutionMode] = useState<AutomationExecutionMode>(
+    initialValues?.executionMode ?? "fanout"
+  );
 
   const isSchedule = triggerType === "schedule";
   // Multi-repository selections are schedule-only (the server rejects them for
@@ -192,6 +199,13 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
     selectedRepository?.repoOwner ?? "",
     selectedRepository?.repoName ?? ""
   );
+
+  const sharedWorkspaceEligible =
+    isSchedule && selectedRepoNames.length >= 2 && selectedEnvironmentIds.length === 0;
+
+  useEffect(() => {
+    if (!sharedWorkspaceEligible && executionMode !== "fanout") setExecutionMode("fanout");
+  }, [executionMode, sharedWorkspaceEligible]);
 
   const isSlack = triggerType === "slack_event";
   const isScheduleValid = !isSchedule || isValidCron(scheduleCron);
@@ -296,6 +310,7 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
         reasoningEffort && isValidReasoningEffort(resolvedModel, reasoningEffort)
           ? reasoningEffort
           : null,
+      executionMode: sharedWorkspaceEligible ? executionMode : "fanout",
       scheduleCron,
       scheduleTz,
       instructions: instructions.trim(),
@@ -649,6 +664,44 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
         </Popover>
         <FieldDescription>{repositorySelectionDescription}</FieldDescription>
       </div>
+
+      {sharedWorkspaceEligible && (
+        <fieldset>
+          <legend className="block text-sm font-medium text-foreground mb-1.5">
+            Workspace mode
+          </legend>
+          <div className="space-y-2">
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="radio"
+                name="automation-execution-mode"
+                checked={executionMode === "fanout"}
+                onChange={() => setExecutionMode("fanout")}
+              />
+              <span>
+                <span className="block font-medium">One session per repository</span>
+                <span className="text-muted-foreground">
+                  Run the same instructions in separate sessions.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="radio"
+                name="automation-execution-mode"
+                checked={executionMode === "shared_workspace"}
+                onChange={() => setExecutionMode("shared_workspace")}
+              />
+              <span>
+                <span className="block font-medium">One shared workspace</span>
+                <span className="text-muted-foreground">
+                  Start one session with all selected repositories.
+                </span>
+              </span>
+            </label>
+          </div>
+        </fieldset>
+      )}
 
       {/* Branch (single-repository selections only; multi-repo runs use each repo's default) */}
       {usesSingleRepository && (
