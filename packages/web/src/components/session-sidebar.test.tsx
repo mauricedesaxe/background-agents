@@ -102,32 +102,14 @@ afterEach(() => {
 });
 
 describe("SessionSidebar", () => {
-  it("switches to the user's sessions before bulk selection", () => {
-    const value = mockHook();
-    const setSessionCreatorFilter = vi.fn();
-    mockHook.mockReturnValue({
-      ...value,
-      setSessionCreatorFilter,
-      recent: [{ ...session("other", "Other user's work"), userId: "other_user" }],
-    });
-    render(<SessionSidebar />);
-
-    fireEvent.click(screen.getByRole("button", { name: "Select my sessions" }));
-
-    expect(setSessionCreatorFilter).toHaveBeenCalledWith("mine");
-    expect(
-      screen.queryByRole("checkbox", { name: "Select Other user's work" })
-    ).not.toBeInTheDocument();
-  });
-
   it("archives selected roots, keeps child rows out of selection, and redirects from a descendant", async () => {
     const value = mockHook();
     const handleSessionsArchived = vi.fn(async () => undefined);
-    mockHook.mockReturnValue({ ...value, handleSessionsArchived, sessionCreatorFilter: "mine" });
+    mockHook.mockReturnValue({ ...value, handleSessionsArchived });
     mockArchiveSessions.mockResolvedValue([{ kind: "archived", sessionId: "running" }]);
     render(<SessionSidebar />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Select my sessions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select sessions" }));
     expect(screen.getByRole("checkbox", { name: "Select Implementing inbox" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Expand 1 sub-task" }));
     expect(
@@ -146,20 +128,18 @@ describe("SessionSidebar", () => {
   });
 
   it("keeps failed roots selected and shows one failure summary", async () => {
-    const value = mockHook();
-    mockHook.mockReturnValue({ ...value, sessionCreatorFilter: "mine" });
     mockArchiveSessions.mockResolvedValue([
       { kind: "failed", sessionId: "attention", reason: "Denied" },
     ]);
     render(<SessionSidebar />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Select my sessions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select sessions" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "Select Needs review" }));
     fireEvent.click(screen.getByRole("button", { name: "Archive selected (1)" }));
     fireEvent.click(screen.getByRole("button", { name: "Archive selected" }));
 
     await vi.waitFor(() =>
-      expect(toastMock.error).toHaveBeenCalledWith("Failed to archive 1 session")
+      expect(toastMock.error).toHaveBeenCalledWith("Failed to archive 1 session: Denied")
     );
     expect(screen.getByRole("button", { name: "Archive selected (1)" })).toBeInTheDocument();
   });
