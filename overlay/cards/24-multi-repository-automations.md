@@ -11,12 +11,13 @@ origin: fork; multi-repository maintenance automations
 
 ## Requirement
 
-A scheduled automation can target no repository, one repository, or up to ten repositories.
-Selecting several repositories defaults to fan-out. Every firing starts one independent session per
-repository. Each session checks out only its assigned repository and opens its own branch,
-artifacts, and pull request. The shared automation instructions apply to every child session.
+A repository-independent automation can target no repository, one repository, or up to ten
+repositories. Selecting several repositories defaults to fan-out. Every firing starts one
+independent session per repository. Each session checks out only its assigned repository and opens
+its own branch, artifacts, and pull request. The shared automation instructions apply to every child
+session.
 
-Scheduled and one-shot automations can instead select shared workspace mode. Shared workspace mode
+Repository-independent automations can instead select shared workspace mode. Shared workspace mode
 requires two to ten direct repositories, rejects environment targets, and starts one session with
 the ordered repository set. The run stores that resolved set in `automation_runs.repository_set`
 before launch. Existing automations remain in fan-out mode.
@@ -36,13 +37,13 @@ sweep fails when every child fails. A mixed terminal result is `partial_failed`.
 has no children. One inaccessible repository fails its child but does not prevent other repositories
 from starting.
 
-Only schedule and one-shot configurations may use shared workspace mode. Event triggers stay at zero
-or one repository until their cross-repository meaning is defined. A running invocation blocks the
-next scheduled firing. Manual trigger requests return a conflict while an invocation is active.
+GitHub and Linear triggers stay single-repository because their incoming event identifies the target
+repository. Other trigger types can fan out or start a shared workspace. A running invocation blocks
+the next scheduled firing. Manual trigger requests return a conflict while an invocation is active.
 
-The automation form exposes a multi-select repository picker for scheduled automations. With two or
-more direct repositories selected, it shows an explicit choice between fan-out and one shared
-workspace. Event forms keep the single-target picker.
+The automation form exposes a multi-select repository picker for repository-independent automations.
+With two or more direct repositories selected, it shows an explicit choice between fan-out and one
+shared workspace. GitHub and Linear forms keep the single-target picker.
 
 ## Acceptance test (the contract)
 

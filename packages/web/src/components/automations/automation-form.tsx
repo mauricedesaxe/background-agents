@@ -171,7 +171,7 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
   const isSchedule = triggerType === "schedule";
   // Multi-repository selections are schedule-only (the server rejects them for
   // event triggers), so the mode toggle only exists there.
-  const multiRepoAllowed = isSchedule;
+  const multiRepoAllowed = !repositoryRequired;
 
   const {
     selectedRepoNames,
@@ -201,7 +201,7 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
   );
 
   const sharedWorkspaceEligible =
-    isSchedule && selectedRepoNames.length >= 2 && selectedEnvironmentIds.length === 0;
+    !repositoryRequired && selectedRepoNames.length >= 2 && selectedEnvironmentIds.length === 0;
 
   useEffect(() => {
     if (!sharedWorkspaceEligible && executionMode !== "fanout") setExecutionMode("fanout");

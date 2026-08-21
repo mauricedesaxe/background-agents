@@ -22,8 +22,7 @@ export interface UseAutomationTargetsOptions {
   initialRepositories: AutomationRepositoryInput[];
   initialEnvironmentIds: string[];
   /**
-   * Multi-target selections are schedule-only (the server rejects them for
-   * event triggers), so multi-select mode only exists there.
+   * Repository-scoped event triggers have one repository from the event.
    */
   multiRepoAllowed: boolean;
   /**
@@ -102,7 +101,6 @@ export function useAutomationTargets(
     [repos, selectedTargets]
   );
 
-  // Multi-select mode is schedule-only; leaving schedule forces single-select.
   useEffect(() => {
     if (!multiRepoAllowed && selectionMode === "multiple") {
       setSelectionMode("single");

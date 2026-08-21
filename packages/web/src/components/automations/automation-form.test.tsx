@@ -729,6 +729,22 @@ describe("repository selection", () => {
     expect(screen.getByRole("button", { name: "Create Automation" })).toBeDisabled(); // still needs event type
   });
 
+  it("allows multiple repositories for webhook automations", () => {
+    render(
+      <AutomationForm
+        mode="create"
+        submitting={false}
+        onSubmit={vi.fn()}
+        initialValues={scheduleBase}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("radio", { name: /Inbound Webhook/ }));
+    openRepositoryPicker();
+
+    expect(screen.getByRole("button", { name: "Select Multiple" })).toBeInTheDocument();
+  });
+
   it("collapses a multi-selection back to one repository when multi-select is turned off", () => {
     render(
       <AutomationForm

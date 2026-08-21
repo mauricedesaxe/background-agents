@@ -161,10 +161,8 @@ function parseRepositorySelection(body: { repositories?: unknown }): RepositoryS
 
 /**
  * Target-count rules across BOTH selections (repositories + environments):
- * repo-scoped event triggers need exactly one repository and no environments;
- * fan-out over several targets is a schedule/manual-only product scope (event
- * fan-out semantics are undefined, not technically prevented). Repositories
- * and environments share one combined cap.
+ * Repo-scoped event triggers need exactly one repository and no environments.
+ * Repositories and environments share one combined cap.
  */
 function validateTargetCounts(
   triggerType: AutomationTriggerType,
@@ -178,9 +176,6 @@ function validateTargetCounts(
     if (environmentCount > 0) {
       throw new TargetSelectionError("Repository-scoped triggers cannot target environments");
     }
-  }
-  if (repositoryCount + environmentCount > 1 && triggerType !== "schedule") {
-    throw new TargetSelectionError("Multi-target selections require a schedule trigger");
   }
   if (repositoryCount + environmentCount > MAX_AUTOMATION_REPOSITORIES) {
     throw new TargetSelectionError(
@@ -204,8 +199,8 @@ function validateExecutionMode(
   environmentCount: number
 ): void {
   if (executionMode !== "shared_workspace") return;
-  if (triggerType !== "schedule" && triggerType !== "once") {
-    throw new TargetSelectionError("Shared workspace mode requires a schedule or one-shot trigger");
+  if (triggerType === "github_event" || triggerType === "linear_event") {
+    throw new TargetSelectionError("Repository-scoped triggers cannot use shared workspace mode");
   }
   if (environmentCount > 0) {
     throw new TargetSelectionError("Shared workspace mode cannot target environments");
