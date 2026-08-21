@@ -1,6 +1,6 @@
 ---
 id: 24-multi-repository-automations
-title: Scheduled automations run across multiple repositories
+title: Automations can work across multiple repositories
 type: rebuild
 priority: high
 placement: upstream-code
@@ -12,75 +12,35 @@ origin: fork; multi-repository maintenance automations
 ## Requirement
 
 A repository-independent automation can target no repository, one repository, or up to ten
-repositories. Selecting several repositories defaults to fan-out. Every firing starts one
-independent session per repository. Each session checks out only its assigned repository and opens
-its own branch, artifacts, and pull request. The shared automation instructions apply to every child
-session.
+repositories. When several repositories are selected, the user chooses how the automation works.
 
-Repository-independent automations can instead select shared workspace mode. Shared workspace mode
-requires two to ten direct repositories, rejects environment targets, and starts one session with
-the ordered repository set. The run stores that resolved set in `automation_runs.repository_set`
-before launch. Existing automations remain in fan-out mode.
+"One session per repository" runs the same instructions independently in every selected repository.
+Each repository can produce its own branch and pull request.
 
-Repository selections are stored as rows, not as repository fields on the automation. Each row holds
-the owner, name, resolved repository id, and base branch. The server rejects duplicate normalized
-repositories. It resolves an omitted base branch to the repository default when the automation
-saves.
+"One shared workspace" starts one agent session with every selected repository available together.
+Use it for work that crosses repository boundaries, such as a frontend and its API. It requires at
+least two repositories.
 
-Every firing creates one invocation. Fan-out creates one child run per selected repository. Shared
-workspace mode creates one child run that snapshots every resolved repository before launch. Editing
-an automation affects the next firing only. History always uses run snapshots, never the
-automation's live repository list.
-
-The history status is derived from child runs. A sweep completes only when every child completes. A
-sweep fails when every child fails. A mixed terminal result is `partial_failed`. A skipped firing
-has no children. One inaccessible repository fails its child but does not prevent other repositories
-from starting.
-
-GitHub and Linear triggers stay single-repository because their incoming event identifies the target
-repository. Other trigger types can fan out or start a shared workspace. A running invocation blocks
-the next scheduled firing. Manual trigger requests return a conflict while an invocation is active.
-
-The automation form exposes a multi-select repository picker for repository-independent automations.
-With two or more direct repositories selected, it shows an explicit choice between fan-out and one
-shared workspace. GitHub and Linear forms keep the single-target picker.
+The choice is visible when the user selects several repositories. Existing automations keep their
+current per-repository behavior. GitHub and Linear automations stay single-repository because the
+incoming event already identifies one repository.
 
 ## Acceptance test (the contract)
 
-Create a scheduled automation with two repositories in fan-out mode. Trigger it once. The server
-records one invocation with two child runs. Each child starts a session that targets only its
-assigned repository. Both child sessions receive the shared instructions. Each session can create
-its own pull request.
+Create an automation with two repositories. The form offers both workspace choices.
 
-Create a scheduled or one-shot automation with two repositories in shared workspace mode. The server
-records one child run and starts one session with the ordered repository snapshot. Shared mode
-rejects environment targets, non-schedule triggers, and fewer than two repositories.
+Choose "One session per repository" and trigger it. Each repository receives an independent agent
+session with the same instructions.
 
-Edit the selection while the first invocation runs. Its history retains the original two repository
-snapshots. The next firing uses the new selection. Make one selected repository inaccessible. Its
-child fails while the other child starts. A non-schedule automation with two repositories is
-rejected. The form prevents more than ten total repository and environment targets.
+Choose "One shared workspace" and trigger it. One agent session starts with both repositories in its
+workspace. A choice with fewer than two repositories is unavailable.
 
-Cover this through real D1 storage and scheduler launch tests. Cover the form's multi-select state
-and submit payload in the web test suite.
+Edit an automation while it runs. The active work retains its original repository selection. The
+next trigger uses the new selection.
 
 ## Placement decision (durable)
 
-- Rebuild this in the upstream-owned shared types, control-plane automation store and scheduler, API
-  routes, and web automation form. Reapply it as one capability. Do not create a separate
-  single-repository pipeline.
-- The normalized selection table and invocation table are the source of truth. Runs are child
-  records that link to sessions. Do not store an aggregate invocation status.
-- Restore `9009_automation_execution_mode.sql` verbatim. Once production applies it, D1 skips it by
-  id. A fresh D1 applies it.
+- Rebuild the capability in the upstream-owned automation product. Reapply it as one behavior.
+- Restore migration `9009` verbatim. Once production applies it, D1 skips it by id. A fresh D1
+  applies it.
 - Card `22-automations-group-by-repo` depends on this capability.
-
-## Dated evidence (2026-08-21, non-binding hints)
-
-- Design record: `docs/MULTI_REPO_AUTOMATIONS.md`.
-- Shared contract: `packages/shared/src/types/automations.ts`.
-- Persistence: `packages/control-plane/src/db/automation-store.ts`.
-- Launch fan-out: `packages/control-plane/src/scheduler/durable-object.ts`.
-- API validation: `packages/control-plane/src/routes/automations.ts`.
-- Form and target picker: `packages/web/src/components/automations/automation-form.tsx` and
-  `packages/web/src/components/automations/use-automation-targets.ts`.
