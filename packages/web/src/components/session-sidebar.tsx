@@ -188,9 +188,11 @@ export function SessionSidebar({
           .filter((outcome) => outcome.kind === "archived")
           .map((outcome) => outcome.sessionId)
       );
-      const failedSessionIds = new Set(
-        outcomes.filter((outcome) => outcome.kind === "failed").map((outcome) => outcome.sessionId)
+      const failedOutcomes = outcomes.filter(
+        (outcome): outcome is Extract<typeof outcome, { kind: "failed" }> =>
+          outcome.kind === "failed"
       );
+      const failedSessionIds = new Set(failedOutcomes.map((outcome) => outcome.sessionId));
 
       if (archivedSessionIds.size > 0) {
         await handleSessionsArchived(archivedSessionIds);
@@ -206,8 +208,9 @@ export function SessionSidebar({
 
       setSelectedSessionIds(failedSessionIds);
       if (failedSessionIds.size > 0) {
+        const reasons = [...new Set(failedOutcomes.map((outcome) => outcome.reason))];
         toast.error(
-          `Failed to archive ${failedSessionIds.size} session${failedSessionIds.size === 1 ? "" : "s"}`
+          `Failed to archive ${failedSessionIds.size} session${failedSessionIds.size === 1 ? "" : "s"}: ${reasons.join(". ")}`
         );
       }
     } finally {
@@ -289,7 +292,7 @@ export function SessionSidebar({
                     onMarkLatestMessageRead={handleMarkLatestMessageRead}
                     onMarkUnread={handleMarkUnread}
                     selection={
-                      selectionMode && sessionCreatorFilter === "mine"
+                      selectionMode
                         ? {
                             selected: selectedVisibleRootSessionIds.has(session.id),
                             onSelectedChange: (selected) =>
@@ -358,15 +361,8 @@ export function SessionSidebar({
               </Button>
             </>
           ) : (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                setSessionCreatorFilter("mine");
-                setSelectionMode(true);
-              }}
-            >
-              Select my sessions
+            <Button variant="ghost" size="sm" onClick={() => setSelectionMode(true)}>
+              Select sessions
             </Button>
           )}
           <NewSessionButton onClick={onNewSession} />
