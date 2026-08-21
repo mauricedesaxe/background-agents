@@ -395,10 +395,11 @@ describe("automation route handlers", () => {
     it.each([
       [
         {
-          triggerType: "webhook",
+          triggerType: "github_event",
+          eventType: "pull_request.opened",
           repositories: [{ repoOwner: "acme", repoName: "web-app" }],
         },
-        "schedule or one-shot",
+        "Repository-scoped triggers",
       ],
       [
         {
@@ -504,7 +505,7 @@ describe("automation route handlers", () => {
       expect(mockBatch).not.toHaveBeenCalled();
     });
 
-    it("rejects multi-repository selections on non-schedule triggers", async () => {
+    it("allows multi-repository fan-out on webhook triggers", async () => {
       const res = await callRoute("POST", "/automations", {
         body: {
           name: "Webhook fan-out",
@@ -517,10 +518,7 @@ describe("automation route handlers", () => {
         },
       });
 
-      expect(res.status).toBe(400);
-      expect(await res.json()).toEqual({
-        error: "Multi-target selections require a schedule trigger",
-      });
+      expect(res.status).toBe(201);
     });
 
     it("creates an environment-targeted automation", async () => {
@@ -638,7 +636,7 @@ describe("automation route handlers", () => {
       });
     });
 
-    it("rejects multi-target selections on non-schedule triggers", async () => {
+    it("allows repository and environment targets on webhook triggers", async () => {
       const res = await callRoute("POST", "/automations", {
         body: {
           name: "Webhook fan-out",
@@ -649,10 +647,7 @@ describe("automation route handlers", () => {
         },
       });
 
-      expect(res.status).toBe(400);
-      expect(await res.json()).toEqual({
-        error: "Multi-target selections require a schedule trigger",
-      });
+      expect(res.status).toBe(201);
     });
 
     it("enforces the combined target cap", async () => {
@@ -979,9 +974,7 @@ describe("automation route handlers", () => {
       );
     });
 
-    it("validates the combined count against the other side's existing rows", async () => {
-      // A webhook automation with one existing repository row: adding an
-      // environment makes it multi-target, which requires a schedule trigger.
+    it("allows an environment beside an existing webhook repository", async () => {
       mockStore.getById.mockResolvedValue({
         ...sampleRow,
         trigger_type: "webhook",
@@ -995,10 +988,7 @@ describe("automation route handlers", () => {
         body: { environmentIds: ["env_1"] },
       });
 
-      expect(res.status).toBe(400);
-      expect(await res.json()).toEqual({
-        error: "Multi-target selections require a schedule trigger",
-      });
+      expect(res.status).toBe(200);
     });
 
     it("rejects an unknown environment on update", async () => {
