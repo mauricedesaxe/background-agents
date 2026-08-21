@@ -11,6 +11,7 @@ import type {
   AutomationInvocationSource,
   AutomationInvocationStatus,
   AutomationRepository,
+  AutomationExecutionMode,
   AutomationRun,
   AutomationRunStatus,
 } from "@open-inspect/shared/types/automations";
@@ -67,6 +68,8 @@ export interface AutomationRow {
   event_type: string | null;
   trigger_config: string | null; // JSON-serialized TriggerConfig
   trigger_auth_data: string | null;
+  /** Migration default preserves fan-out for legacy fixtures and rows. */
+  execution_mode?: AutomationExecutionMode;
 }
 
 type AutomationListResult = { automations: AutomationRow[] } & (
@@ -94,6 +97,8 @@ export interface AutomationRunRow {
   base_branch: string | null;
   /** Environment snapshot taken at firing time (null for repository/repo-less runs). */
   environment_id: string | null;
+  /** Ordered resolved RepositoryRef snapshot for a shared-workspace run. */
+  repository_set?: string | null;
 }
 
 export interface EnrichedRunRow extends AutomationRunRow {
@@ -109,6 +114,7 @@ export interface AutomationRepositoryRow {
   base_branch: string | null;
   created_at: number;
   updated_at: number;
+  position?: number;
 }
 
 /** Repository values for insert/replace (timestamps and owner id supplied by the store). */
@@ -195,6 +201,7 @@ export function toAutomation(
     deletedAt: row.deleted_at,
     eventType: row.event_type ?? null,
     triggerConfig,
+    executionMode: row.execution_mode ?? "fanout",
     repositories: repositoryRows.map(toAutomationRepository),
     environmentIds: environmentRows.map((environment) => environment.environment_id),
   };
@@ -322,8 +329,8 @@ export class AutomationStore {
          (id, name, instructions,
           trigger_type, schedule_cron, schedule_tz, model, reasoning_effort, enabled, next_run_at,
           consecutive_failures, created_by, user_id, created_at, updated_at, deleted_at,
-          event_type, trigger_config, trigger_auth_data)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          event_type, trigger_config, trigger_auth_data, execution_mode)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         row.id,
@@ -344,7 +351,8 @@ export class AutomationStore {
         row.deleted_at,
         row.event_type,
         row.trigger_config,
-        row.trigger_auth_data
+        row.trigger_auth_data,
+        row.execution_mode ?? "fanout"
       );
   }
 
@@ -426,6 +434,7 @@ export class AutomationStore {
       "event_type",
       "trigger_config",
       "trigger_auth_data",
+      "execution_mode",
     ];
 
     for (const field of allowedFields) {
@@ -512,7 +521,7 @@ export class AutomationStore {
       .prepare(
         `SELECT * FROM automation_repositories
          WHERE automation_id = ?
-         ORDER BY repo_owner, repo_name`
+         ORDER BY position, repo_owner, repo_name`
       )
       .bind(automationId)
       .all<AutomationRepositoryRow>();
@@ -532,7 +541,7 @@ export class AutomationStore {
       .prepare(
         `SELECT * FROM automation_repositories
          WHERE automation_id IN (${placeholders})
-         ORDER BY repo_owner, repo_name`
+         ORDER BY position, repo_owner, repo_name`
       )
       .bind(...automationIds)
       .all<AutomationRepositoryRow>();
@@ -549,12 +558,12 @@ export class AutomationStore {
     repositories: AutomationRepositoryInsert[],
     now: number
   ): SqlStatement[] {
-    return repositories.map((repository) =>
+    return repositories.map((repository, position) =>
       this.db
         .prepare(
           `INSERT INTO automation_repositories
-           (automation_id, repo_owner, repo_name, repo_id, base_branch, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
+           (automation_id, repo_owner, repo_name, repo_id, base_branch, created_at, updated_at, position)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .bind(
           automationId,
@@ -563,7 +572,8 @@ export class AutomationStore {
           repository.repo_id,
           repository.base_branch,
           now,
-          now
+          now,
+          position
         )
     );
   }
@@ -704,8 +714,8 @@ export class AutomationStore {
          (id, name, instructions,
           trigger_type, schedule_cron, schedule_tz, model, reasoning_effort, enabled, next_run_at,
           consecutive_failures, created_by, user_id, created_at, updated_at, deleted_at,
-          event_type, trigger_config, trigger_auth_data)
-         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          event_type, trigger_config, trigger_auth_data, execution_mode)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
          WHERE ? > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)`
       )
       .bind(
@@ -728,14 +738,15 @@ export class AutomationStore {
         row.event_type,
         row.trigger_config,
         row.trigger_auth_data,
+        row.execution_mode ?? "fanout",
         row.next_run_at
       );
-    const repositoryStatements = repositories.map((repository) =>
+    const repositoryStatements = repositories.map((repository, position) =>
       this.db
         .prepare(
           `INSERT INTO automation_repositories
-           (automation_id, repo_owner, repo_name, repo_id, base_branch, created_at, updated_at)
-           SELECT ?, ?, ?, ?, ?, ?, ?
+           (automation_id, repo_owner, repo_name, repo_id, base_branch, created_at, updated_at, position)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?
            WHERE EXISTS (SELECT 1 FROM automations WHERE id = ?)`
         )
         .bind(
@@ -746,6 +757,7 @@ export class AutomationStore {
           repository.base_branch,
           row.created_at,
           row.updated_at,
+          position,
           row.id
         )
     );
@@ -994,9 +1006,9 @@ export class AutomationStore {
           .prepare(
             `INSERT INTO automation_runs
              (id, automation_id, invocation_id, session_id, status, skip_reason, failure_reason,
-              scheduled_at, started_at, completed_at, created_at,
-              repo_owner, repo_name, repo_id, base_branch, environment_id)
-             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+               scheduled_at, started_at, completed_at, created_at,
+               repo_owner, repo_name, repo_id, base_branch, environment_id, repository_set)
+              SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
              WHERE EXISTS (SELECT 1 FROM automation_invocations WHERE id = ?)`
           )
           .bind(
@@ -1016,6 +1028,7 @@ export class AutomationStore {
             child.repo_id,
             child.base_branch,
             child.environment_id,
+            child.repository_set ?? null,
             invocation.id
           )
       );

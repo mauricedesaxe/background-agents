@@ -369,6 +369,66 @@ describe("automation route handlers", () => {
       );
     });
 
+    it("persists shared workspace mode for scheduled direct repositories", async () => {
+      mockStore.getById.mockResolvedValue(sampleRow);
+
+      const response = await callRoute("POST", "/automations", {
+        body: {
+          name: "Shared sync",
+          scheduleCron: "0 9 * * *",
+          scheduleTz: "UTC",
+          instructions: "Coordinate the repositories.",
+          executionMode: "shared_workspace",
+          repositories: [
+            { repoOwner: "acme", repoName: "web-app" },
+            { repoOwner: "acme", repoName: "api" },
+          ],
+        },
+      });
+
+      expect(response.status).toBe(201);
+      expect(mockStore.bindAutomationInsert).toHaveBeenCalledWith(
+        expect.objectContaining({ execution_mode: "shared_workspace" })
+      );
+    });
+
+    it.each([
+      [
+        {
+          triggerType: "webhook",
+          repositories: [{ repoOwner: "acme", repoName: "web-app" }],
+        },
+        "schedule or one-shot",
+      ],
+      [
+        {
+          environmentIds: ["env_1"],
+          repositories: [
+            { repoOwner: "acme", repoName: "web-app" },
+            { repoOwner: "acme", repoName: "api" },
+          ],
+        },
+        "cannot target environments",
+      ],
+      [{ repositories: [{ repoOwner: "acme", repoName: "web-app" }] }, "at least two repositories"],
+    ])("rejects invalid shared workspace targets", async (target, expectedError) => {
+      const response = await callRoute("POST", "/automations", {
+        body: {
+          name: "Invalid shared mode",
+          instructions: "Run tests",
+          scheduleCron: "0 9 * * *",
+          scheduleTz: "UTC",
+          executionMode: "shared_workspace",
+          ...target,
+        },
+      });
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: expect.stringContaining(expectedError),
+      });
+    });
+
     it("does not write partial data when repository resolution fails", async () => {
       vi.mocked(resolveRepoOrError).mockImplementation(async (_env, owner, name) => {
         if (name === "api") {

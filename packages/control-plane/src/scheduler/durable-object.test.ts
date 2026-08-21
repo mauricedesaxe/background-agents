@@ -677,6 +677,47 @@ describe("SchedulerDO", () => {
       );
     });
 
+    it("starts one shared workspace session with the full repository snapshot", async () => {
+      mockStore.getOverdueAutomations.mockResolvedValue([
+        { ...sampleAutomation, execution_mode: "shared_workspace" },
+      ]);
+      selectRepositories("auto-1", [
+        repositoryRow("auto-1", { repo_name: "web-app", repo_id: 12345, base_branch: "main" }),
+        repositoryRow("auto-1", { repo_name: "api", repo_id: 67890, base_branch: "develop" }),
+      ]);
+      mockCheckRepositoryAccess.mockImplementation(async ({ owner, name }) => ({
+        repoId: name === "api" ? 67890 : 12345,
+        repoOwner: owner,
+        repoName: name,
+        defaultBranch: "main",
+      }));
+
+      const env = createEnv();
+      const stub = env.SESSION.get(env.SESSION.idFromName("any"));
+      const fetchMock = vi.mocked(stub.fetch);
+      const scheduler = createSchedulerDO(env);
+
+      await scheduler.fetch(new Request("http://internal/internal/tick", { method: "POST" }));
+
+      expect(lastInsertedChildren()).toHaveLength(1);
+      expect(lastInsertedChildren()[0]).toMatchObject({
+        repository_set: JSON.stringify([
+          { repoOwner: "acme", repoName: "web-app", repoId: 12345, baseBranch: "main" },
+          { repoOwner: "acme", repoName: "api", repoId: 67890, baseBranch: "develop" },
+        ]),
+      });
+      const initBody = await getInitBody(fetchMock);
+      expect(initBody).toMatchObject({
+        repoOwner: "acme",
+        repoName: "web-app",
+        repositories: [
+          { repoOwner: "acme", repoName: "web-app", repoId: 12345, baseBranch: "main" },
+          { repoOwner: "acme", repoName: "api", repoId: 67890, baseBranch: "develop" },
+        ],
+      });
+      expect(promptCallCount(fetchMock)).toBe(1);
+    });
+
     it("creates sessions with null repo fields for repo-less automations", async () => {
       mockStore.getOverdueAutomations.mockResolvedValue([sampleAutomation]);
       selectRepositories("auto-1", []);

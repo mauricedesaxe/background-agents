@@ -19,22 +19,49 @@ function openPopover() {
 describe("SchedulePromptPopover", () => {
   it("schedules a quick 15-minute launch with a future instant and a timezone", async () => {
     const onSchedule = vi.fn().mockResolvedValue(true);
-    render(<SchedulePromptPopover disabled={false} onSchedule={onSchedule} />);
+    render(
+      <SchedulePromptPopover
+        disabled={false}
+        sharedWorkspaceEligible={false}
+        onSchedule={onSchedule}
+      />
+    );
 
     openPopover();
     fireEvent.click(await screen.findByRole("button", { name: "15 min" }));
 
     await waitFor(() => expect(onSchedule).toHaveBeenCalledTimes(1));
-    const [instant, timeZone] = onSchedule.mock.calls[0]!;
+    const [instant, timeZone, executionMode] = onSchedule.mock.calls[0]!;
     expect(instant).toBeInstanceOf(Date);
     expect((instant as Date).getTime()).toBeGreaterThan(Date.now());
     expect(typeof timeZone).toBe("string");
     expect((timeZone as string).length).toBeGreaterThan(0);
+    expect(executionMode).toBe("fanout");
+  });
+
+  it("offers shared workspace mode for a multi-repository task", async () => {
+    const onSchedule = vi.fn().mockResolvedValue(true);
+    render(
+      <SchedulePromptPopover disabled={false} sharedWorkspaceEligible onSchedule={onSchedule} />
+    );
+
+    openPopover();
+    fireEvent.click(screen.getByText("One shared workspace"));
+    fireEvent.click(await screen.findByRole("button", { name: "15 min" }));
+
+    await waitFor(() => expect(onSchedule).toHaveBeenCalledTimes(1));
+    expect(onSchedule.mock.calls[0]![2]).toBe("shared_workspace");
   });
 
   it("rejects a chosen local time in the past without calling onSchedule", async () => {
     const onSchedule = vi.fn().mockResolvedValue(true);
-    render(<SchedulePromptPopover disabled={false} onSchedule={onSchedule} />);
+    render(
+      <SchedulePromptPopover
+        disabled={false}
+        sharedWorkspaceEligible={false}
+        onSchedule={onSchedule}
+      />
+    );
 
     openPopover();
     const input = await screen.findByLabelText(/Local date and time/i);
@@ -47,7 +74,9 @@ describe("SchedulePromptPopover", () => {
 
   it("does not open while disabled", () => {
     const onSchedule = vi.fn().mockResolvedValue(true);
-    render(<SchedulePromptPopover disabled onSchedule={onSchedule} />);
+    render(
+      <SchedulePromptPopover disabled sharedWorkspaceEligible={false} onSchedule={onSchedule} />
+    );
 
     openPopover();
     expect(screen.queryByRole("button", { name: "15 min" })).not.toBeInTheDocument();

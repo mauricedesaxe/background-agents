@@ -11,6 +11,7 @@ import {
   isValidReasoningEffort,
 } from "@open-inspect/shared/models";
 import {
+  automationExecutionModeSchema,
   automationRepositoriesInputSchema,
   MAX_AUTOMATION_REPOSITORIES,
 } from "@open-inspect/shared/types/automations";
@@ -90,6 +91,8 @@ async function handleCreateScheduledTask(
     return error("Invalid reasoning effort for selected model", 400);
   }
 
+  const executionMode = automationExecutionModeSchema.safeParse(body.executionMode ?? "fanout");
+  if (!executionMode.success) return error("executionMode must be fanout or shared_workspace", 400);
   const parsedRepositories = automationRepositoriesInputSchema.safeParse(body.repositories ?? []);
   if (!parsedRepositories.success) return error("Invalid repository selection", 400);
   const environmentIds = body.environmentIds ?? [];
@@ -105,6 +108,13 @@ async function handleCreateScheduledTask(
   }
   if (environmentIds.length > 1 || (environmentIds.length > 0 && parsedRepositories.data.length)) {
     return error("A scheduled prompt must target one environment or one repository set", 400);
+  }
+  if (executionMode.data === "shared_workspace") {
+    if (environmentIds.length > 0)
+      return error("Shared workspace mode cannot target environments", 400);
+    if (parsedRepositories.data.length < 2) {
+      return error("Shared workspace mode requires at least two repositories", 400);
+    }
   }
 
   const environmentStore = new EnvironmentStore(ctx.db);
@@ -158,6 +168,7 @@ async function handleCreateScheduledTask(
     event_type: null,
     trigger_config: null,
     trigger_auth_data: null,
+    execution_mode: executionMode.data,
   };
   const store = new AutomationStore(ctx.db);
   if (!(await store.insertOnceIfFuture(row, repositories, environmentIds))) {

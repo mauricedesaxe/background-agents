@@ -13,6 +13,7 @@ import type { AutomationTriggerType, TriggerConfig } from "@open-inspect/shared/
 import type {
   CreateAutomationRequest,
   UpdateAutomationRequest,
+  AutomationExecutionMode,
 } from "@open-inspect/shared/types/automations";
 import { listChannels } from "@open-inspect/shared/slack";
 import {
@@ -40,6 +41,7 @@ import { applyIdentityEnforcement, resolveCanonicalUserId } from "../auth/identi
 import { generateWebhookApiKey, hashApiKey, encryptSentrySecret } from "../auth/webhook-key";
 import { createLogger } from "../logger";
 import {
+  automationExecutionModeSchema,
   automationRepositoriesInputSchema,
   MAX_AUTOMATION_REPOSITORIES,
 } from "@open-inspect/shared/types/automations";
@@ -184,6 +186,32 @@ function validateTargetCounts(
     throw new TargetSelectionError(
       `At most ${MAX_AUTOMATION_REPOSITORIES} repositories and environments combined`
     );
+  }
+}
+
+function parseExecutionMode(value: unknown): AutomationExecutionMode {
+  const parsed = automationExecutionModeSchema.safeParse(value ?? "fanout");
+  if (!parsed.success) {
+    throw new TargetSelectionError("executionMode must be fanout or shared_workspace");
+  }
+  return parsed.data;
+}
+
+function validateExecutionMode(
+  executionMode: AutomationExecutionMode,
+  triggerType: AutomationTriggerType,
+  repositoryCount: number,
+  environmentCount: number
+): void {
+  if (executionMode !== "shared_workspace") return;
+  if (triggerType !== "schedule" && triggerType !== "once") {
+    throw new TargetSelectionError("Shared workspace mode requires a schedule or one-shot trigger");
+  }
+  if (environmentCount > 0) {
+    throw new TargetSelectionError("Shared workspace mode cannot target environments");
+  }
+  if (repositoryCount < 2) {
+    throw new TargetSelectionError("Shared workspace mode requires at least two repositories");
   }
 }
 
@@ -492,6 +520,14 @@ async function handleCreateAutomation(
     requestedEnvironmentIds =
       environmentSelection.kind === "replace" ? environmentSelection.environmentIds : [];
     validateTargetCounts(triggerType, requestedRepositories.length, requestedEnvironmentIds.length);
+    const executionMode = parseExecutionMode(body.executionMode);
+    validateExecutionMode(
+      executionMode,
+      triggerType,
+      requestedRepositories.length,
+      requestedEnvironmentIds.length
+    );
+    body.executionMode = executionMode;
     await resolveEnvironmentSelection(ctx.db, requestedEnvironmentIds);
   } catch (e) {
     if (e instanceof TargetSelectionError) return error(e.message, 400);
@@ -624,6 +660,7 @@ async function handleCreateAutomation(
     event_type: body.eventType ?? null,
     trigger_config: body.triggerConfig ? JSON.stringify(body.triggerConfig) : null,
     trigger_auth_data: triggerAuthData,
+    execution_mode: body.executionMode ?? "fanout",
   };
 
   // Persist the automation, its repository selection, and (for slack_event)
@@ -829,6 +866,13 @@ async function handleUpdateAutomation(
   // — count rules stay write-time so a stored selection predating a rule can
   // never brick unrelated edits.
   let replacementRepositories: AutomationRepositoryInsert[] | null = null;
+  let executionMode: AutomationExecutionMode;
+  try {
+    executionMode = parseExecutionMode(body.executionMode ?? existing.execution_mode);
+  } catch (e) {
+    if (e instanceof TargetSelectionError) return error(e.message, 400);
+    throw e;
+  }
   const replacementEnvironmentIds: string[] | null =
     environmentSelection.kind === "replace" ? environmentSelection.environmentIds : null;
   if (selection.kind === "replace" || replacementEnvironmentIds !== null) {
@@ -846,6 +890,12 @@ async function handleUpdateAutomation(
         finalRepositoryCount,
         finalEnvironmentCount
       );
+      validateExecutionMode(
+        executionMode,
+        existing.trigger_type as AutomationTriggerType,
+        finalRepositoryCount,
+        finalEnvironmentCount
+      );
       if (replacementEnvironmentIds !== null) {
         await resolveEnvironmentSelection(ctx.db, replacementEnvironmentIds);
       }
@@ -857,6 +907,25 @@ async function handleUpdateAutomation(
       replacementRepositories = await resolveRepositorySelection(env, selection.repositories, ctx);
     }
   }
+
+  if (selection.kind !== "replace" && replacementEnvironmentIds === null) {
+    try {
+      const [repositories, environments] = await Promise.all([
+        store.getRepositoriesForAutomation(id),
+        store.getEnvironmentsForAutomation(id),
+      ]);
+      validateExecutionMode(
+        executionMode,
+        existing.trigger_type as AutomationTriggerType,
+        repositories.length,
+        environments.length
+      );
+    } catch (e) {
+      if (e instanceof TargetSelectionError) return error(e.message, 400);
+      throw e;
+    }
+  }
+  if (body.executionMode !== undefined) updateFields.execution_mode = executionMode;
 
   // Update event type — only for non-schedule types
   if (body.eventType !== undefined) {

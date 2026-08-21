@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { RepositoryRef } from "@open-inspect/shared/types/repositories";
 import type { AutomationRunRow } from "../db/automation-store";
 import type { Env } from "../types";
@@ -11,6 +12,29 @@ import { resolveEnvironmentTarget, resolveSessionRepositories } from "../repos/r
  * init input. Scalar fields mirror `repositories[0]` when the list is present
  * (the row-0-mirrors-scalars invariant initializeSession asserts).
  */
+const repositorySetSchema = z
+  .array(
+    z.object({
+      repoOwner: z.string().min(1),
+      repoName: z.string().min(1),
+      repoId: z.number(),
+      baseBranch: z.string().min(1),
+    })
+  )
+  .min(2);
+
+function parseRepositorySet(value: string): RepositoryRef[] {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(value);
+  } catch {
+    throw new Error("Automation run has an invalid repository snapshot");
+  }
+  const parsed = repositorySetSchema.safeParse(raw);
+  if (!parsed.success) throw new Error("Automation run has an invalid repository snapshot");
+  return parsed.data;
+}
+
 export interface AutomationSessionTarget {
   repoOwner: string | null;
   repoName: string | null;
@@ -39,6 +63,19 @@ export async function resolveAutomationSessionTarget(
   ctx: RequestContext,
   log: Logger
 ): Promise<AutomationSessionTarget> {
+  if (run.repository_set) {
+    const repositories = parseRepositorySet(run.repository_set);
+    const primary = repositories[0]!;
+    return {
+      repoOwner: primary.repoOwner,
+      repoName: primary.repoName,
+      repoId: primary.repoId,
+      defaultBranch: primary.baseBranch,
+      repositories,
+      environmentId: null,
+    };
+  }
+
   if (run.environment_id) {
     const environmentInputs = await resolveEnvironmentTarget(
       new EnvironmentStore(ctx.db),

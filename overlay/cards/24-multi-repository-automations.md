@@ -5,47 +5,55 @@ type: rebuild
 priority: high
 placement: upstream-code
 depends_on: []
+migrations: [9009]
 origin: fork; multi-repository maintenance automations
 ---
 
 ## Requirement
 
 A scheduled automation can target no repository, one repository, or up to ten repositories.
-Selecting several repositories starts one independent session per repository for every firing. Each
-session checks out only its assigned repository and opens its own branch, artifacts, and pull
-request. The shared automation instructions apply to every child session.
+Selecting several repositories defaults to fan-out. Every firing starts one independent session per
+repository. Each session checks out only its assigned repository and opens its own branch,
+artifacts, and pull request. The shared automation instructions apply to every child session.
 
-This is maintenance fan-out, not atomic cross-repository work. A user who needs one agent session
-with several repositories selects an environment workspace instead.
+Scheduled and one-shot automations can instead select shared workspace mode. Shared workspace mode
+requires two to ten direct repositories, rejects environment targets, and starts one session with
+the ordered repository set. The run stores that resolved set in `automation_runs.repository_set`
+before launch. Existing automations remain in fan-out mode.
 
 Repository selections are stored as rows, not as repository fields on the automation. Each row holds
 the owner, name, resolved repository id, and base branch. The server rejects duplicate normalized
 repositories. It resolves an omitted base branch to the repository default when the automation
 saves.
 
-Every firing creates one invocation. The invocation creates one child run per selected repository.
-Each child snapshots its repository details before launch. Editing an automation affects the next
-firing only. History always uses its child snapshots, never the automation's live repository list.
+Every firing creates one invocation. Fan-out creates one child run per selected repository. Shared
+workspace mode creates one child run that snapshots every resolved repository before launch. Editing
+an automation affects the next firing only. History always uses run snapshots, never the
+automation's live repository list.
 
 The history status is derived from child runs. A sweep completes only when every child completes. A
 sweep fails when every child fails. A mixed terminal result is `partial_failed`. A skipped firing
 has no children. One inaccessible repository fails its child but does not prevent other repositories
 from starting.
 
-Only scheduled and manual firings may target several repositories. Event triggers stay at zero or
-one repository until their cross-repository meaning is defined. A running invocation blocks the next
-scheduled firing. Manual trigger requests return a conflict while an invocation is active.
+Only schedule and one-shot configurations may use shared workspace mode. Event triggers stay at zero
+or one repository until their cross-repository meaning is defined. A running invocation blocks the
+next scheduled firing. Manual trigger requests return a conflict while an invocation is active.
 
-The automation form exposes a multi-select repository picker for scheduled automations. It states
-the ten-target limit and that each repository starts its own session. Event forms keep the
-single-target picker.
+The automation form exposes a multi-select repository picker for scheduled automations. With two or
+more direct repositories selected, it shows an explicit choice between fan-out and one shared
+workspace. Event forms keep the single-target picker.
 
 ## Acceptance test (the contract)
 
-Create a scheduled automation with two repositories. Trigger it once. The server records one
-invocation with two child runs. Each child starts a session that targets only its assigned
-repository. Both child sessions receive the shared instructions. Each session can create its own
-pull request.
+Create a scheduled automation with two repositories in fan-out mode. Trigger it once. The server
+records one invocation with two child runs. Each child starts a session that targets only its
+assigned repository. Both child sessions receive the shared instructions. Each session can create
+its own pull request.
+
+Create a scheduled or one-shot automation with two repositories in shared workspace mode. The server
+records one child run and starts one session with the ordered repository snapshot. Shared mode
+rejects environment targets, non-schedule triggers, and fewer than two repositories.
 
 Edit the selection while the first invocation runs. Its history retains the original two repository
 snapshots. The next firing uses the new selection. Make one selected repository inaccessible. Its
@@ -62,9 +70,8 @@ and submit payload in the web test suite.
   single-repository pipeline.
 - The normalized selection table and invocation table are the source of truth. Runs are child
   records that link to sessions. Do not store an aggregate invocation status.
-- Restore any required fork-local D1 migrations at their recorded 9xxx ids after they are assigned.
-  The migration must support both an existing production schema and a fresh D1 database. Record the
-  ids in this card before the first sync that applies them.
+- Restore `9009_automation_execution_mode.sql` verbatim. Once production applies it, D1 skips it by
+  id. A fresh D1 applies it.
 - Card `22-automations-group-by-repo` depends on this capability.
 
 ## Dated evidence (2026-08-21, non-binding hints)
