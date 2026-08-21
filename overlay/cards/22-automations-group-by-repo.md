@@ -4,7 +4,7 @@ title: The automations list groups by repository
 type: rebuild
 priority: medium
 placement: upstream-code
-depends_on: []
+depends_on: [24-multi-repository-automations]
 origin: fork; issue #328; automations-page readability
 discussion: https://github.com/mauricedesaxe/background-agents/issues/328
 ---
