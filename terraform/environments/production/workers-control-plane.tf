@@ -9,7 +9,7 @@ resource "cloudflare_queue" "image_build_finalization" {
 
 resource "cloudflare_queue" "image_build_finalization_dlq" {
   account_id = var.cloudflare_account_id
-  queue_name = "open-inspect-image-build-finalization-dlq-${local.name_suffix}"
+  queue_name = "open-inspect-image-build-final-dlq-${local.name_suffix}"
 }
 
 # Build control-plane worker bundle (only runs during apply, not plan)
