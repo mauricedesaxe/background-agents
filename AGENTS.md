@@ -134,6 +134,15 @@ under 72 characters. Use the PR body for details, not the commit message.
   `uv run modal deploy -m src`). Never deploy `src/app.py` directly; it doesn't import function
   modules.
 - **Modal image rebuild**: update `CACHE_BUSTER` in `src/images/base.py` to force a rebuild.
+- **Sandbox image changes**: a harness or skills change does not reach Daytona until
+  `SANDBOX_VERSION` changes and Terraform rebuilds the snapshot (#94). Daytona's `source_hash`
+  covers only `.py`, `.js`, and `.ts`, so changing `HARNESS_REF` in `install-harness.sh` does not
+  invalidate the snapshot. Modal and Vercel use the same extension filter. OpenComputer hashes every
+  non-cache file under the sandbox-runtime source.
+- **Terraform plans after deploy**: a healthy plan is not empty because `always_run = timestamp()`
+  replaces every worker. Treat any resource marked `will be created` as the failure signal.
+- **Fork-local D1 migrations**: IDs start at `9000`. Follow `overlay/rules.md` Rule 3 for the
+  canonical migration rule.
 - **Web platform choice**: set `web_platform = "cloudflare"` in Terraform variables to deploy the
   web app to Cloudflare Workers via OpenNext instead of Vercel. When using Cloudflare, Vercel
   credentials are not required (dummy defaults are used). `NEXT_PUBLIC_WS_URL` must be available at
@@ -148,6 +157,16 @@ under 72 characters. Use the PR body for details, not the commit message.
   owners (see `is_safe_repo_owner`).
 
 ## CI/CD
+
+Merging to `main` triggers `terraform.yml`. The plan always runs, and the apply runs unattended
+without a working `production` approval gate. Terraform deploys the control plane, D1 migrations,
+and the web app when `web_platform = "cloudflare"`. Vercel deploys the web app when
+`web_platform = "vercel"`. Terraform also deploys the sandbox providers. This deployment uses
+Daytona.
+
+A rebase merge can produce no workflow runs (#75). After each merge, confirm a run exists with
+`gh run list --branch main`. If no run exists, start one with
+`gh workflow run terraform.yml --ref main`.
 
 Pushing to `main` auto-deploys changed services:
 
