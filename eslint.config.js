@@ -117,6 +117,13 @@ export default tseslint.config(
     },
   },
 
+  {
+    files: [".opencode/**/*.js"],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
+
   // Control-plane data-layer boundary: all production code must use the
   // injected SqlDatabase (ctx.db, a DO's db field, or a db parameter), never
   // the raw env.DB binding — reading the binding elsewhere would silently
