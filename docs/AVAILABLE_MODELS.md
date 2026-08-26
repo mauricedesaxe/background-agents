@@ -61,12 +61,14 @@ Grok models require a SuperGrok OAuth refresh token and are disabled by default.
 
 ## Z.AI Coding Plan
 
-Z.AI Coding Plan models require `ZHIPU_API_KEY` as a global or repository secret.
+Z.AI Coding Plan models require `ZHIPU_API_KEY` as a global or repository secret. Z.AI routes legacy
+`zai-coding-plan/glm-5.2` requests to `zai-coding-plan/glm-5.3`. See the
+[Z.AI latest model documentation](https://docs.z.ai/devpack/latest-model).
 
-| Model ID                  | Display name | Description      | Reasoning efforts | Default effort |
-| ------------------------- | ------------ | ---------------- | ----------------- | -------------- |
-| `zai-coding-plan/glm-5.2` | GLM 5.2      | Z.AI Coding Plan | Not supported     | N/A            |
-| `zai-coding-plan/glm-5.3` | GLM 5.3      | Z.AI Coding Plan | Not supported     | N/A            |
+| Model ID                        | Display name  | Description                  | Reasoning efforts | Default effort |
+| ------------------------------- | ------------- | ---------------------------- | ----------------- | -------------- |
+| `zai-coding-plan/glm-5.3`       | GLM 5.3       | Flagship coding model        | low, high, max    | max            |
+| `zai-coding-plan/glm-5.3-flash` | GLM 5.3 Flash | Fast multimodal coding model | low, high, max    | max            |
 
 ## DeepSeek
 

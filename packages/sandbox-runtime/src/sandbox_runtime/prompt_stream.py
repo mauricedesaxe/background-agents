@@ -953,7 +953,7 @@ class OpenCodePromptStream:
                         "reasoningEffort": reasoning_effort,
                         "reasoningSummary": "auto",
                     }
-                elif provider_id == "xai":
+                elif provider_id in {"xai", "zai-coding-plan"}:
                     request_body["variant"] = reasoning_effort
 
             request_body["model"] = model_spec

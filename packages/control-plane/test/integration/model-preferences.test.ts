@@ -43,12 +43,18 @@ describe("Model preferences API", () => {
   });
 
   it("normalizes and deduplicates stored legacy model IDs", async () => {
-    await seedPreferences(["gpt-5.4", "openai/gpt-5.4", "claude-sonnet-4-6"]);
+    await seedPreferences([
+      "gpt-5.4",
+      "openai/gpt-5.4",
+      "claude-sonnet-4-6",
+      "zai-coding-plan/glm-5.2",
+      "zai-coding-plan/glm-5.3",
+    ]);
 
     const response = await serviceFetch("https://test.local/model-preferences");
 
     expect(await response.json()).toEqual({
-      enabledModels: ["openai/gpt-5.4", "anthropic/claude-sonnet-4-6"],
+      enabledModels: ["openai/gpt-5.4", "anthropic/claude-sonnet-4-6", "zai-coding-plan/glm-5.3"],
     });
   });
 

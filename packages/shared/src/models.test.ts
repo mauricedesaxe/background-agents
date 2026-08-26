@@ -54,7 +54,10 @@ const ZEN_MODELS = [
 ] as const;
 
 const DEEPSEEK_MODELS = ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"] as const;
-const ZAI_CODING_PLAN_MODELS = ["zai-coding-plan/glm-5.2", "zai-coding-plan/glm-5.3"] as const;
+const ZAI_CODING_PLAN_MODELS = [
+  "zai-coding-plan/glm-5.3",
+  "zai-coding-plan/glm-5.3-flash",
+] as const;
 
 describe("model utilities", () => {
   it("derives every public model view from the authoritative catalog", () => {
@@ -123,6 +126,13 @@ describe("model utilities", () => {
     expect(isValidModel("claude-fable-5")).toBe(true);
     expect(isValidModel("gpt-5.3-codex")).toBe(true);
     expect(isValidModel("gpt-5.6-sol")).toBe(true);
+  });
+
+  it("normalizes and deduplicates the legacy Z.AI model ID", () => {
+    expect(normalizeModelId("zai-coding-plan/glm-5.2")).toBe("zai-coding-plan/glm-5.3");
+    expect(normalizeValidModels(["zai-coding-plan/glm-5.2", "zai-coding-plan/glm-5.3"])).toEqual([
+      "zai-coding-plan/glm-5.3",
+    ]);
   });
 
   it("normalizes, filters, and deduplicates model lists", () => {
@@ -304,6 +314,18 @@ describe("model utilities", () => {
     });
     expect(getReasoningConfig("xai/grok-build-0.1")).toBeUndefined();
     expect(getReasoningConfig("deepseek/deepseek-v4-flash")).toBeUndefined();
+  });
+
+  it("configures Z.AI Coding Plan reasoning efforts", () => {
+    for (const model of ZAI_CODING_PLAN_MODELS) {
+      expect(getReasoningConfig(model)).toEqual({
+        efforts: ["low", "high", "max"],
+        default: "max",
+      });
+      expect(isValidReasoningEffort(model, "low")).toBe(true);
+      expect(isValidReasoningEffort(model, "max")).toBe(true);
+      expect(isValidReasoningEffort(model, "medium")).toBe(false);
+    }
   });
 
   it("validates reasoning efforts per model", () => {
