@@ -23,7 +23,7 @@ CODE_SERVER_VERSION = "4.109.5"
 AGENT_BROWSER_VERSION = "0.21.2"
 JJ_VERSION = "0.44.0"
 SANDBOX_VERSION = (
-    "daytona-v11-8gb-jj-vnc-opencode-1-18-18"  # bump to invalidate the Daytona snapshot
+    "daytona-v12-8gb-jj-vnc-opencode-1-18-18"  # bump to invalidate the Daytona snapshot
 )
 
 
