@@ -324,6 +324,19 @@ class TestBuildPromptRequestBody:
         assert body["variant"] == "medium"
         assert body["model"] == {"providerID": "xai", "modelID": "grok-4.6"}
 
+    def test_with_zai_reasoning_effort(self, bridge: AgentBridge):
+        body = bridge._ensure_prompt_stream()._build_prompt_request_body(
+            "Hello",
+            "zai-coding-plan/glm-5.3-flash",
+            reasoning_effort="max",
+        )
+
+        assert body["variant"] == "max"
+        assert body["model"] == {
+            "providerID": "zai-coding-plan",
+            "modelID": "glm-5.3-flash",
+        }
+
 
 class TestOpenCodeIdentifier:
     """Tests for OpenCode-compatible ascending ID generation."""

@@ -225,8 +225,18 @@ export const MODEL_CATALOG = [
     category: "Z.AI Coding Plan",
     enabledByDefault: false,
     models: [
-      { id: "zai-coding-plan/glm-5.2", name: "GLM 5.2", description: "Z.AI Coding Plan" },
-      { id: "zai-coding-plan/glm-5.3", name: "GLM 5.3", description: "Z.AI Coding Plan" },
+      {
+        id: "zai-coding-plan/glm-5.3",
+        name: "GLM 5.3",
+        description: "Flagship coding model",
+        reasoning: { efforts: ["low", "high", "max"], default: "max" },
+      },
+      {
+        id: "zai-coding-plan/glm-5.3-flash",
+        name: "GLM 5.3 Flash",
+        description: "Fast multimodal coding model",
+        reasoning: { efforts: ["low", "high", "max"], default: "max" },
+      },
     ],
   },
   {
@@ -306,11 +316,13 @@ export const DEFAULT_ENABLED_MODELS: ValidModel[] = MODEL_CATALOG.filter(
 
 /**
  * Normalize a model ID to canonical "provider/model" format.
+ * Maps the legacy Z.AI GLM 5.2 ID to GLM 5.3.
  * Adds "anthropic/" prefix to bare Claude model names and "openai/" prefix
  * to bare GPT model names for backward compat with existing data in D1,
  * SQLite, and Slack KV.
  */
 export function normalizeModelId(modelId: string): string {
+  if (modelId === "zai-coding-plan/glm-5.2") return "zai-coding-plan/glm-5.3";
   if (modelId.includes("/")) return modelId;
   if (modelId.startsWith("claude-")) return `anthropic/${modelId}`;
   if (modelId.startsWith("gpt-")) return `openai/${modelId}`;
