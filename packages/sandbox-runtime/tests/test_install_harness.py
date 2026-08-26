@@ -286,9 +286,12 @@ class TestPinnedHarness:
         philosophy = (opencode / "rules" / "PHILOSOPHY.md").read_text()
         assert "## §30. Felt outcome and writing" in philosophy
         assert "## §29. Narrative order" in philosophy
-        # §31 is what this pin was last moved to deliver, so asserting it is what makes the bump
-        # verifiable rather than merely plausible.
-        assert "## §31. Code style" in philosophy
+        assert "## §1. Earn its keep and Grug-brained development" in philosophy
+        assert "## §32. Complexity, deep modules, and locality of behaviour" in philosophy
+
+        packs = opencode / "rules" / "packs"
+        assert (packs / "defaults.md").is_file()
+        assert not (packs / "web.md").exists()
 
         assert not (opencode / "skills").exists()  # removed by install-harness.sh; runtime owns it
 
