@@ -68,7 +68,7 @@ export class SessionSandboxEventProcessor {
     private readonly updateLastActivity: (timestamp: number) => void,
     private readonly scheduleInactivityCheck: () => Promise<void>,
     private readonly processMessageQueue: () => Promise<void>,
-    private readonly failPendingMessages: (error: string) => Promise<void>,
+    private readonly failUnfinishedMessages: (error: string) => Promise<void>,
     private readonly broadcastPromptQueue: () => void
   ) {}
 
@@ -106,7 +106,7 @@ export class SessionSandboxEventProcessor {
         (event.contextStatus === "existing" && reportedSessionId === null);
 
       if (contextUnavailable) {
-        await this.failPendingMessages(CONTEXT_UNAVAILABLE_ERROR);
+        await this.failUnfinishedMessages(CONTEXT_UNAVAILABLE_ERROR);
         this.sandboxRepository.updateSandboxStatus("failed");
         this.messenger.broadcast({
           type: "sandbox_error",
