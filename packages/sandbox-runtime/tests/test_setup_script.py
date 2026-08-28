@@ -309,3 +309,32 @@ class TestSetupInRepositoryBoot:
 
         sup.hooks.run_setup.assert_not_called()
         sup.hooks.run_start.assert_called_once_with(sup.repositories[0], BootMode.SNAPSHOT_RESTORE)
+
+    async def test_persistent_resume_skips_setup_and_runs_start(self, tmp_path):
+        sup = _make_repository_boot(tmp_path)
+
+        sup._write_repo_manifest = MagicMock()
+        sup._write_workspace_manifest = MagicMock()
+        sup.synchronizer.ensure_credentials_configured = AsyncMock()
+        from sandbox_runtime.repository_sync import (
+            RepositorySyncOutcome,
+            RepositorySyncResult,
+            RepositorySyncStatus,
+        )
+
+        sup.synchronizer.sync = AsyncMock(
+            return_value=RepositorySyncResult(
+                tuple(sup.repositories),
+                tuple(
+                    RepositorySyncOutcome(repo, RepositorySyncStatus.SUCCEEDED)
+                    for repo in sup.repositories
+                ),
+            )
+        )
+        sup.hooks.run_setup = AsyncMock(return_value=True)
+        sup.hooks.run_start = AsyncMock(return_value=True)
+
+        await sup.boot(BootMode.PERSISTENT_RESUME, [])
+
+        sup.hooks.run_setup.assert_not_called()
+        sup.hooks.run_start.assert_called_once_with(sup.repositories[0], BootMode.PERSISTENT_RESUME)

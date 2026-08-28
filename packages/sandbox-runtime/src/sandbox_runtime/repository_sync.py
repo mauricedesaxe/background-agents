@@ -10,10 +10,10 @@ from typing import TYPE_CHECKING, Any
 
 from .diff_baseline import resolve_session_diff_baselines
 from .process_output import communicate_owned_subprocess, terminate_owned_subprocess
-from .runtime_config import BootMode
 
 if TYPE_CHECKING:
     from .repo_config import RepoEntry
+    from .runtime_config import BootMode
 
 GH_WRAPPER_REAL_PATH = "/usr/bin/gh"
 GH_WRAPPER_INSTALL_PATH = Path("/usr/local/bin/gh")
@@ -286,7 +286,7 @@ class RepositorySynchronizer:
                 repo_name=repo.name,
             )
             return False
-        preserve_checkout = boot_mode is BootMode.SNAPSHOT_RESTORE
+        preserve_checkout = boot_mode.preserves_repository_checkout
         try:
             if not await self._ensure_plain_origin(repo):
                 return False
@@ -364,7 +364,7 @@ class RepositorySynchronizer:
         )
         resolved = await resolve_session_diff_baselines(
             repositories,
-            discover_missing=boot_mode is not BootMode.SNAPSHOT_RESTORE,
+            discover_missing=not boot_mode.preserves_repository_checkout,
             get_head_sha=self._get_head_sha,
         )
         return RepositorySyncResult(tuple(resolved), outcomes)

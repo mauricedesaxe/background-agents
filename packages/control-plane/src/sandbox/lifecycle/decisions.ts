@@ -241,7 +241,14 @@ export function evaluateSpawnDecision(
   if (
     supportsPersistentResume &&
     state.providerObjectId &&
-    (state.status === "stopped" || state.status === "stale")
+    (state.status === "stopped" ||
+      state.status === "stale" ||
+      state.status === "failed" ||
+      ((state.status === "spawning" || state.status === "connecting") &&
+        timeSinceLastSpawn >= config.spawningTimeoutMs) ||
+      (state.status === "ready" &&
+        !state.hasActiveWebSocket &&
+        timeSinceLastSpawn >= config.readyWaitMs))
   ) {
     return { action: "resume", providerObjectId: state.providerObjectId };
   }

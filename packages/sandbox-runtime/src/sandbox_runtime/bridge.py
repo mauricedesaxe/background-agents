@@ -16,13 +16,14 @@ import json
 import math
 import os
 import re
-import tempfile
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, NoReturn
 
+import httpx
 import websockets
 from websockets import ClientConnection, State
 from websockets.exceptions import InvalidStatus
@@ -36,6 +37,8 @@ from .constants import (
     BOOT_WARNINGS_FILE_PATH,
     DEFAULT_SANDBOX_TIMEOUT_SECONDS,
     MAX_SNAPSHOT_RESERVE_SECONDS,
+    OPENCODE_SESSION_ID_ENV_VAR,
+    OPENCODE_SESSION_ID_FILE_PATH,
     REPO_MANIFEST_FILE_PATH,
     SANDBOX_TIMEOUT_ENV_VAR,
     SNAPSHOT_RESERVE_FRACTION,
@@ -152,6 +155,12 @@ class SessionTerminatedError(Exception):
     pass
 
 
+class OpenCodeContextStatus(StrEnum):
+    FRESH = "fresh"
+    EXISTING = "existing"
+    UNAVAILABLE = "unavailable"
+
+
 class AgentBridge:
     """
     Bridge between sandbox OpenCode instance and control plane.
@@ -174,6 +183,8 @@ class AgentBridge:
     GIT_PUSH_TERMINATE_GRACE_SECONDS = 5.0
     JJ_COMMAND_TIMEOUT_SECONDS = 30.0
     DIFF_REFRESH_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+    CONTEXT_VERIFY_BACKOFF_BASE_SECONDS = 1.0
+    CONTEXT_VERIFY_MAX_DELAY_SECONDS = 10.0
 
     def __init__(
         self,
@@ -183,6 +194,7 @@ class AgentBridge:
         auth_token: str,
         opencode_port: int = 4096,
         opencode_client: OpenCodeClient | None = None,
+        expected_opencode_session_id: str | None = None,
     ):
         self.sandbox_id = sandbox_id
         self.session_id = session_id
@@ -234,8 +246,10 @@ class AgentBridge:
         self.git_sync_complete = asyncio.Event()
 
         # Session state
+        self.expected_opencode_session_id = expected_opencode_session_id or None
         self.opencode_session_id: str | None = None
-        self.session_id_file = Path(tempfile.gettempdir()) / "opencode-session-id"
+        self.context_status = OpenCodeContextStatus.FRESH
+        self.session_id_file = Path(OPENCODE_SESSION_ID_FILE_PATH)
         self.repo_path = Path("/workspace")
         # Supervisor-written canonical repo manifest; push targeting resolves
         # member checkout paths through it rather than joining spec-supplied
@@ -292,6 +306,7 @@ class AgentBridge:
             "type": "ready",
             "sandboxId": self.sandbox_id,
             "opencodeSessionId": self.opencode_session_id,
+            "contextStatus": self.context_status.value,
             "repositories": [
                 {
                     "position": position,
@@ -483,6 +498,9 @@ class AgentBridge:
                     )
                     await self.event_forwarder.bind(ws)
                     await self._send_event(self._build_ready_event())
+                    if self.context_status is OpenCodeContextStatus.UNAVAILABLE:
+                        self.shutdown_event.set()
+                        return
                     await self._drain_boot_warnings()
 
                     heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -772,6 +790,7 @@ class AgentBridge:
         )
 
         await self._save_session_id()
+        await self._send_event(self._build_ready_event())
 
     def _ensure_prompt_stream(self) -> OpenCodePromptStream:
         """The long-lived prompt SSE translator, created on first use."""
@@ -1168,28 +1187,69 @@ class AgentBridge:
         await self.git_signing.refresh(user)
 
     async def _load_session_id(self) -> None:
-        """Load OpenCode session ID from file if it exists."""
-        if self.session_id_file.exists():
+        """Resolve and verify the expected OpenCode context before readiness."""
+        candidate = self.expected_opencode_session_id
+        if candidate is None and self.session_id_file.exists():
             try:
-                self.opencode_session_id = self.session_id_file.read_text().strip()
-                self.log.info(
-                    "opencode.session.ensure",
-                    opencode_session_id=self.opencode_session_id,
-                    action="loaded",
-                )
-
-                try:
-                    if not await self.opencode_client.session_exists(self.opencode_session_id):
-                        self.log.info(
-                            "opencode.session.invalid",
-                            opencode_session_id=self.opencode_session_id,
-                        )
-                        self.opencode_session_id = None
-                except Exception:
-                    self.opencode_session_id = None
-
+                candidate = self.session_id_file.read_text().strip() or None
             except Exception as e:
                 self.log.error("opencode.session.load_error", exc=e)
+
+        if candidate is None:
+            self.context_status = OpenCodeContextStatus.FRESH
+            return
+
+        self.opencode_session_id = candidate
+        self.log.info(
+            "opencode.session.ensure",
+            opencode_session_id=candidate,
+            action="expected" if self.expected_opencode_session_id else "loaded",
+        )
+        attempt = 0
+        while not self.shutdown_event.is_set():
+            try:
+                if await self.opencode_client.session_exists(candidate):
+                    self.context_status = OpenCodeContextStatus.EXISTING
+                else:
+                    self.context_status = OpenCodeContextStatus.UNAVAILABLE
+                    self.log.error(
+                        "opencode.session.unavailable",
+                        opencode_session_id=candidate,
+                    )
+                return
+            except (httpx.TransportError, httpx.HTTPStatusError) as error:
+                if not self._is_transient_context_verification_error(error):
+                    raise
+                attempt += 1
+                delay = min(
+                    self.CONTEXT_VERIFY_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
+                    self.CONTEXT_VERIFY_MAX_DELAY_SECONDS,
+                )
+                self.log.warn(
+                    "opencode.session.verify_retry",
+                    opencode_session_id=candidate,
+                    attempt=attempt,
+                    delay_s=delay,
+                    exc=error,
+                )
+                if not await self._wait_for_context_retry(delay):
+                    return
+
+    @staticmethod
+    def _is_transient_context_verification_error(error: Exception) -> bool:
+        if isinstance(error, httpx.TransportError):
+            return True
+        if isinstance(error, httpx.HTTPStatusError):
+            status_code = error.response.status_code
+            return status_code in (408, 425, 429) or status_code >= 500
+        return False
+
+    async def _wait_for_context_retry(self, delay_seconds: float) -> bool:
+        try:
+            await asyncio.wait_for(self.shutdown_event.wait(), timeout=delay_seconds)
+        except TimeoutError:
+            return True
+        return False
 
     async def _save_session_id(self) -> None:
         """Save OpenCode session ID to file for persistence."""
@@ -1292,6 +1352,7 @@ async def main() -> None:
         control_plane_url=args.control_plane,
         auth_token=args.token,
         opencode_port=args.opencode_port,
+        expected_opencode_session_id=os.environ.get(OPENCODE_SESSION_ID_ENV_VAR),
     )
 
     await bridge.run()

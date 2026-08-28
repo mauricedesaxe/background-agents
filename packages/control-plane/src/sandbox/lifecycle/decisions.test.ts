@@ -502,7 +502,7 @@ describe("evaluateSpawnDecision", () => {
     expect(decision.action).toBe("spawn");
   });
 
-  it("does not resume for failed status even with providerObjectId", () => {
+  it('returns "resume" for failed persistent sandboxes with a provider object', () => {
     const now = Date.now();
     const state: SandboxState = {
       status: "failed",
@@ -514,8 +514,40 @@ describe("evaluateSpawnDecision", () => {
 
     const decision = evaluateSpawnDecision(state, config, now, false, true);
 
-    // "failed" is not a resume-eligible status — should fall through to spawn
-    expect(decision.action).toBe("spawn");
+    expect(decision).toEqual({ action: "resume", providerObjectId: "daytona-abc123" });
+  });
+
+  it.each(["spawning", "connecting"] as const)(
+    'returns "resume" for stale %s persistent sandboxes with a provider object',
+    (status) => {
+      const now = Date.now();
+      const state: SandboxState = {
+        status,
+        createdAt: now - config.spawningTimeoutMs,
+        providerObjectId: "daytona-abc123",
+        snapshotImageId: null,
+        hasActiveWebSocket: false,
+      };
+
+      const decision = evaluateSpawnDecision(state, config, now, false, true);
+
+      expect(decision).toEqual({ action: "resume", providerObjectId: "daytona-abc123" });
+    }
+  );
+
+  it('returns "resume" for disconnected ready persistent sandboxes after reconnect grace', () => {
+    const now = Date.now();
+    const state: SandboxState = {
+      status: "ready",
+      createdAt: now - 120000,
+      providerObjectId: "daytona-abc123",
+      snapshotImageId: null,
+      hasActiveWebSocket: false,
+    };
+
+    const decision = evaluateSpawnDecision(state, config, now, false, true);
+
+    expect(decision).toEqual({ action: "resume", providerObjectId: "daytona-abc123" });
   });
 });
 

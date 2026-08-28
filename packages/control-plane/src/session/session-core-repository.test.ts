@@ -189,6 +189,15 @@ describe("SessionCoreRepository", () => {
     });
   });
 
+  describe("updateOpenCodeSessionId", () => {
+    it("persists the native OpenCode session identity", () => {
+      repo.updateOpenCodeSessionId("ses-existing");
+
+      expect(mock.calls[0].query).toContain("opencode_session_id");
+      expect(mock.calls[0].params).toEqual(["ses-existing"]);
+    });
+  });
+
   describe("updateSessionCurrentSha", () => {
     it("updates SHA", () => {
       repo.updateSessionCurrentSha("abc123");

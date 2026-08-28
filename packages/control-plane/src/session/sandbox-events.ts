@@ -23,6 +23,8 @@ type PushTerminalEvent = Extract<SandboxEvent, { type: "push_complete" | "push_e
 
 /** How long a pending push waits for its terminal event before rejecting. */
 const PUSH_TIMEOUT_MS = 360_000;
+export const CONTEXT_UNAVAILABLE_ERROR =
+  "The original OpenCode context is no longer available. Start a new session to continue.";
 
 /** Event types that require delivery acknowledgement. */
 const CRITICAL_EVENT_TYPES: ReadonlySet<string> = new Set([
@@ -62,9 +64,11 @@ export class SessionSandboxEventProcessor {
       completedAt: number
     ) => Promise<void>,
     private readonly statusService: SessionStatusService,
+    private readonly onSandboxReady: () => void,
     private readonly updateLastActivity: (timestamp: number) => void,
     private readonly scheduleInactivityCheck: () => Promise<void>,
     private readonly processMessageQueue: () => Promise<void>,
+    private readonly failPendingMessages: (error: string) => Promise<void>,
     private readonly broadcastPromptQueue: () => void
   ) {}
 
@@ -94,7 +98,29 @@ export class SessionSandboxEventProcessor {
     }
 
     if (event.type === "ready") {
+      const expectedSessionId = this.repository.getSession()?.opencode_session_id ?? null;
+      const reportedSessionId = event.opencodeSessionId ?? null;
+      const contextUnavailable =
+        event.contextStatus === "unavailable" ||
+        (expectedSessionId !== null && reportedSessionId !== expectedSessionId) ||
+        (event.contextStatus === "existing" && reportedSessionId === null);
+
+      if (contextUnavailable) {
+        await this.failPendingMessages(CONTEXT_UNAVAILABLE_ERROR);
+        this.sandboxRepository.updateSandboxStatus("failed");
+        this.messenger.broadcast({
+          type: "sandbox_error",
+          error: CONTEXT_UNAVAILABLE_ERROR,
+        });
+        return;
+      }
+
+      if (reportedSessionId) {
+        this.repository.updateOpenCodeSessionId(reportedSessionId);
+      }
       this.diffService.pinBaselines(event);
+      this.onSandboxReady();
+      await this.processMessageQueue();
     }
 
     const eventMessageId = "messageId" in event ? event.messageId : null;

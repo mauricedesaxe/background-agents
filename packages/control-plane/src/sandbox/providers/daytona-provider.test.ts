@@ -510,7 +510,7 @@ describe("DaytonaSandboxProvider", () => {
       expect(client.recoverSandbox).not.toHaveBeenCalled();
     });
 
-    it("does not start or recover when already started", async () => {
+    it("recycles an already-started sandbox whose bridge disconnected", async () => {
       const client = createMockClient({
         getSandbox: async () => ({ id: "daytona-sandbox-id", state: "started" }),
       });
@@ -519,7 +519,8 @@ describe("DaytonaSandboxProvider", () => {
       const result = await provider.resumeSandbox(baseResumeConfig);
 
       expect(result.success).toBe(true);
-      expect(client.startSandbox).not.toHaveBeenCalled();
+      expect(client.stopSandbox).toHaveBeenCalledWith("daytona-sandbox-id");
+      expect(client.startSandbox).toHaveBeenCalledWith("daytona-sandbox-id");
       expect(client.recoverSandbox).not.toHaveBeenCalled();
     });
 

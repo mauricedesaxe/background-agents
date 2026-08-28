@@ -28,12 +28,16 @@ def isolate_runtime_file_paths(tmp_path, monkeypatch):
     manifest_path = str(tmp_path / "oi-repo-manifest.json")
     boot_warnings_path = str(tmp_path / "oi-boot-warnings.jsonl")
     tunnel_env_path = str(tmp_path / ".tunnels.env")
+    opencode_session_id_path = str(tmp_path / "opencode-session-id")
     monkeypatch.setattr("sandbox_runtime.repository_boot.REPO_MANIFEST_FILE_PATH", manifest_path)
     monkeypatch.setattr("sandbox_runtime.bridge.REPO_MANIFEST_FILE_PATH", manifest_path)
     monkeypatch.setattr("sandbox_runtime.boot_warnings.BOOT_WARNINGS_FILE_PATH", boot_warnings_path)
     monkeypatch.setattr("sandbox_runtime.supervisor.BOOT_WARNINGS_FILE_PATH", boot_warnings_path)
     monkeypatch.setattr("sandbox_runtime.bridge.BOOT_WARNINGS_FILE_PATH", boot_warnings_path)
     monkeypatch.setattr("sandbox_runtime.tunnel_environment.TUNNEL_ENV_FILE_PATH", tunnel_env_path)
+    monkeypatch.setattr(
+        "sandbox_runtime.runtime_config.OPENCODE_SESSION_ID_FILE_PATH", opencode_session_id_path
+    )
 
 
 def wire_opencode_transport(bridge: "AgentBridge", http_client: Any) -> Any:

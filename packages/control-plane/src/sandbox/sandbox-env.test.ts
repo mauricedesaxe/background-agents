@@ -193,6 +193,16 @@ describe("buildSandboxEnvVars", () => {
     expect(envVars).not.toHaveProperty("GITHUB_APP_TOKEN");
   });
 
+  it("passes the expected OpenCode session ID as canonical env", () => {
+    const envVars = buildSandboxEnvVars(
+      { ...baseConfig, opencodeSessionId: "ses-existing" },
+      { scmIdentity: scmCloneIdentity("github") }
+    );
+
+    expect(envVars.OPENCODE_SESSION_ID).toBe("ses-existing");
+    expect(JSON.parse(envVars.SESSION_CONFIG).opencode_session_id).toBe("ses-existing");
+  });
+
   it("passes a configured sandbox timeout to the runtime", () => {
     const envVars = buildSandboxEnvVars(
       { ...baseConfig, timeoutSeconds: 14_400 },
@@ -206,13 +216,18 @@ describe("buildSandboxEnvVars", () => {
     const envVars = buildSandboxEnvVars(
       {
         ...baseConfig,
-        userEnvVars: { SANDBOX_ID: "user-override", VCS_HOST: "evil.example" },
+        userEnvVars: {
+          SANDBOX_ID: "user-override",
+          VCS_HOST: "evil.example",
+          OPENCODE_SESSION_ID: "user-session",
+        },
       },
       { scmIdentity: scmCloneIdentity("github") }
     );
 
     expect(envVars.SANDBOX_ID).toBe("sandbox-456");
     expect(envVars.VCS_HOST).toBe("github.com");
+    expect(envVars).not.toHaveProperty("OPENCODE_SESSION_ID");
   });
 
   it("serializes null repo identity to empty strings", () => {

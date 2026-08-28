@@ -198,6 +198,7 @@ export interface RestoreSandboxRequest {
   provider: string;
   model: string;
   userEnvVars?: Record<string, string>;
+  opencodeSessionId?: string;
   timeoutSeconds?: number;
   branch?: string | null;
   codeServerEnabled?: boolean;

@@ -277,6 +277,7 @@ export interface SandboxLifecycle {
   spawnSandbox(): Promise<void>;
   updateLastActivity(timestamp: number): void;
   terminateUnresponsiveSandbox(trigger: UnresponsiveSandboxTrigger): Promise<void>;
+  isReady(): boolean;
 }
 
 export type UnresponsiveSandboxTrigger =
@@ -492,6 +493,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         provider,
         model: modelId,
         userEnvVars,
+        opencodeSessionId: session.opencode_session_id ?? undefined,
         prebuiltImageId,
         prebuiltImageSha,
         timeoutSeconds,
@@ -788,6 +790,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         provider,
         model: modelId,
         userEnvVars,
+        opencodeSessionId: session.opencode_session_id ?? undefined,
         timeoutSeconds,
         branch: session.base_branch,
         codeServerEnabled,
@@ -1566,6 +1569,11 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
 
   isProviderStartupPending(): boolean {
     return this.providerStartupPending;
+  }
+
+  isReady(): boolean {
+    const status = this.storage.getSandbox()?.status;
+    return status === "ready" || status === "running";
   }
 
   /**

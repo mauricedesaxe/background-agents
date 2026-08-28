@@ -8,6 +8,7 @@ from sandbox_runtime.constants import (
     CODE_SERVER_PORT_ENV_VAR,
     EXPECTED_TUNNEL_PORTS_ENV_VAR,
     NOVNC_PORT,
+    OPENCODE_SESSION_ID_ENV_VAR,
     TTYD_PROXY_PORT,
     TTYD_PROXY_PORT_ENV_VAR,
     TUNNEL_ENV_FILE_PATH,
@@ -420,6 +421,37 @@ class TestExpectedTunnelPortsEnvVar:
         )
 
         assert captured["env"][EXPECTED_TUNNEL_PORTS_ENV_VAR] == "3000,5173"
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_sets_expected_opencode_session_id(self, monkeypatch):
+        captured: dict[str, dict[str, str]] = {}
+
+        async def fake_create_aio(*args, **kwargs):
+            captured["env"] = kwargs.get("env") or {}
+
+            class FakeSandbox:
+                object_id = "obj-1"
+                stdout = None
+
+            return FakeSandbox()
+
+        fake_create_aio.aio = fake_create_aio
+        monkeypatch.setattr("src.sandbox.manager.modal.Sandbox.create", fake_create_aio)
+        monkeypatch.setattr(
+            SandboxManager,
+            "_resolve_and_setup_tunnels",
+            AsyncMock(return_value=(None, None, None, None)),
+        )
+
+        await SandboxManager().create_sandbox(
+            SandboxConfig(
+                repo_owner="acme",
+                repo_name="repo",
+                session_config={"session_id": "session-1", "opencode_session_id": "ses-existing"},
+            )
+        )
+
+        assert captured["env"][OPENCODE_SESSION_ID_ENV_VAR] == "ses-existing"
 
     @pytest.mark.asyncio
     async def test_create_sandbox_omits_env_var_when_no_tunnel_ports(self, monkeypatch):

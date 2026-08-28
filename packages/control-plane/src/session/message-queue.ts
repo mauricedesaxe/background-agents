@@ -337,6 +337,16 @@ export class SessionMessageQueue {
       return;
     }
 
+    if (!this.sandboxLifecycle.isReady()) {
+      this.log.info("prompt.dispatch", {
+        event: "prompt.dispatch",
+        message_id: message.id,
+        outcome: "deferred",
+        reason: "sandbox_not_ready",
+      });
+      return;
+    }
+
     const author = this.participantRepository.getParticipantById(message.author_id);
     if (!author) {
       throw new Error(`Missing prompt author ${message.author_id}`);
@@ -472,6 +482,16 @@ export class SessionMessageQueue {
       this.messageRepository.clearMessageAwaitingStopConfirmation(awaitingStop.id);
     }
     await this.processMessageQueue();
+  }
+
+  async failPendingMessages(error: string): Promise<void> {
+    const now = Date.now();
+    for (const message of this.messageRepository.listPendingMessagesWithCreatedAt()) {
+      this.failMessage(message, error, now, "pending");
+    }
+    this.messenger.broadcast({ type: "processing_status", isProcessing: false });
+    this.broadcastPromptQueue();
+    await this.sessionStatus.reconcileAfterExecution(false);
   }
 
   /** Close every unfinished message synchronously; status projection happens afterwards. */
