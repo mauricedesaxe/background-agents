@@ -903,9 +903,17 @@ export class SessionDO extends DurableObject<Env> {
             terminalMessageCompletedAt: completedAt,
           }),
         this.statusService,
+        () => {
+          this.updateSandboxStatus("ready");
+          this.broadcast({ type: "sandbox_status", status: "ready" });
+          if (!this.lifecycleManager.isProviderStartupPending()) {
+            this.broadcast({ type: "sandbox_access_changed" });
+          }
+        },
         (timestamp) => this.updateLastActivity(timestamp),
         () => this.scheduleInactivityCheck(),
         () => this.messageQueue.processMessageQueue(),
+        (error) => this.messageQueue.failPendingMessages(error),
         () => this.messageQueue.broadcastPromptQueue()
       );
     }
@@ -1225,21 +1233,14 @@ export class SessionDO extends DurableObject<Env> {
       const sandboxId = request.headers.get("X-Sandbox-ID");
 
       if (isSandbox) {
-        // The lifecycle manager publishes access after any pending provider
-        // startup has persisted its URLs and credentials.
-        const accessIsPersisted = !this.lifecycleManager.isProviderStartupPending();
         const { replaced } = this.wsManager.acceptAndSetSandboxSocket(
           server,
           sandboxId ?? undefined
         );
         // Notify manager that sandbox connected so it can reset the spawning flag
         this.lifecycleManager.onSandboxConnected();
-        this.updateSandboxStatus("ready");
-        this.broadcast({ type: "sandbox_status", status: "ready" });
-        if (accessIsPersisted) {
-          this.broadcast({ type: "sandbox_access_changed" });
-        }
-
+        this.updateSandboxStatus("connecting");
+        this.broadcast({ type: "sandbox_status", status: "connecting" });
         // Set initial activity timestamp and schedule inactivity check
         // IMPORTANT: Must await to ensure alarm is scheduled before returning
         const now = Date.now();
@@ -1254,11 +1255,6 @@ export class SessionDO extends DurableObject<Env> {
           sandbox_id: sandboxId,
           replaced_existing: replaced,
           duration_ms: Date.now() - now,
-        });
-
-        // Process any pending messages now that sandbox is connected
-        this.backgroundTasks.submit(this.processMessageQueue(), {
-          name: "message_queue.process",
         });
       } else {
         const wsId = `ws-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;

@@ -47,6 +47,8 @@ export interface SessionConfigPayload {
   branch?: string | null;
   /** Ordered member list; only present for multi-repo sessions. */
   repositories?: SessionRepositoryConfigPayload[];
+  /** Expected native OpenCode conversation on replacement boots. */
+  opencode_session_id?: string;
 }
 
 /** Provider-agnostic inputs needed to assemble a {@link SessionConfigPayload}. */
@@ -59,6 +61,7 @@ export interface SessionConfigInput {
   mcpServers?: McpServerConfig[];
   branch?: string | null;
   repositories?: SessionRepositoryInfo[];
+  opencodeSessionId?: string;
 }
 
 /**
@@ -77,6 +80,7 @@ export function buildSessionConfig(input: SessionConfigInput): SessionConfigPayl
     provider: input.provider,
     model: input.model,
     mcp_servers: input.mcpServers,
+    ...(input.opencodeSessionId ? { opencode_session_id: input.opencodeSessionId } : {}),
   };
   if (input.branch !== undefined) {
     payload.branch = input.branch;
@@ -102,6 +106,7 @@ export function toRepositoryConfigPayload(
 const SESSION_CONFIG_ENV_VAR = "SESSION_CONFIG";
 /** Build-mode marker checked as `=== "true"` by the runtime entrypoint. */
 export const IMAGE_BUILD_MODE_ENV_VAR = "IMAGE_BUILD_MODE";
+export const OPENCODE_SESSION_ID_ENV_VAR = "OPENCODE_SESSION_ID";
 export const IMAGE_BUILD_EXECUTION_TIMEOUT_ENV_KEY = "OI_IMAGE_BUILD_EXECUTION_TIMEOUT_SECONDS";
 
 /**
@@ -270,6 +275,7 @@ export function buildSandboxEnvVars(
   const envVars: Record<string, string> = { ...(options.baseEnvVars ?? config.userEnvVars ?? {}) };
   delete envVars.VNC_PASSWORD;
   delete envVars.NOVNC_PORT;
+  delete envVars[OPENCODE_SESSION_ID_ENV_VAR];
 
   const sessionConfig = buildSessionConfig(config);
 
@@ -283,6 +289,10 @@ export function buildSandboxEnvVars(
     REPO_NAME: config.repoName ?? "",
     [SESSION_CONFIG_ENV_VAR]: JSON.stringify(sessionConfig),
   });
+
+  if (config.opencodeSessionId) {
+    envVars[OPENCODE_SESSION_ID_ENV_VAR] = config.opencodeSessionId;
+  }
 
   if (config.codeServerEnabled) {
     envVars.CODE_SERVER_PORT = String(resolveServicePorts(config.sandboxSettings).codeServerPort);

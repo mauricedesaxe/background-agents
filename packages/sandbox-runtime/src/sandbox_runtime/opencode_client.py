@@ -87,12 +87,21 @@ class OpenCodeClient:
         return session_id
 
     async def session_exists(self, opencode_session_id: str) -> bool:
-        """Whether OpenCode still knows the session (a 200 from its lookup)."""
+        """Whether OpenCode still knows the session.
+
+        A 404 is the only permanent absence signal. Other HTTP failures stay
+        distinguishable from missing context so the bridge can retry them.
+        """
         response = await self._client().get(
             f"{self._base_url}/session/{opencode_session_id}",
             timeout=self._request_timeout_seconds,
         )
-        return response.status_code == 200
+        if response.status_code == 404:
+            return False
+        response.raise_for_status()
+        if response.status_code != 200:
+            raise RuntimeError(f"Unexpected OpenCode session lookup status: {response.status_code}")
+        return True
 
     @asynccontextmanager
     async def events(

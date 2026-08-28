@@ -10,22 +10,37 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from .constants import OPENCODE_SESSION_ID_FILE_PATH
+
 
 class BootMode(StrEnum):
     FRESH = "fresh"
+    PERSISTENT_RESUME = "persistent_resume"
     SNAPSHOT_RESTORE = "snapshot_restore"
     REPO_IMAGE = "repo_image"
     BUILD = "build"
 
     @classmethod
-    def from_env(cls, environment: Mapping[str, str]) -> BootMode:
+    def from_env(
+        cls,
+        environment: Mapping[str, str],
+        *,
+        opencode_session_id_file: Path | None = None,
+    ) -> BootMode:
         if environment.get("IMAGE_BUILD_MODE") == "true":
             return cls.BUILD
         if environment.get("RESTORED_FROM_SNAPSHOT") == "true":
             return cls.SNAPSHOT_RESTORE
         if environment.get("FROM_REPO_IMAGE") == "true":
             return cls.REPO_IMAGE
+        session_id_file = opencode_session_id_file or Path(OPENCODE_SESSION_ID_FILE_PATH)
+        if session_id_file.is_file() and session_id_file.read_text().strip():
+            return cls.PERSISTENT_RESUME
         return cls.FRESH
+
+    @property
+    def preserves_repository_checkout(self) -> bool:
+        return self in (self.PERSISTENT_RESUME, self.SNAPSHOT_RESTORE)
 
 
 def _freeze_json(value: Any) -> Any:

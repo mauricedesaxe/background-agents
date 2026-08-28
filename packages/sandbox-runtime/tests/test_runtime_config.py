@@ -18,8 +18,28 @@ from sandbox_runtime.runtime_config import BootMode, RuntimeConfig
         ),
     ],
 )
-def test_boot_mode_precedence(environment, expected):
-    assert BootMode.from_env(environment) is expected
+def test_boot_mode_precedence(environment, expected, tmp_path):
+    assert (
+        BootMode.from_env(environment, opencode_session_id_file=tmp_path / "missing-session-id")
+        is expected
+    )
+
+
+def test_boot_mode_detects_persistent_resume_from_local_session_file(tmp_path):
+    session_id_file = tmp_path / "opencode-session-id"
+    session_id_file.write_text("ses-existing")
+
+    assert (
+        BootMode.from_env({}, opencode_session_id_file=session_id_file)
+        is BootMode.PERSISTENT_RESUME
+    )
+
+
+def test_boot_mode_ignores_empty_local_session_file(tmp_path):
+    session_id_file = tmp_path / "opencode-session-id"
+    session_id_file.write_text("")
+
+    assert BootMode.from_env({}, opencode_session_id_file=session_id_file) is BootMode.FRESH
 
 
 def test_runtime_config_parses_frozen_values_without_environment_patching(tmp_path):

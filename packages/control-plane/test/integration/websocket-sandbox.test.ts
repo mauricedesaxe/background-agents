@@ -79,11 +79,9 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     expect(ws).toBeNull();
   });
 
-  it("sandbox connect sets status to ready", async () => {
+  it("sandbox connect stays connecting until the bridge reports ready", async () => {
     const name = `ws-sandbox-ready-${Date.now()}`;
     const { stub } = await initNamedSession(name);
-    // Model the production boot sequence: the sandbox connects while the
-    // lifecycle is still in "connecting", and the WS accept flips it to ready.
     await seedSandboxAuth(stub, {
       authToken: SANDBOX_TOKEN,
       sandboxId: SANDBOX_ID,
@@ -96,7 +94,23 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     });
     expect(ws).not.toBeNull();
     ws!.accept();
+    await waitForSandboxStatus(stub, "connecting");
+    ws!.send(
+      JSON.stringify({
+        type: "ready",
+        sandboxId: SANDBOX_ID,
+        timestamp: Date.now() / 1000,
+        contextStatus: "fresh",
+        opencodeSessionId: "ses-created",
+      })
+    );
     await waitForSandboxStatus(stub, "ready");
+
+    const sessionRows = await queryDO<{ opencode_session_id: string | null }>(
+      stub,
+      "SELECT opencode_session_id FROM session"
+    );
+    expect(sessionRows[0].opencode_session_id).toBe("ses-created");
 
     const stateRes = await stub.fetch("http://internal/internal/state");
     const state = await stateRes.json<{ sandbox: { status: string } }>();
@@ -142,6 +156,14 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     });
     expect(sandboxWs).not.toBeNull();
     sandboxWs!.accept();
+    sandboxWs!.send(
+      JSON.stringify({
+        type: "ready",
+        sandboxId: SANDBOX_ID,
+        timestamp: Date.now() / 1000,
+        contextStatus: "fresh",
+      })
+    );
 
     const messages = await collector;
     expect(messages.slice(-2).map((message) => message.type)).toEqual([
@@ -195,7 +217,9 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
 
     const messages = await collector;
     expect(
-      messages.filter((message) => message.type === "sandbox_status" && message.status === "ready")
+      messages.filter(
+        (message) => message.type === "sandbox_status" && message.status === "connecting"
+      )
     ).toHaveLength(2);
     expect(messages).not.toContainEqual({ type: "sandbox_access_changed" });
 
@@ -220,6 +244,15 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
       });
       expect(firstWs).not.toBeNull();
       firstWs!.accept();
+      firstWs!.send(
+        JSON.stringify({
+          type: "ready",
+          sandboxId: SANDBOX_ID,
+          timestamp: Date.now() / 1000,
+          contextStatus: "fresh",
+        })
+      );
+      await waitForSandboxStatus(stub, "ready");
 
       const closed = new Promise<void>((resolve) => {
         firstWs!.addEventListener("close", () => resolve());
@@ -276,6 +309,15 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     expect(response.status).toBe(101);
     expect(reconnectedWs).not.toBeNull();
     reconnectedWs!.accept();
+    reconnectedWs!.send(
+      JSON.stringify({
+        type: "ready",
+        sandboxId: SANDBOX_ID,
+        timestamp: Date.now() / 1000,
+        contextStatus: "fresh",
+      })
+    );
+    await waitForSandboxStatus(stub, "ready");
 
     const sandboxAfterReconnect = await queryDO<{ last_heartbeat: number; status: string }>(
       stub,
@@ -309,6 +351,13 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     });
     expect(ws).not.toBeNull();
     ws!.accept();
+    ws!.send(
+      JSON.stringify({
+        type: "ready",
+        sandboxId: SANDBOX_ID,
+        timestamp: Date.now() / 1000,
+      })
+    );
     await waitForSandboxStatus(stub, "ready");
     ws!.close();
   });

@@ -24,6 +24,7 @@ from sandbox_runtime.constants import (
     EXPECTED_TUNNEL_PORTS_ENV_VAR,
     NOVNC_PORT,
     NOVNC_PORT_ENV_VAR,
+    OPENCODE_SESSION_ID_ENV_VAR,
     SANDBOX_TIMEOUT_ENV_VAR,
     TTYD_PROXY_PORT,
     TTYD_PROXY_PORT_ENV_VAR,
@@ -411,6 +412,13 @@ class SandboxManager:
                 if isinstance(config.session_config, dict)
                 else config.session_config.model_dump_json()
             )
+            opencode_session_id = (
+                config.session_config.get("opencode_session_id")
+                if isinstance(config.session_config, dict)
+                else config.session_config.opencode_session_id
+            )
+            if opencode_session_id:
+                env_vars[OPENCODE_SESSION_ID_ENV_VAR] = opencode_session_id
 
         inject_vcs_env_vars(
             env_vars,

@@ -43,7 +43,10 @@ function createProcessor() {
     }),
     clearMessageAwaitingStopConfirmation: vi.fn(),
     updateSandboxGitSyncStatus: vi.fn(),
+    updateSandboxStatus: vi.fn(),
     updateSessionCurrentSha: vi.fn(),
+    updateOpenCodeSessionId: vi.fn(),
+    getSession: vi.fn(() => ({ opencode_session_id: null as string | null })),
   };
   const eventRepository = {
     upsertTokenEvent: vi.fn(),
@@ -69,8 +72,10 @@ function createProcessor() {
   const triggerSnapshot = vi.fn(async (_reason: string) => {});
   const projectTerminalMessage = vi.fn(async () => {});
   const statusService = { reconcileAfterExecution: vi.fn(async (_success: boolean) => {}) };
+  const onSandboxReady = vi.fn(() => repository.updateSandboxStatus("ready"));
   const scheduleInactivityCheck = vi.fn(async () => {});
   const processMessageQueue = vi.fn(async () => {});
+  const failPendingMessages = vi.fn(async (_error: string) => {});
   const broadcastPromptQueue = vi.fn();
   const updateLastActivity = vi.fn();
   const applySessionTitleUpdate = vi.fn((title: string) => ({ ok: true as const, title }));
@@ -102,9 +107,11 @@ function createProcessor() {
     triggerSnapshot,
     projectTerminalMessage,
     statusService as unknown as SessionStatusService,
+    onSandboxReady,
     updateLastActivity,
     scheduleInactivityCheck,
     processMessageQueue,
+    failPendingMessages,
     broadcastPromptQueue
   );
 
@@ -120,8 +127,10 @@ function createProcessor() {
     triggerSnapshot,
     projectTerminalMessage,
     statusService,
+    onSandboxReady,
     scheduleInactivityCheck,
     processMessageQueue,
+    failPendingMessages,
     broadcastPromptQueue,
     updateLastActivity,
     applySessionTitleUpdate,
@@ -201,7 +210,7 @@ describe("SessionSandboxEventProcessor", () => {
     expect(h.updateLastActivity).not.toHaveBeenCalled();
   });
 
-  it("pins diff baselines on ready", async () => {
+  it("accepts a fresh ready event, marks the sandbox ready, and drains the queue", async () => {
     const h = createProcessor();
     const event: SandboxEvent = {
       type: "ready",
@@ -212,6 +221,60 @@ describe("SessionSandboxEventProcessor", () => {
     await h.processor.processSandboxEvent(event);
 
     expect(h.diffService.pinBaselines).toHaveBeenCalledWith(event);
+    expect(h.repository.updateSandboxStatus).toHaveBeenCalledWith("ready");
+    expect(h.processMessageQueue).toHaveBeenCalledOnce();
+  });
+
+  it("persists an existing OpenCode context before draining the queue", async () => {
+    const h = createProcessor();
+    h.repository.getSession.mockReturnValue({ opencode_session_id: "ses-existing" });
+
+    await h.processor.processSandboxEvent({
+      type: "ready",
+      sandboxId: "sb-1",
+      timestamp: 1000,
+      opencodeSessionId: "ses-existing",
+      contextStatus: "existing",
+    });
+
+    expect(h.repository.updateOpenCodeSessionId).toHaveBeenCalledWith("ses-existing");
+    expect(h.repository.updateSandboxStatus).toHaveBeenCalledWith("ready");
+    expect(h.processMessageQueue).toHaveBeenCalledOnce();
+  });
+
+  it("fails pending work when expected OpenCode context is unavailable", async () => {
+    const h = createProcessor();
+    h.repository.getSession.mockReturnValue({ opencode_session_id: "ses-lost" });
+
+    await h.processor.processSandboxEvent({
+      type: "ready",
+      sandboxId: "sb-1",
+      timestamp: 1000,
+      opencodeSessionId: "ses-lost",
+      contextStatus: "unavailable",
+    });
+
+    expect(h.failPendingMessages).toHaveBeenCalledWith(
+      expect.stringContaining("OpenCode context is no longer available")
+    );
+    expect(h.repository.updateSandboxStatus).toHaveBeenCalledWith("failed");
+    expect(h.processMessageQueue).not.toHaveBeenCalled();
+    expect(h.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: "sandbox_error" }));
+  });
+
+  it("accepts an old ready event when its session ID matches the expected context", async () => {
+    const h = createProcessor();
+    h.repository.getSession.mockReturnValue({ opencode_session_id: "ses-existing" });
+
+    await h.processor.processSandboxEvent({
+      type: "ready",
+      sandboxId: "sb-1",
+      timestamp: 1000,
+      opencodeSessionId: "ses-existing",
+    });
+
+    expect(h.processMessageQueue).toHaveBeenCalledOnce();
+    expect(h.failPendingMessages).not.toHaveBeenCalled();
   });
 
   it("persists token event and broadcasts it", async () => {

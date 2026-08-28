@@ -1321,6 +1321,41 @@ describe("SandboxLifecycleManager", () => {
       ]);
     });
 
+    it("preserves a disconnected ready persistent sandbox instead of replacing it", async () => {
+      const sandbox = createMockSandbox({
+        status: "ready",
+        created_at: Date.now() - DEFAULT_LIFECYCLE_CONFIG.spawn.readyWaitMs - 1,
+        modal_object_id: "existing-provider-obj",
+        snapshot_image_id: null,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const provider = createMockProvider({
+        capabilities: { supportsPersistentResume: true, supportsExplicitStop: true },
+        resumeSandbox: vi.fn(async () => ({
+          success: true,
+          providerObjectId: "existing-provider-obj",
+        })),
+        stopSandbox: vi.fn(async () => ({ success: true })),
+      });
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(provider.resumeSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({ providerObjectId: "existing-provider-obj" })
+      );
+      expect(provider.stopSandbox).not.toHaveBeenCalled();
+      expect(provider.createSandbox).not.toHaveBeenCalled();
+    });
+
     it("resets isSpawningSandbox flag after restore throws error", async () => {
       const sandbox = createMockSandbox({
         status: "stopped",
@@ -2917,6 +2952,52 @@ describe("SandboxLifecycleManager", () => {
 
       expect(provider.restoreFromSnapshot).toHaveBeenCalledWith(
         expect.objectContaining({ repositories: MULTI_REPO_MEMBERS })
+      );
+    });
+  });
+
+  describe("OpenCode continuity", () => {
+    it("passes the expected OpenCode session ID to a fresh replacement", async () => {
+      const provider = createMockProvider();
+      const manager = new SandboxLifecycleManager(
+        provider,
+        createMockStorage(
+          createMockSession({ opencode_session_id: "ses-existing" }),
+          createMockSandbox({ status: "failed", modal_object_id: null })
+        ),
+        createMockBroadcaster(),
+        createMockWebSocketManager(),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(provider.createSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({ opencodeSessionId: "ses-existing" })
+      );
+    });
+
+    it("passes the expected OpenCode session ID to snapshot restoration", async () => {
+      const provider = createMockProvider();
+      const manager = new SandboxLifecycleManager(
+        provider,
+        createMockStorage(
+          createMockSession({ opencode_session_id: "ses-existing" }),
+          createMockSandbox({ status: "stopped", snapshot_image_id: "image-1" })
+        ),
+        createMockBroadcaster(),
+        createMockWebSocketManager(),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(provider.restoreFromSnapshot).toHaveBeenCalledWith(
+        expect.objectContaining({ opencodeSessionId: "ses-existing" })
       );
     });
   });

@@ -192,6 +192,7 @@ function buildQueue() {
     spawnSandbox: vi.fn(async () => {}),
     updateLastActivity: vi.fn((_timestamp: number) => {}),
     terminateUnresponsiveSandbox: vi.fn(async () => {}),
+    isReady: vi.fn(() => true),
   };
   const waitUntil = vi.fn((task: Promise<unknown>) =>
     task.catch((error) => log.error("background_task.failed", { error }))
@@ -689,6 +690,18 @@ describe("SessionMessageQueue", () => {
         }),
       })
     );
+  });
+
+  it("does not dispatch while the sandbox socket is connected but context is not ready", async () => {
+    const h = buildQueue();
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage());
+    h.wsManager.getSandboxSocket.mockReturnValue({ readyState: WebSocket.OPEN } as WebSocket);
+    h.sandboxLifecycle.isReady.mockReturnValue(false);
+
+    await h.queue.processMessageQueue();
+
+    expect(h.repository.startMessageProcessing).not.toHaveBeenCalled();
+    expect(h.wsManager.send).not.toHaveBeenCalled();
   });
 
   it("dispatches prompt command when sandbox socket exists", async () => {

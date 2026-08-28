@@ -102,6 +102,13 @@ export class SessionCoreRepository {
     this.sql.exec(`UPDATE session SET branch_name = ? WHERE id = ?`, branchName, sessionId);
   }
 
+  updateOpenCodeSessionId(opencodeSessionId: string): void {
+    this.sql.exec(
+      `UPDATE session SET opencode_session_id = ? WHERE id = (SELECT id FROM session LIMIT 1)`,
+      opencodeSessionId
+    );
+  }
+
   updateSessionCurrentSha(sha: string): void {
     // Each session DO has exactly one session row.
     this.sql.exec(

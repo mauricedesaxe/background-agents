@@ -159,6 +159,7 @@ export class ModalSandboxProvider implements SandboxProvider, ModalImageBuildPro
           provider: config.provider,
           model: config.model,
           userEnvVars: config.userEnvVars,
+          opencodeSessionId: config.opencodeSessionId,
           timeoutSeconds: config.timeoutSeconds ?? DEFAULT_SANDBOX_TIMEOUT_SECONDS,
           branch: config.branch,
           codeServerEnabled: config.codeServerEnabled,

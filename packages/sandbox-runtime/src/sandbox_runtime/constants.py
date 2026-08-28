@@ -58,6 +58,9 @@ IMAGE_BUILD_EXECUTION_TIMEOUT_ENV_VAR = "OI_IMAGE_BUILD_EXECUTION_TIMEOUT_SECOND
 # WebSocket handshake. JSONL: one {scope, message, repoOwner?, repoName?} per line.
 BOOT_WARNINGS_FILE_PATH = "/tmp/oi-boot-warnings.jsonl"
 
+OPENCODE_SESSION_ID_ENV_VAR = "OPENCODE_SESSION_ID"
+OPENCODE_SESSION_ID_FILE_PATH = "/tmp/opencode-session-id"
+
 # Canonical repository manifest written by the supervisor before any child
 # process starts, rewritten on every boot. Consumed by the bridge (push
 # targeting) and the JS create-pull-request tool so the /workspace checkout
