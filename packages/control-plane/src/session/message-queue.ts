@@ -484,8 +484,12 @@ export class SessionMessageQueue {
     await this.processMessageQueue();
   }
 
-  async failPendingMessages(error: string): Promise<void> {
+  async failUnfinishedMessages(error: string): Promise<void> {
     const now = Date.now();
+    const processingMessage = this.messageRepository.getProcessingMessageWithCreatedAt();
+    if (processingMessage) {
+      this.failMessage(processingMessage, error, now, "processing");
+    }
     for (const message of this.messageRepository.listPendingMessagesWithCreatedAt()) {
       this.failMessage(message, error, now, "pending");
     }

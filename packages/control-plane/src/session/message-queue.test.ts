@@ -1168,6 +1168,37 @@ describe("SessionMessageQueue", () => {
     );
   });
 
+  it("fails processing and queued prompts when sandbox context is unavailable", async () => {
+    const h = buildQueue();
+    h.repository.getProcessingMessageWithCreatedAt.mockReturnValue({
+      id: "msg-processing",
+      created_at: 700,
+    });
+    h.repository.listPendingMessagesWithCreatedAt.mockReturnValue([
+      { id: "msg-pending", created_at: 800 },
+    ]);
+
+    await h.queue.failUnfinishedMessages("OpenCode context unavailable");
+
+    expect(h.repository.recordMessageCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: "msg-processing",
+        error: "OpenCode context unavailable",
+      }),
+      expect.any(Number),
+      "processing"
+    );
+    expect(h.repository.recordMessageCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: "msg-pending",
+        error: "OpenCode context unavailable",
+      }),
+      expect.any(Number),
+      "pending"
+    );
+    expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
+  });
+
   it("reconciles session status when failing a stuck processing message", async () => {
     const h = buildQueue();
     h.repository.getProcessingMessageWithCreatedAt.mockReturnValue({

@@ -913,7 +913,7 @@ export class SessionDO extends DurableObject<Env> {
         (timestamp) => this.updateLastActivity(timestamp),
         () => this.scheduleInactivityCheck(),
         () => this.messageQueue.processMessageQueue(),
-        (error) => this.messageQueue.failPendingMessages(error),
+        (error) => this.messageQueue.failUnfinishedMessages(error),
         () => this.messageQueue.broadcastPromptQueue()
       );
     }

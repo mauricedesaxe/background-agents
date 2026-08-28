@@ -75,7 +75,7 @@ function createProcessor() {
   const onSandboxReady = vi.fn(() => repository.updateSandboxStatus("ready"));
   const scheduleInactivityCheck = vi.fn(async () => {});
   const processMessageQueue = vi.fn(async () => {});
-  const failPendingMessages = vi.fn(async (_error: string) => {});
+  const failUnfinishedMessages = vi.fn(async (_error: string) => {});
   const broadcastPromptQueue = vi.fn();
   const updateLastActivity = vi.fn();
   const applySessionTitleUpdate = vi.fn((title: string) => ({ ok: true as const, title }));
@@ -111,7 +111,7 @@ function createProcessor() {
     updateLastActivity,
     scheduleInactivityCheck,
     processMessageQueue,
-    failPendingMessages,
+    failUnfinishedMessages,
     broadcastPromptQueue
   );
 
@@ -130,7 +130,7 @@ function createProcessor() {
     onSandboxReady,
     scheduleInactivityCheck,
     processMessageQueue,
-    failPendingMessages,
+    failUnfinishedMessages,
     broadcastPromptQueue,
     updateLastActivity,
     applySessionTitleUpdate,
@@ -254,7 +254,7 @@ describe("SessionSandboxEventProcessor", () => {
       contextStatus: "unavailable",
     });
 
-    expect(h.failPendingMessages).toHaveBeenCalledWith(
+    expect(h.failUnfinishedMessages).toHaveBeenCalledWith(
       expect.stringContaining("OpenCode context is no longer available")
     );
     expect(h.repository.updateSandboxStatus).toHaveBeenCalledWith("failed");
@@ -274,7 +274,7 @@ describe("SessionSandboxEventProcessor", () => {
     });
 
     expect(h.processMessageQueue).toHaveBeenCalledOnce();
-    expect(h.failPendingMessages).not.toHaveBeenCalled();
+    expect(h.failUnfinishedMessages).not.toHaveBeenCalled();
   });
 
   it("persists token event and broadcasts it", async () => {
