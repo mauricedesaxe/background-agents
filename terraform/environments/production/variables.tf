@@ -489,7 +489,7 @@ variable "e2b_template_id" {
 variable "e2b_sandbox_timeout_seconds" {
   description = "Sandbox TTL in seconds. Default assumes a paid E2B plan. Hobby caps TTL at 3600 — set 3300."
   type        = number
-  default     = 7200
+  default     = 14400
 }
 
 variable "e2b_auto_pause" {

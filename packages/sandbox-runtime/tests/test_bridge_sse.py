@@ -1627,7 +1627,7 @@ class TestInactivityTimeout:
 class TestPromptMaxDuration:
     """Tests for prompt max duration timeout behavior."""
 
-    def test_default_preserves_legacy_snapshot_reserve(self, monkeypatch):
+    def test_default_uses_capped_snapshot_reserve(self, monkeypatch):
         monkeypatch.delenv("SANDBOX_TIMEOUT_SECONDS", raising=False)
 
         bridge = AgentBridge(
@@ -1637,7 +1637,7 @@ class TestPromptMaxDuration:
             auth_token="test-token",
         )
 
-        assert bridge.prompt_max_duration_seconds == 6300
+        assert bridge.prompt_max_duration_seconds == 13500
 
     def test_uses_configured_sandbox_timeout_with_snapshot_reserve(self, monkeypatch):
         monkeypatch.setenv("SANDBOX_TIMEOUT_SECONDS", "14400")
