@@ -295,15 +295,19 @@ class TestPinnedHarness:
 
         assert not (opencode / "skills").exists()  # removed by install-harness.sh; runtime owns it
 
-        # The reviewer agents, in OpenCode's dialect. The sandbox's hand-copied clarity-reviewer
-        # never had `mode:`, so OpenCode defaulted it to `all` and offered a reviewer as a
-        # primary agent.
-        clarity = (opencode / "agents" / "clarity-reviewer.md").read_text()
-        assert "mode: subagent" in clarity
+        # The agents, in OpenCode's dialect. The sandbox's hand-copied reviewers never had
+        # `mode:`, so OpenCode defaulted them to `all` and offered a subagent as a primary one.
+        poteto = (opencode / "agents" / "pstack-poteto-agent.md").read_text()
+        assert "mode: subagent" in poteto
 
         # Claude Code's copy, which is what makes a sandbox and a laptop the same harness.
         assert (claude / "rules" / "PHILOSOPHY.md").is_file()
-        assert (claude / "skills" / "lazar-review" / "SKILL.md").is_file()
+        assert (claude / "skills" / "lazar-qa" / "SKILL.md").is_file()
+
+        # The record contract, which three judging skills read and none of them ships. It arrived
+        # after the previous pin, so it is also what proves the bump reached the sandbox.
+        assert (opencode / "rules" / "records.md").is_file()
+        assert (claude / "rules" / "records.md").is_file()
 
         # The sandbox workspace default, generated from the surface rather than hand-kept.
         instructions = (opencode / "AGENTS.md").read_text()
