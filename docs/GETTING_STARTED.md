@@ -247,7 +247,7 @@ the E2B Template SDK). Create it at the [E2B dashboard](https://e2b.dev) → API
    ```
 
 The control plane calls the E2B REST API directly from Cloudflare Workers. Each session runs in a
-single long-lived sandbox: when its TTL (`e2b_sandbox_timeout_seconds`, default 7200) expires the
+single long-lived sandbox: when its TTL (`e2b_sandbox_timeout_seconds`, default 14400) expires the
 sandbox is **paused** rather than killed (`e2b_auto_pause`, default true), so sessions survive idle
 gaps; the next prompt resumes it through the control plane. On the **Hobby** tier (~1h runtime cap)
 lower `e2b_sandbox_timeout_seconds` to 3300. Set `e2b_auto_pause = false` to kill on timeout

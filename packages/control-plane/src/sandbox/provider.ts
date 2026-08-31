@@ -10,8 +10,8 @@ import type { SandboxSettings } from "@open-inspect/shared/types/integrations";
 import type { CorrelationContext } from "../logger";
 import type { McpServerConfig } from "@open-inspect/shared/types/integrations";
 
-/** Default sandbox lifetime in seconds (2 hours). */
-export const DEFAULT_SANDBOX_TIMEOUT_SECONDS = 7200;
+/** Default sandbox lifetime in seconds. */
+export const DEFAULT_SANDBOX_TIMEOUT_SECONDS = 14400;
 
 /**
  * Provider-neutral configuration for triggering an image build inside a
