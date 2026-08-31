@@ -36,9 +36,10 @@ Behavior, not files.
 
 ## Gotcha (same as cards 01, 11)
 
-Editing `HARNESS_REF` is a `.sh` change and does NOT bump the Daytona `source_hash` (tracks
-`.py/.js/.ts` only), so a ref bump needs a `SANDBOX_VERSION` bump to reach a sandbox. Reapply and
-version bump travel together.
+Editing `HARNESS_REF` used to be a `.sh` change that did NOT bump the Daytona `source_hash`, which
+tracked `.py/.js/.ts` only, so a ref bump reached no sandbox on its own. Fixed in #94: the Daytona
+and Vercel hashes now cover `*.sh` too, matching what the Modal and OpenComputer hashes already did.
+A pin bump rebuilds the snapshot by itself.
 
 ## Dated evidence (2026-08-19, non-binding hints)
 
