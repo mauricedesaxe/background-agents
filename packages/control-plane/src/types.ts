@@ -80,7 +80,7 @@ export interface Env {
   MODAL_ENVIRONMENT_WEB_SUFFIX?: string; // Modal environment web suffix for endpoint URLs
   DAYTONA_API_URL?: string; // Daytona REST API base URL
   DAYTONA_BASE_SNAPSHOT?: string; // Named Daytona snapshot used for fresh sandbox creation
-  DAYTONA_AUTO_STOP_INTERVAL_MINUTES?: string; // Daytona idle stop interval in minutes
+  DAYTONA_AUTO_STOP_INTERVAL_MINUTES?: string;
   DAYTONA_AUTO_ARCHIVE_INTERVAL_MINUTES?: string; // Daytona archive interval in minutes
   DAYTONA_TARGET?: string; // Optional Daytona target name
   OPENCOMPUTER_API_URL?: string; // OpenComputer REST API base URL

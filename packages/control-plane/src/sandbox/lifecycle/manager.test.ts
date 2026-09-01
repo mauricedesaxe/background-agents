@@ -2005,7 +2005,11 @@ describe("SandboxLifecycleManager", () => {
 
       await manager.handleAlarm();
 
-      expect(onSandboxTerminating).toHaveBeenCalledOnce();
+      expect(onSandboxTerminating).toHaveBeenCalledWith({
+        kind: "heartbeat_stale",
+        elapsedMs: expect.any(Number),
+        timeoutMs: 90_000,
+      });
     });
 
     it("calls onSandboxTerminating callback on inactivity timeout", async () => {
@@ -2031,7 +2035,11 @@ describe("SandboxLifecycleManager", () => {
 
       await manager.handleAlarm();
 
-      expect(onSandboxTerminating).toHaveBeenCalledOnce();
+      expect(onSandboxTerminating).toHaveBeenCalledWith({
+        kind: "inactivity_timeout",
+        elapsedMs: expect.any(Number),
+        timeoutMs: 10 * 60 * 1000,
+      });
     });
 
     it("does not call onSandboxTerminating when no callback provided", async () => {
@@ -2142,7 +2150,11 @@ describe("SandboxLifecycleManager", () => {
 
       await manager.handleAlarm();
 
-      expect(onSandboxTerminating).toHaveBeenCalledOnce();
+      expect(onSandboxTerminating).toHaveBeenCalledWith({
+        kind: "connecting_timeout",
+        elapsedMs: expect.any(Number),
+        timeoutMs: 120_000,
+      });
     });
   });
 

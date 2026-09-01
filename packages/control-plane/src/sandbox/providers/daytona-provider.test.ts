@@ -27,7 +27,7 @@ const defaultRestConfig: DaytonaRestConfig = {
   apiUrl: "https://daytona.test/api",
   apiKey: "test-api-key",
   baseSnapshot: "base-snapshot-v1",
-  autoStopIntervalMinutes: 120,
+  autoStopIntervalMinutes: 0,
   autoArchiveIntervalMinutes: 10080,
 };
 
@@ -139,7 +139,7 @@ describe("DaytonaSandboxProvider", () => {
       const createCall = (client.createSandbox as ReturnType<typeof vi.fn>).mock.calls[0][0];
       expect(createCall.name).toBe("sandbox-456");
       expect(createCall.snapshot).toBe("base-snapshot-v1");
-      expect(createCall.autoStopInterval).toBe(120);
+      expect(createCall.autoStopInterval).toBe(0);
       expect(createCall.autoArchiveInterval).toBe(10080);
       expect(createCall.public).toBe(false);
     });

@@ -109,7 +109,7 @@ function createDaytonaProviderFromEnv(env: Env): DaytonaSandboxProvider {
     autoStopIntervalMinutes: parseNumericEnv(
       "DAYTONA_AUTO_STOP_INTERVAL_MINUTES",
       env.DAYTONA_AUTO_STOP_INTERVAL_MINUTES,
-      120
+      0
     ),
     autoArchiveIntervalMinutes: parseNumericEnv(
       "DAYTONA_AUTO_ARCHIVE_INTERVAL_MINUTES",
