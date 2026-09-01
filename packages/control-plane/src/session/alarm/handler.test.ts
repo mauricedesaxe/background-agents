@@ -9,7 +9,7 @@ function createHandler() {
     getProcessingMessageWithStartedAt: vi.fn(),
   };
   const messageQueue = {
-    failStuckProcessingMessage: vi.fn<() => Promise<void>>().mockResolvedValue(),
+    failExecutionWatchdogMessage: vi.fn<() => Promise<void>>().mockResolvedValue(),
     recoverStopConfirmationTimeout: vi.fn<() => Promise<void>>().mockResolvedValue(),
   };
   const lifecycleManager = {
@@ -60,7 +60,7 @@ describe("createAlarmHandler", () => {
 
     expect(now).not.toHaveBeenCalled();
     expect(alarmScheduler.schedule).not.toHaveBeenCalled();
-    expect(messageQueue.failStuckProcessingMessage).not.toHaveBeenCalled();
+    expect(messageQueue.failExecutionWatchdogMessage).not.toHaveBeenCalled();
     expect(messageQueue.recoverStopConfirmationTimeout).toHaveBeenCalledOnce();
     expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
   });
@@ -76,7 +76,7 @@ describe("createAlarmHandler", () => {
     await handler.handle();
 
     expect(log.warn).not.toHaveBeenCalled();
-    expect(messageQueue.failStuckProcessingMessage).not.toHaveBeenCalled();
+    expect(messageQueue.failExecutionWatchdogMessage).not.toHaveBeenCalled();
     expect(alarmScheduler.schedule).toHaveBeenCalledWith(2500);
     expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
   });
@@ -112,7 +112,7 @@ describe("createAlarmHandler", () => {
       })),
     };
     const messageQueue = {
-      failStuckProcessingMessage: vi.fn<() => Promise<void>>().mockResolvedValue(),
+      failExecutionWatchdogMessage: vi.fn<() => Promise<void>>().mockResolvedValue(),
       recoverStopConfirmationTimeout: vi.fn<() => Promise<void>>().mockResolvedValue(),
     };
 
@@ -149,7 +149,10 @@ describe("createAlarmHandler", () => {
       elapsed_ms: 1500,
       timeout_ms: 1000,
     });
-    expect(messageQueue.failStuckProcessingMessage).toHaveBeenCalledTimes(1);
+    expect(messageQueue.failExecutionWatchdogMessage).toHaveBeenCalledWith({
+      elapsedMs: 1500,
+      timeoutMs: 1000,
+    });
     expect(alarmScheduler.schedule).not.toHaveBeenCalled();
     expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
   });

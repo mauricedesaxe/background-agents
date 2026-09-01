@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../types";
 import { createSandboxProviderFromEnv } from "./provider-factory";
 
@@ -14,6 +14,43 @@ function createEnv(overrides: Partial<Env>): Env {
 }
 
 describe("createSandboxProviderFromEnv", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    [undefined, 0],
+    ["30", 30],
+  ])("creates new Daytona sandboxes with auto-stop %s", async (configured, expected) => {
+    const fetchSpy = vi.fn(async (_input: unknown, _init?: RequestInit) =>
+      Response.json({ id: "daytona-object-1", state: "started" })
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    const provider = createSandboxProviderFromEnv(
+      createEnv({
+        DAYTONA_API_URL: "https://daytona.test/api",
+        DAYTONA_API_KEY: "daytona-key",
+        DAYTONA_BASE_SNAPSHOT: "base",
+        DAYTONA_AUTO_STOP_INTERVAL_MINUTES: configured,
+      }),
+      "daytona"
+    );
+
+    await provider.createSandbox({
+      sessionId: "session-1",
+      sandboxId: "sandbox-1",
+      repoOwner: "owner",
+      repoName: "repo",
+      controlPlaneUrl: "https://control-plane.test",
+      sandboxAuthToken: "sandbox-token",
+      provider: "openai",
+      model: "openai/test-model",
+    });
+
+    const request = fetchSpy.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(request.body as string)).toMatchObject({ autoStopInterval: expected });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
   it("rejects malformed Vercel numeric configuration", () => {
     const env = createEnv({
       VERCEL_TOKEN: "vercel-token",

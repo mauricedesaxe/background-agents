@@ -176,8 +176,9 @@ describe("SessionSandboxEventProcessor", () => {
     });
   });
 
-  it("updates heartbeat without broadcasting", async () => {
+  it("updates heartbeat and logs active message correlation without broadcasting", async () => {
     const h = createProcessor();
+    h.repository.getProcessingMessage.mockReturnValue({ id: "msg-active" });
     const event: SandboxEvent = {
       type: "heartbeat",
       sandboxId: "sb-1",
@@ -189,6 +190,13 @@ describe("SessionSandboxEventProcessor", () => {
 
     expect(h.repository.updateSandboxHeartbeat).toHaveBeenCalledWith(expect.any(Number));
     expect(h.broadcast).not.toHaveBeenCalled();
+    expect(h.log.debug).toHaveBeenCalledWith("sandbox.event", {
+      event: "sandbox.event",
+      event_type: "heartbeat",
+      message_id: "msg-active",
+      sandbox_id: "sb-1",
+      status: "ready",
+    });
   });
 
   it("applies session_title without storing a timeline event", async () => {
@@ -295,6 +303,20 @@ describe("SessionSandboxEventProcessor", () => {
       expect.any(Number)
     );
     expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
+    expect(h.log.debug).toHaveBeenCalledWith("sandbox.event", {
+      event: "sandbox.event",
+      event_type: "token",
+      message_id: "msg-1",
+      sandbox_id: "sb-1",
+    });
+    const loggedFields = h.log.debug.mock.calls[0][1];
+    expect(loggedFields).not.toHaveProperty("content");
+    expect(loggedFields).not.toHaveProperty("args");
+    expect(loggedFields).not.toHaveProperty("output");
+    expect(loggedFields).not.toHaveProperty("result");
+    expect(loggedFields).not.toHaveProperty("error");
+    expect(loggedFields).not.toHaveProperty("url");
+    expect(loggedFields).not.toHaveProperty("metadata");
   });
 
   it("persists each context compaction marker and broadcasts it", async () => {
@@ -392,6 +414,31 @@ describe("SessionSandboxEventProcessor", () => {
         sandboxId: "sb-1",
         url: "sessions/session-1/media/artifact-1.png",
       }),
+    });
+  });
+
+  it("logs and persists an artifact against the active message when messageId is absent", async () => {
+    const h = createProcessor();
+    h.repository.getProcessingMessage.mockReturnValue({ id: "msg-active" });
+    const event: SandboxEvent = {
+      type: "artifact",
+      artifactType: "screenshot",
+      url: "sessions/session-1/media/artifact-2.png",
+      messageId: undefined,
+      sandboxId: "sb-1",
+      timestamp: 1000,
+    };
+
+    await h.processor.processSandboxEvent(event);
+
+    expect(h.eventRepository.createEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: "msg-active" })
+    );
+    expect(h.log.info).toHaveBeenCalledWith("sandbox.event", {
+      event: "sandbox.event",
+      event_type: "artifact",
+      message_id: "msg-active",
+      sandbox_id: "sb-1",
     });
   });
 
@@ -501,6 +548,16 @@ describe("SessionSandboxEventProcessor", () => {
     expect(h.scheduleInactivityCheck).toHaveBeenCalledTimes(1);
     expect(h.processMessageQueue).toHaveBeenCalledTimes(1);
     expect(h.waitUntil).toHaveBeenCalled();
+    expect(h.log.info).toHaveBeenCalledWith("prompt.complete", {
+      event: "prompt.complete",
+      message_id: "msg-1",
+      outcome: "success",
+      cause: "execution_complete",
+      message_status: "completed",
+      total_duration_ms: expect.any(Number),
+      processing_duration_ms: expect.any(Number),
+      queue_duration_ms: 100,
+    });
   });
 
   it("waits for terminal projection before snapshot, queue drain, and acknowledgement", async () => {
@@ -550,6 +607,15 @@ describe("SessionSandboxEventProcessor", () => {
 
     expect(h.repository.recordMessageCompletion).not.toHaveBeenCalled();
     expect(h.repository.clearMessageAwaitingStopConfirmation).toHaveBeenCalledWith("msg-1");
+    expect(h.log.info).toHaveBeenCalledWith("prompt.completion_ignored", {
+      event: "prompt.completion_ignored",
+      message_id: "msg-1",
+      reason: "no_processing_owner",
+    });
+    expect(h.log.info).not.toHaveBeenCalledWith(
+      "prompt.complete",
+      expect.objectContaining({ message_id: "msg-1" })
+    );
   });
 
   it("delegates a failed sandbox completion", async () => {

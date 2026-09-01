@@ -1107,7 +1107,8 @@ export class SessionDO extends DurableObject<Env> {
       idGenerator,
       config,
       {
-        onSandboxTerminating: () => this.messageQueue.failStuckProcessingMessage(),
+        onSandboxTerminating: (cause) =>
+          this.messageQueue.failProcessingMessageForSandboxTermination(cause),
         onSandboxTerminated: () => this.messageQueue.resumeAfterSandboxTermination(),
       },
       imageBuildLookup

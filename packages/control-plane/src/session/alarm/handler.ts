@@ -9,7 +9,7 @@ export interface AlarmHandlerDeps {
   repository: MessageRepository;
   messageQueue: Pick<
     SessionMessageQueue,
-    "failStuckProcessingMessage" | "recoverStopConfirmationTimeout"
+    "failExecutionWatchdogMessage" | "recoverStopConfirmationTimeout"
   >;
   lifecycleManager: Pick<SandboxLifecycleManager, "handleAlarm">;
   alarmScheduler: AlarmScheduler;
@@ -33,10 +33,6 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
   return {
     async handle(): Promise<void> {
       await deps.messageQueue.recoverStopConfirmationTimeout();
-      // Execution timeout check: if a message has been in 'processing' longer than
-      // the configured timeout, fail it. This is idempotent - if the message was
-      // already failed (by onSandboxTerminating or a prior alarm),
-      // getProcessingMessageWithStartedAt() returns null.
       const processing = deps.repository.getProcessingMessageWithStartedAt();
       if (processing?.started_at) {
         const now = deps.now();
@@ -52,7 +48,10 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
             elapsed_ms: result.elapsedMs,
             timeout_ms: deps.executionTimeoutMs,
           });
-          await deps.messageQueue.failStuckProcessingMessage();
+          await deps.messageQueue.failExecutionWatchdogMessage({
+            elapsedMs: result.elapsedMs,
+            timeoutMs: deps.executionTimeoutMs,
+          });
         } else {
           // An earlier lifecycle alarm has consumed the Durable Object's single
           // alarm slot. Reassert this message's deadline before lifecycle handling

@@ -77,10 +77,22 @@ export class SessionSandboxEventProcessor {
   }
 
   async processSandboxEvent(event: SandboxEventWithAck): Promise<void> {
+    const loggedEventMessageId = "messageId" in event ? event.messageId : null;
+    const correlatedMessageId =
+      loggedEventMessageId ?? this.messageRepository.getProcessingMessage()?.id ?? null;
+    const eventLogContext = {
+      event: "sandbox.event",
+      event_type: event.type,
+      message_id: correlatedMessageId,
+      sandbox_id: "sandboxId" in event ? (event.sandboxId ?? null) : null,
+      ...("status" in event ? { status: event.status } : {}),
+      ...("isSubtask" in event ? { is_subtask: event.isSubtask ?? false } : {}),
+      ...("childSessionId" in event ? { child_session_id: event.childSessionId ?? null } : {}),
+    };
     if (event.type === "heartbeat" || event.type === "token") {
-      this.log.debug("Sandbox event", { event_type: event.type });
+      this.log.debug("sandbox.event", eventLogContext);
     } else if (event.type !== "execution_complete") {
-      this.log.info("Sandbox event", { event_type: event.type });
+      this.log.info("sandbox.event", eventLogContext);
     }
     const now = Date.now();
 
@@ -255,6 +267,7 @@ export class SessionSandboxEventProcessor {
           event: "prompt.complete",
           message_id: event.messageId,
           outcome: event.success ? "success" : "failure",
+          cause: event.success ? "execution_complete" : "execution_failed",
           message_status: completion.status,
           total_duration_ms: totalDurationMs,
           processing_duration_ms: processingDurationMs,
@@ -276,10 +289,10 @@ export class SessionSandboxEventProcessor {
         await this.statusService.reconcileAfterExecution(event.success);
       } else {
         this.messageRepository.clearMessageAwaitingStopConfirmation(event.messageId);
-        this.log.info("prompt.complete", {
-          event: "prompt.complete",
+        this.log.info("prompt.completion_ignored", {
+          event: "prompt.completion_ignored",
           message_id: event.messageId,
-          outcome: "already_stopped",
+          reason: "no_processing_owner",
         });
       }
 

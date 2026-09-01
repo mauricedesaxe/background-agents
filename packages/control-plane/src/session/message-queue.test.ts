@@ -271,6 +271,12 @@ describe("SessionMessageQueue", () => {
     });
     expect(h.broadcast).toHaveBeenCalledWith({ type: "prompt_queue_updated", promptQueue: [] });
     expect(h.sessionStatus.reconcileAfterQueueRemoval).toHaveBeenCalledOnce();
+    expect(h.log.info).toHaveBeenCalledWith("prompt.complete", {
+      event: "prompt.complete",
+      message_id: "msg-1",
+      outcome: "cancelled",
+      cause: "user_cancelled_before_dispatch",
+    });
   });
 
   it("rejects cancellation after a prompt leaves pending state", async () => {
@@ -991,6 +997,22 @@ describe("SessionMessageQueue", () => {
     expect(
       h.repository.markMessageAwaitingStopConfirmation.mock.invocationCallOrder[0]
     ).toBeLessThan(h.wsManager.send.mock.invocationCallOrder[0]);
+    const terminalLogs = h.log.info.mock.calls.filter(([event]) => event === "prompt.complete");
+    expect(terminalLogs).toEqual([
+      [
+        "prompt.complete",
+        expect.objectContaining({
+          message_id: "msg-9",
+          outcome: "stopped",
+          cause: "user_stop",
+          message_status: "failed",
+          total_duration_ms: expect.any(Number),
+          processing_duration_ms: expect.any(Number),
+          queue_duration_ms: 100,
+        }),
+      ],
+    ]);
+    expect(h.log.info).not.toHaveBeenCalledWith("prompt.stopped", expect.anything());
   });
 
   it("projects terminal unread state before broadcasting synthetic completion", async () => {
@@ -1131,7 +1153,10 @@ describe("SessionMessageQueue", () => {
     const h = buildQueue();
 
     await h.queue.stopExecution();
-    await h.queue.failStuckProcessingMessage();
+    await h.queue.failExecutionWatchdogMessage({
+      elapsedMs: 1_500,
+      timeoutMs: 1_000,
+    });
 
     expect(h.repository.recordMessageCompletion).not.toHaveBeenCalled();
     expect(h.wsManager.send).not.toHaveBeenCalledWith(expect.anything(), { type: "stop" });
@@ -1199,13 +1224,64 @@ describe("SessionMessageQueue", () => {
     expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
   });
 
-  it("reconciles session status when failing a stuck processing message", async () => {
+  it.each([
+    [
+      { kind: "connecting_timeout", elapsedMs: 130_000, timeoutMs: 120_000 } as const,
+      "Sandbox failed to connect within the allowed time",
+    ],
+    [
+      { kind: "heartbeat_stale", elapsedMs: 100_000, timeoutMs: 90_000 } as const,
+      "The sandbox stopped responding and was terminated",
+    ],
+    [
+      { kind: "inactivity_timeout", elapsedMs: 660_000, timeoutMs: 600_000 } as const,
+      "Sandbox stopped due to inactivity",
+    ],
+  ])("reports lifecycle termination cause $cause.kind", async (cause, expectedError) => {
+    const h = buildQueue();
+    h.repository.getProcessingMessageWithCreatedAt.mockReturnValue({
+      id: "msg-lifecycle",
+      created_at: 800,
+    });
+
+    await h.queue.failProcessingMessageForSandboxTermination(cause);
+
+    expect(h.repository.recordMessageCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: "msg-lifecycle",
+        error: expectedError,
+      }),
+      expect.any(Number),
+      "processing"
+    );
+    expect(expectedError).not.toBe("Execution timed out (stuck processing)");
+    expect(h.log.info).toHaveBeenCalledWith(
+      "prompt.complete",
+      expect.objectContaining({
+        event: "prompt.complete",
+        message_id: "msg-lifecycle",
+        outcome: "failure",
+        cause: cause.kind,
+        message_status: "failed",
+        total_duration_ms: expect.any(Number),
+        processing_duration_ms: expect.any(Number),
+        queue_duration_ms: 100,
+        termination_elapsed_ms: cause.elapsedMs,
+        termination_timeout_ms: cause.timeoutMs,
+      })
+    );
+  });
+
+  it("reports a stuck processing timeout only for the execution watchdog", async () => {
     const h = buildQueue();
     h.repository.getProcessingMessageWithCreatedAt.mockReturnValue({
       id: "msg-timeout",
       created_at: 800,
     });
-    await h.queue.failStuckProcessingMessage();
+    await h.queue.failExecutionWatchdogMessage({
+      elapsedMs: 1_500,
+      timeoutMs: 1_000,
+    });
 
     expect(h.repository.recordMessageCompletion).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1216,6 +1292,15 @@ describe("SessionMessageQueue", () => {
       "processing"
     );
     expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
+    expect(h.log.info).toHaveBeenCalledWith(
+      "prompt.complete",
+      expect.objectContaining({
+        message_id: "msg-timeout",
+        cause: "execution_watchdog_timeout",
+        termination_elapsed_ms: 1_500,
+        termination_timeout_ms: 1_000,
+      })
+    );
   });
 
   describe("enqueuePromptFromApi", () => {
