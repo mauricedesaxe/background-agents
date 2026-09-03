@@ -13,7 +13,9 @@ function createHandler() {
     recoverStopConfirmationTimeout: vi.fn<() => Promise<void>>().mockResolvedValue(),
   };
   const lifecycleManager = {
-    handleAlarm: vi.fn<() => Promise<void>>().mockResolvedValue(),
+    handleAlarm: vi
+      .fn<(context: { isMessageProcessing: boolean }) => Promise<void>>()
+      .mockResolvedValue(),
   };
   const alarmScheduler = {
     schedule: vi.fn<(timestamp: number) => Promise<void>>().mockResolvedValue(),
@@ -62,7 +64,7 @@ describe("createAlarmHandler", () => {
     expect(alarmScheduler.schedule).not.toHaveBeenCalled();
     expect(messageQueue.failExecutionWatchdogMessage).not.toHaveBeenCalled();
     expect(messageQueue.recoverStopConfirmationTimeout).toHaveBeenCalledOnce();
-    expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
+    expect(lifecycleManager.handleAlarm).toHaveBeenCalledWith({ isMessageProcessing: false });
   });
 
   it("does not fail processing message when execution timeout is not reached", async () => {
@@ -78,7 +80,7 @@ describe("createAlarmHandler", () => {
     expect(log.warn).not.toHaveBeenCalled();
     expect(messageQueue.failExecutionWatchdogMessage).not.toHaveBeenCalled();
     expect(alarmScheduler.schedule).toHaveBeenCalledWith(2500);
-    expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
+    expect(lifecycleManager.handleAlarm).toHaveBeenCalledWith({ isMessageProcessing: true });
   });
 
   it("keeps the execution deadline ahead of a later lifecycle check", async () => {
@@ -103,7 +105,9 @@ describe("createAlarmHandler", () => {
       completeDelivery: vi.fn(),
     });
     const lifecycleManager = {
-      handleAlarm: vi.fn(async () => alarmScheduler.schedule(5000)),
+      handleAlarm: vi.fn(async (_context: { isMessageProcessing: boolean }) =>
+        alarmScheduler.schedule(5000)
+      ),
     };
     const repository = {
       getProcessingMessageWithStartedAt: vi.fn(() => ({
@@ -131,6 +135,7 @@ describe("createAlarmHandler", () => {
     expect(currentAlarm).toBe(2500);
     expect(storage.setAlarm).toHaveBeenCalledTimes(1);
     expect(storage.setAlarm).toHaveBeenCalledWith(2500);
+    expect(lifecycleManager.handleAlarm).toHaveBeenCalledWith({ isMessageProcessing: true });
   });
 
   it("fails stuck processing message when execution timeout is reached", async () => {
@@ -139,6 +144,9 @@ describe("createAlarmHandler", () => {
     repository.getProcessingMessageWithStartedAt.mockReturnValue({
       id: "message-1",
       started_at: 500,
+    });
+    messageQueue.failExecutionWatchdogMessage.mockImplementation(async () => {
+      repository.getProcessingMessageWithStartedAt.mockReturnValue(null);
     });
 
     await handler.handle();
@@ -154,6 +162,24 @@ describe("createAlarmHandler", () => {
       timeoutMs: 1000,
     });
     expect(alarmScheduler.schedule).not.toHaveBeenCalled();
-    expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
+    expect(lifecycleManager.handleAlarm).toHaveBeenCalledWith({ isMessageProcessing: false });
+  });
+
+  it("protects a replacement message started during watchdog recovery", async () => {
+    const { handler, repository, messageQueue, lifecycleManager } = createHandler();
+    repository.getProcessingMessageWithStartedAt.mockReturnValue({
+      id: "timed-out-message",
+      started_at: 500,
+    });
+    messageQueue.failExecutionWatchdogMessage.mockImplementation(async () => {
+      repository.getProcessingMessageWithStartedAt.mockReturnValue({
+        id: "replacement-message",
+        started_at: 2000,
+      });
+    });
+
+    await handler.handle();
+
+    expect(lifecycleManager.handleAlarm).toHaveBeenCalledWith({ isMessageProcessing: true });
   });
 });
