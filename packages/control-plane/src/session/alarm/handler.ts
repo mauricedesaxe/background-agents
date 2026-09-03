@@ -60,7 +60,9 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
         }
       }
 
-      await deps.lifecycleManager.handleAlarm();
+      await deps.lifecycleManager.handleAlarm({
+        isMessageProcessing: deps.repository.getProcessingMessageWithStartedAt() !== null,
+      });
     },
   };
 }

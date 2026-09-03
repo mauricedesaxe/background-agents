@@ -55,6 +55,10 @@ import type { AlarmScheduler } from "../../platform-ports";
 export type { ImageBuildLookup } from "./image-selection";
 export type { AlarmScheduler } from "../../platform-ports";
 
+export interface SandboxAlarmContext {
+  isMessageProcessing: boolean;
+}
+
 const log = createLogger("lifecycle-manager");
 
 /** TTL for terminal auth JWTs (24 hours, matching typical sandbox lifetime). */
@@ -1164,7 +1168,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
   /**
    * Handle alarm for inactivity and heartbeat monitoring.
    */
-  async handleAlarm(): Promise<void> {
+  async handleAlarm(context: SandboxAlarmContext): Promise<void> {
     const sandbox = this.storage.getSandbox();
     if (!sandbox) {
       this.log.debug("Alarm fired: no sandbox found");
@@ -1282,6 +1286,15 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       return;
     }
 
+    if (context.isMessageProcessing) {
+      this.log.debug("Alarm: active execution skips inactivity check");
+      const heartbeatDeadline = sandbox.last_heartbeat
+        ? sandbox.last_heartbeat + this.config.heartbeat.timeoutMs + 1
+        : now + this.config.heartbeat.timeoutMs;
+      await this.alarmScheduler.schedule(heartbeatDeadline);
+      return;
+    }
+
     // Evaluate inactivity timeout
     const connectedClients = this.getConnectedClientCount();
     const inactivityState = {
@@ -1308,7 +1321,6 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
           elapsedMs: sandbox.last_activity == null ? undefined : now - sandbox.last_activity,
           timeoutMs: this.config.inactivity.timeoutMs,
         });
-        // Set status to stopped FIRST to block reconnection attempts
         this.storage.updateSandboxStatus("stopped");
         this.clearSandboxAccessState();
         this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });

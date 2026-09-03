@@ -1677,6 +1677,76 @@ describe("SandboxLifecycleManager", () => {
   });
 
   describe("handleAlarm", () => {
+    it("does not stop an active execution at the inactivity deadline", async () => {
+      const now = Date.now();
+      const lastHeartbeat = now - 10_000;
+      const sandbox = createMockSandbox({
+        status: "ready",
+        last_heartbeat: lastHeartbeat,
+        last_activity: now - DEFAULT_LIFECYCLE_CONFIG.inactivity.timeoutMs,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const broadcaster = createMockBroadcaster();
+      const wsManager = createMockWebSocketManager(false, 0);
+      const alarmScheduler = createMockAlarmScheduler();
+      const onSandboxTerminating = vi.fn().mockResolvedValue(undefined);
+      const manager = new SandboxLifecycleManager(
+        createMockProvider(),
+        storage,
+        broadcaster,
+        wsManager,
+        alarmScheduler,
+        createMockIdGenerator(),
+        createTestConfig(),
+        { onSandboxTerminating }
+      );
+
+      await manager.handleAlarm({ isMessageProcessing: true });
+
+      expect(storage.calls).not.toContain("updateSandboxStatus:stopped");
+      expect(broadcaster.messages).not.toContainEqual({
+        type: "sandbox_status",
+        status: "stopped",
+      });
+      expect(wsManager.detachSandboxWebSocket).not.toHaveBeenCalled();
+      expect(onSandboxTerminating).not.toHaveBeenCalled();
+      expect(alarmScheduler.alarms).toEqual([
+        lastHeartbeat + DEFAULT_LIFECYCLE_CONFIG.heartbeat.timeoutMs + 1,
+      ]);
+    });
+
+    it("still fails a stale heartbeat during an active execution", async () => {
+      const now = Date.now();
+      const sandbox = createMockSandbox({
+        status: "ready",
+        last_heartbeat: now - DEFAULT_LIFECYCLE_CONFIG.heartbeat.timeoutMs - 1,
+        last_activity: now - DEFAULT_LIFECYCLE_CONFIG.inactivity.timeoutMs,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const onSandboxTerminating = vi.fn().mockResolvedValue(undefined);
+      const manager = new SandboxLifecycleManager(
+        createMockProvider(),
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig(),
+        { onSandboxTerminating }
+      );
+      const dateNow = vi.spyOn(Date, "now").mockReturnValue(now);
+
+      await manager.handleAlarm({ isMessageProcessing: true });
+      dateNow.mockRestore();
+
+      expect(storage.calls).toContain("updateSandboxStatus:stale");
+      expect(onSandboxTerminating).toHaveBeenCalledWith({
+        kind: "heartbeat_stale",
+        elapsedMs: DEFAULT_LIFECYCLE_CONFIG.heartbeat.timeoutMs + 1,
+        timeoutMs: DEFAULT_LIFECYCLE_CONFIG.heartbeat.timeoutMs,
+      });
+    });
+
     it("detects heartbeat timeout and sets stale", async () => {
       const now = Date.now();
       const sandbox = createMockSandbox({
@@ -1698,7 +1768,7 @@ describe("SandboxLifecycleManager", () => {
         createTestConfig()
       );
 
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
 
       expect(storage.calls).toContain("updateSandboxStatus:stale");
       expect(broadcaster.messages.some((m) => (m as { status?: string }).status === "stale")).toBe(
@@ -1730,7 +1800,7 @@ describe("SandboxLifecycleManager", () => {
         createTestConfig()
       );
 
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
 
       expect(storage.calls).toContain("updateSandboxStatus:stopped");
       expect(wsManager.sendToSandbox).toHaveBeenCalledWith({ type: "shutdown" });
@@ -1759,7 +1829,7 @@ describe("SandboxLifecycleManager", () => {
         createTestConfig()
       );
 
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
 
       expect(storage.calls).not.toContain("updateSandboxStatus:stopped");
       expect(alarmScheduler.alarms.length).toBe(1);
@@ -1793,10 +1863,10 @@ describe("SandboxLifecycleManager", () => {
       );
       const now = vi.spyOn(Date, "now").mockReturnValue(timeoutAt);
 
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
       sandbox.last_heartbeat = graceDeadlineMs;
       now.mockReturnValue(graceDeadlineMs);
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
       now.mockRestore();
 
       expect(alarmScheduler.alarms).toEqual([graceDeadlineMs]);
@@ -1826,7 +1896,7 @@ describe("SandboxLifecycleManager", () => {
         createTestConfig()
       );
 
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
 
       expect(storage.calls).not.toContain("updateSandboxStatus:stopped");
       expect(alarmScheduler.alarms.length).toBe(1);
@@ -1854,7 +1924,7 @@ describe("SandboxLifecycleManager", () => {
         createTestConfig()
       );
 
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
 
       expect(provider.takeSnapshot).toHaveBeenCalled();
     });
@@ -1884,7 +1954,7 @@ describe("SandboxLifecycleManager", () => {
         createTestConfig()
       );
 
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
 
       expect(provider.takeSnapshot).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1928,7 +1998,7 @@ describe("SandboxLifecycleManager", () => {
         createTestConfig()
       );
 
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
 
       expect(provider.takeSnapshot).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1968,7 +2038,7 @@ describe("SandboxLifecycleManager", () => {
         createTestConfig()
       );
 
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
 
       expect(provider.takeSnapshot).not.toHaveBeenCalled();
       expect(stopSandbox).toHaveBeenCalledWith(
@@ -2010,7 +2080,7 @@ describe("SandboxLifecycleManager", () => {
         createTestConfig()
       );
 
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
 
       expect(storage.calls).toContain("clearSandboxVnc");
       expect(sandbox.vnc_url).toBeNull();
@@ -2037,7 +2107,7 @@ describe("SandboxLifecycleManager", () => {
         { onSandboxTerminating }
       );
 
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
 
       expect(onSandboxTerminating).toHaveBeenCalledWith({
         kind: "heartbeat_stale",
@@ -2067,7 +2137,7 @@ describe("SandboxLifecycleManager", () => {
         { onSandboxTerminating }
       );
 
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
 
       expect(onSandboxTerminating).toHaveBeenCalledWith({
         kind: "inactivity_timeout",
@@ -2095,7 +2165,7 @@ describe("SandboxLifecycleManager", () => {
         createTestConfig()
       );
 
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
       expect(storage.calls).toContain("updateSandboxStatus:stale");
     });
 
@@ -2120,7 +2190,7 @@ describe("SandboxLifecycleManager", () => {
         createTestConfig()
       );
 
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
 
       expect(storage.calls).toContain("updateSandboxStatus:failed");
       expect(storage.calls).toContain("clearSandboxCodeServer");
@@ -2154,7 +2224,7 @@ describe("SandboxLifecycleManager", () => {
         createTestConfig()
       );
 
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
 
       expect(storage.calls).not.toContain("updateSandboxStatus:failed");
       // Should schedule a follow-up alarm
@@ -2182,7 +2252,7 @@ describe("SandboxLifecycleManager", () => {
         { onSandboxTerminating }
       );
 
-      await manager.handleAlarm();
+      await manager.handleAlarm({ isMessageProcessing: false });
 
       expect(onSandboxTerminating).toHaveBeenCalledWith({
         kind: "connecting_timeout",
