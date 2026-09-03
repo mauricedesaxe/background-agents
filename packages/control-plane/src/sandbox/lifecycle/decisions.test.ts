@@ -16,6 +16,7 @@ import {
   isSandboxReconnectBlockedStatus,
   DEFAULT_CONNECTING_TIMEOUT_CONFIG,
   DEFAULT_EXECUTION_TIMEOUT_MS,
+  DEFAULT_INACTIVITY_CONFIG,
   type CircuitBreakerState,
   type CircuitBreakerConfig,
   type SandboxState,
@@ -554,11 +555,7 @@ describe("evaluateSpawnDecision", () => {
 // ==================== Inactivity Timeout Tests ====================
 
 describe("evaluateInactivityTimeout", () => {
-  const config: InactivityConfig = {
-    timeoutMs: 10 * 60 * 1000, // 10 minutes
-    extensionMs: 5 * 60 * 1000, // 5 minutes
-    minCheckIntervalMs: 30000, // 30 seconds
-  };
+  const config: InactivityConfig = DEFAULT_INACTIVITY_CONFIG;
 
   it('returns "schedule" for terminal states (stopped)', () => {
     const now = Date.now();
@@ -635,9 +632,10 @@ describe("evaluateInactivityTimeout", () => {
   });
 
   it('returns "extend" when threshold exceeded but clients connected', () => {
-    const now = Date.now();
+    const lastActivity = 1_000_000;
+    const now = lastActivity + config.timeoutMs;
     const state: InactivityState = {
-      lastActivity: now - config.timeoutMs - 1000,
+      lastActivity,
       status: "ready",
       connectedClientCount: 2,
     };
@@ -646,14 +644,48 @@ describe("evaluateInactivityTimeout", () => {
 
     expect(decision.action).toBe("extend");
     if (decision.action === "extend") {
-      expect(decision.extensionMs).toBe(config.extensionMs);
+      expect(decision.graceDeadlineMs).toBe(
+        lastActivity + config.timeoutMs + config.connectedClientGraceMs
+      );
       expect(decision.shouldWarn).toBe(true);
     }
   });
 
+  it("times out at the fixed connected-client grace deadline", () => {
+    const lastActivity = 1_000_000;
+    const graceDeadlineMs = lastActivity + config.timeoutMs + config.connectedClientGraceMs;
+    const state: InactivityState = {
+      lastActivity,
+      status: "ready",
+      connectedClientCount: 1,
+    };
+
+    const decision = evaluateInactivityTimeout(state, config, graceDeadlineMs);
+
+    expect(decision).toEqual({ action: "timeout", shouldSnapshot: true });
+  });
+
+  it("starts a fresh idle window after new activity", () => {
+    const previousLastActivity = 1_000_000;
+    const now = previousLastActivity + config.timeoutMs + config.connectedClientGraceMs;
+    const lastActivity = now - 60_000;
+    const state: InactivityState = {
+      lastActivity,
+      status: "ready",
+      connectedClientCount: 1,
+    };
+
+    const decision = evaluateInactivityTimeout(state, config, now);
+
+    expect(decision).toEqual({
+      action: "schedule",
+      nextCheckMs: config.timeoutMs - (now - lastActivity),
+    });
+  });
+
   it('returns "schedule" with correct remaining time', () => {
     const now = Date.now();
-    const inactiveTime = 5 * 60 * 1000; // 5 minutes
+    const inactiveTime = 2 * 60 * 1000;
     const state: InactivityState = {
       lastActivity: now - inactiveTime,
       status: "ready",
@@ -670,7 +702,6 @@ describe("evaluateInactivityTimeout", () => {
 
   it("handles minimum check interval", () => {
     const now = Date.now();
-    // 9 minutes 50 seconds - very close to timeout
     const inactiveTime = config.timeoutMs - 10000;
     const state: InactivityState = {
       lastActivity: now - inactiveTime,
@@ -682,7 +713,6 @@ describe("evaluateInactivityTimeout", () => {
 
     expect(decision.action).toBe("schedule");
     if (decision.action === "schedule") {
-      // Should be max of remaining time (10s) and min interval (30s)
       expect(decision.nextCheckMs).toBe(config.minCheckIntervalMs);
     }
   });

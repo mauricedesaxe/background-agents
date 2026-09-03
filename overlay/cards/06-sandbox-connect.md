@@ -25,7 +25,7 @@ of the sync runbook**, a blocking live smoke check the sync agent runs.
    "never connects / OOM respawn", not micro-latency. Tune only if a healthy prod session ever
    legitimately exceeds them.
 3. Assert idle-stop fires **4-7 min** later (card `02-idle-window`: a 5-min window, with a possible
-   2-min extension while a tab is connected).
+   2-min grace period while a tab is connected).
 4. On any failure: the sync is NOT good. Block the PR / roll back. Do not proceed.
 
 ## Placement decision (durable)

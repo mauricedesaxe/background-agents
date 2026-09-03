@@ -1083,7 +1083,11 @@ export class SessionDO extends DurableObject<Env> {
       sessionId,
       inactivity: {
         ...DEFAULT_LIFECYCLE_CONFIG.inactivity,
-        timeoutMs: parseInt(this.env.SANDBOX_INACTIVITY_TIMEOUT_MS || "600000", 10),
+        timeoutMs: parseInt(
+          this.env.SANDBOX_INACTIVITY_TIMEOUT_MS ||
+            String(DEFAULT_LIFECYCLE_CONFIG.inactivity.timeoutMs),
+          10
+        ),
       },
       mcpServerLookup,
       slackAgentNotifyLookup,

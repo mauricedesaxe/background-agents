@@ -1713,7 +1713,7 @@ describe("SandboxLifecycleManager", () => {
       const sandbox = createMockSandbox({
         status: "ready",
         last_heartbeat: now - 10000, // Recent heartbeat
-        last_activity: now - 11 * 60 * 1000, // 11 minutes ago, past 10 min timeout
+        last_activity: now - 11 * 60 * 1000,
       });
       const storage = createMockStorage(createMockSession(), sandbox);
       const broadcaster = createMockBroadcaster();
@@ -1741,7 +1741,7 @@ describe("SandboxLifecycleManager", () => {
       const sandbox = createMockSandbox({
         status: "ready",
         last_heartbeat: now - 10000,
-        last_activity: now - 11 * 60 * 1000, // Past timeout
+        last_activity: now - DEFAULT_LIFECYCLE_CONFIG.inactivity.timeoutMs,
       });
       const storage = createMockStorage(createMockSession(), sandbox);
       const broadcaster = createMockBroadcaster();
@@ -1761,12 +1761,46 @@ describe("SandboxLifecycleManager", () => {
 
       await manager.handleAlarm();
 
-      // Should extend, not timeout
       expect(storage.calls).not.toContain("updateSandboxStatus:stopped");
       expect(alarmScheduler.alarms.length).toBe(1);
-      expect(
-        broadcaster.messages.some((m) => (m as { type: string }).type === "sandbox_warning")
-      ).toBe(true);
+      expect(broadcaster.messages).toContainEqual({
+        type: "sandbox_warning",
+        message:
+          "Sandbox will stop in 2 minutes due to inactivity. Send a message to keep it alive.",
+      });
+    });
+
+    it("stops on the second inactivity alarm while clients remain connected", async () => {
+      const config = createTestConfig();
+      const lastActivity = 1_000_000;
+      const timeoutAt = lastActivity + config.inactivity.timeoutMs;
+      const graceDeadlineMs = timeoutAt + config.inactivity.connectedClientGraceMs;
+      const sandbox = createMockSandbox({
+        status: "ready",
+        last_heartbeat: timeoutAt,
+        last_activity: lastActivity,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const alarmScheduler = createMockAlarmScheduler();
+      const manager = new SandboxLifecycleManager(
+        createMockProvider(),
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false, 1),
+        alarmScheduler,
+        createMockIdGenerator(),
+        config
+      );
+      const now = vi.spyOn(Date, "now").mockReturnValue(timeoutAt);
+
+      await manager.handleAlarm();
+      sandbox.last_heartbeat = graceDeadlineMs;
+      now.mockReturnValue(graceDeadlineMs);
+      await manager.handleAlarm();
+      now.mockRestore();
+
+      expect(alarmScheduler.alarms).toEqual([graceDeadlineMs]);
+      expect(storage.calls).toContain("updateSandboxStatus:stopped");
     });
 
     it("schedules next alarm correctly", async () => {
@@ -1774,7 +1808,7 @@ describe("SandboxLifecycleManager", () => {
       const sandbox = createMockSandbox({
         status: "ready",
         last_heartbeat: now - 10000,
-        last_activity: now - 5 * 60 * 1000, // 5 minutes ago, not yet timed out
+        last_activity: now - 2 * 60 * 1000,
       });
       const storage = createMockStorage(createMockSession(), sandbox);
       const broadcaster = createMockBroadcaster();
@@ -1803,7 +1837,7 @@ describe("SandboxLifecycleManager", () => {
       const sandbox = createMockSandbox({
         status: "ready",
         last_heartbeat: now - 10000,
-        last_activity: now - 11 * 60 * 1000, // Past timeout
+        last_activity: now - DEFAULT_LIFECYCLE_CONFIG.inactivity.timeoutMs,
       });
       const storage = createMockStorage(createMockSession(), sandbox);
       const broadcaster = createMockBroadcaster();
@@ -2017,7 +2051,7 @@ describe("SandboxLifecycleManager", () => {
       const sandbox = createMockSandbox({
         status: "ready",
         last_heartbeat: now - 10000, // Recent heartbeat
-        last_activity: now - 11 * 60 * 1000, // Past 10 min timeout
+        last_activity: now - 11 * 60 * 1000,
       });
       const storage = createMockStorage(createMockSession(), sandbox);
       const onSandboxTerminating = vi.fn().mockResolvedValue(undefined);
@@ -2038,7 +2072,7 @@ describe("SandboxLifecycleManager", () => {
       expect(onSandboxTerminating).toHaveBeenCalledWith({
         kind: "inactivity_timeout",
         elapsedMs: expect.any(Number),
-        timeoutMs: 10 * 60 * 1000,
+        timeoutMs: DEFAULT_LIFECYCLE_CONFIG.inactivity.timeoutMs,
       });
     });
 
