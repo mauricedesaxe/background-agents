@@ -1349,16 +1349,16 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       case "extend":
         this.log.info("Inactivity extended", {
           connected_clients: connectedClients,
-          extension_ms: inactivityDecision.extensionMs,
+          grace_deadline_ms: inactivityDecision.graceDeadlineMs,
         });
         if (inactivityDecision.shouldWarn) {
           this.broadcaster.broadcast({
             type: "sandbox_warning",
             message:
-              "Sandbox will stop in 5 minutes due to inactivity. Send a message to keep it alive.",
+              "Sandbox will stop in 2 minutes due to inactivity. Send a message to keep it alive.",
           });
         }
-        await this.alarmScheduler.schedule(now + inactivityDecision.extensionMs);
+        await this.alarmScheduler.schedule(inactivityDecision.graceDeadlineMs);
         return;
 
       case "schedule":

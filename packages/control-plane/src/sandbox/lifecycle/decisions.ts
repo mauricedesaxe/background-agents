@@ -324,10 +324,10 @@ export interface InactivityState {
  * Inactivity timeout configuration.
  */
 export interface InactivityConfig {
-  /** Time in ms before sandbox stops due to inactivity (default: 10 minutes) */
+  /** Base idle window before a stop or connected-client grace period (default: 5 minutes) */
   timeoutMs: number;
-  /** Additional time granted when clients are connected (default: 5 minutes) */
-  extensionMs: number;
+  /** Additional time granted when clients are connected (default: 2 minutes) */
+  connectedClientGraceMs: number;
   /** Minimum interval between alarm checks (default: 30s) */
   minCheckIntervalMs: number;
 }
@@ -336,8 +336,8 @@ export interface InactivityConfig {
  * Default inactivity configuration.
  */
 export const DEFAULT_INACTIVITY_CONFIG: InactivityConfig = {
-  timeoutMs: 10 * 60 * 1000, // 10 minutes
-  extensionMs: 5 * 60 * 1000, // 5 minutes
+  timeoutMs: 5 * 60 * 1000, // 5 minutes
+  connectedClientGraceMs: 2 * 60 * 1000,
   minCheckIntervalMs: 30000, // 30 seconds
 };
 
@@ -346,13 +346,13 @@ export const DEFAULT_INACTIVITY_CONFIG: InactivityConfig = {
  */
 export type InactivityAction =
   | { action: "timeout"; shouldSnapshot: boolean }
-  | { action: "extend"; extensionMs: number; shouldWarn: boolean }
+  | { action: "extend"; graceDeadlineMs: number; shouldWarn: boolean }
   | { action: "schedule"; nextCheckMs: number };
 
 /**
  * Evaluate what action to take for inactivity timeout.
  *
- * The 10-minute default timeout balances cost efficiency with user experience:
+ * The 5-minute default timeout balances cost efficiency with user experience:
  * - Short enough to avoid wasting resources on abandoned sessions
  * - Long enough for users to read/think between prompts
  * - Snapshots preserve all state, so resume is instant
@@ -365,13 +365,12 @@ export type InactivityAction =
  * @example
  * ```typescript
  * const decision = evaluateInactivityTimeout(
- *   { lastActivity: now - 600001, status: "ready", connectedClientCount: 1 },
+ *   { lastActivity: now - 300001, status: "ready", connectedClientCount: 1 },
  *   DEFAULT_INACTIVITY_CONFIG,
  *   now
  * );
  * if (decision.action === "extend") {
- *   // Warn user and schedule next check
- *   await alarmScheduler.schedule(now + decision.extensionMs);
+ *   await alarmScheduler.schedule(decision.graceDeadlineMs);
  * }
  * ```
  */
@@ -397,20 +396,17 @@ export function evaluateInactivityTimeout(
 
   const inactiveTime = now - state.lastActivity;
 
-  // Check if inactivity threshold exceeded
   if (inactiveTime >= config.timeoutMs) {
-    // If clients are still connected, they may be actively reviewing
-    // Grant an extension and warn them
-    if (state.connectedClientCount > 0) {
-      return {
-        action: "extend",
-        extensionMs: config.extensionMs,
-        shouldWarn: true,
-      };
+    const graceDeadlineMs = state.lastActivity + config.timeoutMs + config.connectedClientGraceMs;
+    if (now >= graceDeadlineMs || state.connectedClientCount === 0) {
+      return { action: "timeout", shouldSnapshot: true };
     }
 
-    // No clients connected - timeout and snapshot
-    return { action: "timeout", shouldSnapshot: true };
+    return {
+      action: "extend",
+      graceDeadlineMs,
+      shouldWarn: true,
+    };
   }
 
   // Not yet timed out - schedule next check at remaining time (minimum interval)

@@ -59,9 +59,9 @@ is simply absent, which is the point.
 
 ## Gate 2 — Idle-window tfvar (card 02)
 
-- Assert `sandbox_inactivity_timeout_ms == 300000` is set in the prod tfvars.
-- If missing, **set it**. Do not assume it is present — it is gitignored and local-only, so a fresh
-  machine or a lost tfvars file drops it.
+- Confirm that Terraform Plan and Apply both pass `SANDBOX_INACTIVITY_TIMEOUT_MS` into
+  `sandbox_inactivity_timeout_ms`.
+- Confirm that both jobs use `300000` when the secret is absent.
 
 ## Gate 3 — Queue-name length (card 03)
 

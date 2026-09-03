@@ -105,7 +105,7 @@ when it resumes a sandbox), and E2B has no server-side idle-stop or auto-delete.
 therefore drives the lifecycle through the shared lifecycle manager, treating E2B stops as a
 **resumable pause**:
 
-- Idle sessions are **paused** after the shared inactivity timeout (default 10 minutes).
+- Idle sessions are **paused** after the shared inactivity timeout (default 5 minutes).
 - When the TTL lapses, the sandbox created with `E2B_AUTO_PAUSE=true` **auto-pauses** (recoverable)
   rather than being killed.
 - The next prompt **resumes** the paused sandbox in place (workspace state preserved); if E2B has
@@ -115,7 +115,7 @@ therefore drives the lifecycle through the shared lifecycle manager, treating E2
 
 Paused E2B sandboxes are not billed and are retained indefinitely, so pausing is the default
 recoverable stop. `E2B_AUTO_PAUSE` controls the **TTL action** (pause vs kill when the timeout
-lapses); the ~10-minute inactivity pause above is driven by the shared lifecycle manager and applies
+lapses); the ~5-minute inactivity pause above is driven by the shared lifecycle manager and applies
 regardless of that flag. Resume is always control-plane-driven — the next prompt reconnects the
 sandbox through the lifecycle manager. E2B's provider-side auto-resume is deliberately **disabled**
 so stray inbound traffic to an old tunnel can't wake a paused sandbox outside that state machine.
