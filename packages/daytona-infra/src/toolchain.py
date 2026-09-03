@@ -22,8 +22,10 @@ OPENCODE_VERSION = "1.18.18"
 CODE_SERVER_VERSION = "4.109.5"
 AGENT_BROWSER_VERSION = "0.21.2"
 JJ_VERSION = "0.44.0"
+BD_VERSION = "1.2.2"
+BD_SHA256 = "8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8"
 SANDBOX_VERSION = (
-    "daytona-v12-8gb-jj-vnc-opencode-1-18-18"  # bump to invalidate the Daytona snapshot
+    "daytona-v13-8gb-jj-bd-vnc-opencode-1-18-18"  # bump to invalidate the Daytona snapshot
 )
 
 
@@ -75,6 +77,13 @@ def build_base_image(repo_root: Path) -> Image:
             f"jj-v{JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz",
             "mkdir -p /tmp/jjx && tar -xzf /tmp/jj.tar.gz -C /tmp/jjx",
             "install /tmp/jjx/jj /usr/local/bin/jj && rm -rf /tmp/jj.tar.gz /tmp/jjx",
+            f"curl -fsSL -o /tmp/beads.tar.gz "
+            f"https://github.com/gastownhall/beads/releases/download/v{BD_VERSION}/"
+            f"beads_{BD_VERSION}_linux_amd64.tar.gz",
+            f'echo "{BD_SHA256}  /tmp/beads.tar.gz" | sha256sum -c -',
+            "mkdir -p /tmp/beads && tar -xzf /tmp/beads.tar.gz -C /tmp/beads",
+            "install /tmp/beads/bd /usr/local/bin/bd && rm -rf /tmp/beads.tar.gz /tmp/beads",
+            "bd --version",
             "mkdir -p /workspace /app /tmp/opencode",
             # Install the SCM credential-helper shim and configure git
             # system-wide. The shim delegates to the Python helper module
