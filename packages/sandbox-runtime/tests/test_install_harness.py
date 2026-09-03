@@ -311,7 +311,25 @@ class TestPinnedHarness:
 
         # The sandbox workspace default, generated from the surface rather than hand-kept.
         instructions = (opencode / "AGENTS.md").read_text()
-        assert "Work the default workspace directly with `jj edit`" in instructions
+        assert "default jj workspace directly with `jj edit`" in instructions
+        assert "The root coordinator is the sole Beads writer." in instructions
+
+        poteto_skill = (claude / "skills" / "pstack-poteto-mode" / "SKILL.md").read_text()
+        assert "standing project-scale program routes to **Orchestrate**" in poteto_skill
+
+        orchestrate = (
+            claude / "skills" / "pstack-poteto-mode" / "playbooks" / "orchestrate.md"
+        ).read_text()
+        for command in (
+            "git ls-remote --exit-code origin refs/dolt/data",
+            "bd bootstrap",
+            "bd dolt pull",
+            "bd prime",
+            "bd init --skip-agents --skip-hooks",
+            "bd dolt commit",
+            "bd dolt push",
+        ):
+            assert command in orchestrate
 
         assert (opencode / "plugin" / "comment-lint.ts").is_file()  # #79 write-time guard
         assert (home / ".lazar-harness" / "bin" / "comment-lint").is_file()
