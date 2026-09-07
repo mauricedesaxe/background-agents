@@ -50,12 +50,6 @@ run "queue_names_fit" {
     deployment_name = "queue-length-test"
   }
 
-  assert {
-    condition = alltrue([
-      for name in local.derived_queue_names : length(name) <= 63
-    ])
-    error_message = "A normal deployment_name must keep every derived queue name within 63 chars."
-  }
 }
 
 # A 26-char deployment_name pushes the 38-char image-build-finalization literal

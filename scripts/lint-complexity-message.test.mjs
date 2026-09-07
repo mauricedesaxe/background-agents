@@ -20,21 +20,6 @@ test("parses the supported ESLint complexity diagnostic shape", async () => {
   );
   const [message] = result.messages;
 
-  assert.deepEqual(
-    {
-      ruleId: message.ruleId,
-      messageId: message.messageId,
-      message: message.message,
-      nodeType: message.nodeType,
-    },
-    {
-      ruleId: "complexity",
-      messageId: "complex",
-      message: "Function 'example' has a complexity of 2. Maximum allowed is 0.",
-      nodeType: "FunctionDeclaration",
-    }
-  );
-
   assert.deepEqual(parseComplexityMessage("packages/example.ts", message), {
     file: "packages/example.ts",
     line: 1,

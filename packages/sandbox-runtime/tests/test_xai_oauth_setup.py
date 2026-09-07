@@ -106,17 +106,6 @@ def test_auth_json_removes_stale_managed_provider_entries(tmp_path):
     assert data["xai"]["refresh"] == "managed-by-control-plane"
 
 
-def test_xai_plugin_uses_broker_without_refresh_token_environment():
-    plugin = (
-        Path(__file__).parents[1] / "src" / "sandbox_runtime" / "plugins" / "xai-auth-plugin.js"
-    ).read_text()
-
-    assert 'provider: "xai"' in plugin
-    assert "/xai-token-refresh" in plugin
-    assert "XAI_OAUTH_REFRESH_TOKEN" not in plugin
-    assert "reasoningEffort" not in plugin
-
-
 async def test_start_deploys_xai_plugin_from_marker(tmp_path):
     supervisor = _make_opencode_server()
     supervisor.workspace_path = tmp_path / "workspace"

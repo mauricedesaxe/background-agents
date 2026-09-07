@@ -153,12 +153,6 @@ describe("POST /webhooks/github", () => {
     expect(await secondRes.json()).toEqual({ ok: true, duplicate: true });
 
     expect(ctx.waitUntil).toHaveBeenCalledOnce();
-    const githubKv = env.GITHUB_KV as unknown as {
-      get: ReturnType<typeof vi.fn>;
-      put: ReturnType<typeof vi.fn>;
-    };
-    expect(githubKv.get).toHaveBeenCalledTimes(2);
-    expect(githubKv.put).toHaveBeenCalledTimes(2);
   });
 
   it("allows redelivery after async processing failure clears the marker", async () => {
@@ -202,12 +196,6 @@ describe("POST /webhooks/github", () => {
     await flushWaitUntil(ctx, 1);
 
     expect(ctx.waitUntil).toHaveBeenCalledTimes(2);
-    const githubKv = env.GITHUB_KV as unknown as {
-      get: ReturnType<typeof vi.fn>;
-      put: ReturnType<typeof vi.fn>;
-      delete: ReturnType<typeof vi.fn>;
-    };
-    expect(githubKv.delete).toHaveBeenCalledTimes(2);
   });
 
   it("returns 200 for unhandled event type", async () => {

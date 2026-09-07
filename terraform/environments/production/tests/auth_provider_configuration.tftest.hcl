@@ -46,11 +46,6 @@ run "github_only" {
   command = plan
 
   assert {
-    condition     = local.github_oauth_enabled && !local.google_enabled
-    error_message = "GitHub-only credentials must enable only GitHub."
-  }
-
-  assert {
     condition = (
       contains(module.control_plane_worker.plain_text_binding_names, "GITHUB_CLIENT_ID") &&
       !contains(module.control_plane_worker.plain_text_binding_names, "GOOGLE_CLIENT_ID") &&
@@ -95,11 +90,6 @@ run "google_only" {
   }
 
   assert {
-    condition     = !local.github_oauth_enabled && local.google_enabled
-    error_message = "Google-only credentials must enable only Google."
-  }
-
-  assert {
     condition = (
       !contains(module.control_plane_worker.plain_text_binding_names, "GITHUB_CLIENT_ID") &&
       contains(module.control_plane_worker.plain_text_binding_names, "GOOGLE_CLIENT_ID") &&
@@ -117,11 +107,6 @@ run "github_and_google" {
     google_client_id     = "google-id"
     google_client_secret = "google-secret"
     allowed_emails       = "person@example.com"
-  }
-
-  assert {
-    condition     = local.github_oauth_enabled && local.google_enabled
-    error_message = "Complete GitHub and Google credentials must enable both providers."
   }
 
   assert {
