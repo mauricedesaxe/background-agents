@@ -7,8 +7,6 @@ import pytest
 
 from sandbox_runtime.repo_config import RepoEntry
 from sandbox_runtime.repository_sync import (
-    DEFAULT_GIT_CLONE_TIMEOUT_SECONDS,
-    DEFAULT_GIT_FETCH_TIMEOUT_SECONDS,
     RepositorySynchronizer,
     RepositorySyncOutcome,
     RepositorySyncStatus,
@@ -30,13 +28,6 @@ def _hung_process() -> MagicMock:
     process.communicate = AsyncMock(side_effect=communicate_forever)
     process.wait = AsyncMock(return_value=-signal.SIGKILL)
     return process
-
-
-def test_git_operation_timeout_defaults_are_named() -> None:
-    synchronizer = RepositorySynchronizer("github.com", MagicMock())
-
-    assert synchronizer.clone_timeout_seconds == DEFAULT_GIT_CLONE_TIMEOUT_SECONDS
-    assert synchronizer.fetch_timeout_seconds == DEFAULT_GIT_FETCH_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio

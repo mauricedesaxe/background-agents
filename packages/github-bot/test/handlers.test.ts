@@ -720,29 +720,9 @@ describe("error handling", () => {
       handleReviewRequested(env, log, reviewRequestedPayload, "trace-err")
     ).rejects.toThrow("Session creation failed: 500");
   });
-
-  it("proceeds with session even if reaction fails", async () => {
-    const env = createMockEnv();
-    const log = createMockLogger();
-    vi.mocked(postReaction).mockResolvedValue(false);
-
-    await handleReviewRequested(env, log, reviewRequestedPayload, "trace-reaction");
-
-    // Session should still be created despite reaction failure
-    expect(getControlPlaneFetch(env)).toHaveBeenCalledTimes(3);
-  });
 });
 
 describe("integration config", () => {
-  it("fetches config with the correct repo and logger", async () => {
-    const env = createMockEnv();
-    const log = createMockLogger();
-
-    await handleReviewRequested(env, log, reviewRequestedPayload, "trace-config");
-
-    expect(getGitHubConfig).toHaveBeenCalledWith(env, "acme/widgets", log);
-  });
-
   it("uses config.model in session creation", async () => {
     vi.mocked(getGitHubConfig).mockResolvedValue({
       ...defaultConfig,

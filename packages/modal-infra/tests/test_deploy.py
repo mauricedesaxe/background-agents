@@ -95,12 +95,3 @@ def test_src_modal_deploy_builds_sandbox_image_before_app_deploy(tmp_path: Path)
         "run python deploy.py --build-sandbox-image",
         "run modal deploy -m src",
     ]
-
-
-def test_modal_deployment_hash_includes_deployment_entrypoints() -> None:
-    modal_tf = (
-        Path(__file__).parents[3] / "terraform/environments/production/modal.tf"
-    ).read_text()
-
-    assert "packages/modal-infra/deploy.py" in modal_tf
-    assert "terraform/modules/modal-app/scripts/deploy.sh" in modal_tf

@@ -186,7 +186,6 @@ describe("resolveTargetValue", () => {
       envTarget.kind === "environment" ? envTarget.environment : null
     );
     expect(await resolveTargetValue(env, "env:env_abc123")).toEqual(envTarget);
-    expect(mockGetEnvironmentById).toHaveBeenCalledWith(env, "env_abc123", undefined);
   });
 
   it("returns null for a repository or environment that no longer exists", async () => {

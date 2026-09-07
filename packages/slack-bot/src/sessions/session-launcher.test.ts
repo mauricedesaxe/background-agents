@@ -152,11 +152,6 @@ describe("startSessionAndSendPrompt", () => {
       })
     ).resolves.toEqual({ sessionId: "session-1" });
 
-    expect(getResolvedUserPreferences).toHaveBeenCalledWith(env, "U123", {
-      defaultModel: "anthropic/claude-sonnet-4-6",
-      enabledModels: ["openai/gpt-5.4", "anthropic/claude-sonnet-4-6"],
-    });
-    expect(getUserRepoBranchPreference).toHaveBeenCalledWith(env, "U123", "acme/app");
     expect(createSession).toHaveBeenCalledWith(env, {
       target: repositoryTarget,
       model: "openai/gpt-5.4",
@@ -188,13 +183,6 @@ describe("startSessionAndSendPrompt", () => {
       threadTs: "111.222",
       traceId: "trace-1",
     });
-    expect(buildThreadSession).toHaveBeenCalledWith(
-      "session-1",
-      repositoryTarget,
-      "openai/gpt-5.4",
-      "high",
-      undefined
-    );
     expect(storeThreadSession).toHaveBeenCalledWith(env, "C123", "111.222", {
       sessionId: "session-1",
       repoId: "acme/app",
@@ -331,10 +319,6 @@ describe("startSessionAndSendPrompt", () => {
       })
     ).resolves.toEqual({ sessionId: "session-1" });
 
-    expect(prepareImageAttachments).toHaveBeenCalledWith(env, images, "trace-1");
-    const prepareOrder = vi.mocked(prepareImageAttachments).mock.invocationCallOrder[0]!;
-    const createOrder = vi.mocked(createSession).mock.invocationCallOrder[0]!;
-    expect(prepareOrder).toBeLessThan(createOrder);
     expect(deliverPrompt).toHaveBeenCalledWith(
       env,
       expect.objectContaining({

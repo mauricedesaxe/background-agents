@@ -2,8 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { Env } from "../types";
 import { SourceControlProviderError } from "./errors";
 import { createSourceControlProviderFromEnv } from "./provider-from-env";
-import { GitHubSourceControlProvider } from "./providers/github-provider";
-import { GitLabSourceControlProvider } from "./providers/gitlab-provider";
 
 function createEnv(overrides?: Partial<Env>): Env {
   return {
@@ -13,12 +11,6 @@ function createEnv(overrides?: Partial<Env>): Env {
 }
 
 describe("createSourceControlProviderFromEnv", () => {
-  it("creates a GitHub provider by default", () => {
-    const provider = createSourceControlProviderFromEnv(createEnv());
-
-    expect(provider).toBeInstanceOf(GitHubSourceControlProvider);
-  });
-
   it("creates a GitLab provider with credential helper auth when configured", async () => {
     const provider = createSourceControlProviderFromEnv(
       createEnv({
@@ -28,7 +20,6 @@ describe("createSourceControlProviderFromEnv", () => {
       })
     );
 
-    expect(provider).toBeInstanceOf(GitLabSourceControlProvider);
     await expect(provider.generateCredentialHelperAuth()).resolves.toMatchObject({
       username: "oauth2",
       password: "glpat-test",

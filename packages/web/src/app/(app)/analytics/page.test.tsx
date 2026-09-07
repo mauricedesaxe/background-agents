@@ -2,7 +2,7 @@
 /// <reference types="@testing-library/jest-dom" />
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, within, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as matchers from "@testing-library/jest-dom/matchers";
 import type {
@@ -154,18 +154,22 @@ function getUserRows() {
 }
 
 describe("AnalyticsPage", () => {
-  it("refetches analytics when the selected range changes", async () => {
+  it("shows data for the selected range", async () => {
     const user = userEvent.setup();
 
     renderPage();
-
-    expect(mockUseAnalyticsDashboard).toHaveBeenCalledWith(30);
+    mockUseAnalyticsDashboard.mockImplementation((days) => ({
+      summary: { ...summary, totalSessions: days },
+      timeseries,
+      repoBreakdown,
+      userBreakdown,
+      loading: false,
+      error: undefined,
+    }));
 
     await user.click(screen.getByRole("radio", { name: "7d" }));
 
-    await waitFor(() => {
-      expect(mockUseAnalyticsDashboard).toHaveBeenLastCalledWith(7);
-    });
+    expect(screen.getByText("7 sessions in range")).toBeInTheDocument();
   });
 
   it("re-sorts the per-user table when a header is clicked", async () => {

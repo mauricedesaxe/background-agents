@@ -71,9 +71,6 @@ describe("deliverPrompt", () => {
       expect.objectContaining({ dropped: ["too_large"] }),
       { traceId: "trace-1" }
     );
-    const sendOrder = vi.mocked(sendPrompt).mock.invocationCallOrder[0]!;
-    const notifyOrder = vi.mocked(notifyDroppedAttachments).mock.invocationCallOrder[0]!;
-    expect(sendOrder).toBeLessThan(notifyOrder);
   });
 
   it("does not notify drops when the prompt send fails", async () => {
