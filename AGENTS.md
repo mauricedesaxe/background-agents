@@ -168,3 +168,31 @@ CI runs lint, typecheck, and tests for all TypeScript and Python packages on eve
   protocol, D1 schema, security model
 - [packages/modal-infra/README.md](packages/modal-infra/README.md) — sandbox internals, Modal
   deployment, endpoint URLs
+
+## Fork Deployment Notes
+
+Operational facts for this fork's deployment that upstream's doc does not know about. A sync can
+overwrite this section; the `fork-ops-notes` CI job fails until it is reapplied from
+`overlay/cards/18-fork-ops-notes.md`.
+
+- **Deploy path.** Merging to `main` triggers `terraform.yml`. Plan always runs; Apply runs
+  unattended (there is no production approval gate in practice). Terraform deploys the control
+  plane, the D1 migrations, and the web app when `web_platform = "cloudflare"`. **Daytona is the
+  sandbox provider this deployment runs.**
+- **A merge can produce zero workflow runs (#75).** A rebase-merge has been observed producing no
+  workflow runs at all, leaving the change on `main` looking deployed with nothing to approve.
+  Confirm with `gh run list --branch main` after merging; force a run with
+  `gh workflow run terraform.yml --ref main`.
+- **Sandbox image changes propagate via the content-hash `buildHash` (#94).** The image plan is
+  computed by `plan_image` in `packages/sandbox-images` over its declared payload roots
+  (`PAYLOAD_ROOTS` plus the provider-infra package and terraform module), and Terraform consumes the
+  result as the Daytona snapshot `source_hash` (`daytona.tf` runs `cli.py hash`). There is no manual
+  version string to bump — a changed input inside the hashed roots invalidates the snapshot on its
+  own. The flip side: a change that lands outside the hashed roots ships nothing, so check that a
+  harness or skills edit sits inside the declared roots before expecting it to reach sandboxes.
+  `SANDBOX_VERSION` is the runtime version stamped on the image and reported by running sandboxes;
+  it is not a propagation trigger.
+- **Fork-local D1 migrations start at id 9000** — the fork migration id floor
+  (`FORK_MIGRATION_ID_FLOOR`), per `overlay/rules.md` Rule 3. Upstream owns the ids below it. The
+  9xxx range is append-only: reuse an already-applied 9xxx id, never re-add one, and never change
+  the content of an applied id.

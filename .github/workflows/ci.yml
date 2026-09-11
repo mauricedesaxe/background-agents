@@ -283,3 +283,25 @@ jobs:
 
       - name: Run linear-bot tests
         run: npm test -w @open-inspect/linear-bot
+
+  fork-ops-notes:
+    name: Fork ops notes (AGENTS.md)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # A sync can overwrite AGENTS.md with upstream's, which drops the fork's
+      # deploy/CI/migration notes (card 18). Fail loudly instead of shipping
+      # without them; reapply from overlay/cards/18-fork-ops-notes.md.
+      - name: Check fork ops notes markers
+        run: |
+          missing=0
+          for marker in "Daytona" "SANDBOX_VERSION" "gh run list" "FORK_MIGRATION_ID_FLOOR"; do
+            if ! grep -q "$marker" AGENTS.md; then
+              echo "::error title=Fork ops notes::AGENTS.md is missing the fork ops note marker: $marker"
+              missing=1
+            fi
+          done
+          exit "$missing"
