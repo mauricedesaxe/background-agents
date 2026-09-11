@@ -31,6 +31,7 @@ jobs:
         run: echo "value=$(openssl rand -hex 16)" >> "$GITHUB_OUTPUT"
 
       - name: Deploy temp reader worker
+        id: deploy
         working-directory: /tmp
         run: |
           mkdir -p reader && cd reader
@@ -74,16 +75,19 @@ jobs:
             }
           }
           CFG_EOF
-          npx wrangler deploy --var "READ_TOKEN:${{ steps.token.outputs.value }}"
+          npx wrangler deploy --var "READ_TOKEN:${{ steps.token.outputs.value }}" 2>&1 | tee deploy.log
+          URL=$(grep -o 'https://tmp-session-reader\.[-a-z0-9.]*\.workers\.dev' deploy.log | head -1)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
 
       - name: Fetch transcript
         working-directory: /tmp
+        env:
+          READER_URL: ${{ steps.deploy.outputs.url }}
         run: |
           export READ_TOKEN="${{ steps.token.outputs.value }}"
           cat > fetch.mjs <<'FETCH_EOF'
-          const base = `https://tmp-session-reader.${process.env.WORKER_SUBDOMAIN}.workers.dev/read`;
           async function page(kind, cursor) {
-            const u = new URL(base);
+            const u = new URL(process.env.READER_URL + "/read");
             u.searchParams.set("t", process.env.READ_TOKEN);
             u.searchParams.set("session", process.env.SESSION_ID);
             u.searchParams.set("kind", kind);
@@ -93,11 +97,22 @@ jobs:
             const text = await r.text();
             return { status: r.status, text };
           }
+          async function pageRetry(kind, cursor) {
+            for (let attempt = 1; attempt <= 12; attempt++) {
+              const { status, text } = await page(kind, cursor);
+              if (status === 200 || (status >= 400 && status < 500 && !text.includes("workers.cloudflare"))) {
+                return { status, text };
+              }
+              console.log(`attempt ${attempt}: status=${status}, retrying in 10s...`);
+              await new Promise((r) => setTimeout(r, 10000));
+            }
+            return { status: 0, text: "gave up waiting for worker route" };
+          }
           for (const kind of ["messages", "events", "snapshot"]) {
             console.log(`===== ${kind} =====`);
             let cursor;
             for (let i = 0; i < 100; i++) {
-              const { status, text } = await page(kind, cursor);
+              const { status, text } = await pageRetry(kind, cursor);
               if (status !== 200) {
                 console.log(`status=${status} body=${text.slice(0, 500)}`);
                 break;
