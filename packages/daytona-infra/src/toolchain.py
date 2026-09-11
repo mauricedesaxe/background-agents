@@ -5,10 +5,14 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING
 
-from daytona import CreateSnapshotParams, Daytona, Image
+from daytona import CreateSnapshotParams, Daytona, Image, Resources
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+SNAPSHOT_CPU = 2
+SNAPSHOT_MEMORY_GIB = 8
+SNAPSHOT_DISK_GIB = 8
 
 
 def build_base_image(repo_root: Path) -> Image:
@@ -31,6 +35,9 @@ def create_base_snapshot(daytona: Daytona, repo_root: Path, snapshot_name: str) 
         CreateSnapshotParams(
             name=snapshot_name,
             image=build_base_image(repo_root),
+            resources=Resources(
+                cpu=SNAPSHOT_CPU, memory=SNAPSHOT_MEMORY_GIB, disk=SNAPSHOT_DISK_GIB
+            ),
             entrypoint=["python", "-m", "sandbox_runtime.entrypoint"],
         ),
         on_logs=lambda chunk: print(chunk, end="\n"),
