@@ -20,19 +20,17 @@ card 11.
 
 ## Acceptance test (the contract)
 
-A built sandbox image has the harness installed at the pinned ref (the install-harness test asserts
-resolved ref == requested `HARNESS_REF`), AND the sandbox agent can invoke a `lazar-*` skill.
-Behavior, not files.
+A built sandbox image has the harness installed at the pinned ref (the resolved install matches the
+requested `HARNESS_REF`), AND the sandbox agent can invoke a `lazar-*` skill. Behavior, not files.
 
 ## Placement decision (durable)
 
-- The install **mechanism** is code in the upstream-owned tree (an install script + a hook in the
-  image build that invokes it), reapplied each sync. Upstream has none of this — 100% fork-local.
-  The mechanism is small and low-friction to reapply.
+- The install **mechanism** is code in the upstream-owned tree, reapplied each sync. Upstream has
+  none of this — 100% fork-local. The mechanism is small and low-friction to reapply.
 - lazar-harness itself is the **external repo**, and this card is the **config-ward escape hatch**:
   anything pushed INTO lazar-harness survives a blind sync untouched, because the upstream tree
-  never sees it. The jj binary (card 11) is the first thing moving there. The more fork behavior
-  that lives in lazar-harness, the less gets reapplied in the upstream tree each sync.
+  never sees it. The more fork behavior that lives in lazar-harness, the less gets reapplied in the
+  upstream tree each sync.
 
 ## Gotcha (same as cards 01, 11)
 
@@ -41,7 +39,7 @@ tracked `.py/.js/.ts` only, so a ref bump reached no sandbox on its own. Fixed i
 and Vercel hashes now cover `*.sh` too, matching what the Modal and OpenComputer hashes already did.
 A pin bump rebuilds the snapshot by itself.
 
-## Dated evidence (2026-08-19, non-binding hints)
+## Provenance
 
-- Install script `packages/sandbox-runtime/src/sandbox_runtime/scripts/install-harness.sh`
-  (`HARNESS_REPO`, `HARNESS_REF`), invoked by a hook in the Daytona image build.
+Fork-only since the first Daytona bake. File-level notes were dropped when the card contract went
+requirements-first — locate the install mechanism on current upstream yourself.
