@@ -39,6 +39,11 @@ if TYPE_CHECKING:
 MAX_PENDING_PART_EVENTS: Final = 2000
 CONTEXT_OVERFLOW_ERROR_NAME: Final = "ContextOverflowError"
 
+PROVIDER_RETRY_CAP: Final = 4
+
+PROVIDER_REJECTION_ERROR_NAMES: Final = frozenset({"APIError", "APICallError", "AI_APICallError"})
+PROVIDER_RETRYABLE_STATUS_CODES: Final = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
+
 OPENCODE_DEFAULT_TITLE_RE: Final = re.compile(
     r"^(new session|child session) - " r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$",
     re.IGNORECASE,
@@ -76,6 +81,8 @@ class _PromptState:
     # session.compacted. If still set at idle with no error emitted, the
     # promised compaction never happened and the prompt must fail.
     pending_overflow_error: str | None = None
+    provider_retry_count: int = 0
+    provider_retry_cap_reached: bool = False
 
     def __post_init__(self) -> None:
         self.attribution = MessageAttribution(
@@ -98,6 +105,7 @@ class _Disposition(Enum):
     FINISHED_IDLE = "finished_idle"
     # Parent session errored: the error event was emitted, finish immediately.
     FAILED = "failed"
+    CAPPED = "capped"
 
 
 class _PromptMaxDurationTimeout(Exception):
@@ -232,6 +240,9 @@ class OpenCodePromptStream:
                         async for final_event in self._fetch_final_message_state(state):
                             yield final_event
                         return
+                    if step.disposition is _Disposition.CAPPED:
+                        await self._stop_after_provider_retry_cap(state, opencode_session_id)
+                        return
                     if step.disposition is _Disposition.FAILED:
                         return
 
@@ -359,6 +370,9 @@ class OpenCodePromptStream:
                 self._log.info("bridge.session_compacted", message_id=state.message_id)
                 events.append({"type": "context_compacted", "messageId": state.message_id})
 
+        if state.provider_retry_cap_reached:
+            return _StreamStep(events=events, disposition=_Disposition.CAPPED)
+
         return _StreamStep(events=events, disposition=_Disposition.CONTINUE)
 
     def _track_child_session(self, state: _PromptState, props: dict[str, Any]) -> None:
@@ -415,14 +429,17 @@ class OpenCodePromptStream:
                     created_epoch_ms=_message_created_epoch_ms(info),
                 )
                 if disposition is not AssistantMessageDisposition.REJECT and info.get("error"):
-                    error_event = self._parent_error_event_once(state, info["error"])
-                    if error_event:
-                        self._log.error(
-                            "bridge.message_error",
-                            error_msg=error_event["error"],
-                            oc_msg_id=oc_msg_id,
-                        )
-                        events.append(error_event)
+                    if self._is_provider_rejection(info["error"]):
+                        events.extend(self._provider_retry_step(state, info["error"]).events)
+                    else:
+                        error_event = self._parent_error_event_once(state, info["error"])
+                        if error_event:
+                            self._log.error(
+                                "bridge.message_error",
+                                error_msg=error_event["error"],
+                                oc_msg_id=oc_msg_id,
+                            )
+                            events.append(error_event)
 
                 if disposition is AssistantMessageDisposition.OUTPUT:
                     events.extend(self._drain_pending_parts(state, oc_msg_id, is_subtask=False))
@@ -513,6 +530,9 @@ class OpenCodePromptStream:
                 )
                 return _StreamStep(events=[], disposition=_Disposition.CONTINUE)
 
+            if self._is_provider_rejection(error):
+                return self._provider_retry_step(state, error)
+
             error_event = self._parent_error_event_once(state, error)
             self._log.error(
                 "bridge.session_error",
@@ -597,6 +617,100 @@ class OpenCodePromptStream:
             "error": error_msg,
             "messageId": state.message_id,
         }
+
+    @staticmethod
+    def _is_provider_rejection(error: object) -> bool:
+        """Best-effort classification of provider-rejection payloads.
+
+        OpenCode wraps provider API failures in AI-SDK NamedErrors. The
+        recognized shapes are the error name, an explicit ``isRetryable``
+        flag, or a retryable HTTP status; anything else stays a terminal
+        error so unknown failures keep failing the turn.
+        """
+        if not isinstance(error, dict):
+            return False
+        if error.get("name") in PROVIDER_REJECTION_ERROR_NAMES:
+            return True
+        candidates = [
+            payload for payload in (error.get("data"), error) if isinstance(payload, dict)
+        ]
+        for payload in candidates:
+            if payload.get("isRetryable") is True:
+                return True
+            status = payload.get("statusCode", payload.get("status_code"))
+            if isinstance(status, int) and not isinstance(status, bool):
+                if status in PROVIDER_RETRYABLE_STATUS_CODES:
+                    return True
+        return False
+
+    @staticmethod
+    def _extract_next_retry_at(error: object) -> float | None:
+        """Best-effort next-attempt epoch seconds from a rejection payload.
+
+        Reads the AI-SDK ``retryAfter`` (milliseconds) or a ``retry-after``
+        response header (seconds). Anything unusable reads as absent; the
+        caller then emits the event without ``nextRetryAt``.
+        """
+        if not isinstance(error, dict):
+            return None
+        data = error.get("data")
+        payload = data if isinstance(data, dict) else error
+        retry_after = payload.get("retryAfter")
+        if (
+            isinstance(retry_after, int | float)
+            and not isinstance(retry_after, bool)
+            and retry_after >= 0
+        ):
+            return time.time() + retry_after / 1000.0
+        headers = payload.get("responseHeaders")
+        header_value = headers.get("retry-after") if isinstance(headers, dict) else None
+        if isinstance(header_value, str):
+            try:
+                return time.time() + float(header_value)
+            except ValueError:
+                return None
+        return None
+
+    def _provider_retry_step(self, state: _PromptState, error: object) -> _StreamStep:
+        """Turn one provider rejection into a non-terminal visibility event.
+
+        OpenCode retries provider rejections internally without announcing
+        them; each observed rejection emits ``provider_retry`` with the
+        per-message consecutive attempt count. At ``PROVIDER_RETRY_CAP`` the
+        step also carries the terminal error and the CAPPED disposition that
+        makes the stream loop ask OpenCode to stop.
+        """
+        state.provider_retry_count += 1
+        event: dict[str, Any] = {
+            "type": "provider_retry",
+            "attempt": state.provider_retry_count,
+            "messageId": state.message_id,
+        }
+        next_retry_at = self._extract_next_retry_at(error)
+        if next_retry_at is not None:
+            event["nextRetryAt"] = next_retry_at
+        events: list[dict[str, Any]] = [event]
+        disposition = _Disposition.CONTINUE
+        if state.provider_retry_count >= PROVIDER_RETRY_CAP:
+            state.provider_retry_cap_reached = True
+            disposition = _Disposition.CAPPED
+            error_text = f"provider kept rejecting after {PROVIDER_RETRY_CAP} retries"
+            state.emitted_error_messages.add(error_text)
+            events.append({"type": "error", "error": error_text, "messageId": state.message_id})
+        return _StreamStep(events=events, disposition=disposition)
+
+    async def _stop_after_provider_retry_cap(
+        self, state: _PromptState, opencode_session_id: str
+    ) -> None:
+        """Best-effort abort of OpenCode's internal retry loop at the cap."""
+        try:
+            await self._client.request_stop(opencode_session_id, reason="provider_retry_cap")
+        except Exception as e:
+            self._log.warn(
+                "bridge.provider_retry_cap_stop_failed",
+                exc=e,
+                message_id=state.message_id,
+            )
 
     def _handle_part(
         self,

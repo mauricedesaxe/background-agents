@@ -3,7 +3,7 @@ import { createTestBackgroundTasks } from "../../background-tasks.test-support";
 import { SessionSandboxEventProcessor } from "./processor";
 import { SandboxArtifactEventHandler } from "./artifact.handler";
 import { SandboxExecutionEventHandler } from "./execution.handler";
-import { SandboxRuntimeEventHandler } from "./runtime.handler";
+import { SandboxRuntimeEventHandler, type QueuedPromptHold } from "./runtime.handler";
 import { SandboxPushService } from "../sandbox-push-service";
 import { SandboxStreamingEventHandler } from "./streaming.handler";
 import type { GitPushSpec } from "../../source-control";
@@ -76,6 +76,10 @@ function createProcessor() {
   const broadcast = vi.fn((_message: ServerMessage) => {});
   const messenger = { broadcast, sendToSandbox: vi.fn(async () => {}) };
   const diffService = { pinBaselines: vi.fn() };
+  const promptHold: QueuedPromptHold = {
+    holdQueuedPrompt: vi.fn(),
+    releaseQueuedPromptHold: vi.fn(),
+  };
   const triggerSnapshot = vi.fn(async (_reason: string) => {});
   const projectTerminalMessage = vi.fn(async () => {});
   const statusService = { reconcileAfterExecution: vi.fn(async (_success: boolean) => {}) };
@@ -149,7 +153,8 @@ function createProcessor() {
       diffService as unknown as SessionDiffService,
       applySessionTitleUpdate,
       updateLastActivity,
-      log
+      log,
+      promptHold
     ),
     pushService
   );
@@ -165,6 +170,7 @@ function createProcessor() {
     callbackService,
     broadcast,
     diffService,
+    promptHold,
     triggerSnapshot,
     projectTerminalMessage,
     statusService,
@@ -290,6 +296,119 @@ describe("SessionSandboxEventProcessor", () => {
     });
 
     expect(h.repository.recordReportedSandboxRuntimeVersion).toHaveBeenCalledWith(null);
+  });
+
+  describe("context recovery on ready", () => {
+    const seededSession = {
+      harness: "opencode",
+      agent_session_id: "ses-stored",
+    };
+    const contextResetCalls = (h: ReturnType<typeof createProcessor>) =>
+      h.eventRepository.createEvent.mock.calls.filter(
+        ([created]: [{ type: string }]) => created.type === "context_reset"
+      );
+
+    it("synthesizes a context_reset timeline event and holds the queued prompt on a fresh session", async () => {
+      const h = createProcessor();
+      h.repository.getSession.mockReturnValue(seededSession);
+
+      await h.processor.processSandboxEvent({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: null,
+        timestamp: 1000,
+      });
+
+      expect(contextResetCalls(h)).toHaveLength(1);
+      expect(contextResetCalls(h)[0][0]).toEqual(
+        expect.objectContaining({
+          type: "context_reset",
+          data: expect.stringContaining("fresh_session"),
+        })
+      );
+      expect(h.broadcast).toHaveBeenCalledWith({
+        type: "sandbox_event",
+        event: expect.objectContaining({
+          type: "context_reset",
+          reason: "fresh_session",
+          agentSessionId: null,
+        }),
+      });
+      expect(h.promptHold.holdQueuedPrompt).toHaveBeenCalledOnce();
+    });
+
+    it("holds and flags a mismatch when the sandbox reports a different resumed id", async () => {
+      const h = createProcessor();
+      h.repository.getSession.mockReturnValue(seededSession);
+
+      await h.processor.processSandboxEvent({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: "ses-other",
+        resumed: true,
+        timestamp: 1000,
+      });
+
+      expect(h.broadcast).toHaveBeenCalledWith({
+        type: "sandbox_event",
+        event: expect.objectContaining({
+          type: "context_reset",
+          reason: "session_id_mismatch",
+          agentSessionId: "ses-other",
+        }),
+      });
+      expect(h.promptHold.holdQueuedPrompt).toHaveBeenCalledOnce();
+    });
+
+    it("does nothing when the sandbox resumed the session's id", async () => {
+      const h = createProcessor();
+      h.repository.getSession.mockReturnValue(seededSession);
+
+      await h.processor.processSandboxEvent({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: "ses-stored",
+        resumed: true,
+        timestamp: 1000,
+      });
+
+      expect(contextResetCalls(h)).toHaveLength(0);
+      expect(h.promptHold.holdQueuedPrompt).not.toHaveBeenCalled();
+    });
+
+    it("does nothing when the session has no stored agent session id", async () => {
+      const h = createProcessor();
+      h.repository.getSession.mockReturnValue({ harness: "opencode", agent_session_id: null });
+
+      await h.processor.processSandboxEvent({
+        type: "ready",
+        sandboxId: "sb-1",
+        timestamp: 1000,
+      });
+
+      expect(contextResetCalls(h)).toHaveLength(0);
+      expect(h.promptHold.holdQueuedPrompt).not.toHaveBeenCalled();
+    });
+  });
+
+  it("treats provider_retry as a timeline-observer event without acknowledgement", async () => {
+    const h = createProcessor();
+    const event: SandboxEvent = {
+      type: "provider_retry",
+      attempt: 2,
+      nextRetryAt: 1900,
+      messageId: "msg-1",
+      sandboxId: "sb-1",
+      timestamp: 1000,
+    };
+
+    await h.processor.processSandboxEvent(event);
+
+    expect(h.eventRepository.createEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "provider_retry", messageId: "msg-1" })
+    );
+    expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
+    expect(h.wsManager.send).not.toHaveBeenCalled();
   });
 
   it("persists token event and broadcasts it", async () => {

@@ -6,7 +6,9 @@ the synchronous per-event translator (`_apply_sse_event`) dispositions and
 the cross-prompt session-title dedupe, which are directly testable now.
 """
 
-from unittest.mock import MagicMock
+import asyncio
+import time
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -972,6 +974,269 @@ class TestSessionTitleDedupe:
         step = self.title_event(stream, make_state(), "New Session - 2026-07-18T00:00:00.000Z")
 
         assert step.events == []
+
+
+def provider_rejection_error(
+    *,
+    name: str = "APIError",
+    message: str = "429 rate limit exceeded",
+    extra_data: dict | None = None,
+) -> dict:
+    """Synthesized NamedError fixture in OpenCode's error-part shape.
+
+    Built from the shape the bridge already parses (``_extract_error_message``
+    reads ``{"name", "data": {"message"}}``), extended with the AI-SDK fields
+    the provider-rejection detector matches on. Not captured from a live
+    OpenCode stream: OpenCode retries provider rejections internally and
+    usually emits nothing, so there is no traffic to record.
+    """
+    data: dict = {"message": message}
+    if extra_data:
+        data.update(extra_data)
+    return {"name": name, "data": data}
+
+
+class TestProviderRetryDetection:
+    def test_parent_session_error_classified_as_rejection_emits_retry_and_continues(self):
+        stream = make_stream()
+
+        step = stream._apply_sse_event(
+            make_state(),
+            sse(
+                "session.error",
+                {
+                    "sessionID": PARENT_SESSION_ID,
+                    "error": provider_rejection_error(),
+                },
+            ),
+        )
+
+        assert step.disposition is _Disposition.CONTINUE
+        assert step.events == [{"type": "provider_retry", "attempt": 1, "messageId": "cp-msg-1"}]
+
+    def test_retryable_status_without_known_name_is_a_rejection(self):
+        error = provider_rejection_error(
+            name="ProviderMysteryError",
+            extra_data={"statusCode": 429},
+        )
+
+        assert OpenCodePromptStream._is_provider_rejection(error) is True
+
+    def test_explicit_is_retryable_flag_is_a_rejection(self):
+        error = provider_rejection_error(
+            name="ProviderMysteryError",
+            extra_data={"isRetryable": True},
+        )
+
+        assert OpenCodePromptStream._is_provider_rejection(error) is True
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            {"name": "SomeError", "data": {"message": "It broke"}},
+            {"name": "ProviderAuthError", "data": {"message": "bad key"}},
+            {"name": "ContextOverflowError", "data": {"message": "too long"}},
+            {"name": "ProviderMysteryError", "data": {"message": "boom", "statusCode": 401}},
+            {"name": "ProviderMysteryError", "data": {"message": "boom"}},
+            "a plain string",
+            None,
+        ],
+    )
+    def test_unknown_shapes_stay_terminal_errors(self, error):
+        assert OpenCodePromptStream._is_provider_rejection(error) is False
+
+    def test_retry_after_header_sets_next_retry_at(self):
+        error = provider_rejection_error(extra_data={"responseHeaders": {"retry-after": "30"}})
+
+        step = make_stream()._apply_sse_event(
+            make_state(),
+            sse("session.error", {"sessionID": PARENT_SESSION_ID, "error": error}),
+        )
+
+        event = step.events[0]
+        assert event["type"] == "provider_retry"
+        assert event["nextRetryAt"] == pytest.approx(time.time() + 30.0, abs=5.0)
+
+    def test_retry_after_ms_field_sets_next_retry_at(self):
+        error = provider_rejection_error(extra_data={"retryAfter": 5000})
+
+        next_retry_at = OpenCodePromptStream._extract_next_retry_at(error)
+
+        assert next_retry_at == pytest.approx(time.time() + 5.0, abs=5.0)
+
+    def test_unparseable_retry_hint_omits_next_retry_at(self):
+        error = provider_rejection_error(
+            extra_data={"responseHeaders": {"retry-after": "Fri, 31 Dec 2027 23:59:59 GMT"}}
+        )
+
+        step = make_stream()._apply_sse_event(
+            make_state(),
+            sse("session.error", {"sessionID": PARENT_SESSION_ID, "error": error}),
+        )
+
+        assert "nextRetryAt" not in step.events[0]
+
+    def test_attempts_count_consecutively_per_message(self):
+        stream = make_stream()
+        state = make_state()
+        rejection = sse(
+            "session.error", {"sessionID": PARENT_SESSION_ID, "error": provider_rejection_error()}
+        )
+
+        first = stream._apply_sse_event(state, rejection)
+        second = stream._apply_sse_event(state, rejection)
+
+        assert first.events[0]["attempt"] == 1
+        assert second.events[0]["attempt"] == 2
+
+    def test_cap_trips_terminal_error_and_capped_disposition(self):
+        stream = make_stream()
+        state = make_state()
+        rejection = sse(
+            "session.error", {"sessionID": PARENT_SESSION_ID, "error": provider_rejection_error()}
+        )
+
+        step = None
+        for _attempt in range(4):
+            step = stream._apply_sse_event(state, rejection)
+
+        assert step is not None
+        assert step.disposition is _Disposition.CAPPED
+        assert step.events[0]["attempt"] == 4
+        assert step.events[1] == {
+            "type": "error",
+            "error": "provider kept rejecting after 4 retries",
+            "messageId": "cp-msg-1",
+        }
+
+    def test_non_retry_error_after_rejections_still_fails_stream(self):
+        stream = make_stream()
+        state = make_state()
+        rejection = sse(
+            "session.error", {"sessionID": PARENT_SESSION_ID, "error": provider_rejection_error()}
+        )
+        stream._apply_sse_event(state, rejection)
+
+        step = stream._apply_sse_event(
+            state,
+            sse(
+                "session.error",
+                {"sessionID": PARENT_SESSION_ID, "error": {"name": "SomeError"}},
+            ),
+        )
+
+        assert step.disposition is _Disposition.FAILED
+
+    def test_message_part_error_classified_as_rejection_emits_retry(self):
+        stream = make_stream()
+        state = make_state()
+
+        step = stream._apply_sse_event(
+            state,
+            sse(
+                "message.updated",
+                {
+                    "info": {
+                        "id": "msg_parent_1",
+                        "sessionID": PARENT_SESSION_ID,
+                        "parentID": state.opencode_message_id,
+                        "role": "assistant",
+                        "error": provider_rejection_error(),
+                    }
+                },
+            ),
+        )
+
+        assert [event["type"] for event in step.events] == ["provider_retry"]
+        assert step.disposition is _Disposition.CONTINUE
+        assert state.provider_retry_count == 1
+
+    def test_cap_tripping_via_message_error_yields_capped_step(self):
+        stream = make_stream()
+        state = make_state()
+        error_info = {
+            "info": {
+                "id": "msg_parent_1",
+                "sessionID": PARENT_SESSION_ID,
+                "parentID": state.opencode_message_id,
+                "role": "assistant",
+                "error": provider_rejection_error(),
+            }
+        }
+
+        step = None
+        for _ in range(4):
+            step = stream._apply_sse_event(state, sse("message.updated", error_info))
+
+        assert step is not None
+        assert step.disposition is _Disposition.CAPPED
+        retry_events = [event for event in step.events if event.get("type") == "provider_retry"]
+        terminal = [event for event in step.events if event.get("type") == "error"]
+        assert [event["attempt"] for event in retry_events] == [4]
+        assert terminal == [
+            {
+                "type": "error",
+                "error": "provider kept rejecting after 4 retries",
+                "messageId": "cp-msg-1",
+            }
+        ]
+
+
+class TestProviderRetryCapStream:
+    @staticmethod
+    async def _collect(stream: OpenCodePromptStream, state_session_id: str) -> list[dict]:
+        async def sse_events():
+            for _ in range(4):
+                yield sse(
+                    "session.error",
+                    {
+                        "sessionID": state_session_id,
+                        "error": provider_rejection_error(),
+                    },
+                )
+            yield sse("session.idle", {"sessionID": state_session_id})
+            await asyncio.Future()
+
+        client = MagicMock()
+        client.events = MagicMock()
+        client.events.return_value = AsyncNullContext(sse_events())
+        client.post_prompt = AsyncMock()
+        client.request_stop = AsyncMock()
+        client.get_messages = AsyncMock(return_value=[])
+        stream._client = client
+
+        collected = []
+        async for event in stream.stream_prompt(
+            opencode_session_id=state_session_id,
+            message_id="cp-msg-1",
+            content="hello",
+        ):
+            collected.append(event)
+        return collected
+
+    async def test_cap_requests_stop_and_emits_terminal_error(self):
+        stream = make_stream()
+
+        collected = await self._collect(stream, PARENT_SESSION_ID)
+
+        retry_events = [event for event in collected if event.get("type") == "provider_retry"]
+        terminal = [event for event in collected if event.get("type") == "error"]
+        assert [event["attempt"] for event in retry_events] == [1, 2, 3, 4]
+        assert terminal[-1]["error"] == "provider kept rejecting after 4 retries"
+        stream._client.request_stop.assert_awaited_once_with(
+            PARENT_SESSION_ID, reason="provider_retry_cap"
+        )
+
+
+class AsyncNullContext:
+    def __init__(self, iterator) -> None:
+        self.iterator = iterator
+
+    async def __aenter__(self):
+        return self.iterator
+
+    async def __aexit__(self, *exc_info) -> None:
+        return None
 
 
 if __name__ == "__main__":

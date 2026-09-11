@@ -106,9 +106,13 @@ export class SessionSandboxEventProcessor {
       case "tool_result":
       case "error":
       case "warning":
+      case "provider_retry":
       case "user_message":
         // Timeline-observer events: persist and broadcast, nothing else.
         this.streaming.recordTimelineEvent(event, context);
+        return;
+      case "context_reset":
+        this.runtime.handleContextReset(event, context);
         return;
       case "snapshot_ready":
         // The bridge's answer to the snapshot command. The lifecycle manager

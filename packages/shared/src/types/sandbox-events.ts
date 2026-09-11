@@ -62,6 +62,12 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
     // SANDBOX_VERSION of the image this sandbox booted from. Stamped onto any
     // snapshot it produces so a later restore can be gated on it.
     runtimeVersion: z.string().optional(),
+    /**
+     * True only when the bridge recovered the persisted vendor session at
+     * startup. Absent (or false) means this sandbox starts a fresh agent
+     * conversation even though the durable timeline shows prior turns.
+     */
+    resumed: z.boolean().optional(),
     repositories: z.array(sessionDiffBaselineRepositorySchema).optional(),
   }),
   messageSandboxEventBaseSchema.extend({
@@ -116,6 +122,13 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
     taskCallId: z.string().optional(),
   }),
   messageSandboxEventBaseSchema.extend({
+    type: z.literal("provider_retry"),
+    /** 1-based count of consecutive provider rejections for this message. */
+    attempt: z.number().int().positive(),
+    /** Epoch seconds of the provider's next attempt, when its payload carries one. */
+    nextRetryAt: z.number().optional(),
+  }),
+  messageSandboxEventBaseSchema.extend({
     type: z.literal("execution_complete"),
     success: z.boolean(),
     error: z.string().optional(),
@@ -124,6 +137,13 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
   }),
   messageSandboxEventBaseSchema.extend({
     type: z.literal("context_compacted"),
+  }),
+  sandboxEventBaseSchema.extend({
+    type: z.literal("context_reset"),
+    /** Why the sandbox is not resuming the session's vendor conversation. */
+    reason: z.enum(["fresh_session", "session_id_mismatch"]).optional(),
+    /** The vendor session id the sandbox will use from now on, when known. */
+    agentSessionId: z.string().nullable().optional(),
   }),
   sandboxEventBaseSchema.extend({
     type: z.literal("artifact"),
