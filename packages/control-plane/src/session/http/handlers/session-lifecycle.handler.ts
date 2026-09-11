@@ -1,5 +1,6 @@
 import type { WebSocketManager } from "../../../sandbox/lifecycle/manager";
 import type { SessionStatus } from "@open-inspect/shared/types/sessions";
+import type { ExecutionStopOptions } from "../../execution-stop-coordinator";
 import type { SessionCoreRepository } from "../../session-core-repository";
 import type { SandboxRepository } from "../../sandbox-repository";
 import type { MessageRepository } from "../../message-repository";
@@ -42,9 +43,8 @@ const titleUpdateBodySchema = z.object({
 
 type TitleUpdateBody = z.infer<typeof titleUpdateBodySchema>;
 
-/**
- * HTTP boundary for the session lifecycle endpoints: init, state reads, title
- * updates, archive/unarchive, draft expiry, and cancellation.
+/** HTTP boundary for the session lifecycle endpoints: init, state reads, title
+ * updates, archive/unarchive/archive-cascade, draft expiry, and cancellation.
  */
 export class SessionLifecycleHandler {
   /** Create the session lifecycle HTTP handler with its persistence and lifecycle services. */
@@ -56,7 +56,8 @@ export class SessionLifecycleHandler {
     private readonly titleService: SessionTitleService,
     private readonly sockets: WebSocketManager,
     private readonly durableObjectId: string,
-    private readonly cancelSession: () => Promise<void>
+    private readonly cancelSession: () => Promise<void>,
+    private readonly stopExecution: (options?: ExecutionStopOptions) => Promise<void>
   ) {}
 
   getState(): Response {
@@ -131,6 +132,20 @@ export class SessionLifecycleHandler {
     return Response.json({ title: result.title });
   }
 
+  /**
+   * Why: no session state may block archiving — archive means "hide this from
+   * my sidebar", and the two guards this path once had (refusing cancelled
+   * sessions and sessions with queued work) made a dead row permanently
+   * un-archivable: a message stranded in `processing` after a sandbox dies
+   * never drains. Live execution is stopped first instead, the way the
+   * trusted child-cascade retires a running child, and the stop's status
+   * reconcile is suppressed so `archived` sticks.
+   */
+  private async stopExecutionBeforeArchive(status: SessionStatus): Promise<void> {
+    if (isSessionInactive(status)) return;
+    await this.stopExecution({ suppressStatusReconcile: true });
+  }
+
   /** Archive the session after route-level lifecycle authorization has succeeded. */
   async archive(): Promise<Response> {
     const session = this.sessionCoreRepository.getSession();
@@ -138,17 +153,23 @@ export class SessionLifecycleHandler {
       return Response.json({ error: "Session not found" }, { status: 404 });
     }
 
-    if (session.status === "cancelled") {
-      return Response.json({ error: "Cancelled sessions cannot be archived" }, { status: 409 });
-    }
-
-    if (this.messageRepository.getPendingOrProcessingCount() > 0) {
-      return Response.json({ error: "Cannot archive a session with queued work" }, { status: 409 });
-    }
-
+    await this.stopExecutionBeforeArchive(session.status);
     await this.statusService.transition("archived");
 
     return Response.json({ status: "archived" });
+  }
+
+  /**
+   * Archive this session on behalf of a parent's cascade.
+   *
+   * Why a separate path from `archive`: the public proxy exposes `archive`
+   * behind participant authorization, and a child's participants need not
+   * include whoever archived the parent. This route is trusted DO-to-DO only
+   * and is never wired to a public proxy route. Semantics are `archive`'s by
+   * construction, so the two cannot drift.
+   */
+  async archiveCascade(): Promise<Response> {
+    return this.archive();
   }
 
   /**

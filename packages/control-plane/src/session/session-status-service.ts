@@ -11,7 +11,7 @@
 import { SessionInternalPaths } from "./contracts";
 import type { SessionRuntimeClient } from "./runtime-client";
 import type { Logger } from "../logger";
-import type { SessionIndexStore } from "../db/session-index";
+import type { SessionEntry, SessionIndexStore } from "../db/session-index";
 import type { SessionStatus } from "@open-inspect/shared/types/sessions";
 import type { SessionRow } from "./types";
 import type { SessionCoreRepository } from "./session-core-repository";
@@ -24,7 +24,7 @@ import { isSessionPromptable, isTurnSettled } from "@open-inspect/shared/types/s
 /** The index projections this service keeps consistent with the session row. */
 type SessionIndexProjections = Pick<
   SessionIndexStore,
-  "updateStatus" | "repairStatus" | "finalizeChildAdmission" | "updateMetrics"
+  "updateStatus" | "repairStatus" | "finalizeChildAdmission" | "updateMetrics" | "listByParent"
 >;
 
 export class SessionStatusService {
@@ -68,6 +68,9 @@ export class SessionStatusService {
     const updatedAt = Math.max(Date.now(), session.updated_at + 1);
     this.repository.updateSessionStatus(session.id, status, updatedAt);
     await this.projectTransition(session, publicSessionId, status, updatedAt);
+    if (status === "archived") {
+      await this.cascadeArchiveToChildren(publicSessionId);
+    }
 
     return true;
   }
@@ -119,6 +122,53 @@ export class SessionStatusService {
     await this.projectTransition(session, publicSessionId, "cancelled", updatedAt);
 
     return true;
+  }
+
+  /**
+   * Why: archiving a parent flips only the parent's row, so the sidebar's next
+   * refetch resurrects the still-active children as orphaned sub-task rows.
+   * The fan-out fires from the transition itself, gated on `archived`, so it
+   * runs once per real transition no matter which entrypoint archived the
+   * session. Each child archives through the trusted cascade endpoint and
+   * lands back here through its own transition, which is what reaches
+   * grandchildren. Best-effort per child: an unreachable or never-created
+   * child DO is logged and never fails the parent's archive.
+   */
+  private async cascadeArchiveToChildren(parentId: string): Promise<void> {
+    let children: SessionEntry[];
+    try {
+      children = await this.sessionIndex.listByParent(parentId);
+    } catch (error) {
+      this.log.error("session.archive_cascade.list_children_failed", {
+        session_id: parentId,
+        error,
+      });
+      return;
+    }
+
+    const pending = children.filter((child) => child.status !== "archived");
+    const results = await Promise.allSettled(
+      pending.map((child) =>
+        this.sessions.fetch(child.id, SessionInternalPaths.archiveCascade, { method: "POST" })
+      )
+    );
+    results.forEach((result, index) => {
+      if (result.status === "rejected") {
+        this.log.error("session.archive_cascade.child_failed", {
+          session_id: pending[index].id,
+          parent_id: parentId,
+          error: result.reason,
+        });
+        return;
+      }
+      if (!result.value.ok) {
+        this.log.warn("session.archive_cascade.child_rejected", {
+          session_id: pending[index].id,
+          parent_id: parentId,
+          http_status: result.value.status,
+        });
+      }
+    });
   }
 
   private async projectTransition(

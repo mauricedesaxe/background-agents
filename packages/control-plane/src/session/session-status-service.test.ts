@@ -6,6 +6,7 @@ import type { SessionRuntimeClient } from "./runtime-client";
 import type { Logger } from "../logger";
 import type { SessionRow, ArtifactRow, MessageRow } from "./types";
 import type { SessionCoreRepository } from "./session-core-repository";
+import type { SessionEntry } from "../db/session-index";
 import type { ArtifactRepository } from "./artifact-repository";
 import type { MessageRepository } from "./message-repository";
 import type { SessionMessenger } from "./messenger";
@@ -65,6 +66,7 @@ function harness(options: { session?: SessionRow | null } = {}) {
     repairStatus: vi.fn(async () => true),
     finalizeChildAdmission: vi.fn(async () => {}),
     updateMetrics: vi.fn(async () => true),
+    listByParent: vi.fn(async () => [] as SessionEntry[]),
   };
 
   const parentFetch = vi.fn(
@@ -224,6 +226,87 @@ describe("SessionStatusService.transition", () => {
 
     await h.service.transition("active");
 
+    expect(h.parentFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("SessionStatusService.archive cascade", () => {
+  function child(id: string, status: SessionEntry["status"]): SessionEntry {
+    return {
+      id,
+      title: null,
+      repoOwner: null,
+      repoName: null,
+      model: "anthropic/claude-haiku-4-5",
+      baseBranch: null,
+      status,
+      createdAt: 1,
+      updatedAt: 2,
+    };
+  }
+
+  it("fans the archive out to non-archived children on a real transition", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+    h.sessionIndex.listByParent.mockResolvedValue([
+      child("child-active", "active"),
+      child("child-archived", "archived"),
+    ]);
+
+    expect(await h.service.transition("archived")).toBe(true);
+
+    expect(h.sessionIndex.listByParent).toHaveBeenCalledWith("public-session-1");
+    expect(h.parentFetch).toHaveBeenCalledTimes(1);
+    const [childId, path, init] = h.parentFetch.mock.calls[0];
+    expect(childId).toBe("child-active");
+    expect(path).toBe(SessionInternalPaths.archiveCascade);
+    expect(init?.method).toBe("POST");
+  });
+
+  it("does not cascade on a same-status refresh", async () => {
+    const h = harness({ session: createSession({ status: "archived" }) });
+
+    expect(await h.service.transition("archived")).toBe(false);
+
+    expect(h.sessionIndex.listByParent).not.toHaveBeenCalled();
+    expect(h.parentFetch).not.toHaveBeenCalled();
+  });
+
+  it("logs a rejected child fan-out without failing the transition", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+    h.sessionIndex.listByParent.mockResolvedValue([child("child-unreachable", "active")]);
+    h.parentFetch.mockRejectedValue(new Error("child DO unreachable"));
+
+    expect(await h.service.transition("archived")).toBe(true);
+
+    expect(h.log.error).toHaveBeenCalledWith(
+      "session.archive_cascade.child_failed",
+      expect.objectContaining({ session_id: "child-unreachable", parent_id: "public-session-1" })
+    );
+  });
+
+  it("logs a non-OK child response without failing the transition", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+    h.sessionIndex.listByParent.mockResolvedValue([child("child-never-created", "created")]);
+    h.parentFetch.mockResolvedValue(new Response("Session not found", { status: 404 }));
+
+    expect(await h.service.transition("archived")).toBe(true);
+
+    expect(h.log.warn).toHaveBeenCalledWith(
+      "session.archive_cascade.child_rejected",
+      expect.objectContaining({ session_id: "child-never-created", http_status: 404 })
+    );
+  });
+
+  it("logs when listing children fails, without failing the transition", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+    h.sessionIndex.listByParent.mockRejectedValue(new Error("d1 down"));
+
+    expect(await h.service.transition("archived")).toBe(true);
+
+    expect(h.log.error).toHaveBeenCalledWith(
+      "session.archive_cascade.list_children_failed",
+      expect.objectContaining({ session_id: "public-session-1" })
+    );
     expect(h.parentFetch).not.toHaveBeenCalled();
   });
 });

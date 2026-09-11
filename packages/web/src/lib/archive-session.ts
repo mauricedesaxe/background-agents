@@ -1,6 +1,18 @@
 import { toast } from "sonner";
 import { browserApiFetch } from "@/lib/browser-api-fetch";
 
+const GENERIC_ARCHIVE_FAILURE = "Failed to archive session";
+
+/** The server's `error` field, when the failed response body carries one. */
+async function readServerErrorMessage(response: Response): Promise<string | null> {
+  try {
+    const body = (await response.json()) as { error?: unknown };
+    return typeof body.error === "string" && body.error.length > 0 ? body.error : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Archives a session via the API.
  *
@@ -13,13 +25,13 @@ export async function archiveSession(sessionId: string): Promise<boolean> {
       method: "POST",
     });
     if (!response.ok) {
-      toast.error("Failed to archive session");
+      toast.error((await readServerErrorMessage(response)) ?? GENERIC_ARCHIVE_FAILURE);
       return false;
     }
 
     return true;
   } catch {
-    toast.error("Failed to archive session");
+    toast.error(GENERIC_ARCHIVE_FAILURE);
     return false;
   }
 }

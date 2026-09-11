@@ -15,6 +15,15 @@ export interface ExecutionStopPreparation {
   failure: RecordedMessageFailure;
 }
 
+/**
+ * Why: archive stops execution immediately before its own transition to
+ * `archived`, and the stop's status reconcile and queue drain would settle
+ * the status or dispatch queued work underneath that transition.
+ */
+export interface ExecutionStopOptions {
+  suppressStatusReconcile?: boolean;
+}
+
 export class ExecutionStopCoordinator {
   constructor(
     private readonly log: Logger,
@@ -31,13 +40,13 @@ export class ExecutionStopCoordinator {
     private readonly processMessageQueue: () => Promise<void>
   ) {}
 
-  async stop(reason = "Execution was stopped"): Promise<void> {
+  async stop(reason = "Execution was stopped", options: ExecutionStopOptions = {}): Promise<void> {
     const preparation = this.repository.transaction(() => this.prepare(reason, Date.now()));
     if (!preparation) {
       this.messenger.broadcast({ type: "processing_status", isProcessing: false });
       return;
     }
-    await this.deliver(preparation);
+    await this.deliver(preparation, options);
   }
 
   prepare(reason: string, now: number): ExecutionStopPreparation | null {
@@ -55,7 +64,10 @@ export class ExecutionStopCoordinator {
     return { stopConfirmationDeadline, failure };
   }
 
-  async deliver(preparation: ExecutionStopPreparation): Promise<void> {
+  async deliver(
+    preparation: ExecutionStopPreparation,
+    options: ExecutionStopOptions = {}
+  ): Promise<void> {
     this.messageFailures.deliver(preparation.failure);
     this.broadcastPromptQueue();
     this.log.info("prompt.stopped", {
@@ -68,7 +80,9 @@ export class ExecutionStopCoordinator {
     const stopSent = sandboxWs !== null && this.wsManager.send(sandboxWs, { type: "stop" });
     const [alarm, status] = await Promise.allSettled([
       this.alarmScheduler.schedule(preparation.stopConfirmationDeadline),
-      this.sessionStatus.reconcileAfterExecution(false),
+      options.suppressStatusReconcile
+        ? Promise.resolve()
+        : this.sessionStatus.reconcileAfterExecution(false),
     ]);
     if (status.status === "rejected") {
       this.log.error("Stop status reconciliation failed", { error: status.reason });
@@ -88,6 +102,7 @@ export class ExecutionStopCoordinator {
         return;
       }
       await this.sandboxLifecycle.terminateUnresponsiveSandbox(reason);
+      if (options.suppressStatusReconcile) return;
       await this.resumeAfterSandboxTermination();
     }
   }

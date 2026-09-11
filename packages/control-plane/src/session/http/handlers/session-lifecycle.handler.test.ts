@@ -94,6 +94,7 @@ function createHandler() {
   } as unknown as SessionStatusService;
   const applySessionTitleUpdate = vi.fn((title: string) => ({ ok: true as const, title }));
   const cancelSession = vi.fn();
+  const stopExecution = vi.fn<() => Promise<void>>(async () => {});
   const getSandboxSocket = vi.fn<() => WebSocket | null>();
   const sendToSandbox = vi.fn();
 
@@ -110,13 +111,15 @@ function createHandler() {
       getConnectedClientCount: vi.fn(() => 0),
     } as unknown as WebSocketManager,
     "session-do-id",
-    cancelSession
+    cancelSession,
+    stopExecution
   );
 
   const handler = {
     getState: () => lifecycleHandler.getState(),
     updateTitle: (request: Request) => lifecycleHandler.updateTitle(request),
     archive: (_request?: Request) => lifecycleHandler.archive(),
+    archiveCascade: () => lifecycleHandler.archiveCascade(),
     unarchive: (_request?: Request) => lifecycleHandler.unarchive(),
     expireDraft: () => lifecycleHandler.expireDraft(),
     cancel: () => lifecycleHandler.cancel(),
@@ -133,6 +136,7 @@ function createHandler() {
     settleFromMessageState,
     applySessionTitleUpdate,
     cancelSession,
+    stopExecution,
     getSandboxSocket,
     sendToSandbox,
     updateSandboxStatus,
@@ -400,35 +404,73 @@ describe("SessionLifecycleHandler", () => {
     expect(transition).not.toHaveBeenCalled();
   });
 
-  it("returns 409 when archiving a session with queued work", async () => {
-    const { handler, getSession, repository, transition } = createHandler();
+  it("stops wedged execution and archives a session with stuck queued work", async () => {
+    const { handler, getSession, repository, stopExecution, transition } = createHandler();
     getSession.mockReturnValue(createSession());
     repository.getPendingOrProcessingCount.mockReturnValue(1);
+    transition.mockResolvedValue(true);
 
-    const response = await handler.archive(
-      new Request("http://internal/internal/archive", {
-        method: "POST",
-        body: JSON.stringify({ userId: "user-1" }),
-      })
+    const response = await handler.archive();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "archived" });
+    expect(stopExecution).toHaveBeenCalledWith({ suppressStatusReconcile: true });
+    expect(stopExecution.mock.invocationCallOrder[0]).toBeLessThan(
+      transition.mock.invocationCallOrder[0]
     );
-
-    expect(response.status).toBe(409);
-    expect(transition).not.toHaveBeenCalled();
+    expect(transition).toHaveBeenCalledWith("archived");
   });
 
-  it("returns 409 when archiving a cancelled session", async () => {
-    const { handler, getSession, transition } = createHandler();
+  it("archives a cancelled session without stopping execution", async () => {
+    const { handler, getSession, stopExecution, transition } = createHandler();
     getSession.mockReturnValue(createSession({ status: "cancelled" }));
+    transition.mockResolvedValue(true);
 
-    const response = await handler.archive(
-      new Request("http://internal/internal/archive", {
-        method: "POST",
-        body: JSON.stringify({ userId: "user-1" }),
-      })
+    const response = await handler.archive();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "archived" });
+    expect(stopExecution).not.toHaveBeenCalled();
+    expect(transition).toHaveBeenCalledWith("archived");
+  });
+
+  it("archiveCascade stops a running child before archiving it", async () => {
+    const { handler, getSession, stopExecution, transition } = createHandler();
+    getSession.mockReturnValue(createSession());
+    transition.mockResolvedValue(true);
+
+    const response = await handler.archiveCascade();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "archived" });
+    expect(stopExecution).toHaveBeenCalledWith({ suppressStatusReconcile: true });
+    expect(stopExecution.mock.invocationCallOrder[0]).toBeLessThan(
+      transition.mock.invocationCallOrder[0]
     );
+    expect(transition).toHaveBeenCalledWith("archived");
+  });
 
-    expect(response.status).toBe(409);
-    expect(transition).not.toHaveBeenCalled();
+  it("archiveCascade archives a terminal child without stopping execution", async () => {
+    const { handler, getSession, stopExecution, transition } = createHandler();
+    getSession.mockReturnValue(createSession({ status: "failed" }));
+    transition.mockResolvedValue(true);
+
+    const response = await handler.archiveCascade();
+
+    expect(response.status).toBe(200);
+    expect(stopExecution).not.toHaveBeenCalled();
+    expect(transition).toHaveBeenCalledWith("archived");
+  });
+
+  it("archiveCascade is a no-op for an already-archived child", async () => {
+    const { handler, getSession, stopExecution, transition } = createHandler();
+    getSession.mockReturnValue(createSession({ status: "archived" }));
+
+    const response = await handler.archiveCascade();
+
+    expect(response.status).toBe(200);
+    expect(stopExecution).not.toHaveBeenCalled();
+    expect(transition).toHaveBeenCalledWith("archived");
   });
 
   // Unarchive must not assert a status of its own. Forcing "active" left a
