@@ -63,3 +63,25 @@ resource "terraform_data" "sign_in_provider_gate" {
     }
   }
 }
+
+# Fail the plan when any queue name derived in workers-control-plane.tf would
+# exceed Cloudflare's 63-character queue-name cap. An overflow only surfaces as
+# an API 400 mid-apply (a partial apply), so the budget is enforced here, where
+# nothing has been touched yet. The literals mirror workers-control-plane.tf,
+# which documents the per-name budget; resource attributes are avoided because
+# a computed queue_name is not known at plan time and would defer this check.
+locals {
+  queue_names = [
+    "open-inspect-image-build-finalization-${local.name_suffix}",
+    "open-inspect-image-build-dlq-${local.name_suffix}",
+  ]
+}
+
+resource "terraform_data" "cloudflare_queue_name_gate" {
+  lifecycle {
+    precondition {
+      condition     = alltrue([for q in locals.queue_names : length(q) <= 63])
+      error_message = "Derived Cloudflare queue names exceed the 63-character limit: ${join(", ", [for q in locals.queue_names : q if length(q) > 63])}. Shorten the queue name literals in workers-control-plane.tf."
+    }
+  }
+}

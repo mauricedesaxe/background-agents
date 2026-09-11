@@ -9,7 +9,11 @@ resource "cloudflare_queue" "image_build_finalization" {
 
 resource "cloudflare_queue" "image_build_finalization_dlq" {
   account_id = var.cloudflare_account_id
-  queue_name = "open-inspect-image-build-finalization-dlq-${local.name_suffix}"
+  # Cloudflare caps queue names at 63 chars. name_suffix is deployment_name, so
+  # the worst case is this literal (29) + a 24-char suffix = 53; the
+  # finalization queue above is 38 + 24 = 62. The pre-2026-08 literal
+  # "...-finalization-dlq-" hit 66 with that suffix. checks.tf guards the budget.
+  queue_name = "open-inspect-image-build-dlq-${local.name_suffix}"
 }
 
 # Build control-plane worker bundle (only runs during apply, not plan)
