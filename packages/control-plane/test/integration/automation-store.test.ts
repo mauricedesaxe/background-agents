@@ -366,6 +366,66 @@ describe("AutomationStore (D1 integration)", () => {
       expect(secondPage.hasMore).toBe(false);
       expect(secondPage.nextCursor).toBeNull();
     });
+
+    it("hides a settled one-shot but keeps failed, pending, and non-once automations", async () => {
+      const store = new AutomationStore(env.DB);
+      const now = Date.now();
+
+      await store.create(
+        makeAutomation({ id: "auto-once-done", trigger_type: "once", created_at: now })
+      );
+      await seedRun(
+        makeRun("auto-once-done", {
+          id: "run-once-done",
+          status: "completed",
+          completed_at: now,
+        })
+      );
+
+      await store.create(
+        makeAutomation({ id: "auto-once-failed", trigger_type: "once", created_at: now })
+      );
+      await seedRun(
+        makeRun("auto-once-failed", {
+          id: "run-once-failed",
+          status: "failed",
+          failure_reason: "boom",
+          completed_at: now,
+        })
+      );
+
+      await store.create(
+        makeAutomation({ id: "auto-once-running", trigger_type: "once", created_at: now })
+      );
+      await seedRun(
+        makeRun("auto-once-running", {
+          id: "run-once-running",
+          status: "running",
+          started_at: now,
+        })
+      );
+
+      await store.create(
+        makeAutomation({ id: "auto-once-idle", trigger_type: "once", created_at: now })
+      );
+
+      await store.create(makeAutomation({ id: "auto-schedule-done", created_at: now }));
+      await seedRun(
+        makeRun("auto-schedule-done", {
+          id: "run-sched-done",
+          status: "completed",
+          completed_at: now,
+        })
+      );
+
+      const result = await store.list({ limit: 25 });
+      expect(result.automations.map((automation) => automation.id)).toEqual([
+        "auto-schedule-done",
+        "auto-once-running",
+        "auto-once-idle",
+        "auto-once-failed",
+      ]);
+    });
   });
 
   // ─── Pause / Resume ────────────────────────────────────────────────────────

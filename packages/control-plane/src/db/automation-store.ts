@@ -296,6 +296,26 @@ const DERIVED_INVOCATION_COMPLETED_AT_SQL = `CASE
 END`;
 
 /**
+ * A one-shot automation whose run settled without error is list noise: it is
+ * already disabled and will never fire again. Errored, in-progress, and
+ * never-fired one-shots stay visible, and non-`once` triggers are untouched.
+ * Reuses the invocation aggregate so "settled without error" keeps one
+ * definition. Applied in `list()` — server-side, so cursor pagination stays
+ * correct.
+ */
+const HIDE_SETTLED_ONCE_SQL = `NOT (
+  automations.trigger_type = 'once'
+  AND EXISTS (
+    SELECT 1
+    FROM automation_invocations i
+    LEFT JOIN automation_runs r ON r.invocation_id = i.id
+    WHERE i.automation_id = automations.id
+    GROUP BY i.id
+    HAVING ${DERIVED_INVOCATION_STATUS_SQL} IN ('completed', 'skipped')
+  )
+)`;
+
+/**
  * TS twin of DERIVED_INVOCATION_STATUS_SQL over a sibling aggregate. Keep the
  * two in lockstep.
  */
@@ -425,7 +445,7 @@ export class AutomationStore {
     repoOwner?: string;
     repoName?: string;
   }): Promise<AutomationListResult> {
-    const conditions: string[] = ["deleted_at IS NULL"];
+    const conditions: string[] = ["deleted_at IS NULL", HIDE_SETTLED_ONCE_SQL];
     const params: unknown[] = [];
 
     if (options.nameSearch) {
