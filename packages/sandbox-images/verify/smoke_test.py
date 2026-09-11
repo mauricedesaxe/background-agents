@@ -218,10 +218,11 @@ def observed_tool_version(command: str, expected: str, output: str) -> str:
         "agent-browser": r"agent-browser\s+",
         "code-server": r"",
         "ttyd": r"ttyd version\s+",
+        "jj": r"jj\s+",
         "google-chrome": r"Google Chrome(?: for Testing)?\s+",
     }
-    # ttyd's pinned release appends its source commit, not a prerelease label.
-    suffix = r"(?:-[a-f0-9]{7,40})?" if command == "ttyd" else ""
+    # Why: ttyd and jj's pinned releases append their source commit, not a prerelease label.
+    suffix = r"(?:-[a-f0-9]{7,40})?" if command in ("ttyd", "jj") else ""
     pattern = prefixes[command] + r"(\d+(?:\.\d+){2,3})" + suffix + r"(?=\s|$)"
     matches = [
         match.group(1) for line in output.splitlines() if (match := re.match(pattern, line.strip()))
@@ -240,6 +241,7 @@ def inspect_image(plan: dict[str, Any], tools: dict[str, Any], *, services: bool
         ("bun", tools["bun"]),
         ("pnpm", tools["pnpm"]),
         ("agent-browser", tools["agentBrowser"]),
+        ("jj", tools["jj"]["version"]),
         ("code-server", tools["codeServer"]["version"]),
         ("ttyd", tools["ttyd"]["version"]),
         ("google-chrome", tools["chrome"]["version"]),
@@ -266,6 +268,12 @@ def inspect_image(plan: dict[str, Any], tools: dict[str, Any], *, services: bool
     probe.run(["gh", "--version"])
     if probe.run(["git", "config", "--system", "credential.useHttpPath"]) != "true":
         raise RuntimeError("SCM credential helper is not repository-path scoped")
+    harness_stamp = json.loads(Path("/app/openinspect-harness.json").read_text())
+    if harness_stamp.get("ref") != tools["harness"]["ref"]:
+        raise RuntimeError("Installed harness ref does not match the pinned toolchain")
+    skills = Path(plan["target"]["home"]) / ".claude/skills"
+    if not any(skills.glob("lazar-*/SKILL.md")):
+        raise RuntimeError("No lazar-* skill installed for the runtime user")
     probe.run(
         [
             "node",

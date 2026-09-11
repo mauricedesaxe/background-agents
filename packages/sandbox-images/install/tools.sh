@@ -23,6 +23,9 @@ tar -xzf "$download_dir/code-server.tar.gz" -C /opt/openinspect/code-server --st
 ln -sf /opt/openinspect/code-server/bin/code-server /usr/local/bin/code-server
 download_checked "https://github.com/tsl0922/ttyd/releases/download/$TTYD_VERSION/ttyd.x86_64" "$TTYD_SHA256" "$download_dir/ttyd"
 install -m 0755 "$download_dir/ttyd" /usr/local/bin/ttyd
+download_checked "https://github.com/jj-vcs/jj/releases/download/v$JJ_VERSION/jj-v$JJ_VERSION-x86_64-unknown-linux-musl.tar.gz" "$JJ_SHA256" "$download_dir/jj.tar.gz"
+tar -xzf "$download_dir/jj.tar.gz" -C "$download_dir" ./jj
+install -m 0755 "$download_dir/jj" /usr/local/bin/jj
 download_checked "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/linux64/chrome-linux64.zip" "$CHROME_SHA256" "$download_dir/chrome.zip"
 mkdir -p /opt/openinspect/chrome
 unzip -q "$download_dir/chrome.zip" -d /opt/openinspect/chrome

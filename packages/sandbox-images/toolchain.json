@@ -18,6 +18,10 @@
     "version": "0.9.7",
     "sha256": "b26fcc8dfa1c39b5a5613445af3be3eefda45d9a39359bee271eafe34913583e"
   },
+  "jj": {
+    "version": "0.44.0",
+    "sha256": "0a07bab4641a55fd2bc2fd1563ba3a3f9a577584086ad74086a1c5b69b3ffce9"
+  },
   "hatchling": "1.27.0",
   "websockify": "0.13.0",
   "node": {
@@ -53,5 +57,10 @@
   "novnc": {
     "version": "1.6.0",
     "sha256": "5066103959ef4e9b10f37e5a148627360dd8414e4cf8a7db92bdbd022e728aaa"
+  },
+  "harness": {
+    "repo": "https://github.com/mauricedesaxe/lazar-harness.git",
+    "ref": "42aa3e015a66109b05b8cf2f88c5e4a09ce4ae68",
+    "treeSha256": "8f7130e26d03b1c7131fe4795f621665d082bf3fa1cde57598ae09f26d9e18f2"
   }
 }
