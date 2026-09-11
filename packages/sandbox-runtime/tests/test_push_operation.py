@@ -385,3 +385,152 @@ async def test_launch_exception_becomes_result(operation, error, expected):
     operation.log.error.assert_called_once_with(
         "git.push_error", exc=error, branch_name="feature/test"
     )
+
+
+JJ_BOOKMARK_SET_ARGS = ("bookmark", "set", "--allow-backwards", "--revision", "@")
+JJ_GIT_EXPORT_ARGS = ("git", "export")
+
+
+def _jj_launcher(jj_processes: list, git_process):
+    """Subprocess launcher that dispatches on argv: jj commands get the queued
+    fake processes in order, the git push gets `git_process`. Records all argv."""
+
+    def launch(*args, **kwargs):
+        if args[0] == "jj":
+            return jj_processes.pop(0)
+        git_process.argv = args
+        return git_process
+
+    return launch
+
+
+async def test_jj_colocated_checkout_sets_bookmark_and_pushes_it(operation, tmp_path):
+    (tmp_path / "repo" / ".jj").mkdir()
+    bookmark_process = _fake_process()
+    export_process = _fake_process()
+    git_process = _fake_process()
+    spec = _push_spec()
+    with patch(
+        "sandbox_runtime.push_operation.asyncio.create_subprocess_exec",
+        side_effect=_jj_launcher([bookmark_process, export_process], git_process),
+    ) as launch:
+        result = await operation.execute(spec)
+
+    assert result.error is None
+    bookmark_args = launch.call_args_list[0].args
+    assert bookmark_args[:3] == ("jj", "--repository", str(tmp_path / "repo"))
+    assert bookmark_args[3:8] == JJ_BOOKMARK_SET_ARGS
+    assert bookmark_args[8] == "feature/test"
+    assert launch.call_args_list[1].args[:4] == (
+        "jj",
+        "--repository",
+        str(tmp_path / "repo"),
+        "git",
+    )
+    assert launch.call_args_list[1].args[4] == "export"
+    assert git_process.argv == (
+        "git",
+        "push",
+        "--",
+        spec["remoteUrl"],
+        "feature/test:refs/heads/feature/test",
+    )
+
+
+async def test_jj_bookmark_failure_falls_back_to_spec_refspec(operation, tmp_path):
+    (tmp_path / "repo" / ".jj").mkdir()
+    git_process = _fake_process()
+    spec = _push_spec()
+    with patch(
+        "sandbox_runtime.push_operation.asyncio.create_subprocess_exec",
+        side_effect=_jj_launcher([_fake_process(1, b"Error: benchmark conflict")], git_process),
+    ):
+        result = await operation.execute(spec)
+
+    assert result.error is None
+    assert git_process.argv == ("git", "push", "--", spec["remoteUrl"], spec["refspec"])
+    operation.log.warn.assert_any_call(
+        "git.push_jj_fallback",
+        reason="jj_command_failed",
+        branch_name="feature/test",
+    )
+
+
+async def test_jj_export_failure_still_pushes_bookmark_refspec(operation, tmp_path):
+    (tmp_path / "repo" / ".jj").mkdir()
+    git_process = _fake_process()
+    spec = _push_spec()
+    with patch(
+        "sandbox_runtime.push_operation.asyncio.create_subprocess_exec",
+        side_effect=_jj_launcher([_fake_process(), _fake_process(1, b"boom")], git_process),
+    ):
+        result = await operation.execute(spec)
+
+    assert result.error is None
+    assert git_process.argv[4] == "feature/test:refs/heads/feature/test"
+    operation.log.warn.assert_any_call("git.push_jj_export_failed", branch_name="feature/test")
+
+
+async def test_jj_launch_exception_falls_back_to_spec_refspec(operation, tmp_path):
+    (tmp_path / "repo" / ".jj").mkdir()
+    git_process = _fake_process()
+    spec = _push_spec()
+
+    def launch(*args, **kwargs):
+        if args[0] == "jj":
+            raise FileNotFoundError("jj binary missing")
+        git_process.argv = args
+        return git_process
+
+    with patch("sandbox_runtime.push_operation.asyncio.create_subprocess_exec", side_effect=launch):
+        result = await operation.execute(spec)
+
+    assert result.error is None
+    assert git_process.argv == ("git", "push", "--", spec["remoteUrl"], spec["refspec"])
+
+
+async def test_jj_command_timeout_falls_back_to_spec_refspec(operation, tmp_path):
+    (tmp_path / "repo" / ".jj").mkdir()
+    stuck = _fake_process()
+    stuck.communicate = AsyncMock(side_effect=RuntimeError("timed out"))
+    git_process = _fake_process()
+    spec = _push_spec()
+    with patch(
+        "sandbox_runtime.push_operation.asyncio.create_subprocess_exec",
+        side_effect=_jj_launcher([stuck, _fake_process()], git_process),
+    ):
+        result = await operation.execute(spec)
+
+    assert result.error is None
+    assert git_process.argv == ("git", "push", "--", spec["remoteUrl"], spec["refspec"])
+
+
+async def test_jj_colocated_member_checkout_runs_jj_in_member_path(operation, tmp_path):
+    _write_manifest(operation, [("open-inspect", "backend")])
+    (operation.repo_path / "backend" / ".git").mkdir(parents=True)
+    (operation.repo_path / "backend" / ".jj").mkdir()
+    bookmark_process = _fake_process()
+    export_process = _fake_process()
+    git_process = _fake_process()
+    with patch(
+        "sandbox_runtime.push_operation.asyncio.create_subprocess_exec",
+        side_effect=_jj_launcher([bookmark_process, export_process], git_process),
+    ) as launch:
+        result = await operation.execute(_push_spec(repoOwner="open-inspect", repoName="backend"))
+
+    assert result.error is None
+    assert launch.call_args_list[0].args[2] == str(operation.repo_path / "backend")
+    assert launch.call_args_list[-1].kwargs["cwd"] == operation.repo_path / "backend"
+
+
+async def test_plain_git_checkout_keeps_spec_refspec(operation):
+    git_process = _fake_process()
+    spec = _push_spec()
+    with patch(
+        "sandbox_runtime.push_operation.asyncio.create_subprocess_exec",
+        side_effect=_jj_launcher([], git_process),
+    ):
+        result = await operation.execute(spec)
+
+    assert result.error is None
+    assert git_process.argv == ("git", "push", "--", spec["remoteUrl"], spec["refspec"])

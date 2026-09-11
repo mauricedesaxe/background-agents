@@ -12,6 +12,7 @@ from .repo_config import find_repo_entry, load_repo_manifest
 
 GIT_PUSH_TIMEOUT_SECONDS = 300.0
 GIT_PUSH_TERMINATE_GRACE_SECONDS = 5.0
+JJ_COMMAND_TIMEOUT_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -116,7 +117,8 @@ class PushOperation:
         )
         try:
             repo_dir = self._resolve_push_checkout(request)
-            await self._run_git_push(request, repo_dir)
+            refspec = await self._resolve_refspec(request, repo_dir)
+            await self._run_git_push(request, repo_dir, refspec)
         except PushRejected as rejection:
             return PushResult(request, str(rejection))
         except Exception as e:
@@ -139,6 +141,91 @@ class PushOperation:
         if request.has_repo_identity:
             return self._member_checkout(request)
         return self._sole_workspace_checkout()
+
+    async def _resolve_refspec(self, request: PushRequest, repo_dir: Path) -> str:
+        """Resolve what the push publishes: the working copy in a jj-colocated
+        checkout, the spec's refspec (typically ``HEAD``) otherwise.
+
+        A jj-colocated checkout pins ``.git/HEAD`` to the working-copy commit
+        ``@-``, so pushing ``HEAD`` publishes an empty branch. Setting the
+        bookmark named after the target branch to ``@`` and pushing that
+        bookmark refspec publishes the actual work instead.
+        """
+        if not (repo_dir / ".jj").exists():
+            return request.refspec
+        bookmark_refspec = f"{request.branch_name}:refs/heads/{request.branch_name}"
+        if await self._pin_jj_bookmark(request, repo_dir):
+            return bookmark_refspec
+        self.log.warn(
+            "git.push_jj_fallback",
+            reason="jj_command_failed",
+            branch_name=request.branch_name,
+        )
+        return request.refspec
+
+    async def _pin_jj_bookmark(self, request: PushRequest, repo_dir: Path) -> bool:
+        """Point the target branch's bookmark at the working copy.
+
+        False only when the bookmark itself cannot be set — the caller then
+        falls back to the spec's refspec. A failed ``git export`` keeps this
+        True: in a colocated checkout the ref is auto-exported anyway, and
+        when it is genuinely missing the bookmark refspec push fails visibly
+        instead of silently publishing the empty branch the fallback would.
+        """
+        command = (
+            "jj",
+            "--repository",
+            str(repo_dir),
+            "bookmark",
+            "set",
+            "--allow-backwards",
+            "--revision",
+            "@",
+            request.branch_name,
+        )
+        if not await self._run_jj_command(command, request.branch_name):
+            return False
+        export = ("jj", "--repository", str(repo_dir), "git", "export")
+        if not await self._run_jj_command(export, request.branch_name):
+            self.log.warn(
+                "git.push_jj_export_failed",
+                branch_name=request.branch_name,
+            )
+        return True
+
+    async def _run_jj_command(self, command: tuple[str, ...], branch_name: str) -> bool:
+        process: asyncio.subprocess.Process | None = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            _stdout, stderr = await asyncio.wait_for(
+                communicate_owned_subprocess(
+                    process, terminate_grace_seconds=GIT_PUSH_TERMINATE_GRACE_SECONDS
+                ),
+                timeout=JJ_COMMAND_TIMEOUT_SECONDS,
+            )
+        except Exception as e:
+            self.log.warn(
+                "git.push_jj_command_failed",
+                exc=e,
+                command=command[1:],
+                branch_name=branch_name,
+            )
+            return False
+        if process.returncode != 0:
+            stderr_text = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
+            self.log.warn(
+                "git.push_jj_command_failed",
+                command=command[1:],
+                branch_name=branch_name,
+                stderr=stderr_text,
+            )
+            return False
+        return True
 
     def _member_checkout(self, request: PushRequest) -> Path:
         # Only canonical manifest paths select checkouts, never spec-supplied paths.
@@ -170,11 +257,11 @@ class PushOperation:
             self._reject_push(reason="no_repo_configured", message="No repository found")
         return repo_dirs[0].parent
 
-    async def _run_git_push(self, request: PushRequest, repo_dir: Path) -> None:
+    async def _run_git_push(self, request: PushRequest, repo_dir: Path, refspec: str) -> None:
         self.log.info(
             "git.push_command",
             branch_name=request.branch_name,
-            refspec=request.refspec,
+            refspec=refspec,
             force=request.force,
             remote_url=request.redacted_push_url,
         )
@@ -184,7 +271,7 @@ class PushOperation:
             *(["-f"] if request.force else []),
             "--",
             request.push_url,
-            request.refspec,
+            refspec,
             cwd=repo_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
