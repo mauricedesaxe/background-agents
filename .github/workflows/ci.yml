@@ -29,6 +29,9 @@ on:
       - "terraform/environments/production/**"
       - "vitest.workspace.ts"
       - "!**/*.md"
+      # AGENTS.md carries the fork ops notes the fork-ops-notes job guards;
+      # a positive include after the exclusion is what makes md-only syncs run it.
+      - "AGENTS.md"
       - "packages/sandbox-runtime/src/**"
       - "packages/sandbox-images/**"
       # Re-included after the exclusion above, which later patterns override: a
@@ -62,6 +65,9 @@ on:
       - "terraform/environments/production/**"
       - "vitest.workspace.ts"
       - "!**/*.md"
+      # AGENTS.md carries the fork ops notes the fork-ops-notes job guards;
+      # a positive include after the exclusion is what makes md-only syncs run it.
+      - "AGENTS.md"
       - "packages/sandbox-runtime/src/**"
       - "packages/sandbox-images/**"
       # Re-included after the exclusion above, which later patterns override: a

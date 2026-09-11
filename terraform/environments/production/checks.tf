@@ -71,17 +71,23 @@ resource "terraform_data" "sign_in_provider_gate" {
 # which documents the per-name budget; resource attributes are avoided because
 # a computed queue_name is not known at plan time and would defer this check.
 locals {
-  queue_names = [
-    "open-inspect-image-build-finalization-${local.name_suffix}",
-    "open-inspect-image-build-dlq-${local.name_suffix}",
-  ]
+  queue_names = concat(
+    [
+      "open-inspect-image-build-finalization-${local.name_suffix}",
+      "open-inspect-image-build-dlq-${local.name_suffix}",
+    ],
+    [
+      "open-inspect-github-autofix-${local.name_suffix}",
+      "open-inspect-github-autofix-dlq-${local.name_suffix}",
+    ],
+  )
 }
 
 resource "terraform_data" "cloudflare_queue_name_gate" {
   lifecycle {
     precondition {
-      condition     = alltrue([for q in locals.queue_names : length(q) <= 63])
-      error_message = "Derived Cloudflare queue names exceed the 63-character limit: ${join(", ", [for q in locals.queue_names : q if length(q) > 63])}. Shorten the queue name literals in workers-control-plane.tf."
+      condition     = alltrue([for q in local.queue_names : length(q) <= 63])
+      error_message = "Derived Cloudflare queue names exceed the 63-character limit: ${join(", ", [for q in local.queue_names : q if length(q) > 63])}. Shorten the queue name literals in workers-control-plane.tf."
     }
   }
 }

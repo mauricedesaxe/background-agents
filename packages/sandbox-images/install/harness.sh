@@ -8,9 +8,9 @@ git -C "$harness_dir/repo" remote add origin "$OI_HARNESS_REPO"
 git -C "$harness_dir/repo" fetch --depth 1 -q origin "$OI_HARNESS_REF"
 git -C "$harness_dir/repo" checkout -q --detach FETCH_HEAD
 resolved_ref="$(git -C "$harness_dir/repo" rev-parse HEAD)"
-tree_sha256="$(git -C "$harness_dir/repo" archive HEAD | sha256sum | cut -d' ' -f1)"
-if [[ "$tree_sha256" != "$OI_HARNESS_TREESHA" ]]; then
-  echo "Harness tree digest mismatch: expected $OI_HARNESS_TREESHA, got $tree_sha256" >&2
+archive_sha256="$(git -C "$harness_dir/repo" archive HEAD | sha256sum | cut -d' ' -f1)"
+if [[ "$archive_sha256" != "$OI_HARNESS_ARCHIVE_SHA" ]]; then
+  echo "Harness archive digest mismatch: expected $OI_HARNESS_ARCHIVE_SHA, got $archive_sha256" >&2
   exit 1
 fi
 env HOME="$OI_RUNTIME_HOME" XDG_CONFIG_HOME="$OI_RUNTIME_HOME/.config" HARNESS_SURFACE=sandbox \
@@ -25,7 +25,7 @@ from pathlib import Path
 stamp = {
     "repo": os.environ["OI_HARNESS_REPO"],
     "ref": os.environ["OI_HARNESS_REF"],
-    "treeSha256": os.environ["OI_HARNESS_TREESHA"],
+    "archiveSha256": os.environ["OI_HARNESS_ARCHIVE_SHA"],
 }
 Path("/app/openinspect-harness.json").write_text(json.dumps(stamp, indent=2) + "\n")
 '
