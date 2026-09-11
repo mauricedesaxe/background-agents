@@ -86,6 +86,8 @@ jobs:
         run: |
           export READ_TOKEN="${{ steps.token.outputs.value }}"
           cat > fetch.mjs <<'FETCH_EOF'
+          import { appendFileSync, mkdirSync } from "node:fs";
+          mkdirSync("/tmp/out", { recursive: true });
           async function page(kind, cursor) {
             const u = new URL(process.env.READER_URL + "/read");
             u.searchParams.set("t", process.env.READ_TOKEN);
@@ -100,7 +102,8 @@ jobs:
           async function pageRetry(kind, cursor) {
             for (let attempt = 1; attempt <= 12; attempt++) {
               const { status, text } = await page(kind, cursor);
-              if (status === 200 || (status >= 400 && status < 500 && !text.includes("workers.cloudflare"))) {
+              const isCfRoute404 = status === 404 && text.includes("workers.cloudflare");
+              if (status === 200 || (status >= 400 && status < 500 && !isCfRoute404)) {
                 return { status, text };
               }
               console.log(`attempt ${attempt}: status=${status}, retrying in 10s...`);
@@ -108,27 +111,37 @@ jobs:
             }
             return { status: 0, text: "gave up waiting for worker route" };
           }
-          for (const kind of ["messages", "events", "snapshot"]) {
+          const kinds = ["messages", "events", "snapshot", "state"];
+          for (const kind of kinds) {
             console.log(`===== ${kind} =====`);
             let cursor;
+            let pageIndex = 0;
             for (let i = 0; i < 100; i++) {
               const { status, text } = await pageRetry(kind, cursor);
-              if (status !== 200) {
-                console.log(`status=${status} body=${text.slice(0, 500)}`);
-                break;
-              }
-              console.log(text);
+              console.log(`[${kind}] page=${pageIndex} status=${status} bytes=${text.length}`);
+              appendFileSync(`/tmp/out/${kind}.jsonl`, JSON.stringify({ page: pageIndex, status, body: text }) + "\n");
+              pageIndex++;
+              if (status !== 200) break;
+              let j;
               try {
-                const j = JSON.parse(text);
-                cursor = j && typeof j === "object" ? j.cursor : undefined;
+                j = JSON.parse(text);
               } catch {
+                console.log(`[${kind}] non-JSON body, stopping`);
                 break;
               }
+              cursor = j && typeof j === "object" ? j.cursor : undefined;
               if (!cursor) break;
             }
           }
+          console.log("done");
           FETCH_EOF
           node fetch.mjs
+
+      - name: Upload transcript artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: transcript
+          path: /tmp/out/
 
       - name: Delete temp worker
         if: always()
