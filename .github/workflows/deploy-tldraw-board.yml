@@ -1,0 +1,37 @@
+name: Deploy tldraw board
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Unpack app
+        run: |
+          mkdir -p /tmp/app && cd /tmp/app
+          echo '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' | base64 -d | tar xz
+
+      - name: Build
+        working-directory: /tmp/app
+        run: |
+          npm install --no-audit --no-fund 2>&1 | tail -1
+          VITE_TLDRAW_LICENSE="${{ secrets.TLDRAW_LICENSE_KEY }}" npm run build 2>&1 | tail -3
+
+      - name: Deploy worker
+        working-directory: /tmp/app
+        run: |
+          npm i -g wrangler@4 2>&1 | tail -1
+          npx wrangler deploy 2>&1 | tee deploy.log
+          grep -o 'https://[-a-z0-9.]*workers.dev' deploy.log | head -1 || true
