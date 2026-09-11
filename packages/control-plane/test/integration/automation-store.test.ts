@@ -516,6 +516,33 @@ describe("AutomationStore (D1 integration)", () => {
       const count = await store.countOverdue(now);
       expect(count).toBe(0);
     });
+
+    it("includes due once automations in overdue queries", async () => {
+      const store = new AutomationStore(env.DB);
+      const now = Date.now();
+      await store.create(
+        makeAutomation({
+          id: "auto-once-overdue",
+          trigger_type: "once",
+          schedule_cron: null,
+          next_run_at: now - 60000,
+          enabled: 1,
+        })
+      );
+      await store.create(
+        makeAutomation({
+          id: "auto-once-future",
+          trigger_type: "once",
+          schedule_cron: null,
+          next_run_at: now + 60000,
+          enabled: 1,
+        })
+      );
+
+      expect(await store.countOverdue(now)).toBe(1);
+      const overdue = await store.getOverdueAutomations(now, 10);
+      expect(overdue.map((automation) => automation.id)).toEqual(["auto-once-overdue"]);
+    });
   });
 
   // ─── Run management ────────────────────────────────────────────────────────

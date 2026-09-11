@@ -527,6 +527,106 @@ describe("Scheduler (integration)", () => {
     });
   });
 
+  describe("once trigger", () => {
+    it("fires a due once automation once at ~T and disables it; a second tick does not re-fire", async () => {
+      const store = new AutomationStore(env.DB);
+      const fireAt = Date.now() - 60_000;
+      await store.create(
+        makeAutomation({
+          id: "auto-once-due",
+          trigger_type: "once",
+          schedule_cron: null,
+          next_run_at: fireAt,
+          enabled: 1,
+        })
+      );
+
+      const result = await createScheduler().tick();
+      expect(result.processed + result.failed).toBeGreaterThanOrEqual(1);
+
+      const runs = await fetchRuns("auto-once-due");
+      expect(runs).toHaveLength(1);
+      expect(runs[0]!.scheduled_at).toBe(fireAt);
+      expect(runs[0]!.invocation_id).not.toBeNull();
+
+      const fired = await store.getById("auto-once-due");
+      expect(fired).toMatchObject({ enabled: 0, next_run_at: null });
+
+      await createScheduler().tick();
+      expect(await fetchRuns("auto-once-due")).toHaveLength(1);
+      const invocations = await store.listInvocations("auto-once-due", {
+        limit: 10,
+        offset: 0,
+      });
+      expect(invocations.total).toBe(1);
+    });
+
+    it("redelivery of an already-served slot dedups and disables without a second launch", async () => {
+      const store = new AutomationStore(env.DB);
+      const fireAt = Date.now() - 60_000;
+      await store.create(
+        makeAutomation({
+          id: "auto-once-redelivery",
+          trigger_type: "once",
+          schedule_cron: null,
+          next_run_at: fireAt,
+          enabled: 1,
+        })
+      );
+
+      await env.DB.prepare(
+        `INSERT INTO automation_invocations
+           (id, automation_id, source, scheduled_at, trigger_key, concurrency_key,
+            trigger_metadata, skip_reason, failure_counted_at, created_at, updated_at)
+         VALUES (?, ?, 'schedule', ?, NULL, NULL, NULL, NULL, NULL, ?, ?)`
+      )
+        .bind("inv-once-redelivery", "auto-once-redelivery", fireAt, fireAt, fireAt)
+        .run();
+      await seedRun(
+        makeRunRow("auto-once-redelivery", {
+          id: "run-once-redelivery",
+          invocation_id: "inv-once-redelivery",
+          status: "completed",
+          scheduled_at: fireAt,
+          started_at: fireAt,
+          completed_at: fireAt,
+          created_at: fireAt,
+        })
+      );
+
+      expect(await createScheduler().tick()).toMatchObject({ failed: 0 });
+
+      expect(await fetchRuns("auto-once-redelivery")).toHaveLength(1);
+      const invocations = await store.listInvocations("auto-once-redelivery", {
+        limit: 10,
+        offset: 0,
+      });
+      expect(invocations.total).toBe(1);
+      const redelivered = await store.getById("auto-once-redelivery");
+      expect(redelivered).toMatchObject({ enabled: 0, next_run_at: null });
+    });
+
+    it("does not fire a future-dated once automation early", async () => {
+      const store = new AutomationStore(env.DB);
+      await store.create(
+        makeAutomation({
+          id: "auto-once-future",
+          trigger_type: "once",
+          schedule_cron: null,
+          next_run_at: Date.now() + 3_600_000,
+          enabled: 1,
+        })
+      );
+
+      expect(await createScheduler().tick()).toEqual({ processed: 0, skipped: 0, failed: 0 });
+
+      expect(await fetchRuns("auto-once-future")).toHaveLength(0);
+      const row = await store.getById("auto-once-future");
+      expect(row).toMatchObject({ enabled: 1 });
+      expect(row!.next_run_at!).toBeGreaterThan(Date.now());
+    });
+  });
+
   // ─── Trigger handler ──────────────────────────────────────────────────────
 
   describe("manual trigger", () => {

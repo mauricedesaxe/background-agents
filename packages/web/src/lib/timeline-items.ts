@@ -34,6 +34,8 @@ const directTimelineEventEligibility = {
     Boolean(event.artifactId),
   error: () => true,
   warning: () => true,
+  provider_retry: () => true,
+  context_reset: () => true,
   execution_complete: () => true,
   context_compacted: () => true,
 } satisfies Partial<Record<SandboxEvent["type"], (event: SandboxEvent) => boolean>>;

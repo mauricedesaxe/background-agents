@@ -72,22 +72,23 @@ function makeAutomation(overrides: Partial<AutomationListItem> = {}): Automation
   };
 }
 
-describe("AutomationsList repository labels", () => {
-  const renderList = (automations: AutomationListItem[]) =>
-    render(
-      <AutomationsList
-        automations={automations}
-        emptyState={{ kind: "no-automations" }}
-        onPause={noop}
-        onResume={noop}
-        onTrigger={noop}
-        onDelete={noop}
-      />
-    );
+const renderList = (automations: AutomationListItem[]) =>
+  render(
+    <AutomationsList
+      automations={automations}
+      emptyState={{ kind: "no-automations" }}
+      onPause={noop}
+      onResume={noop}
+      onTrigger={noop}
+      onDelete={noop}
+    />
+  );
 
+describe("AutomationsList repository labels", () => {
   it("shows the repository name for a single-repository automation", () => {
     renderList([makeAutomation()]);
-    expect(screen.getByText("acme/web-app")).toBeInTheDocument();
+    const labels = screen.getAllByText("acme/web-app");
+    expect(labels.length).toBeGreaterThanOrEqual(1);
   });
 
   it("shows a count for a multi-repository automation", () => {
@@ -110,6 +111,42 @@ describe("AutomationsList repository labels", () => {
       }),
     ]);
     expect(screen.getByText("No repository")).toBeInTheDocument();
+  });
+});
+
+describe("AutomationsList repository grouping", () => {
+  it("renders one heading per repository group, shared bucket last", () => {
+    renderList([
+      makeAutomation({ id: "a-1", name: "Web job" }),
+      makeAutomation({
+        id: "a-2",
+        name: "API job",
+        repositories: [{ repoOwner: "acme", repoName: "api", repoId: 2, baseBranch: "main" }],
+      }),
+      makeAutomation({
+        id: "a-3",
+        name: "Fan-out job",
+        repositories: [
+          { repoOwner: "acme", repoName: "web-app", repoId: 1, baseBranch: "main" },
+          { repoOwner: "acme", repoName: "api", repoId: 2, baseBranch: "main" },
+        ],
+      }),
+    ]);
+
+    const headings = screen.getAllByRole("heading", { level: 2 });
+    expect(headings.map((heading) => heading.textContent)).toEqual([
+      "acme/api",
+      "acme/web-app",
+      "Multiple repositories",
+    ]);
+
+    const apiSection = headings[0]!.closest("section")!;
+    expect(apiSection.textContent).toContain("API job");
+    expect(apiSection.textContent).not.toContain("Web job");
+
+    const sharedSection = headings[2]!.closest("section")!;
+    expect(sharedSection.textContent).toContain("Fan-out job");
+    expect(sharedSection.textContent).not.toContain("Web job");
   });
 });
 

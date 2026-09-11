@@ -218,6 +218,7 @@ interface StartInvocationParams {
   scheduledAt?: number;
   /** Next cron slot, advanced atomically with the insert (schedule source only). */
   advanceToNextRunAt?: number;
+  disableAfterFire?: boolean;
   triggerKey?: string | null;
   concurrencyKey?: string | null;
   /** Source-specific JSON stored on the invocation (slack message coordinates). */
@@ -508,6 +509,10 @@ export class Scheduler {
           params.advanceToNextRunAt !== undefined
             ? { fromSlot: params.scheduledAt, nextRunAt: params.advanceToNextRunAt }
             : undefined,
+        disableAfterSlot:
+          params.disableAfterFire && params.scheduledAt !== undefined
+            ? params.scheduledAt
+            : undefined,
       }));
     } catch (e) {
       if (isDuplicateKeyError(e)) {
@@ -518,6 +523,8 @@ export class Scheduler {
           // Monotonic: never rewind the schedule. A stale duplicate for an old
           // slot must not move next_run_at behind a newer tick's advance.
           await store.advanceNextRunAt(automation.id, params.advanceToNextRunAt);
+        } else if (params.disableAfterFire && params.scheduledAt !== undefined) {
+          await store.disableOnceAfterSlot(automation.id, params.scheduledAt);
         }
         return { outcome: "deduplicated" };
       }
@@ -670,6 +677,9 @@ export class Scheduler {
         params.scheduledAt !== undefined &&
         params.advanceToNextRunAt !== undefined
         ? { fromSlot: params.scheduledAt, nextRunAt: params.advanceToNextRunAt }
+        : undefined,
+      options.advanceSchedule && params.disableAfterFire && params.scheduledAt !== undefined
+        ? params.scheduledAt
         : undefined
     );
     return { outcome: "skipped" };
@@ -715,16 +725,19 @@ export class Scheduler {
         break;
       }
       try {
-        const nextRunAt = nextCronOccurrence(
-          automation.schedule_cron!,
-          automation.schedule_tz
-        ).getTime();
-
+        const once = automation.trigger_type === "once";
         const result = await this.startInvocation(store, {
           automation,
           source: "schedule",
           scheduledAt: automation.next_run_at!,
-          advanceToNextRunAt: nextRunAt,
+          ...(once
+            ? { disableAfterFire: true }
+            : {
+                advanceToNextRunAt: nextCronOccurrence(
+                  automation.schedule_cron!,
+                  automation.schedule_tz
+                ).getTime(),
+              }),
           repositories,
           environments,
         });

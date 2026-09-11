@@ -135,6 +135,7 @@ async function handleCreateAutomation(
   const triggerType: AutomationTriggerType = body.triggerType || "schedule";
   const validTriggerTypes: AutomationTriggerType[] = [
     "schedule",
+    "once",
     "sentry",
     "webhook",
     "github_event",
@@ -176,6 +177,13 @@ async function handleCreateAutomation(
     if (cronError) return error(cronError, 400);
     if (!body.scheduleTz || !isValidTimeZone(body.scheduleTz)) {
       return error("scheduleTz must be a valid IANA timezone", 400);
+    }
+  } else if (triggerType === "once") {
+    if (body.onceRunAt === undefined || !Number.isFinite(body.onceRunAt)) {
+      return error("onceRunAt must be an epoch-ms timestamp", 400);
+    }
+    if (body.scheduleCron || body.scheduleTz) {
+      return error("scheduleCron and scheduleTz are only valid for schedule triggers", 400);
     }
   } else {
     // Reject schedule fields for non-schedule types
@@ -240,10 +248,11 @@ async function handleCreateAutomation(
   );
   if (harnessAuthIncompatibility) return error(harnessAuthIncompatibility.message, 400);
 
-  // Compute next run (only for schedule triggers)
   const nextRunAt = isSchedule
     ? nextCronOccurrence(body.scheduleCron!, body.scheduleTz!).getTime()
-    : null;
+    : triggerType === "once"
+      ? body.onceRunAt!
+      : null;
 
   const id = generateId();
   const now = Date.now();

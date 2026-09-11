@@ -215,6 +215,73 @@ describe("context compaction", () => {
   });
 });
 
+describe("provider retry", () => {
+  it("renders a warning row with the attempt count and next attempt time", () => {
+    render(
+      <EventItem
+        event={{
+          type: "provider_retry",
+          attempt: 2,
+          nextRetryAt: 1_789_168_944.5,
+          messageId: "message-1",
+          sandboxId: "sandbox-1",
+          timestamp: 1_789_168_900,
+        }}
+        sessionId="session-1"
+        currentParticipantId={null}
+        participantProfiles={{}}
+        onOpenMedia={() => {}}
+      />
+    );
+
+    expect(screen.getByText(/Provider retrying \(attempt 2\)/)).toBeInTheDocument();
+    expect(screen.getByText(/next attempt at/)).toBeInTheDocument();
+  });
+
+  it("renders without a next attempt time when the payload carries none", () => {
+    render(
+      <EventItem
+        event={{
+          type: "provider_retry",
+          attempt: 1,
+          messageId: "message-1",
+          sandboxId: "sandbox-1",
+          timestamp: 1_789_168_900,
+        }}
+        sessionId="session-1"
+        currentParticipantId={null}
+        participantProfiles={{}}
+        onOpenMedia={() => {}}
+      />
+    );
+
+    expect(screen.getByText("Provider retrying (attempt 1)")).toBeInTheDocument();
+    expect(screen.queryByText(/next attempt at/)).not.toBeInTheDocument();
+  });
+});
+
+describe("context reset", () => {
+  it("renders a warning row telling the user the sandbox starts fresh", () => {
+    render(
+      <EventItem
+        event={{
+          type: "context_reset",
+          reason: "fresh_session",
+          agentSessionId: null,
+          sandboxId: "sandbox-1",
+          timestamp: 1_789_168_900,
+        }}
+        sessionId="session-1"
+        currentParticipantId={null}
+        participantProfiles={{}}
+        onOpenMedia={() => {}}
+      />
+    );
+
+    expect(screen.getByText(/This sandbox starts a fresh context/)).toBeInTheDocument();
+  });
+});
+
 const baseTimelineProps = {
   sessionId: "session-1",
   currentParticipantId: null,

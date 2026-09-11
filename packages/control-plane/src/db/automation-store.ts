@@ -806,7 +806,7 @@ export class AutomationStore {
     const result = await this.db
       .prepare(
         `SELECT COUNT(*) as count FROM automations
-         WHERE enabled = 1 AND deleted_at IS NULL AND trigger_type = 'schedule'
+         WHERE enabled = 1 AND deleted_at IS NULL AND trigger_type IN ('schedule', 'once')
          AND next_run_at IS NOT NULL AND next_run_at <= ?`
       )
       .bind(now)
@@ -818,7 +818,7 @@ export class AutomationStore {
     const result = await this.db
       .prepare(
         `SELECT * FROM automations
-         WHERE enabled = 1 AND deleted_at IS NULL AND trigger_type = 'schedule'
+         WHERE enabled = 1 AND deleted_at IS NULL AND trigger_type IN ('schedule', 'once')
          AND next_run_at IS NOT NULL AND next_run_at <= ?
          ORDER BY next_run_at ASC
          LIMIT ?`
@@ -991,6 +991,7 @@ export class AutomationStore {
     children: AutomationRunRow[];
     overlapScope: InvocationOverlapScope;
     advanceSchedule?: ScheduleAdvance;
+    disableAfterSlot?: number;
   }): Promise<{ inserted: boolean }> {
     const invocation = params.invocation;
     const overlap = this.overlapPredicate(invocation.automation_id, params.overlapScope);
@@ -1069,6 +1070,10 @@ export class AutomationStore {
       );
     }
 
+    if (params.disableAfterSlot !== undefined) {
+      statements.push(this.bindDisableAfterSlot(invocation.automation_id, params.disableAfterSlot));
+    }
+
     const results = await this.db.batch(statements);
     return { inserted: (results[0]?.meta?.changes ?? 0) > 0 };
   }
@@ -1084,7 +1089,8 @@ export class AutomationStore {
    */
   async insertSkippedInvocation(
     invocation: AutomationInvocationRow,
-    advanceSchedule?: ScheduleAdvance
+    advanceSchedule?: ScheduleAdvance,
+    disableAfterSlot?: number
   ): Promise<{ inserted: boolean }> {
     const statements: SqlStatement[] = [
       this.db
@@ -1126,8 +1132,32 @@ export class AutomationStore {
       );
     }
 
+    if (disableAfterSlot !== undefined) {
+      statements.push(this.bindDisableAfterSlot(invocation.automation_id, disableAfterSlot));
+    }
+
     const results = await this.db.batch(statements);
     return { inserted: (results[0]?.meta?.changes ?? 0) > 0 };
+  }
+
+  /**
+   * Consume a once trigger's fire-at slot: disable the automation only while it
+   * still holds `fromSlot` as its next_run_at. The CAS makes a duplicate firing
+   * (idempotency-index loser or an overlap skip) harmless, and mirrors the
+   * schedule advance's slot-ownership rule.
+   */
+  async disableOnceAfterSlot(automationId: string, fromSlot: number): Promise<boolean> {
+    const result = await this.bindDisableAfterSlot(automationId, fromSlot).run();
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
+  private bindDisableAfterSlot(automationId: string, fromSlot: number): SqlStatement {
+    return this.db
+      .prepare(
+        `UPDATE automations SET enabled = 0, next_run_at = NULL, updated_at = ?
+         WHERE id = ? AND deleted_at IS NULL AND next_run_at = ?`
+      )
+      .bind(Date.now(), automationId, fromSlot);
   }
 
   /** Atomically record a denied cron slot and pause it so overdue denial cannot starve the queue. */

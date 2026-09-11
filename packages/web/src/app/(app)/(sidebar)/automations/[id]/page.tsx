@@ -237,6 +237,7 @@ export default function AutomationDetailPage({ params }: { params: Promise<{ id:
                       ? describeCron(automation.scheduleCron, automation.scheduleTz)
                       : "Schedule (no cron)"
                     : {
+                        once: "Once",
                         sentry: "Sentry Alert",
                         webhook: "Inbound Webhook",
                         github_event: "GitHub Event",

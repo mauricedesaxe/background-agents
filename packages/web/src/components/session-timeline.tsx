@@ -620,6 +620,31 @@ function WarningEvent({ event }: EventRendererProps) {
   );
 }
 
+function ProviderRetryEvent({ event }: EventRendererProps) {
+  if (event.type !== "provider_retry") return null;
+
+  const nextRetry =
+    event.nextRetryAt != null
+      ? ` · next attempt at ${new Date(event.nextRetryAt * 1000).toLocaleTimeString()}`
+      : "";
+  return (
+    <StatusRow tone="warning" time={formatEventTime(event)}>
+      Provider retrying (attempt {event.attempt}){nextRetry}
+    </StatusRow>
+  );
+}
+
+function ContextResetEvent({ event }: EventRendererProps) {
+  if (event.type !== "context_reset") return null;
+
+  return (
+    <StatusRow tone="warning" time={formatEventTime(event)}>
+      This sandbox starts a fresh context — earlier conversation history is shown but the agent no
+      longer has it. Acknowledge to dispatch the queued prompt.
+    </StatusRow>
+  );
+}
+
 function ExecutionCompleteEvent({ event }: EventRendererProps) {
   if (event.type !== "execution_complete") return null;
 
@@ -662,6 +687,8 @@ const eventRenderers = {
   artifact: ArtifactEvent,
   error: ErrorEvent,
   warning: WarningEvent,
+  provider_retry: ProviderRetryEvent,
+  context_reset: ContextResetEvent,
   execution_complete: ExecutionCompleteEvent,
   context_compacted: ContextCompactedEvent,
 } satisfies Record<DirectTimelineEventType, (props: EventRendererProps) => ReactNode>;

@@ -1163,7 +1163,8 @@ describe("Scheduler", () => {
           scheduled_at: sampleAutomation.next_run_at,
           skip_reason: "concurrent_run_active",
         }),
-        { fromSlot: sampleAutomation.next_run_at, nextRunAt: expect.any(Number) }
+        { fromSlot: sampleAutomation.next_run_at, nextRunAt: expect.any(Number) },
+        undefined
       );
       expect(mockStore.insertInvocationGuarded).not.toHaveBeenCalled();
     });
@@ -1182,6 +1183,7 @@ describe("Scheduler", () => {
 
       expect(mockStore.insertSkippedInvocation).toHaveBeenCalledWith(
         expect.objectContaining({ skip_reason: "concurrent_run_active" }),
+        undefined,
         undefined
       );
     });
@@ -2748,6 +2750,7 @@ describe("Scheduler", () => {
           concurrency_key: "slack:C1:thread-root",
           trigger_metadata: JSON.stringify({ channel: "C1", messageTs: "1700000000.000200" }),
         }),
+        undefined,
         undefined
       );
       // No prompt reached any session.

@@ -48,6 +48,7 @@ import { ModelReasoningSelector } from "@/components/model-reasoning-selector";
 import { PaperclipIcon, SendIcon } from "@/components/ui/icons";
 import { SessionSkillSelector } from "@/components/session-skill-selector";
 import { PromptSkillTextarea } from "@/components/prompt-skill-autocomplete";
+import { OnceSchedulePopover } from "@/components/once-schedule-popover";
 import type { SessionSkillSelection } from "@open-inspect/shared/types/skills";
 import {
   useSkillResolutionPreview,
@@ -507,7 +508,9 @@ function HomeContent({
     handleDragOver,
     handleDragLeave,
   } = useAttachmentDropZone({ locked: attachmentsLocked, onAdd: attachments.onAdd });
-  const { sessionTarget, selectedRepo, repos, loadingRepos, isLaunchable } = picker;
+  const { sessionTarget, selectedRepo, repos, loadingRepos, isLaunchable, buildRequestFields } =
+    picker;
+  const targetRequestFields = buildRequestFields();
   const selectedProvider = getSubscriptionProviderForModel(selectedModel);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -653,6 +656,12 @@ function HomeContent({
                       target={skillPreviewTarget}
                       preview={skillPreview}
                       previewLoading={skillPreviewLoading}
+                      disabled={creating}
+                    />
+
+                    <OnceSchedulePopover
+                      instructions={prompt}
+                      target={targetRequestFields}
                       disabled={creating}
                     />
 

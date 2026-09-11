@@ -46,6 +46,7 @@ const COMMON_SET = new Set(COMMON_TIMEZONES);
 const ALL_TIMEZONES = Intl.supportedValuesOf("timeZone");
 const TRIGGER_LABELS: Record<AutomationTriggerType, string> = {
   schedule: "Schedule",
+  once: "Once",
   sentry: "Sentry Alert",
   webhook: "Inbound Webhook",
   github_event: "GitHub Event",
