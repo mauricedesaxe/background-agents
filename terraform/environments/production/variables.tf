@@ -656,7 +656,7 @@ variable "sandbox_provider" {
 variable "sandbox_inactivity_timeout_ms" {
   description = "Milliseconds of sandbox inactivity before OpenInspect snapshots and stops the sandbox when no clients are connected."
   type        = number
-  default     = 600000
+  default     = 300000
 }
 
 variable "web_platform" {

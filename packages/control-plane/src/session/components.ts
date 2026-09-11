@@ -1003,7 +1003,7 @@ function createLifecycleManager(deps: LifecycleManagerDeps): SandboxLifecycleMan
     getSessionId,
     inactivity: {
       ...DEFAULT_LIFECYCLE_CONFIG.inactivity,
-      timeoutMs: parseInt(env.SANDBOX_INACTIVITY_TIMEOUT_MS || "600000", 10),
+      timeoutMs: parseInt(env.SANDBOX_INACTIVITY_TIMEOUT_MS || "300000", 10),
     },
     mcpServerLookup,
     slackAgentNotifyLookup,
