@@ -199,7 +199,20 @@ export class SessionInboxStore {
   ): { sql: string; params: unknown[] } {
     const { conditions, params } = this.eligibility(options);
     return {
-      sql: `WITH RECURSIVE eligible_sessions AS (
+      sql: `WITH RECURSIVE
+            -- Archiving a root means clearing its subtree. The cascade is
+            -- best-effort, so active descendants can outlive it in the data;
+            -- without this exclusion the re-rooting below would promote them
+            -- to standalone top-level rows. Recursive over raw sessions so an
+            -- archived-lineage descendant cannot become eligible itself.
+            archived_lineage(id) AS (
+              SELECT id FROM sessions WHERE status = 'archived'
+              UNION
+              SELECT child.id
+              FROM archived_lineage
+              JOIN sessions child ON child.parent_session_id = archived_lineage.id
+            ),
+            eligible_sessions AS (
               SELECT sessions.*, ${unreadSql("sessions")} AS unread
               FROM sessions
               LEFT JOIN users viewer ON viewer.id = ?
@@ -253,7 +266,11 @@ export class SessionInboxStore {
   private eligibility(
     options: Pick<ListSessionInboxOptions, "createdByUserIds" | "excludeAutomatedSessions">
   ): { conditions: string[]; params: unknown[] } {
-    const conditions = ["sessions.status != 'archived'", "sessions.root_session_id IS NOT NULL"];
+    const conditions = [
+      "sessions.status != 'archived'",
+      "sessions.root_session_id IS NOT NULL",
+      "sessions.id NOT IN (SELECT id FROM archived_lineage)",
+    ];
     const params: unknown[] = [];
     if (options.excludeAutomatedSessions) {
       conditions.push("sessions.spawn_source NOT IN ('automation', 'github-bot')");

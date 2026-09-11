@@ -385,6 +385,108 @@ describe("session inbox", () => {
     expect(body.items.every((item) => item.descendantSessions.length === 0)).toBe(true);
   });
 
+  it("hides an active sub-task whose ancestor is archived", async () => {
+    await serviceFetch("https://example.com/sessions/inbox?category=finished");
+    const store = new SessionIndexStore(env.DB);
+    await store.create(session("archived-parent", { status: "archived", updatedAt: 5000 }));
+    await store.create(
+      session("orphan-child", {
+        status: "active",
+        parentSessionId: "archived-parent",
+        spawnSource: "agent",
+        spawnDepth: 1,
+        updatedAt: 4000,
+      })
+    );
+    await store.create(
+      session("orphan-grandchild", {
+        parentSessionId: "orphan-child",
+        spawnSource: "agent",
+        spawnDepth: 2,
+        updatedAt: 3500,
+      })
+    );
+    await store.create(session("sibling-parent", { updatedAt: 3000 }));
+
+    const response = await serviceFetch("https://example.com/sessions/inbox");
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      categories: Record<
+        string,
+        {
+          items: Array<{ rootSession: { id: string }; descendantSessions: Array<{ id: string }> }>;
+        }
+      >;
+    };
+    const visibleIds = Object.values(body.categories).flatMap((page) =>
+      page.items.flatMap((item) => [
+        item.rootSession.id,
+        ...item.descendantSessions.map(({ id }) => id),
+      ])
+    );
+    expect(visibleIds).toEqual(["sibling-parent"]);
+  });
+
+  it("reroots a child whose parent row is gone at query time", async () => {
+    await serviceFetch("https://example.com/sessions/inbox?category=finished");
+    const store = new SessionIndexStore(env.DB);
+    await store.create(session("live-root", { updatedAt: 5000 }));
+    await env.DB.prepare(
+      `INSERT INTO sessions (id, parent_session_id, spawn_source, spawn_depth, created_at, updated_at)
+       VALUES (?, ?, 'agent', 1, ?, ?)`
+    )
+      .bind("deleted-parent-child", "hard-deleted-root", 1000, 4000)
+      .run();
+
+    const response = await serviceFetch("https://example.com/sessions/inbox?category=finished");
+    const body = (await response.json()) as {
+      items: Array<{ rootSession: { id: string } }>;
+    };
+    expect(body.items.map((item) => item.rootSession.id)).toEqual([
+      "live-root",
+      "deleted-parent-child",
+    ]);
+  });
+
+  it("reroots a Mine-filtered subtree while archived lineage stays hidden", async () => {
+    await serviceFetch("https://example.com/sessions/inbox?category=finished");
+    const store = new SessionIndexStore(env.DB);
+    await store.create(
+      session("mine-filtered-root", {
+        userId: "22222222222222222222222222222222",
+        status: "active",
+        updatedAt: 5000,
+      })
+    );
+    await store.create(
+      session("mine-filtered-child", {
+        parentSessionId: "mine-filtered-root",
+        spawnSource: "agent",
+        spawnDepth: 1,
+        status: "active",
+        updatedAt: 4000,
+      })
+    );
+    await store.create(session("archived-parent", { status: "archived", updatedAt: 3000 }));
+    await store.create(
+      session("archived-child", {
+        parentSessionId: "archived-parent",
+        spawnSource: "agent",
+        spawnDepth: 1,
+        status: "active",
+        updatedAt: 2000,
+      })
+    );
+
+    const response = await serviceFetch(
+      "https://example.com/sessions/inbox?category=in_progress&mine=true"
+    );
+    const body = (await response.json()) as {
+      items: Array<{ rootSession: { id: string } }>;
+    };
+    expect(body.items.map((item) => item.rootSession.id)).toEqual(["mine-filtered-child"]);
+  });
+
   it("paginates roots independently with cursors", async () => {
     await serviceFetch("https://example.com/sessions/inbox?category=finished");
     const store = new SessionIndexStore(env.DB);
