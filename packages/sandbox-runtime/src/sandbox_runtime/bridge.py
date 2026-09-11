@@ -238,6 +238,7 @@ class AgentBridge:
         self._connection_count = 0
         self._reconnect_attempt_count = 0
         self._total_connected_duration_seconds = 0.0
+        self._agent_session_resumed = False
 
     @property
     def agent_session_id(self) -> str | None:
@@ -262,6 +263,7 @@ class AgentBridge:
             "opencodeSessionId": self.agent_session_id,
             "harness": self.harness.id.value,
             **({"runtimeVersion": runtime_version} if runtime_version else {}),
+            **({"resumed": True} if self._agent_session_resumed else {}),
             "repositories": [
                 {
                     "position": position,
@@ -858,6 +860,7 @@ class AgentBridge:
             self.log.error("agent.session.load_error", exc=e)
             return
         if resumed:
+            self._agent_session_resumed = True
             await self._save_session_id()
 
     async def _persist_rotated_session_id(self) -> None:

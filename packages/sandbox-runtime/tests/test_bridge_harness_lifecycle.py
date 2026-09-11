@@ -119,6 +119,32 @@ class TestSessionIdentity:
 
         assert harness.session_id == "oc-live"
         assert bridge.session_id_file.read_text() == "oc-live"
+        assert bridge._build_ready_event()["resumed"] is True
+
+    @pytest.mark.asyncio
+    async def test_ready_event_omits_resumed_when_resume_fails(self, tmp_path: Path) -> None:
+        harness = ScriptedHarness(session_id=None)
+        harness.resume_session = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        bridge = _bridge(harness)
+        bridge.session_id_file = tmp_path / "agent-session-id"
+        bridge.legacy_session_id_file = tmp_path / "opencode-session-id"
+        bridge.legacy_session_id_file.write_text("oc-gone")
+
+        await bridge._load_session_id()
+
+        assert "resumed" not in bridge._build_ready_event()
+
+    @pytest.mark.asyncio
+    async def test_ready_event_omits_resumed_when_nothing_was_persisted(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = _bridge(ScriptedHarness(session_id=None))
+        bridge.session_id_file = tmp_path / "agent-session-id"
+        bridge.legacy_session_id_file = tmp_path / "opencode-session-id"
+
+        await bridge._load_session_id()
+
+        assert "resumed" not in bridge._build_ready_event()
 
     @pytest.mark.asyncio
     async def test_first_prompt_creates_the_session_the_harness_owns(self, tmp_path: Path) -> None:
