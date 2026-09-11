@@ -25,25 +25,24 @@ connect + a real jj-colocated push at deploy time (runbook Gate 4 plus card 11's
 
 ## Placement decision (durable)
 
-Installed in the **Daytona image build** (`toolchain.py`), reapplied each sync, pinned to a specific
-version via a `JJ_VERSION` constant. Fetches the prebuilt musl binary from the `jj-vcs/jj` releases,
-extracts to an owned tmp dir (avoids the `/tmp` sticky-bit extraction error), and installs to
-`/usr/local/bin/jj`.
+Installed in the sandbox image build as part of its declared toolchain, pinned to a named version
+and integrity-verified, reapplied each sync. Upstream has none of this — 100% fork-local. The fork
+previously installed jj here; the blind sync wiped it, which is why the harness/jj story was
+silently broken on clean upstream. This card restores it.
 
-The fork previously installed jj here; the blind sync wiped it (100% fork-local), which is why the
-harness/jj story was silently broken on clean upstream. This card restores it.
+The eventual move of the jj install into the external `lazar-harness` (card 11's original placement)
+still stands as a later option; until the harness installs binaries, it lives here.
 
 ## Gotchas
 
-- **Bump `SANDBOX_VERSION` in the same change.** The Daytona `source_hash` tracks `.py/.js/.ts`, so
-  the `.py` edit invalidates the snapshot on its own, but the version string is what the snapshot is
-  keyed by, so bump it to force the rebuild. (Bumped to the `-jj-` variant.)
-- **Pin the same jj version in CI.** Card 11's jj-colocated seam tests install jj in the
-  sandbox-runtime CI job; keep that version and this `JJ_VERSION` in step.
-- The eventual move of the jj install into the external `lazar-harness` (card 11's original
-  placement) still stands as a later option; until the harness installs jj, it lives here.
+- **The install ships nothing without an image version bump.** Repo-wide snapshot-invalidation rule
+  (#94 family): a toolchain change reaches sandboxes only when the image version moves and the
+  snapshot rebuilds. The runbook's image gate covers it.
+- **Pin parity with every other install lane.** The CI seam tests that exercise jj install their own
+  jj (card 11); its pin and the image's pin move together.
 
-## Dated evidence (2026-08-19, non-binding hints)
+## Provenance
 
-- `packages/daytona-infra/src/toolchain.py`: `JJ_VERSION` constant + a `run_commands` step in
-  `build_base_image`, next to the code-server / agent-browser installs.
+First installed fork-side in the image build; wiped by an early blind sync and re-added under this
+card (2026-08-19). File-level notes from the original card were dropped when the card contract went
+requirements-first — locate the toolchain declaration on current upstream yourself.

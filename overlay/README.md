@@ -18,29 +18,38 @@ regenerated from these cards.
 
 ## What a card is (read this before reading any card)
 
-Each card is a **product requirement plus an acceptance test**. It is NOT an implementation recipe.
-The reapply agent derives the implementation from the requirement and the test, against whatever
-upstream looks like on the day it runs.
+Each card is a **requirement plus an acceptance test**, written from the outside. The requirement
+states what must be true for the user or operator, or how a failure reproduces from the outside. The
+acceptance test states what a verifier observes when it is true. It is NOT an implementation recipe,
+and it must not read like one:
 
-File paths, function names, and line numbers in a card are **dated evidence** captured on the day
-the card was written. They orient you to where the behavior lived then. They are **non-binding**.
-Upstream renames, moves, splits, and refactors files. A card that says "the change lives in
-`bridge.py`" is wrong the day upstream splits `bridge.py`, and stale instructions are worse than
-none.
+- **No anatomy.** A card does not name the files, functions, constants, routes, or code shapes where
+  the change should land — in any section, not even as "hints". The reapply agent locates the code
+  on current upstream itself. Upstream reorganizes constantly: between two syncs it consolidated the
+  entire sandbox dependency-install area (#1816), which turned every file-anchored instruction in
+  that area into a map of a corpse. A card that names today's file teaches the next agent to patch a
+  corpse.
+- **Placement is categorical, never anatomical.** The placement decision names the sync-surviving
+  lane the divergence lives in, plus any durable constraints on it. It never names a path.
+
+Dated evidence is optional provenance: a short note on where the divergence came from and what
+happened to it — added fork-side, wiped by a sync, superseded by an upstream change. It is history,
+not orientation. It must pass one test: could a reader mistake any of it for instructions? When in
+doubt, delete it.
 
 To rebuild a divergence:
 
-1. Read the **requirement** (the felt outcome) and the **acceptance test** (the behavior that proves
-   it).
-2. Locate the relevant code on current upstream **yourself**. Expect it in different files than the
-   card names.
+1. Read the **requirement** (the felt outcome, or the reproduction) and the **acceptance test** (the
+   observable behavior that proves it).
+2. Locate the relevant code on current upstream **yourself**. Expect it in different files than any
+   earlier note mentioned.
 3. Implement the behavior.
-4. Prove it with the acceptance test. A named file that no longer exists is normal, not an error.
+4. Prove it with the acceptance test.
 
-The **placement decision** on each card is the one durable part that is not dated evidence. It
-records where sync-surviving state lives: a snapshot the overlay owns, a gitignored tfvar, the
-external `lazar-harness` repo, a plan-time guard, upstream-tree code, or CI config. That is the
-config / overlay / upstream boundary, which is the whole point of the overlay. Keep it.
+The **placement decision** on each card is durable. It records where sync-surviving state lives: a
+snapshot the overlay owns, a gitignored tfvar, the external `lazar-harness` repo, a plan-time guard,
+upstream-tree code, or CI config. That is the config / overlay / upstream boundary, which is the
+whole point of the overlay. Keep it.
 
 ## Card frontmatter
 
