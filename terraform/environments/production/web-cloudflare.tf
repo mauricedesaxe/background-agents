@@ -63,7 +63,7 @@ resource "local_file" "web_app_wrangler_production" {
 
     # A custom-domain deployment has one canonical browser origin.
     workers_dev = ${local.web_custom_domain_enabled ? "false" : "true"}
-    # Declaring the custom-domain route here keeps `wrangler deploy` from
+    # Declaring the custom-domain route here keeps the wrangler deploy step from
     # pruning the terraform-managed domain (cloudflare_workers_custom_domain)
     # on the next web deploy: it reconciles domains to this config (card 16).
     ${local.web_custom_domain_enabled ? "routes = [{ pattern = \"${local.web_custom_domain}\", custom_domain = true }]" : ""}
