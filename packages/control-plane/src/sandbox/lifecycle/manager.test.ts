@@ -96,6 +96,8 @@ function createMockSession(overrides: Partial<SessionRow> = {}): SessionRow {
     created_at: Date.now() - 60000,
     updated_at: Date.now(),
     ...overrides,
+    context_reset_pending: 0,
+    context_reset_hold_deadline: null,
   };
 }
 

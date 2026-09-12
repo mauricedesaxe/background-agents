@@ -197,7 +197,7 @@ describe("ChildResultDelivery", () => {
     const sql = inMemorySql();
     const delivery = new ChildResultDelivery(createDeliveryDeps(sql));
 
-    expect(delivery.shouldDeliverFor("child-1", "running", false)).toBe(false);
-    expect(sql.rows.get("child-1")?.last_seen_status).toBe("running");
+    expect(delivery.shouldDeliverFor("child-1", "active", false)).toBe(false);
+    expect(sql.rows.get("child-1")?.last_seen_status).toBe("active");
   });
 });

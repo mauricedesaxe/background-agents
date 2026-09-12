@@ -188,6 +188,8 @@ function accountRow(status: string, overrides: Partial<D1Row> = {}): D1Row {
 
 function sessionRow(overrides: Partial<SessionRow> = {}): SessionRow {
   return {
+    context_reset_pending: 0,
+    context_reset_hold_deadline: null,
     id: "sess-1",
     session_name: "sess-public-1",
     title: null,

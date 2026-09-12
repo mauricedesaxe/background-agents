@@ -62,6 +62,8 @@ function sessionRow(overrides: Partial<SessionRow> = {}): SessionRow {
     created_at: 1,
     updated_at: 1,
     ...overrides,
+    context_reset_pending: 0,
+    context_reset_hold_deadline: null,
   };
 }
 

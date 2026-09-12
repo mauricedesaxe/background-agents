@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { initSession, queryDO, seedMessage } from "./helpers";
+import type { SessionDO } from "../../src/cloudflare/durable-object";
 import { runInSessionDO } from "./session-do-access";
 
 describe("POST /internal/sandbox-event", () => {

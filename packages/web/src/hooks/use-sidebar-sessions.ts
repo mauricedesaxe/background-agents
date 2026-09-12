@@ -396,7 +396,8 @@ export function useSidebarSessions() {
       // Only a confirmed server-side read clears the local unread overlay.
       // A failed or retried attempt keeps the flag, and a genuinely-read
       // reconcile self-heals a stale one even from another client's mark-read.
-      if (outcome === "complete" && !readState.unread) {
+      const confirmedRead = outcome === "marked_read" || outcome === "already_read";
+      if (confirmedRead && !readState.unread) {
         clearManualUnread(sessionId);
       }
       const applyReadState = (item: SessionInboxItem) =>
