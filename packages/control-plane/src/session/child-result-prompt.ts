@@ -1,0 +1,159 @@
+import type { ChildSessionDetail } from "@open-inspect/shared/types/session-api";
+import { isTurnSettled } from "@open-inspect/shared/types/session-activity";
+import type { SessionStatus } from "@open-inspect/shared/types/sessions";
+import type { Logger } from "../logger";
+import { buildSessionInternalRequest, SessionInternalPaths } from "./contracts";
+import type { SqlStorage } from "./sql-storage";
+
+/**
+ * The prompt body a parent agent receives when a child session settles: the
+ * child's status, its final response text, the failure cause, and any
+ * pull-request links, so the parent can continue without re-reading the
+ * child's trajectory itself.
+ */
+export function buildChildResultPrompt(childSessionId: string, detail: ChildSessionDetail): string {
+  const title = detail.session.title || childSessionId;
+  const lines = [`Subtask "${title}" finished with status: ${detail.session.status}.`];
+
+  const finalResponse = detail.finalResponse;
+  if (finalResponse) {
+    const text = finalResponse.textContent.trim();
+    if (text.length > 0) lines.push("", text);
+    if (finalResponse.error) lines.push("", `Error: ${finalResponse.error}`);
+  }
+
+  for (const artifact of detail.artifacts) {
+    if (artifact.type === "pr" && artifact.url) lines.push("", `Pull request: ${artifact.url}`);
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Per-child last-seen status in the session's own SQLite store. Created on
+ * first write so the DO schema file stays untouched; the DDL is the
+ * candidate to fold into `schema.ts` on the next schema pass.
+ */
+const CHILD_DELIVERY_STATE_TABLE_SQL = `CREATE TABLE IF NOT EXISTS child_delivery_state (
+  child_session_id TEXT PRIMARY KEY,
+  last_seen_status TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+)`;
+
+export interface ChildResultDeliveryDeps {
+  sql: SqlStorage;
+  /** Reads one child session's summary; the caller targets the child's DO. */
+  fetchChildSummary(childSessionId: string): Promise<Response>;
+  /** Enqueues on this session's own prompt route; 409 means not promptable. */
+  enqueueAgentPrompt(request: Request): Promise<Response>;
+  /** The user id the agent-sourced prompt is attributed to. */
+  resolveAuthorUserId(): string | null;
+  log: Logger;
+}
+
+/**
+ * Delivers a settled child's result into this (parent) session's prompt
+ * queue. Edge-triggered: `shouldDeliverFor` persists each child's last-seen
+ * status and fires only on a transition INTO a settled status, so repeated
+ * settled updates (title changes re-send the settled status) and same-status
+ * replays from the archive cascade never double-fire. Every caller goes
+ * through `shouldDeliverFor`, which is what makes the replay safe.
+ *
+ * The enqueue rides this session's own prompt route, whose handler maps
+ * `SessionNotPromptableError` to 409; a parent archived or cancelled
+ * mid-flight (typically by the archive cascade) therefore drops quietly.
+ */
+export class ChildResultDelivery {
+  constructor(private readonly deps: ChildResultDeliveryDeps) {}
+
+  /**
+   * Record `status` as the child's last-seen status and answer whether this
+   * update should deliver the child's result. `deliverResult: false`
+   * suppresses delivery while still recording the status.
+   */
+  shouldDeliverFor(
+    childSessionId: string,
+    status: SessionStatus,
+    deliverResult?: boolean
+  ): boolean {
+    this.deps.sql.exec(CHILD_DELIVERY_STATE_TABLE_SQL);
+    const previous = readLastSeenStatus(this.deps.sql, childSessionId);
+    this.deps.sql.exec(
+      `INSERT INTO child_delivery_state (child_session_id, last_seen_status, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT (child_session_id) DO UPDATE SET
+         last_seen_status = excluded.last_seen_status,
+         updated_at = excluded.updated_at`,
+      childSessionId,
+      status,
+      Date.now()
+    );
+    if (deliverResult === false) return false;
+    return previous !== status && isTurnSettled(status);
+  }
+
+  /**
+   * Fetch the settled child's summary (final response included), build the
+   * parent prompt, and enqueue it as an agent-sourced prompt.
+   */
+  async deliver(childSessionId: string): Promise<void> {
+    const authorId = this.deps.resolveAuthorUserId();
+    if (!authorId) {
+      this.deps.log.warn("child_result.no_author", { child_id: childSessionId });
+      return;
+    }
+
+    let detail: ChildSessionDetail;
+    try {
+      const response = await this.deps.fetchChildSummary(childSessionId);
+      if (!response.ok) {
+        this.deps.log.warn("child_result.summary_fetch_failed", {
+          child_id: childSessionId,
+          status: response.status,
+        });
+        return;
+      }
+      detail = (await response.json()) as ChildSessionDetail;
+    } catch (error) {
+      this.deps.log.error("child_result.summary_fetch_error", {
+        child_id: childSessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+
+    const content = buildChildResultPrompt(childSessionId, detail);
+    const request = buildSessionInternalRequest(SessionInternalPaths.prompt, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content, authorId, source: "agent" }),
+    });
+    try {
+      const response = await this.deps.enqueueAgentPrompt(request);
+      if (response.status === 409) return;
+      if (!response.ok) {
+        this.deps.log.warn("child_result.enqueue_failed", {
+          child_id: childSessionId,
+          status: response.status,
+        });
+        return;
+      }
+      this.deps.log.info("child_result.delivered", { child_id: childSessionId });
+    } catch (error) {
+      this.deps.log.error("child_result.enqueue_error", {
+        child_id: childSessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
+function readLastSeenStatus(sql: SqlStorage, childSessionId: string): SessionStatus | null {
+  const rows = sql
+    .exec(
+      "SELECT last_seen_status FROM child_delivery_state WHERE child_session_id = ?",
+      childSessionId
+    )
+    .toArray() as Array<{ last_seen_status: SessionStatus }>;
+  return rows[0]?.last_seen_status ?? null;
+}

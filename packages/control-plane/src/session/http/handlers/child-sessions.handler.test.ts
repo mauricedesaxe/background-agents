@@ -516,4 +516,28 @@ describe("ChildSessionsHandler", () => {
       title: null,
     });
   });
+
+  it("accepts a deliverResult flag on child session update", async () => {
+    const { handler, broadcast } = createHandler();
+
+    const response = await handler.childSessionUpdate(
+      new Request("http://internal/internal/child-session/update", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          childSessionId: "child-1",
+          status: "completed",
+          deliverResult: false,
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(broadcast).toHaveBeenCalledWith({
+      type: "child_session_update",
+      childSessionId: "child-1",
+      status: "completed",
+      title: null,
+    });
+  });
 });

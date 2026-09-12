@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { SELF, env } from "cloudflare:test";
 import type { SessionStatus } from "@open-inspect/shared/types/sessions";
 import { runInSessionDO } from "./session-do-access";
@@ -852,6 +852,164 @@ describe("Child session operations (list, get, cancel)", () => {
       expect(res.status).toBe(400);
       const body = await res.json<{ error: string }>();
       expect(body.error).toContain("status");
+    });
+  });
+
+  describe("child result delivery", () => {
+    /** Seed a settled child: terminal message, its events, and its status. */
+    async function seedChildTerminalResult(childStub: DurableObjectStub): Promise<void> {
+      await queryDO(childStub, "UPDATE session SET status = 'completed'");
+      const [{ id: participantId }] = await queryDO<{ id: string }>(
+        childStub,
+        "SELECT id FROM participants LIMIT 1"
+      );
+      await queryDO(
+        childStub,
+        `INSERT INTO messages (id, author_id, content, source, status, created_at, started_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        "msg-child-final",
+        participantId,
+        "Do the subtask",
+        "agent",
+        "completed",
+        100,
+        110,
+        200
+      );
+      await seedEvents(childStub, [
+        {
+          id: "evt-child-token",
+          type: "token",
+          data: JSON.stringify({ content: "The subtask is done" }),
+          messageId: "msg-child-final",
+          createdAt: 180,
+        },
+        {
+          id: "evt-child-complete",
+          type: "execution_complete",
+          data: JSON.stringify({ success: true }),
+          messageId: "msg-child-final",
+          createdAt: 200,
+        },
+      ]);
+    }
+
+    function postChildUpdate(parentStub: DurableObjectStub, body: Record<string, unknown>) {
+      return parentStub.fetch("http://internal/internal/child-session-update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+
+    async function countAgentMessages(parentStub: DurableObjectStub): Promise<number> {
+      const rows = await queryDO<{ count: number }>(
+        parentStub,
+        "SELECT COUNT(*) AS count FROM messages WHERE source = 'agent'"
+      );
+      return rows[0]?.count ?? 0;
+    }
+
+    it("enqueues exactly one agent prompt when a child settles", async () => {
+      const { childName, parentStub, childStub } = await setupParentAndChild();
+      await seedChildTerminalResult(childStub);
+
+      const res = await postChildUpdate(parentStub, {
+        childSessionId: childName,
+        status: "completed",
+        title: "Child",
+      });
+      expect(res.status).toBe(200);
+
+      await vi.waitFor(async () => {
+        expect(await countAgentMessages(parentStub)).toBe(1);
+      });
+
+      const rows = await queryDO<{ content: string; source: string }>(
+        parentStub,
+        "SELECT content, source FROM messages WHERE source = 'agent'"
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].source).toBe("agent");
+      expect(rows[0].content).toContain("The subtask is done");
+      expect(rows[0].content).toContain("finished with status: completed");
+    });
+
+    it("does not re-enqueue on a repeated settled update", async () => {
+      const { childName, parentStub, childStub } = await setupParentAndChild();
+      await seedChildTerminalResult(childStub);
+      await postChildUpdate(parentStub, { childSessionId: childName, status: "completed" });
+      await vi.waitFor(async () => {
+        expect(await countAgentMessages(parentStub)).toBe(1);
+      });
+
+      const res = await postChildUpdate(parentStub, {
+        childSessionId: childName,
+        status: "completed",
+      });
+      expect(res.status).toBe(200);
+
+      expect(await countAgentMessages(parentStub)).toBe(1);
+    });
+
+    it("does not re-enqueue on a title-only update of a settled child", async () => {
+      const { childName, parentStub, childStub } = await setupParentAndChild();
+      await seedChildTerminalResult(childStub);
+      await postChildUpdate(parentStub, { childSessionId: childName, status: "completed" });
+      await vi.waitFor(async () => {
+        expect(await countAgentMessages(parentStub)).toBe(1);
+      });
+
+      const res = await postChildUpdate(parentStub, {
+        childSessionId: childName,
+        status: "completed",
+        title: "Renamed child",
+      });
+      expect(res.status).toBe(200);
+
+      expect(await countAgentMessages(parentStub)).toBe(1);
+    });
+
+    it("skips quietly when the parent is archived", async () => {
+      const { childName, parentStub, childStub } = await setupParentAndChild();
+      await seedChildTerminalResult(childStub);
+      await queryDO(parentStub, "UPDATE session SET status = 'archived'");
+
+      const res = await postChildUpdate(parentStub, {
+        childSessionId: childName,
+        status: "completed",
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json<{ ok: boolean }>();
+      expect(body.ok).toBe(true);
+
+      await vi.waitFor(
+        async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          expect(await countAgentMessages(parentStub)).toBe(0);
+        },
+        { timeout: 1000, interval: 100 }
+      );
+      expect(await countAgentMessages(parentStub)).toBe(0);
+    });
+
+    it("does not deliver for a child this parent does not track", async () => {
+      const { parentStub } = await setupParentAndChild();
+
+      const res = await postChildUpdate(parentStub, {
+        childSessionId: "child-does-not-exist",
+        status: "failed",
+      });
+      expect(res.status).toBe(200);
+
+      await vi.waitFor(
+        async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          expect(await countAgentMessages(parentStub)).toBe(0);
+        },
+        { timeout: 1000, interval: 100 }
+      );
+      expect(await countAgentMessages(parentStub)).toBe(0);
     });
   });
 });

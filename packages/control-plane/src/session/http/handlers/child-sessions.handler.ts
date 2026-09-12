@@ -19,11 +19,20 @@ const parentPromptRequestSchema = childFollowUpPromptRequestSchema.extend({
   author: activePromptAuthorSchema,
 });
 
-const childSessionUpdateBodySchema = z.object({
+/**
+ * Body of POST /internal/child-session-update. `deliverResult` is the
+ * opt-out for result delivery: absent or true lets a settled child's result
+ * reach the parent, false records the status without delivering. Shared with
+ * the DO's delivery hook so both sides parse the same shape.
+ */
+export const childSessionUpdateBodySchema = z.object({
   childSessionId: z.string().min(1),
   status: sessionStatusSchema,
   title: z.string().nullable().optional(),
+  deliverResult: z.boolean().optional(),
 });
+
+export type ChildSessionUpdateBody = z.infer<typeof childSessionUpdateBodySchema>;
 
 function resolvePromptAuthorParticipant(
   messageRepository: MessageRepository,

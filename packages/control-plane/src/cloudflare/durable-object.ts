@@ -15,6 +15,13 @@ import { createCloudflareEnv, type WorkerBindings } from "./platform";
 import { upgradeWebSocket } from "./websocket-upgrade";
 import type { SessionPlatform } from "../session/platform";
 import { createSessionRuntime, type SessionRuntime } from "../session/components";
+import type { BackgroundTasks } from "../platform-ports";
+import { ChildResultDelivery } from "../session/child-result-prompt";
+import { buildSessionInternalRequest, SessionInternalPaths } from "../session/contracts";
+import {
+  childSessionUpdateBodySchema,
+  type ChildSessionUpdateBody,
+} from "../session/http/handlers/child-sessions.handler";
 
 export class SessionDO extends DurableObject<WorkerBindings> {
   /**
@@ -26,8 +33,10 @@ export class SessionDO extends DurableObject<WorkerBindings> {
   private readonly platform: SessionPlatform;
   /** The application environment over this object's bindings. */
   private readonly appEnv: Env;
-  // The per-activation runtime; null until ensureInitialized() builds it.
+  /** The per-activation runtime; null until ensureInitialized() builds it. */
   private _runtime: SessionRuntime | null = null;
+  /** Delivery over this object's storage; null until a childSessionUpdate needs it. */
+  private _childResults: { delivery: ChildResultDelivery; tasks: BackgroundTasks } | null = null;
 
   constructor(ctx: DurableObjectState, env: WorkerBindings) {
     super(ctx, env);
@@ -80,7 +89,77 @@ export class SessionDO extends DurableObject<WorkerBindings> {
     if (request.headers.get("Upgrade") === "websocket") {
       return upgradeWebSocket(runtime.upgrades, request, runtime.log);
     }
-    return runtime.server.onRequest(request);
+    const childUpdate = await this.parseChildSessionUpdate(request);
+    const response = await runtime.server.onRequest(request);
+    if (childUpdate) this.deliverChildResultIfNeeded(childUpdate);
+    return response;
+  }
+
+  /**
+   * Child-result delivery for the childSessionUpdate route. Every child
+   * status report arrives here, including the archive-cascade replays, so
+   * routing the edge-trigger through this one path is what keeps a replay
+   * from double-firing. Delivery runs past the response.
+   */
+  private deliverChildResultIfNeeded(update: ChildSessionUpdateBody): void {
+    const { delivery, tasks } = this.childResults;
+    if (!delivery.shouldDeliverFor(update.childSessionId, update.status, update.deliverResult)) {
+      return;
+    }
+    const childSessionId = update.childSessionId;
+    tasks.submit(() => delivery.deliver(childSessionId), {
+      name: "child_result.deliver",
+      context: { child_session_id: childSessionId },
+    });
+  }
+
+  private parseChildSessionUpdate(request: Request): Promise<ChildSessionUpdateBody | null> {
+    const url = new URL(request.url);
+    if (url.pathname !== SessionInternalPaths.childSessionUpdate || request.method !== "POST") {
+      return Promise.resolve(null);
+    }
+    return request
+      .clone()
+      .json()
+      .then((raw) => {
+        const parsed = childSessionUpdateBodySchema.safeParse(raw);
+        return parsed.success ? parsed.data : null;
+      })
+      .catch(() => null);
+  }
+
+  /** The delivery collaborators, built on first settled child update. */
+  private get childResults(): { delivery: ChildResultDelivery; tasks: BackgroundTasks } {
+    if (this._childResults) return this._childResults;
+    const runtime = this.runtime;
+    const sql = this.platform.storage.sql;
+    const dispatch = this.appEnv.SESSION;
+    this._childResults = {
+      delivery: new ChildResultDelivery({
+        sql,
+        fetchChildSummary: (childSessionId) =>
+          dispatch(
+            childSessionId,
+            buildSessionInternalRequest(
+              SessionInternalPaths.childSummary,
+              { method: "GET" },
+              "?include=result"
+            )
+          ),
+        resolveAuthorUserId: () => {
+          const rows = sql
+            .exec(
+              "SELECT user_id FROM participants WHERE role = 'owner' ORDER BY joined_at LIMIT 1"
+            )
+            .toArray() as Array<{ user_id: string }>;
+          return rows[0]?.user_id ?? null;
+        },
+        enqueueAgentPrompt: (request) => runtime.server.onRequest(request),
+        log: runtime.log,
+      }),
+      tasks: this.platform.createBackgroundTasks(runtime.log),
+    };
+    return this._childResults;
   }
 
   /**
