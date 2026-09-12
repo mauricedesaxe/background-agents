@@ -126,6 +126,7 @@ export interface MessageRow {
   status: MessageStatus;
   error_message: string | null;
   stop_confirmation_deadline: number | null;
+  context_reset_hold: number;
   created_at: number;
   started_at: number | null;
   completed_at: number | null;

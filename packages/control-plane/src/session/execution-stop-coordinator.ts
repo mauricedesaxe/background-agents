@@ -1,5 +1,6 @@
 import type { Logger } from "../logger";
 import type { AlarmScheduler } from "../platform-ports";
+import { isSessionPromptable } from "@open-inspect/shared/types/session-activity";
 import type { SandboxLifecycle } from "../sandbox/lifecycle/manager";
 import type { AlarmDeadlineStore } from "./alarm/scheduler";
 import type { MessageRepository } from "./message-repository";
@@ -121,6 +122,17 @@ export class ExecutionStopCoordinator {
       message_id: awaitingStop.id,
     });
     await this.sandboxLifecycle.terminateUnresponsiveSandbox("stop_confirmation_timeout");
+    const session = this.repository.getSession();
+    if (session && !isSessionPromptable(session.status)) {
+      // Why: a suppressed archive-stop can time out after the transition, and resuming here would dispatch onto a closed session.
+      this.messageRepository.clearMessageAwaitingStopConfirmation(awaitingStop.id);
+      this.log.info("Stop recovery skipped for a closed session", {
+        event: "prompt.stop_recovery_skipped",
+        message_id: awaitingStop.id,
+        status: session.status,
+      });
+      return;
+    }
     await this.resumeAfterSandboxTermination();
   }
 

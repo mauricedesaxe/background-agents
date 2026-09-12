@@ -57,7 +57,7 @@ const QUERY_PATTERNS = {
   UPDATE_METRICS: /^UPDATE sessions SET total_cost = \?/,
   DELETE_SESSION: /^DELETE FROM sessions WHERE id = \?$/,
   SELECT_BY_PARENT:
-    /^SELECT \* FROM sessions WHERE parent_session_id = \? ORDER BY created_at DESC$/,
+    /^SELECT \* FROM sessions WHERE parent_session_id = \? AND status != 'archived' ORDER BY created_at DESC$/,
   SELECT_ACTIVE_DESCENDANTS: /^WITH RECURSIVE descendants/,
   SELECT_1_CHILD: /^SELECT 1 FROM sessions WHERE id = \? AND parent_session_id = \?$/,
   SELECT_SPAWN_DEPTH: /^SELECT spawn_depth FROM sessions WHERE id = \?$/,
@@ -145,7 +145,7 @@ class FakeD1Database {
     if (QUERY_PATTERNS.SELECT_BY_PARENT.test(normalized)) {
       const parentId = args[0] as string;
       const children = Array.from(this.rows.values())
-        .filter((r) => r.parent_session_id === parentId)
+        .filter((r) => r.parent_session_id === parentId && r.status !== "archived")
         .sort((a, b) => b.created_at - a.created_at);
       return children;
     }
@@ -909,6 +909,24 @@ describe("SessionIndexStore", () => {
       it("returns empty array when no children exist", async () => {
         const children = await store.listByParent("no-children");
         expect(children).toEqual([]);
+      });
+
+      it("excludes archived children", async () => {
+        await store.create(
+          makeSession({
+            id: "child-archived",
+            title: "Child archived",
+            status: "archived",
+            parentSessionId: parentId,
+            spawnSource: "agent",
+            spawnDepth: 1,
+            createdAt: 3000,
+          })
+        );
+
+        const children = await store.listByParent(parentId);
+
+        expect(children.map((child) => child.id)).toEqual(["child-2", "child-1"]);
       });
     });
 

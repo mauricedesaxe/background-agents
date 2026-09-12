@@ -95,6 +95,7 @@ function createMessage(overrides: Partial<MessageRow> = {}): MessageRow {
     status: "pending",
     error_message: null,
     stop_confirmation_deadline: null,
+    context_reset_hold: 0,
     created_at: 1000,
     started_at: null,
     completed_at: null,

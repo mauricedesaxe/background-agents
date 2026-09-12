@@ -4,6 +4,7 @@ import { SessionSandboxEventProcessor } from "./processor";
 import { SandboxArtifactEventHandler } from "./artifact.handler";
 import { SandboxExecutionEventHandler } from "./execution.handler";
 import { SandboxRuntimeEventHandler, type QueuedPromptHold } from "./runtime.handler";
+import { ContextResetPromptHold } from "../prompt-hold-service";
 import { SandboxPushService } from "../sandbox-push-service";
 import { SandboxStreamingEventHandler } from "./streaming.handler";
 import type { GitPushSpec } from "../../source-control";
@@ -14,11 +15,12 @@ import type { SessionDiffService } from "../diffs/service";
 import type { SessionCoreRepository } from "../session-core-repository";
 import type { SandboxRepository } from "../sandbox-repository";
 import type { ArtifactRepository } from "../artifact-repository";
-import type { EventRepository } from "../event-repository";
+import type { CreateEventData, EventRepository } from "../event-repository";
 import type { MessageRepository } from "../message-repository";
 import type { SessionStatusService } from "../session-status-service";
 import type { SessionWebSocketManager } from "../websocket-manager";
 import type { SessionBudgetService } from "../budget-service";
+import type { Logger } from "../../logger";
 
 function createPushSpec(repoOwner: string, repoName: string, targetBranch: string): GitPushSpec {
   return {
@@ -32,12 +34,12 @@ function createPushSpec(repoOwner: string, repoName: string, targetBranch: strin
   };
 }
 
-function createProcessor() {
+function createProcessor(promptHoldOverride?: QueuedPromptHold) {
   const getProcessingMessage = vi.fn(() => null as { id: string } | null);
   const repository = {
     updateSandboxHeartbeat: vi.fn(),
     recordReportedSandboxRuntimeVersion: vi.fn(),
-    getSession: vi.fn(() => null),
+    getSession: vi.fn((): { harness: string; agent_session_id: string | null } | null => null),
     getProcessingMessage,
     getMessageContent: vi.fn(() => null as string | null),
     addSessionCost: vi.fn(() => 1.25),
@@ -59,8 +61,8 @@ function createProcessor() {
     upsertTokenEvent: vi.fn(),
     createContextCompactionEvent: vi.fn(),
     upsertToolCallEvent: vi.fn(),
-    createEvent: vi.fn(),
-  } as unknown as EventRepository;
+    createEvent: vi.fn<(data: CreateEventData) => void>(),
+  };
   const artifactRepository = { createArtifact: vi.fn() } as unknown as ArtifactRepository;
 
   const callbackService = {
@@ -116,7 +118,7 @@ function createProcessor() {
     wsManager as unknown as SessionWebSocketManager,
     new SandboxStreamingEventHandler(
       backgroundTasks,
-      eventRepository,
+      eventRepository as unknown as EventRepository,
       callbackService as unknown as CallbackNotificationService,
       messenger,
       updateLastActivity,
@@ -124,7 +126,7 @@ function createProcessor() {
     ),
     new SandboxArtifactEventHandler(
       artifactRepository,
-      eventRepository,
+      eventRepository as unknown as EventRepository,
       messenger,
       updateLastActivity
     ),
@@ -148,13 +150,13 @@ function createProcessor() {
     new SandboxRuntimeEventHandler(
       repository as unknown as SessionCoreRepository,
       repository as unknown as SandboxRepository,
-      eventRepository,
+      eventRepository as unknown as EventRepository,
       messenger,
       diffService as unknown as SessionDiffService,
       applySessionTitleUpdate,
       updateLastActivity,
       log,
-      promptHold
+      promptHoldOverride ?? promptHold
     ),
     pushService
   );
@@ -308,6 +310,51 @@ describe("SessionSandboxEventProcessor", () => {
         ([created]: [{ type: string }]) => created.type === "context_reset"
       );
 
+    /**
+     * The real hold over a stateful pending-message list, mirroring the
+     * MessageRepository marker, so the divergence scenarios pin the actual
+     * hold/release state machine instead of the seam fake.
+     */
+    function createHoldHarness() {
+      const messages = [{ id: "msg-queued", status: "pending" as const, context_reset_hold: 0 }];
+      const messageRepository = {
+        holdPendingMessages(): number {
+          let written = 0;
+          for (const message of messages) {
+            if (message.status === "pending" && message.context_reset_hold === 0) {
+              message.context_reset_hold = 1;
+              written += 1;
+            }
+          }
+          return written;
+        },
+        releaseHeldMessages(): number {
+          let written = 0;
+          for (const message of messages) {
+            if (message.status === "pending" && message.context_reset_hold === 1) {
+              message.context_reset_hold = 0;
+              written += 1;
+            }
+          }
+          return written;
+        },
+      };
+      const drainQueue = vi.fn(async () => {});
+      const log = {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+        child: vi.fn(),
+      } as unknown as Logger;
+      const hold = new ContextResetPromptHold(
+        messageRepository as unknown as MessageRepository,
+        drainQueue,
+        log
+      );
+      return { hold, messages, drainQueue };
+    }
+
     it("synthesizes a context_reset timeline event and holds the queued prompt on a fresh session", async () => {
       const h = createProcessor();
       h.repository.getSession.mockReturnValue(seededSession);
@@ -388,6 +435,49 @@ describe("SessionSandboxEventProcessor", () => {
 
       expect(contextResetCalls(h)).toHaveLength(0);
       expect(h.promptHold.holdQueuedPrompt).not.toHaveBeenCalled();
+    });
+
+    it("marks the queued message held, and acknowledging releases it to dispatch", async () => {
+      const holdHarness = createHoldHarness();
+      const h = createProcessor(holdHarness.hold);
+      h.repository.getSession.mockReturnValue(seededSession);
+
+      await h.processor.processSandboxEvent({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: null,
+        timestamp: 1000,
+      });
+
+      expect(holdHarness.messages[0].context_reset_hold).toBe(1);
+      expect(holdHarness.drainQueue).not.toHaveBeenCalled();
+
+      await holdHarness.hold.releaseQueuedPromptHold();
+
+      expect(holdHarness.messages[0].context_reset_hold).toBe(0);
+      expect(holdHarness.drainQueue).toHaveBeenCalledOnce();
+    });
+
+    it("does not hold again on a second ready that resumed the stored session id", async () => {
+      const h = createProcessor();
+      h.repository.getSession.mockReturnValue(seededSession);
+
+      await h.processor.processSandboxEvent({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: null,
+        timestamp: 1000,
+      });
+      await h.processor.processSandboxEvent({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: "ses-stored",
+        resumed: true,
+        timestamp: 2000,
+      });
+
+      expect(h.promptHold.holdQueuedPrompt).toHaveBeenCalledOnce();
+      expect(contextResetCalls(h)).toHaveLength(1);
     });
   });
 

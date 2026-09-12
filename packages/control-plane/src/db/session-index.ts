@@ -855,10 +855,23 @@ export class SessionIndexStore {
     return (result.meta?.changes ?? 0) > 0;
   }
 
-  /** List children of a parent session, newest first. */
+  /**
+   * List children of a parent session, newest first, excluding archived ones.
+   *
+   * Why the filter is the child's own status only: the archive cascade reads
+   * this same listing right after projecting its own parent as `archived`, so
+   * a lineage filter over ancestors would hide exactly the children the
+   * cascade still has to archive. Convergence covers the rest — the cascade
+   * archives every reachable child of an archived parent, and the top-level
+   * listing already excludes archived lineage outright.
+   */
   async listByParent(parentSessionId: string): Promise<SessionEntry[]> {
     const result = await this.db
-      .prepare(`SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY created_at DESC`)
+      .prepare(
+        `SELECT * FROM sessions
+         WHERE parent_session_id = ? AND status != 'archived'
+         ORDER BY created_at DESC`
+      )
       .bind(parentSessionId)
       .all<SessionRow>();
     return this.attachListMetadata((result.results || []).map(toEntry));

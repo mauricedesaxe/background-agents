@@ -119,6 +119,26 @@ describe("MessageRepository", () => {
     expect(mock.calls[2].query).toContain("stop_confirmation_deadline = NULL");
   });
 
+  it("holds and releases pending messages with the context-reset marker", () => {
+    mock.setRowsWritten(2);
+    expect(repository.holdPendingMessages()).toBe(2);
+    expect(mock.calls[0].query).toContain("context_reset_hold = 1");
+    expect(mock.calls[0].query).toContain("status = 'pending'");
+    expect(mock.calls[0].query).toContain("context_reset_hold = 0");
+
+    mock.setRowsWritten(1);
+    expect(repository.releaseHeldMessages()).toBe(1);
+    expect(mock.calls[1].query).toContain("context_reset_hold = 0");
+    expect(mock.calls[1].query).toContain("status = 'pending'");
+    expect(mock.calls[1].query).toContain("context_reset_hold = 1");
+  });
+
+  it("reports zero held or released messages when nothing matched", () => {
+    mock.setRowsWritten(0);
+    expect(repository.holdPendingMessages()).toBe(0);
+    expect(repository.releaseHeldMessages()).toBe(0);
+  });
+
   it("looks up idempotent requests and unfinished positions", () => {
     const lookup = `SELECT * FROM messages WHERE client_request_id = ? LIMIT 1`;
     const positions = `SELECT id FROM messages WHERE status IN ('pending', 'processing')

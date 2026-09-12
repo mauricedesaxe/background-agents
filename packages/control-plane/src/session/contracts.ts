@@ -50,6 +50,7 @@ export const SessionInternalPaths = {
   updateTitle: "/internal/update-title",
   budget: "/internal/budget",
   cancel: "/internal/cancel",
+  acknowledgeContextReset: "/internal/acknowledge-context-reset",
   childSessionUpdate: "/internal/child-session-update",
   diffState: "/internal/diff-state",
   diffStore: "/internal/diff-store",

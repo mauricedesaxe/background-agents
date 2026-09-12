@@ -91,6 +91,7 @@ import { SandboxExecutionEventHandler } from "./sandbox-events/execution.handler
 import { SessionSandboxEventProcessor } from "./sandbox-events/processor";
 import { SandboxRuntimeEventHandler } from "./sandbox-events/runtime.handler";
 import { SandboxStreamingEventHandler } from "./sandbox-events/streaming.handler";
+import { ContextResetPromptHold } from "./prompt-hold-service";
 import { SandboxPushService } from "./sandbox-push-service";
 import { SessionTerminalMessageProjection } from "./terminal-message-projection";
 import { PersistedTerminalMessageProjectionStore } from "./terminal-message-projection-store";
@@ -99,6 +100,7 @@ import { AutofixHandler } from "./http/handlers/autofix.handler";
 import { MessagesHandler } from "./http/handlers/messages.handler";
 import { ChildSessionsHandler } from "./http/handlers/child-sessions.handler";
 import { ChildSummaryHandler } from "./http/handlers/child-summary.handler";
+import { ContextResetHandler } from "./http/handlers/context-reset.handler";
 import { SessionInitHandler } from "./http/handlers/session-init.handler";
 import { SandboxHandler } from "./http/handlers/sandbox.handler";
 import { AttachmentsHandler } from "./http/handlers/attachments.handler";
@@ -485,6 +487,11 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
   );
 
   const updateLastActivity = (timestamp: number) => lifecycleManager.updateLastActivity(timestamp);
+  const promptHold = new ContextResetPromptHold(
+    messageRepository,
+    () => messageQueue.processMessageQueue(),
+    log
+  );
   const streamingEventHandler = new SandboxStreamingEventHandler(
     backgroundTasks,
     eventRepository,
@@ -526,7 +533,8 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     diffService,
     (title, options) => titleService.applySessionTitleUpdate(title, options),
     updateLastActivity,
-    log
+    log,
+    promptHold
   );
   const pushService = new SandboxPushService(log, wsManager);
   const sandboxEventProcessor = new SessionSandboxEventProcessor(
@@ -585,6 +593,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
 
   // Tier 8 — internal HTTP handlers.
   const messagesHandler = new MessagesHandler(messageService);
+  const contextResetHandler = new ContextResetHandler(promptHold);
 
   const childSessionsHandler = new ChildSessionsHandler(
     messageRepository,
@@ -811,6 +820,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     childSummary: (_request, url) => childSummaryHandler.getChildSummary(url),
     parentPrompt: (request) => childSessionsHandler.parentPrompt(request),
     cancel: () => sessionLifecycleHandler.cancel(),
+    acknowledgeContextReset: () => contextResetHandler.acknowledgeContextReset(),
     childSessionUpdate: (request) => childSessionsHandler.childSessionUpdate(request),
     diffState: () => diffsHandler.state(),
     diffStore: (request) => diffsHandler.storeBundle(request),

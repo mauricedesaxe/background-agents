@@ -70,6 +70,54 @@ describe("POST /internal/archive", () => {
 
     expect(res.status).toBe(200);
   });
+
+  it("archive fails a prompt enqueued during the stop window instead of stranding it", async () => {
+    // Why: the prompt was admitted before the transition, and archived is not promptable, so the transition must close it or it never runs.
+    const { stub } = await initSession({ userId: "user-1" });
+
+    const [participant] = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants LIMIT 1"
+    );
+    await seedMessage(stub, {
+      id: "msg-archive-window-processing",
+      authorId: participant.id,
+      content: "Wedged prompt",
+      source: "web",
+      status: "processing",
+      createdAt: Date.now() - 1000,
+      startedAt: Date.now() - 500,
+    });
+    await seedMessage(stub, {
+      id: "msg-archive-window-queued",
+      authorId: participant.id,
+      content: "Prompt enqueued mid-stop",
+      source: "web",
+      status: "pending",
+      createdAt: Date.now() - 500,
+    });
+
+    const res = await stub.fetch("http://internal/internal/archive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "user-1" }),
+    });
+    expect(res.status).toBe(200);
+
+    const messages = await queryDO<{ id: string; status: string; error_message: string | null }>(
+      stub,
+      "SELECT id, status, error_message FROM messages WHERE id = ?",
+      "msg-archive-window-queued"
+    );
+    expect(messages[0].status).toBe("failed");
+    expect(messages[0].error_message).toBe("Session was archived");
+
+    const unfinished = await queryDO<{ count: number }>(
+      stub,
+      "SELECT COUNT(*) as count FROM messages WHERE status IN ('pending', 'processing')"
+    );
+    expect(unfinished[0].count).toBe(0);
+  });
 });
 
 describe("POST /internal/unarchive", () => {

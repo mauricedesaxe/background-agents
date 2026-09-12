@@ -3,11 +3,23 @@ import { browserApiFetch } from "@/lib/browser-api-fetch";
 
 const GENERIC_ARCHIVE_FAILURE = "Failed to archive session";
 
-/** The server's `error` field, when the failed response body carries one. */
-async function readServerErrorMessage(response: Response): Promise<string | null> {
+/**
+ * Fragments of the lifecycle errors the server answers with, which are safe
+ * to show verbatim: not found, not promptable, forbidden. Anything else —
+ * especially a 5xx body — is server internals and falls back to the generic
+ * message.
+ */
+const SAFE_SERVER_ERROR_FRAGMENTS: readonly string[] = ["not found", "not promptable", "forbidden"];
+
+/** The server's `error` field, when it carries one a user may read. */
+async function readSafeServerErrorMessage(response: Response): Promise<string | null> {
   try {
     const body = (await response.json()) as { error?: unknown };
-    return typeof body.error === "string" && body.error.length > 0 ? body.error : null;
+    if (typeof body.error !== "string" || body.error.length === 0) return null;
+    const normalized = body.error.toLowerCase();
+    return SAFE_SERVER_ERROR_FRAGMENTS.some((fragment) => normalized.includes(fragment))
+      ? body.error
+      : null;
   } catch {
     return null;
   }
@@ -25,7 +37,7 @@ export async function archiveSession(sessionId: string): Promise<boolean> {
       method: "POST",
     });
     if (!response.ok) {
-      toast.error((await readServerErrorMessage(response)) ?? GENERIC_ARCHIVE_FAILURE);
+      toast.error((await readSafeServerErrorMessage(response)) ?? GENERIC_ARCHIVE_FAILURE);
       return false;
     }
 

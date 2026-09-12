@@ -702,6 +702,29 @@ describe("D1 SessionIndexStore", () => {
       expect(children).toEqual([]);
     });
 
+    it("listByParent excludes archived children", async () => {
+      const now = Date.now();
+      await store.create({
+        id: `${childId1}-archived`,
+        title: "Child archived",
+        repoOwner: "owner",
+        repoName: "repo",
+        model: "anthropic/claude-sonnet-4-6",
+        reasoningEffort: null,
+        baseBranch: null,
+        status: "archived",
+        parentSessionId: parentId,
+        spawnSource: "agent",
+        spawnDepth: 1,
+        createdAt: now + 2,
+        updatedAt: now + 2,
+      });
+
+      const children = await store.listByParent(parentId);
+
+      expect(children.map((child) => child.id)).toEqual([childId2, childId1]);
+    });
+
     it("countTotalChildren counts all children regardless of status", async () => {
       const count = await store.countTotalChildren(parentId);
       expect(count).toBe(2);

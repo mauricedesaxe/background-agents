@@ -159,6 +159,30 @@ export class MessageRepository {
     this.sql.exec(`UPDATE messages SET stop_confirmation_deadline = NULL WHERE id = ?`, messageId);
   }
 
+  /**
+   * Mark every pending message as held until the user acknowledges a context
+   * reset. Returns how many messages the hold now covers.
+   */
+  holdPendingMessages(): number {
+    const held = this.sql.exec(
+      `UPDATE messages SET context_reset_hold = 1 WHERE status = 'pending' AND context_reset_hold = 0`
+    );
+    held.toArray();
+    return held.rowsWritten ?? 0;
+  }
+
+  /**
+   * Release the context-reset hold on every held pending message. Returns how
+   * many messages became dispatchable.
+   */
+  releaseHeldMessages(): number {
+    const released = this.sql.exec(
+      `UPDATE messages SET context_reset_hold = 0 WHERE status = 'pending' AND context_reset_hold = 1`
+    );
+    released.toArray();
+    return released.rowsWritten ?? 0;
+  }
+
   getProcessingMessageWithCreatedAt(): { id: string; created_at: number } | null {
     const result = this.sql.exec(
       `SELECT id, created_at FROM messages WHERE status = 'processing' LIMIT 1`

@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import { SessionIndexStore } from "../../src/db/session-index";
+import { runInSessionDO } from "./session-do-access";
+import type { SessionDO } from "../../src/cloudflare/durable-object";
 import { cleanD1Tables } from "./cleanup";
 import {
   initNamedSession,
@@ -87,6 +89,63 @@ describe("Archive cascade to child sessions", () => {
     );
     expect(messages[0].status).toBe("failed");
     expect(messages[0].error_message).toBe("Session was archived");
+  });
+
+  it("clears a wedged child's stop fence on alarm recovery and dispatches nothing", async () => {
+    // Why: the child's suppressed stop times out only after the transition completes, so recovery must drop the fence without dispatching queued work.
+    const parent = await initNamedSession(unique("cascade-parent"));
+    const child = await initNamedSession(unique("cascade-child"), {
+      parentSessionId: parent.sessionName,
+    });
+
+    const participants = await queryDO<{ id: string }>(
+      child.stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    await seedMessage(child.stub, {
+      id: "msg-cascade-alarm-processing",
+      authorId: participants[0].id,
+      content: "Wedged child prompt",
+      source: "web",
+      status: "processing",
+      createdAt: Date.now() - 1000,
+      startedAt: Date.now() - 500,
+    });
+    await seedMessage(child.stub, {
+      id: "msg-cascade-alarm-queued",
+      authorId: participants[0].id,
+      content: "Queued child prompt",
+      source: "web",
+      status: "pending",
+      createdAt: Date.now() - 500,
+    });
+
+    const res = await archiveParent(parent.sessionName);
+    expect(res.status).toBe(200);
+
+    await queryDO(
+      child.stub,
+      "UPDATE messages SET stop_confirmation_deadline = ? WHERE stop_confirmation_deadline IS NOT NULL",
+      Date.now() - 1000
+    );
+
+    await runInSessionDO(child.stub, (instance: SessionDO) => instance.alarm());
+
+    const fence = await queryDO<{ count: number }>(
+      child.stub,
+      "SELECT COUNT(*) as count FROM messages WHERE stop_confirmation_deadline IS NOT NULL"
+    );
+    expect(fence[0].count).toBe(0);
+
+    const statuses = await queryDO<{ id: string; status: string }>(
+      child.stub,
+      "SELECT id, status FROM messages WHERE id IN (?, ?)",
+      "msg-cascade-alarm-processing",
+      "msg-cascade-alarm-queued"
+    );
+    expect(statuses.find((m) => m.id === "msg-cascade-alarm-queued")?.status).toBe("failed");
+    expect(statuses.every((m) => m.status !== "processing")).toBe(true);
+    expect(await doStatus(child.sessionName)).toBe("archived");
   });
 
   it("skips an already-archived child without error", async () => {

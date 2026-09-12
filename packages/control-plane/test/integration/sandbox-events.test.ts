@@ -487,4 +487,94 @@ describe("POST /internal/sandbox-event", () => {
     expect(events[0].messageId).toBe("msg-order");
     expect(events[0].data.content).toBe("token-2");
   });
+
+  it("a divergent ready stores a context_reset and holds the queued prompt", async () => {
+    const { stub } = await initSession();
+    await queryDO(stub, `UPDATE session SET agent_session_id = 'ses-stored'`);
+
+    const participants = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    await seedMessage(stub, {
+      id: "msg-held-live",
+      authorId: participants[0].id,
+      content: "Next turn",
+      source: "web",
+      status: "pending",
+      createdAt: Date.now(),
+    });
+
+    const res = await stub.fetch("http://internal/internal/sandbox-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: null,
+        timestamp: Date.now() / 1000,
+      }),
+    });
+    expect(res.status).toBe(200);
+
+    const rows = await queryDO<{ context_reset_hold: number; status: string }>(
+      stub,
+      "SELECT context_reset_hold, status FROM messages WHERE id = 'msg-held-live'"
+    );
+    expect(rows[0]).toEqual({ context_reset_hold: 1, status: "pending" });
+
+    const resets = await queryDO<{ data: string }>(
+      stub,
+      "SELECT data FROM events WHERE type = 'context_reset'"
+    );
+    expect(JSON.parse(resets[0].data)).toMatchObject({ reason: "fresh_session" });
+
+    const acknowledge = await stub.fetch("http://internal/internal/acknowledge-context-reset", {
+      method: "POST",
+    });
+    expect(acknowledge.status).toBe(200);
+
+    const released = await queryDO<{ context_reset_hold: number }>(
+      stub,
+      "SELECT context_reset_hold FROM messages WHERE id = 'msg-held-live'"
+    );
+    expect(released[0].context_reset_hold).toBe(0);
+  });
+
+  it("a ready that resumed the stored session id does not hold the queued prompt", async () => {
+    const { stub } = await initSession();
+    await queryDO(stub, `UPDATE session SET agent_session_id = 'ses-stored'`);
+
+    const participants = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    await seedMessage(stub, {
+      id: "msg-clean-live",
+      authorId: participants[0].id,
+      content: "Next turn",
+      source: "web",
+      status: "pending",
+      createdAt: Date.now(),
+    });
+
+    const res = await stub.fetch("http://internal/internal/sandbox-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: "ses-stored",
+        resumed: true,
+        timestamp: Date.now() / 1000,
+      }),
+    });
+    expect(res.status).toBe(200);
+
+    const rows = await queryDO<{ context_reset_hold: number }>(
+      stub,
+      "SELECT context_reset_hold FROM messages WHERE id = 'msg-clean-live'"
+    );
+    expect(rows[0].context_reset_hold).toBe(0);
+  });
 });

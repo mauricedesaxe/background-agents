@@ -131,9 +131,10 @@ CREATE TABLE IF NOT EXISTS messages (
   autofix_feedback_key TEXT,                        -- Stable provider feedback identity for idempotency
   autofix_pr_key TEXT,                              -- Stable provider PR identity for rolling attempt limits
   origin_context TEXT,                              -- Typed JSON describing the external feedback origin
-  status TEXT DEFAULT 'pending',                    -- 'pending', 'processing', 'completed', 'failed'
-  error_message TEXT,                               -- If status='failed'
-  stop_confirmation_deadline INTEGER,               -- Blocks dispatch until stop is confirmed or times out
+   status TEXT DEFAULT 'pending',                    -- 'pending', 'processing', 'completed', 'failed'
+   error_message TEXT,                               -- If status='failed'
+   stop_confirmation_deadline INTEGER,               -- Blocks dispatch until stop is confirmed or times out
+   context_reset_hold INTEGER NOT NULL DEFAULT 0,    -- Blocks dispatch until the user acknowledges a context reset
   reported_cost_usd REAL NOT NULL DEFAULT 0,        -- Highest cumulative cost the runtime reported for this turn
   created_at INTEGER NOT NULL,
   started_at INTEGER,                               -- When processing began
@@ -687,6 +688,11 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
         if (!msg.includes("no such column") && !msg.includes("duplicate column")) throw e;
       }
     },
+  },
+  {
+    id: 51,
+    description: "Add context-reset prompt hold to messages",
+    run: `ALTER TABLE messages ADD COLUMN context_reset_hold INTEGER NOT NULL DEFAULT 0`,
   },
 ];
 

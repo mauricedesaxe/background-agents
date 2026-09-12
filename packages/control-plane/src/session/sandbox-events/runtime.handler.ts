@@ -11,8 +11,8 @@ import { persistSandboxEvent, type SandboxEventContext } from "./context";
 /**
  * Marks the queued prompt as held until the user acknowledges the fresh
  * context, and releases it. The sandbox-events family owns when to hold;
- * the implementation owns the message-row marker and the client command
- * (or internal route) that releases it.
+ * `ContextResetPromptHold` owns the message-row marker and the internal
+ * acknowledge route that releases it.
  */
 export interface QueuedPromptHold {
   holdQueuedPrompt(): void;
@@ -42,7 +42,7 @@ export class SandboxRuntimeEventHandler {
     ) => SessionTitleUpdateResult,
     private readonly updateLastActivity: (timestamp: number) => void,
     private readonly log: Logger,
-    private readonly promptHold?: QueuedPromptHold
+    private readonly promptHold: QueuedPromptHold
   ) {}
 
   handleHeartbeat(context: SandboxEventContext): void {
@@ -136,10 +136,6 @@ export class SandboxRuntimeEventHandler {
       persisted_session_id: persistedSessionId,
       reported_session_id: reportedSessionId,
     });
-    if (this.promptHold) {
-      this.promptHold.holdQueuedPrompt();
-    } else {
-      this.log.warn("sandbox.context_reset_hold_unavailable");
-    }
+    this.promptHold.holdQueuedPrompt();
   }
 }

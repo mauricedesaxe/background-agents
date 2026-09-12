@@ -389,6 +389,12 @@ export class SessionMessageQueue {
     if (!message) {
       return;
     }
+    if (message.context_reset_hold === 1) {
+      this.log.debug("processMessageQueue: head prompt held by context reset", {
+        message_id: message.id,
+      });
+      return;
+    }
     const now = Date.now();
     const session = this.repository.getSession();
     const resolvedModel = getValidModelOrDefault(message.model || session?.model);

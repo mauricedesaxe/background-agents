@@ -6,9 +6,9 @@ import type { SessionRuntimeClient } from "./runtime-client";
 import type { Logger } from "../logger";
 import type { SessionRow, ArtifactRow, MessageRow } from "./types";
 import type { SessionCoreRepository } from "./session-core-repository";
+import type { MessageRepository } from "./message-repository";
 import type { SessionEntry } from "../db/session-index";
 import type { ArtifactRepository } from "./artifact-repository";
-import type { MessageRepository } from "./message-repository";
 import type { SessionMessenger } from "./messenger";
 
 function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
@@ -51,6 +51,8 @@ function harness(options: { session?: SessionRow | null } = {}) {
     getLatestTerminalMessage: vi.fn(() => null as MessageRow | null),
     getMessageCount: vi.fn(() => 3),
     getActiveDurationMs: vi.fn(() => 4500),
+    listPendingMessagesWithCreatedAt: vi.fn(() => [] as Array<{ id: string; created_at: number }>),
+    recordMessageCompletion: vi.fn<MessageRepository["recordMessageCompletion"]>(() => null),
   };
   const artifactRepository = {
     listArtifacts: vi.fn(
@@ -67,6 +69,7 @@ function harness(options: { session?: SessionRow | null } = {}) {
     finalizeChildAdmission: vi.fn(async () => {}),
     updateMetrics: vi.fn(async () => true),
     listByParent: vi.fn(async () => [] as SessionEntry[]),
+    recordLatestTerminalMessage: vi.fn(async () => true),
   };
 
   const parentFetch = vi.fn(
@@ -238,6 +241,7 @@ describe("SessionStatusService.archive cascade", () => {
       repoOwner: null,
       repoName: null,
       model: "anthropic/claude-haiku-4-5",
+      reasoningEffort: null,
       baseBranch: null,
       status,
       createdAt: 1,
@@ -308,6 +312,92 @@ describe("SessionStatusService.archive cascade", () => {
       expect.objectContaining({ session_id: "public-session-1" })
     );
     expect(h.parentFetch).not.toHaveBeenCalled();
+  });
+
+  it("caps the awaited fan-out and logs the truncation", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+    h.sessionIndex.listByParent.mockResolvedValue(
+      Array.from({ length: 60 }, (_, i) => child(`child-${i}`, "active"))
+    );
+
+    expect(await h.service.transition("archived")).toBe(true);
+
+    expect(h.parentFetch).toHaveBeenCalledTimes(50);
+    expect(h.log.warn).toHaveBeenCalledWith(
+      "session.archive_cascade.children_truncated",
+      expect.objectContaining({ session_id: "public-session-1", children: 60, limit: 50 })
+    );
+  });
+
+  it("gives up on a child that outlives the per-child timeout and logs the outcome", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness({ session: createSession({ status: "active" }) });
+      h.sessionIndex.listByParent.mockResolvedValue([child("child-slow", "active")]);
+      h.parentFetch.mockImplementation(() => new Promise<Response>(() => {}));
+
+      const transition = h.service.transition("archived");
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(await transition).toBe(true);
+      expect(h.log.error).toHaveBeenCalledWith(
+        "session.archive_cascade.child_failed",
+        expect.objectContaining({
+          session_id: "child-slow",
+          parent_id: "public-session-1",
+          error: expect.objectContaining({
+            message: expect.stringContaining("timed out after 5000ms"),
+          }),
+        })
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails prompts stranded by the archive transition with the archived cause", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+    h.repository.listPendingMessagesWithCreatedAt.mockReturnValue([
+      { id: "msg-stranded", created_at: 1000 },
+    ]);
+    h.repository.recordMessageCompletion.mockImplementation(
+      (event: { messageId: string }, completedAt: number) => ({
+        messageId: event.messageId,
+        messageCreatedAt: 1000,
+        messageStartedAt: null,
+        completedAt,
+        status: "failed" as const,
+      })
+    );
+
+    expect(await h.service.transition("archived")).toBe(true);
+
+    expect(h.repository.recordMessageCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "execution_complete",
+        messageId: "msg-stranded",
+        success: false,
+        error: "Session was archived",
+      }),
+      expect.any(Number),
+      "pending"
+    );
+    expect(h.broadcast).toHaveBeenCalledWith({
+      type: "sandbox_event",
+      event: expect.objectContaining({ messageId: "msg-stranded", success: false }),
+    });
+    expect(h.sessionIndex.recordLatestTerminalMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "public-session-1", messageId: "msg-stranded" })
+    );
+  });
+
+  it("records nothing when the archive transition strands no prompts", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+
+    expect(await h.service.transition("archived")).toBe(true);
+
+    expect(h.repository.recordMessageCompletion).not.toHaveBeenCalled();
+    expect(h.sessionIndex.recordLatestTerminalMessage).not.toHaveBeenCalled();
   });
 });
 
