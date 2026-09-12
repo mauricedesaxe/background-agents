@@ -70,6 +70,7 @@ def validate_toolchain(tools: dict[str, Any]) -> None:
         for name in (
             "uv",
             "jj",
+            "bd",
             "codeServer",
             "ttyd",
             "chrome",
@@ -188,6 +189,7 @@ def pack_bundle(root: Path, provider: str, output_root: Path) -> Path:
             ("NODE", "node"),
             ("UV", "uv"),
             ("JJ", "jj"),
+            ("BD", "bd"),
             ("CODE_SERVER", "codeServer"),
             ("TTYD", "ttyd"),
             ("FLUXBOX", "fluxbox"),

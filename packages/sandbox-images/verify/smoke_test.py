@@ -219,10 +219,16 @@ def observed_tool_version(command: str, expected: str, output: str) -> str:
         "code-server": r"",
         "ttyd": r"ttyd version\s+",
         "jj": r"jj\s+",
+        "bd": r"bd\s+version\s+",
         "google-chrome": r"Google Chrome(?: for Testing)?\s+",
     }
-    # Why: ttyd and jj's pinned releases append their source commit, not a prerelease label.
-    suffix = r"(?:-[a-f0-9]{7,40})?" if command in ("ttyd", "jj") else ""
+    # Why: ttyd, jj and bd's pinned releases append their source commit, not a prerelease label.
+    suffixes = {
+        "ttyd": r"(?:-[a-f0-9]{7,40})?",
+        "jj": r"(?:-[a-f0-9]{7,40})?",
+        "bd": r"(?:\s+\([a-f0-9]{7,40}\))?",
+    }
+    suffix = suffixes.get(command, "")
     pattern = prefixes[command] + r"(\d+(?:\.\d+){2,3})" + suffix + r"(?=\s|$)"
     matches = [
         match.group(1) for line in output.splitlines() if (match := re.match(pattern, line.strip()))
@@ -242,6 +248,7 @@ def inspect_image(plan: dict[str, Any], tools: dict[str, Any], *, services: bool
         ("pnpm", tools["pnpm"]),
         ("agent-browser", tools["agentBrowser"]),
         ("jj", tools["jj"]["version"]),
+        ("bd", tools["bd"]["version"]),
         ("code-server", tools["codeServer"]["version"]),
         ("ttyd", tools["ttyd"]["version"]),
         ("google-chrome", tools["chrome"]["version"]),

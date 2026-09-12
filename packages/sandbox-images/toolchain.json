@@ -22,6 +22,10 @@
     "version": "0.44.0",
     "sha256": "0a07bab4641a55fd2bc2fd1563ba3a3f9a577584086ad74086a1c5b69b3ffce9"
   },
+  "bd": {
+    "version": "1.2.2",
+    "sha256": "8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8"
+  },
   "hatchling": "1.27.0",
   "websockify": "0.13.0",
   "node": {
