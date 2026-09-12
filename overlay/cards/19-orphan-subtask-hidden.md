@@ -45,10 +45,8 @@ must keep passing.
 - Server-side only. The client cannot distinguish a legitimate re-rooted root from an orphan,
   because the server presents both as roots. The exclusion has to happen where roots are computed.
 
-## Dated evidence (2026-08-20, non-binding hints)
+## Provenance
 
-- An `archived_lineage` recursive CTE (descendants of any `status = 'archived'` parent) whose ids
-  are excluded from `eligible_sessions`, in `packages/control-plane/src/db/session-inbox-store.ts`
-  (`inboxCtes`). The re-rooting CTE it guards is `rerooted_sessions` in the same builder.
-- Test: `packages/control-plane/test/integration/session-inbox.test.ts`, case "hides an active
-  sub-task whose ancestor is archived".
+Fork-only since before the first blind sync; rebuilt on the 2026-09-11 preview branch. The as-built
+diff lives in the sync PR; this card carries only the requirement, the acceptance test, and the
+placement category.

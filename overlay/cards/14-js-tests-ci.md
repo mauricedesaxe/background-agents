@@ -23,9 +23,9 @@ restore it. A sync that leaves the suites unexecuted reverts this card to a rebu
 
 ## Placement decision (durable)
 
-**CI config, upstream-owned, reapplied each sync.** The job **globs**
-`packages/sandbox-runtime/tests/*.mjs` rather than hardcoding filenames, so after a sync it runs
-whatever suites exist — robust to upstream adding or renaming files.
+**CI config, upstream-owned, reapplied each sync.** The job **globs** a glob over the
+sandbox-runtime test suites rather than hardcoded filenames, so after a sync it runs whatever suites
+exist — robust to upstream adding or renaming files.
 
 ## Finding that raises the stakes
 
