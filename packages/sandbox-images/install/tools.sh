@@ -26,7 +26,7 @@ install -m 0755 "$download_dir/ttyd" /usr/local/bin/ttyd
 download_checked "https://github.com/jj-vcs/jj/releases/download/v$JJ_VERSION/jj-v$JJ_VERSION-x86_64-unknown-linux-musl.tar.gz" "$JJ_SHA256" "$download_dir/jj.tar.gz"
 tar -xzf "$download_dir/jj.tar.gz" -C "$download_dir" ./jj
 install -m 0755 "$download_dir/jj" /usr/local/bin/jj
-download_checked "https://github.com/gastownhall/beads/releases/download/v$BD_VERSION/beads_$BD_VERSION_linux_amd64.tar.gz" "$BD_SHA256" "$download_dir/bd.tar.gz"
+download_checked "https://github.com/gastownhall/beads/releases/download/v$BD_VERSION/beads_${BD_VERSION}_linux_amd64.tar.gz" "$BD_SHA256" "$download_dir/bd.tar.gz"
 tar -xzf "$download_dir/bd.tar.gz" -C "$download_dir" bd
 install -m 0755 "$download_dir/bd" /usr/local/bin/bd
 download_checked "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/linux64/chrome-linux64.zip" "$CHROME_SHA256" "$download_dir/chrome.zip"
