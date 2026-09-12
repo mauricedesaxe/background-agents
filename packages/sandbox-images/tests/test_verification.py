@@ -58,6 +58,66 @@ def test_smoke_test_preserves_failures(monkeypatch):
         main()
 
 
+def _inspect_image_dependencies(monkeypatch, harness_stamp: str):
+    """Drive inspect_image past every probe up to the harness stamp read.
+
+    The probe outputs replay, in call order, the ten pinned tool versions,
+    the runtime-manifest version, the SCM probes, and the credential-helper
+    check, so the stamp comparison is the first thing that can fail.
+    """
+    plan = {
+        "target": {"node": "22", "user": "openinspect", "home": "/nonexistent-home"},
+        "runtimeEnv": {},
+        "runtimeVersion": "9.9.9",
+        "provider": "vercel",
+    }
+    tools = {
+        "node": {"22": {"version": "22.23.2"}},
+        "opencode": "1.0.0",
+        "bun": "1.0.0",
+        "pnpm": "9.0.0",
+        "agentBrowser": "0.37.0",
+        "jj": {"version": "0.1.0"},
+        "bd": {"version": "0.1.0"},
+        "codeServer": {"version": "4.109.5"},
+        "ttyd": {"version": "1.7.7"},
+        "chrome": {"version": "152.0.7977.82"},
+        "harness": {"ref": "pinned-harness-ref"},
+    }
+    probe = Mock()
+    probe.run.side_effect = [
+        "v22.23.2",
+        "1.0.0",
+        "1.0.0",
+        "9.0.0",
+        "agent-browser 0.37.0",
+        "jj 0.1.0",
+        "bd version 0.1.0",
+        "4.109.5",
+        "ttyd version 1.7.7",
+        "Google Chrome for Testing 152.0.7977.82",
+        "9.9.9",
+        "",
+        "",
+        "true",
+    ]
+    probe.options = {}
+    monkeypatch.setitem(
+        verification["inspect_image"].__globals__, "Probe", Mock(return_value=probe)
+    )
+    monkeypatch.setattr(Path, "read_text", Mock(return_value=harness_stamp))
+    return plan, tools
+
+
+def test_harness_stamp_mismatch_fails_the_smoke_verification(monkeypatch):
+    plan, tools = _inspect_image_dependencies(
+        monkeypatch, harness_stamp='{"ref": "drifted-harness-ref"}'
+    )
+
+    with pytest.raises(RuntimeError, match="does not match the pinned toolchain"):
+        verification["inspect_image"](plan, tools, services=False)
+
+
 @pytest.mark.parametrize(
     "command,output,expected",
     [
