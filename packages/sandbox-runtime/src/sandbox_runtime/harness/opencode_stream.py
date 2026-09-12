@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 MAX_PENDING_PART_EVENTS: Final = 2000
 CONTEXT_OVERFLOW_ERROR_NAME: Final = "ContextOverflowError"
 
-PROVIDER_RETRY_CAP: Final = 4
+MAX_PROVIDER_RETRY_ATTEMPTS: Final = 4
 
 PROVIDER_REJECTION_ERROR_NAMES: Final = frozenset({"APIError", "APICallError", "AI_APICallError"})
 PROVIDER_RETRYABLE_STATUS_CODES: Final = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
@@ -651,7 +651,8 @@ class OpenCodePromptStream:
         """
         if not isinstance(error, dict):
             return False
-        if error.get("name") in PROVIDER_REJECTION_ERROR_NAMES:
+        name = error.get("name")
+        if isinstance(name, str) and name in PROVIDER_REJECTION_ERROR_NAMES:
             return True
         candidates = [
             payload for payload in (error.get("data"), error) if isinstance(payload, dict)
@@ -683,7 +684,10 @@ class OpenCodePromptStream:
             and not isinstance(retry_after, bool)
             and retry_after >= 0
         ):
-            return time.time() + retry_after / 1000.0
+            try:
+                return time.time() + retry_after / 1000.0
+            except OverflowError:
+                return None
         headers = payload.get("responseHeaders")
         header_value = headers.get("retry-after") if isinstance(headers, dict) else None
         if isinstance(header_value, str):
@@ -698,7 +702,7 @@ class OpenCodePromptStream:
 
         OpenCode retries provider rejections internally without announcing
         them; each observed rejection emits ``provider_retry`` with the
-        per-message consecutive attempt count. At ``PROVIDER_RETRY_CAP`` the
+        per-message consecutive attempt count. At ``MAX_PROVIDER_RETRY_ATTEMPTS`` the
         step also carries the terminal error and the CAPPED disposition that
         makes the stream loop ask OpenCode to stop.
         """
@@ -716,10 +720,10 @@ class OpenCodePromptStream:
             event["nextRetryAt"] = next_retry_at
         events: list[dict[str, Any]] = [event]
         disposition = _Disposition.CONTINUE
-        if state.provider_retry_count >= PROVIDER_RETRY_CAP:
+        if state.provider_retry_count >= MAX_PROVIDER_RETRY_ATTEMPTS:
             state.provider_retry_cap_reached = True
             disposition = _Disposition.CAPPED
-            error_text = f"provider kept rejecting after {PROVIDER_RETRY_CAP} retries"
+            error_text = f"provider kept rejecting after {MAX_PROVIDER_RETRY_ATTEMPTS} retries"
             state.emitted_error_messages.add(error_text)
             events.append({"type": "error", "error": error_text, "messageId": state.message_id})
         return _StreamStep(events=events, disposition=disposition)

@@ -437,23 +437,61 @@ async def test_jj_colocated_checkout_sets_bookmark_and_pushes_it(operation, tmp_
     )
 
 
-async def test_jj_bookmark_failure_falls_back_to_spec_refspec(operation, tmp_path):
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        b"Error: benchmark conflict",
+        b"Error: deadlock avoided",
+    ],
+)
+async def test_jj_rejection_fails_push_without_fallback(operation, tmp_path, stderr):
     (tmp_path / "repo" / ".jj").mkdir()
     git_process = _fake_process()
     spec = _push_spec()
     with patch(
         "sandbox_runtime.push_operation.asyncio.create_subprocess_exec",
-        side_effect=_jj_launcher([_fake_process(1, b"Error: benchmark conflict")], git_process),
-    ):
+        side_effect=_jj_launcher([_fake_process(1, stderr)], git_process),
+    ) as launch:
         result = await operation.execute(spec)
 
-    assert result.error is None
-    assert git_process.argv == ("git", "push", "--", spec["remoteUrl"], spec["refspec"])
+    assert result.error is not None
+    assert "jj rejected the operation" in result.error
+    assert [call.args[0] for call in launch.call_args_list] == ["jj"]
     operation.log.warn.assert_any_call(
-        "git.push_jj_fallback",
-        reason="jj_command_failed",
+        "git.push_jj_command_failed",
+        command=(
+            "--repository",
+            str(tmp_path / "repo"),
+            "bookmark",
+            "set",
+            "--allow-backwards",
+            "--revision",
+            "@",
+            "feature/test",
+        ),
         branch_name="feature/test",
+        stderr=stderr.decode(),
     )
+
+
+async def test_jj_rejected_hostile_branch_name_fails_push_without_fallback(operation, tmp_path):
+    """jj rejects hostile branch names with a clap parse error; the push must
+    fail loudly instead of falling back to HEAD, which resolves to the
+    current checkout's branch — a silent wrong-target push."""
+    (tmp_path / "repo" / ".jj").mkdir()
+    spec = _push_spec(targetBranch="--evil")
+    git_process = _fake_process()
+    with patch(
+        "sandbox_runtime.push_operation.asyncio.create_subprocess_exec",
+        side_effect=_jj_launcher(
+            [_fake_process(1, b"error: unexpected argument '--evil' found")], git_process
+        ),
+    ) as launch:
+        result = await operation.execute(spec)
+
+    assert result.error is not None
+    assert "jj rejected the operation" in result.error
+    assert [call.args[0] for call in launch.call_args_list] == ["jj"]
 
 
 async def test_jj_lock_conflict_fails_push_without_fallback(operation, tmp_path):
@@ -488,25 +526,6 @@ async def test_jj_lock_conflict_fails_push_without_fallback(operation, tmp_path)
     )
 
 
-async def test_jj_deadlock_stderr_falls_back_to_spec_refspec(operation, tmp_path):
-    (tmp_path / "repo" / ".jj").mkdir()
-    git_process = _fake_process()
-    spec = _push_spec()
-    with patch(
-        "sandbox_runtime.push_operation.asyncio.create_subprocess_exec",
-        side_effect=_jj_launcher([_fake_process(1, b"Error: deadlock avoided")], git_process),
-    ):
-        result = await operation.execute(spec)
-
-    assert result.error is None
-    assert git_process.argv == ("git", "push", "--", spec["remoteUrl"], spec["refspec"])
-    operation.log.warn.assert_any_call(
-        "git.push_jj_fallback",
-        reason="jj_command_failed",
-        branch_name="feature/test",
-    )
-
-
 async def test_jj_export_failure_still_pushes_bookmark_refspec(operation, tmp_path):
     (tmp_path / "repo" / ".jj").mkdir()
     git_process = _fake_process()
@@ -522,7 +541,10 @@ async def test_jj_export_failure_still_pushes_bookmark_refspec(operation, tmp_pa
     operation.log.warn.assert_any_call("git.push_jj_export_failed", branch_name="feature/test")
 
 
-async def test_jj_launch_exception_falls_back_to_spec_refspec(operation, tmp_path):
+async def test_jj_missing_binary_falls_back_to_spec_refspec(operation, tmp_path):
+    """A missing jj binary is the only fallback-eligible failure: a checkout
+    without a working jj is managed by plain git, so the spec's refspec —
+    not HEAD resolved through a colocated checkout — is the right ref."""
     (tmp_path / "repo" / ".jj").mkdir()
     git_process = _fake_process()
     spec = _push_spec()
@@ -540,7 +562,7 @@ async def test_jj_launch_exception_falls_back_to_spec_refspec(operation, tmp_pat
     assert git_process.argv == ("git", "push", "--", spec["remoteUrl"], spec["refspec"])
 
 
-async def test_jj_command_timeout_falls_back_to_spec_refspec(operation, tmp_path):
+async def test_jj_command_failure_fails_push_without_fallback(operation, tmp_path):
     (tmp_path / "repo" / ".jj").mkdir()
     stuck = _fake_process()
     stuck.communicate = AsyncMock(side_effect=RuntimeError("timed out"))
@@ -549,11 +571,12 @@ async def test_jj_command_timeout_falls_back_to_spec_refspec(operation, tmp_path
     with patch(
         "sandbox_runtime.push_operation.asyncio.create_subprocess_exec",
         side_effect=_jj_launcher([stuck, _fake_process()], git_process),
-    ):
+    ) as launch:
         result = await operation.execute(spec)
 
-    assert result.error is None
-    assert git_process.argv == ("git", "push", "--", spec["remoteUrl"], spec["refspec"])
+    assert result.error is not None
+    assert "jj command failed" in result.error
+    assert [call.args[0] for call in launch.call_args_list] == ["jj"]
 
 
 async def test_jj_colocated_member_checkout_runs_jj_in_member_path(operation, tmp_path):

@@ -14,7 +14,7 @@ import { componentsOf, runInSessionDO } from "./session-do-access";
  * degraded and surfacing the error at the first spawn or PR operation.
  */
 describe("createSessionRuntime", () => {
-  async function buildWithEnv(overrides: Partial<Record<keyof Env, string | undefined>>) {
+  async function buildRuntimeWithEnv(overrides: Partial<Record<keyof Env, string | undefined>>) {
     const stub = env.SESSION.get(env.SESSION.idFromName(`components-eager-${crypto.randomUUID()}`));
 
     return runInSessionDO(stub, (instance: SessionDO, state) => {
@@ -26,14 +26,25 @@ describe("createSessionRuntime", () => {
         ...overrides,
       } as WorkerBindings);
 
-      let error: string | null = null;
       try {
-        createSessionRuntime(createDurableObjectSessionPlatform(state, env.DB), doctored);
+        return {
+          error: null,
+          runtime: createSessionRuntime(
+            createDurableObjectSessionPlatform(state, env.DB),
+            doctored
+          ),
+        };
       } catch (caught) {
-        error = caught instanceof Error ? caught.message : String(caught);
+        return {
+          error: caught instanceof Error ? caught.message : String(caught),
+          runtime: null,
+        };
       }
-      return error;
     });
+  }
+
+  async function buildWithEnv(overrides: Partial<Record<keyof Env, string | undefined>>) {
+    return (await buildRuntimeWithEnv(overrides)).error;
   }
 
   it("builds the whole graph on a correctly configured deployment", async () => {
@@ -57,5 +68,15 @@ describe("createSessionRuntime", () => {
   it("fails at graph build on an invalid SCM_PROVIDER", async () => {
     const error = await buildWithEnv({ SCM_PROVIDER: "not-a-real-provider" });
     expect(error).toMatch(/SCM_PROVIDER/i);
+  });
+
+  it("pins the inactivity fallback to 300000ms when SANDBOX_INACTIVITY_TIMEOUT_MS is absent", async () => {
+    const built = await buildRuntimeWithEnv({ SANDBOX_INACTIVITY_TIMEOUT_MS: undefined });
+    expect(built.error).toBeNull();
+
+    const lifecycleManager = built.runtime!.internals.lifecycleManager as unknown as {
+      config: { inactivity: { timeoutMs: number } };
+    };
+    expect(lifecycleManager.config.inactivity.timeoutMs).toBe(300_000);
   });
 });

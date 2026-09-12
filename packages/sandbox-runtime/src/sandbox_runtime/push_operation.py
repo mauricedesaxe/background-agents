@@ -17,6 +17,16 @@ JJ_COMMAND_TIMEOUT_SECONDS = 60.0
 JJ_LOCK_ERROR_PATTERN = re.compile(r"failed to lock (working copy|lock)", re.IGNORECASE)
 
 
+class _JjUnavailable(Exception):
+    """The jj binary itself is missing — the only fallback-eligible jj failure.
+
+    A checkout without a working jj is managed by plain git in practice, so
+    the spec's refspec stays the correct thing to push. Every other jj
+    failure must not fall back: the raw refspec (typically ``HEAD``) resolves
+    to the current checkout's branch and can silently push the wrong ref.
+    """
+
+
 @dataclass(frozen=True)
 class PushRequest:
     """Validated provider-generated push spec, or correlation data for a rejection."""
@@ -151,7 +161,9 @@ class PushOperation:
         A jj-colocated checkout pins ``.git/HEAD`` to the working-copy commit
         ``@-``, so pushing ``HEAD`` publishes an empty branch. Setting the
         bookmark named after the target branch to ``@`` and pushing that
-        bookmark refspec publishes the actual work instead.
+        bookmark refspec publishes the actual work instead. The refspec
+        fallback only runs when jj itself is missing; a jj that rejects the
+        operation fails the push loudly instead.
         """
         if not (repo_dir / ".jj").exists():
             return request.refspec
@@ -160,7 +172,7 @@ class PushOperation:
             return bookmark_refspec
         self.log.warn(
             "git.push_jj_fallback",
-            reason="jj_command_failed",
+            reason="jj_binary_missing",
             branch_name=request.branch_name,
         )
         return request.refspec
@@ -168,11 +180,15 @@ class PushOperation:
     async def _pin_jj_bookmark(self, request: PushRequest, repo_dir: Path) -> bool:
         """Point the target branch's bookmark at the working copy.
 
-        False only when the bookmark itself cannot be set — the caller then
-        falls back to the spec's refspec. A failed ``git export`` keeps this
-        True: in a colocated checkout the ref is auto-exported anyway, and
-        when it is genuinely missing the bookmark refspec push fails visibly
-        instead of silently publishing the empty branch the fallback would.
+        True when the bookmark is set — the caller pushes the bookmark
+        refspec. False only when the jj binary itself is missing — the one
+        failure where the spec-refspec fallback stays correct. Any other jj
+        failure raises PushRejected: falling back would push ``HEAD``, which
+        resolves to the current checkout's branch and can silently publish
+        the wrong ref. A failed ``git export`` stays non-fatal: in a
+        colocated checkout the ref is auto-exported anyway, and when it is
+        genuinely missing the bookmark refspec push fails visibly instead of
+        silently publishing the empty branch the fallback would.
         """
         command = (
             "jj",
@@ -185,17 +201,29 @@ class PushOperation:
             "@",
             request.branch_name,
         )
-        if not await self._run_jj_command(command, request.branch_name):
+        try:
+            await self._run_jj_command(command, request.branch_name)
+        except _JjUnavailable:
             return False
         export = ("jj", "--repository", str(repo_dir), "git", "export")
-        if not await self._run_jj_command(export, request.branch_name):
+        if not await self._run_jj_command(export, request.branch_name, fatal=False):
             self.log.warn(
                 "git.push_jj_export_failed",
                 branch_name=request.branch_name,
             )
         return True
 
-    async def _run_jj_command(self, command: tuple[str, ...], branch_name: str) -> bool:
+    async def _run_jj_command(
+        self, command: tuple[str, ...], branch_name: str, *, fatal: bool = True
+    ) -> bool:
+        """Run one jj command: True on success.
+
+        With ``fatal`` (the bookmark-set path) any failure raises: a missing
+        binary raises _JjUnavailable, everything else raises PushRejected.
+        With ``fatal=False`` (the export path) non-lock failures only return
+        False so the caller can warn and still push the bookmark refspec; a
+        lock conflict raises in both modes.
+        """
         process: asyncio.subprocess.Process | None = None
         try:
             process = await asyncio.create_subprocess_exec(
@@ -210,6 +238,16 @@ class PushOperation:
                 ),
                 timeout=JJ_COMMAND_TIMEOUT_SECONDS,
             )
+        except FileNotFoundError as e:
+            self.log.warn(
+                "git.push_jj_command_failed",
+                exc=e,
+                command=command[1:],
+                branch_name=branch_name,
+            )
+            if fatal:
+                raise _JjUnavailable(str(e)) from None
+            return False
         except Exception as e:
             self.log.warn(
                 "git.push_jj_command_failed",
@@ -217,6 +255,8 @@ class PushOperation:
                 command=command[1:],
                 branch_name=branch_name,
             )
+            if fatal:
+                raise PushRejected(f"Push failed - jj command failed: {e}") from None
             return False
         if process.returncode != 0:
             stderr_text = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
@@ -231,6 +271,11 @@ class PushOperation:
                     "Push failed - jj workspace is locked by a concurrent jj process; "
                     "not falling back to the raw refspec to avoid publishing stale state"
                 )
+            if fatal:
+                raise PushRejected(
+                    "Push failed - jj rejected the operation; not falling back to the raw "
+                    f"refspec to avoid pushing the wrong ref: {stderr_text or 'no stderr'}"
+                )
             return False
         return True
 
@@ -238,12 +283,13 @@ class PushOperation:
     def _is_jj_lock_conflict(stderr_text: str) -> bool:
         """Whether a failed jj command lost its lock to a concurrent jj process.
 
-        Why: the refspec fallback would publish whatever HEAD points at in a
+        Why: the raw refspec fallback would publish whatever HEAD points at in a
         checkout another jj process is mid-write on, silently publishing stale
         state. Matched against jj's real wording ("Failed to lock working
         copy") so unrelated stderr mentioning locks — "deadlock avoided",
-        benchmark conflicts — still falls back. A missing binary is the only
-        failure that also falls back.
+        benchmark conflicts — gets the generic jj-rejection failure instead of
+        the lock-specific message. A missing binary is the only failure that
+        also falls back.
         """
         return bool(JJ_LOCK_ERROR_PATTERN.search(stderr_text))
 
