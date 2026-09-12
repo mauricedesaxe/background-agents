@@ -14,7 +14,7 @@ GIT_PUSH_TIMEOUT_SECONDS = 300.0
 GIT_PUSH_TERMINATE_GRACE_SECONDS = 5.0
 JJ_COMMAND_TIMEOUT_SECONDS = 60.0
 
-JJ_LOCK_ERROR_PATTERN = re.compile(r"lock", re.IGNORECASE)
+JJ_LOCK_ERROR_PATTERN = re.compile(r"failed to lock (working copy|lock)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -240,7 +240,10 @@ class PushOperation:
 
         Why: the refspec fallback would publish whatever HEAD points at in a
         checkout another jj process is mid-write on, silently publishing stale
-        state. A missing binary is the only failure that still falls back.
+        state. Matched against jj's real wording ("Failed to lock working
+        copy") so unrelated stderr mentioning locks — "deadlock avoided",
+        benchmark conflicts — still falls back. A missing binary is the only
+        failure that also falls back.
         """
         return bool(JJ_LOCK_ERROR_PATTERN.search(stderr_text))
 

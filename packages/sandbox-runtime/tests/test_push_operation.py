@@ -463,7 +463,7 @@ async def test_jj_lock_conflict_fails_push_without_fallback(operation, tmp_path)
     with patch(
         "sandbox_runtime.push_operation.asyncio.create_subprocess_exec",
         side_effect=_jj_launcher(
-            [_fake_process(1, b"Error: failed to acquire lock: working_copy")], git_process
+            [_fake_process(1, b"Error: Failed to lock working copy")], git_process
         ),
     ) as launch:
         result = await operation.execute(spec)
@@ -484,7 +484,26 @@ async def test_jj_lock_conflict_fails_push_without_fallback(operation, tmp_path)
             "feature/test",
         ),
         branch_name="feature/test",
-        stderr="Error: failed to acquire lock: working_copy",
+        stderr="Error: Failed to lock working copy",
+    )
+
+
+async def test_jj_deadlock_stderr_falls_back_to_spec_refspec(operation, tmp_path):
+    (tmp_path / "repo" / ".jj").mkdir()
+    git_process = _fake_process()
+    spec = _push_spec()
+    with patch(
+        "sandbox_runtime.push_operation.asyncio.create_subprocess_exec",
+        side_effect=_jj_launcher([_fake_process(1, b"Error: deadlock avoided")], git_process),
+    ):
+        result = await operation.execute(spec)
+
+    assert result.error is None
+    assert git_process.argv == ("git", "push", "--", spec["remoteUrl"], spec["refspec"])
+    operation.log.warn.assert_any_call(
+        "git.push_jj_fallback",
+        reason="jj_command_failed",
+        branch_name="feature/test",
     )
 
 
