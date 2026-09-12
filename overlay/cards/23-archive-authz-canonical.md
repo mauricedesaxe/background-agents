@@ -63,3 +63,15 @@ that reverts the lookup to `user_id` only reddens the canonical case.
 - Tests: `packages/control-plane/src/session/participant-repository.test.ts` (both-column lookup)
   and `packages/control-plane/test/integration/session-lifecycle.test.ts`, case "archive authorizes
   the canonical user of a bot-rooted session".
+
+## Disposition (2026-09-11 audit vs upstream 0e9ecf98)
+
+**SUPERSEDED — no rebuild.** Upstream reworked session authorization to route-level RBAC with
+canonical-by-construction subjects: bot- and automation-rooted sessions now authorize the canonical
+owner identity at the route, so the participant OR-lookup premise this card was built on no longer
+exists. The requirement's outcome — the owner can archive, unarchive, and rename every session they
+can see, including bot-, automation-, and agent-child-rooted ones, while a genuine stranger is still
+rejected — is expected of upstream's mechanism, and the audit found it holds. The requirement above
+stays as the record of what was wanted and why; the OR-lookup mechanism it named must NOT be
+reintroduced. If a post-sync regression ever shows an identity-miss 403 on those sessions, fix it on
+upstream's RBAC mechanism, not by resurrecting the two-column lookup.

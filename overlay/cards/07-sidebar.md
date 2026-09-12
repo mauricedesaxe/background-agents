@@ -23,9 +23,8 @@ for this workflow. Four parts, one cohesive system, all non-negotiable:
   the fork groups by repo.
 - **Automatic-vs-manual separation** — the repo group **visually splits** sessions into a manual and
   an automatic bucket. This is grouping, not a filter: there is deliberately **no** Manual/Automatic
-  filter control, because the Mine/All creator filter already excludes automation-started sessions
-  (Mine sets both `excludeAutomationLineage` and `createdByUserIds`). A separate source filter was
-  built and then removed as redundant.
+  filter control, because the existing creator filter already excludes automation-started sessions,
+  making a separate source filter redundant. One was built and then removed for exactly that reason.
 - **Per-user manual unread** (#21) — mark-a-session-unread, per user.
 
 ## Acceptance test (the contract)
@@ -42,10 +41,10 @@ data-model transform. This is the guardrail against a half-rebuilt sidebar.
 - Rebuilt in the **upstream-owned tree**, reapplied each sync.
 - **Restore migrations 9005 and 9008 verbatim at their original ids** (Rule 3). The blind sync wipes
   these fork-local files, but prod has the rows applied, so prod skips them by id and a fresh D1
-  (CI, a new environment) applies them. Restoring is required so the sidebar's columns/indexes exist
-  off a clean tree. 9005 adds `manually_unread` (#21); 9008 adds keyset-pagination indexes for the
-  child trees. 9008 is NOT a duplicate of upstream's own session indexes — it creates
-  differently-named composites with `id DESC` for stable keyset pagination.
+  (CI, a new environment) applies them. Restoring is required so the sidebar's columns and indexes
+  exist off a clean tree: 9005 carries per-user manual unread state, and 9008 carries the composite
+  ordering indexes that make the child trees' keyset pagination stable. 9008 is NOT a duplicate of
+  upstream's own session indexes — it creates distinct composites upstream lacks.
 - **Keep upstream's server-paginated status sections and creator filter; layer the fork's repo
   grouping + automatic/manual separation inside them.** Do not replace the sections with a flat
   client-side grouped list — that discards the server-side pagination heavy fan-out needs. The UX
@@ -54,15 +53,17 @@ data-model transform. This is the guardrail against a half-rebuilt sidebar.
 
 ## This is the highest reapply-cost line in the plan
 
-Biggest UI surface, and upstream **actively develops this exact file** (they added a creator
+Biggest UI surface, and upstream **actively develops this exact surface** (they added a creator
 filter). A blind sync overwrites it every sync, so the reapply re-lands the divergence against
 changing upstream code. A half-rebuilt sidebar is precisely the silent regression that passed CI in
 #327. Phase 4 implication: this line resists the hands-off ambition. Flag it for a careful/human
 reapply pass, not a rubber-stamp.
 
-## Dated evidence (2026-08-19, non-binding hints)
+## Provenance
 
-- Data model: `buildGroupedSessionList`, `SessionRepositoryGroup`,
-  `SessionSourceFilter = "manual" | "automatic"`, `childrenMap` in
-  `packages/web/src/lib/session-list.ts`.
-- Component `session-sidebar.tsx`; unread reuses `read-state/route.ts`.
+The fork built the grouped sidebar (origin 0b12c30) for upstream issues #20 and #21; every blind
+sync wipes it, and the rebuild re-lands it against whatever the sidebar has become upstream — the
+only card flagged for a careful or human reapply pass. The two fork migrations ride along verbatim
+at their original ids each restore. The 2026-08-19 card anchored the grouping transform, the sidebar
+component, and the unread route by file, dropped in the 2026-09-11 conversion. Nothing superseded:
+the four-part UX and the no-source-filter decision stand.

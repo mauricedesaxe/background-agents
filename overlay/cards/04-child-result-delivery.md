@@ -26,32 +26,31 @@ change) does NOT re-enqueue (edge-trigger: only status transitions fire delivery
 
 ## Placement decision (durable)
 
-- Rebuilt in the **upstream-owned tree**, reapplied each sync, ported onto upstream's
-  `parentSessions` shape (we do NOT reintroduce a fork-local `sessions` DO namespace — see the
-  drops).
+- Rebuilt in the **upstream-owned tree**, reapplied each sync, ported onto upstream's own session
+  storage shape. The fork's parallel session namespace stays dropped (see the drops).
 - Depends on card `06-sandbox-connect`: the only real prerequisite is children reaching terminal
   with a summary, which is the connect path. Sequence after it.
 
 ## Scope note
 
 Upstream already ships the summary builder (the expensive half). Missing is only the delivery
-wiring: on a terminal child status update, fetch the summary, enqueue an agent-sourced prompt, wake
-the parent, plus a `deliverResult` status field and the edge-trigger guard. Roughly 100-150 lines on
-existing machinery, not a full-stack rebuild.
+wiring: on a terminal child status transition, fetch the summary, enqueue an agent-sourced prompt,
+wake the parent, record the delivery on the child, and guard the edge trigger against non-status
+updates. Roughly 100-150 lines on existing machinery, not a full-stack rebuild.
 
 ## Reliability (upstream baseline is sound)
 
-- A child inherits the parent's non-default branch on upstream (upstream test covers it), so the
+- A child inherits the parent's non-default branch on upstream (an upstream test covers it), so the
   fork-era "children clone base branch, lose parent work" concern looks handled on the clean
   baseline.
 - The jj detached-HEAD no-op is fork-only and returns only with card `11-jj-pr-helper`; it is that
   card's test burden, not this one's.
 
-## Dated evidence (2026-08-19, non-binding hints)
+## Provenance
 
-- Delivery wiring lived in `child-result-prompt.ts` plus the terminal-child hook in
-  `durable-object.ts` (on the current baseline this hook is in the child->parent notify path, not
-  the DO itself).
-- Summary builder already upstream as `child-session-summary.ts`.
-- Tests to port onto the upstream shape: `child-result-prompt.test.ts`,
-  `child-sessions.handler.test.ts`.
+The fork built the feature first (closing #285, commits 707f756 and 3361bd8); the blind sync wiped
+it and it is rebuilt onto upstream each sync, which since ships the summary half natively. The
+2026-08-19 card carried file anchors for the delivery wiring, the summary builder, and the tests to
+port, plus a note about where the terminal-child hook sat on that baseline — all orientation, all
+dropped in the 2026-09-11 conversion. Nothing superseded: the requirement and the edge-trigger guard
+stand as written.

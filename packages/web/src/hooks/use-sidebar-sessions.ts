@@ -393,7 +393,12 @@ export function useSidebarSessions() {
   // are updated in place; only a hierarchy leaving attention restarts a chain.
   const reconcileSidebarReadState = useCallback(
     ({ sessionId, outcome, readState }: SessionReadStateReconciledDetail) => {
-      clearManualUnread(sessionId);
+      // Only a confirmed server-side read clears the local unread overlay.
+      // A failed or retried attempt keeps the flag, and a genuinely-read
+      // reconcile self-heals a stale one even from another client's mark-read.
+      if (outcome === "complete" && !readState.unread) {
+        clearManualUnread(sessionId);
+      }
       const applyReadState = (item: SessionInboxItem) =>
         applySessionInboxItemReadState(item, sessionId, readState);
       updateAttentionRetained((item) => {

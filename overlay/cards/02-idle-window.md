@@ -16,24 +16,25 @@ is a **config value to verify present**, not a feature to rebuild. No code.
 
 ## Acceptance test (the contract)
 
-Terraform Plan and Apply pass `SANDBOX_INACTIVITY_TIMEOUT_MS` into `sandbox_inactivity_timeout_ms`.
-Both jobs use `300000` when the secret is absent. A real idle session stops at about 5 minutes when
-no client is connected.
+The deployed control plane carries the five-minute idle window end to end: the Terraform plan and
+apply both wire the configured value through to the sandbox lifecycle, and both fall back to five
+minutes when the override secret is absent. A real idle session with no connected client stops about
+five minutes after its last activity. With a browser client connected, the stop is deferred by an
+additional client-connected grace window (see the runbook's connect check for the current bounds).
 
 ## Placement decision (durable)
 
-The worker reads `SANDBOX_INACTIVITY_TIMEOUT_MS` from the Terraform variable
-`sandbox_inactivity_timeout_ms`. The Terraform default, the CI fallback, and the worker default are
-all `300000`. A deployment can override that value with the GitHub secret.
+The idle window is a single configured value with a five-minute default at every layer: the
+Terraform default, the CI fallback, and the worker default all agree. A deployment can override the
+value with a GitHub secret. No fork-owned state carries it — the verification is that the plumbing
+survived the sync and the default is what a real idle session experiences.
 
-## Not carried
+## Provenance
 
-The "+5 min grace while a tab is connected" note in the original list is wrong. The code grants one
-hardcoded **2-minute** grace period. Its deadline is the last activity plus the timeout and the
-grace period. The shared lifecycle manager owns this behavior.
-
-## Dated evidence (2026-08-19, non-binding hints)
-
-- `terraform/environments/production/terraform.tfvars` line ~21: `300000 # 5 min`.
-- Code defaults `timeoutMs = 5*60*1000` and `connectedClientGraceMs = 2*60*1000` in the sandbox
-  lifecycle decisions module.
+The value has been fork config since the first fork deploy; the card verifies rather than rebuilds.
+The 2026-08-19 card carried line anchors into the tfvars file and the lifecycle module, dropped in
+the 2026-09-11 conversion. Its "not carried" correction — that the client grace was a hardcoded two
+minutes, not five — is superseded by the 2026-09-11 audit: current upstream grants a
+client-connected grace, and the runbook's connect check now encodes the five-minute window plus that
+grace. The "+5 min grace while a tab is connected" note in the original divergence list was wrong in
+the other direction and was never carried.

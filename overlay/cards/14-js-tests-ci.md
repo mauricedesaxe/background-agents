@@ -16,10 +16,10 @@ blocks merge. Today no CI job executes them, so they are dead weight even on ups
 **Strategically load-bearing — of everything in this list, the absence of this is what let #327
 happen.** This job arms the guardrail that makes every other item's JS-side seam test actually bite.
 
-## Acceptance test (the contract) — self-proving
+## Acceptance test (the contract) — one red run per sync
 
-CI has a job that executes the `.mjs` suites, and a deliberately-failing `.mjs` test turns CI red.
-(Test-infra item, so that is its contract.)
+After each sync, confirm the JS job is armed: make one suite fail, watch CI go red on the PR, then
+restore it. A sync that leaves the suites unexecuted reverts this card to a rebuild.
 
 ## Placement decision (durable)
 
@@ -43,3 +43,12 @@ Recorded as a candidate only. Not filing now. Same batch as the card `05-provide
 
 High leverage despite being "just CI config." Rebuild **early** — it protects the reapply of every
 other JS-touching item.
+
+## Disposition (2026-09-11 audit vs upstream 0e9ecf98)
+
+**COVERED upstream.** The audit found the JS suites already run in CI on every pull request on
+upstream, so the gap this card existed to close is closed at the source. Nothing to rebuild or
+reapply; the card records that fact. The acceptance test above supersedes the original one (a CI job
+executing the suites, self-proven by a deliberately failing test) — that is now upstream's own
+state, verified once per sync by the red-run confirmation. If the job is absent after a sync, or a
+red run does not block, rebuild the job; the requirement at the top is back in force.
