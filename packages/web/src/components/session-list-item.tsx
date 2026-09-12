@@ -34,6 +34,7 @@ export function SessionListItem({
   onArchive,
   onSessionSelect,
   onMarkLatestMessageRead,
+  onMarkUnread,
 }: {
   session: SessionItem;
   environmentName?: string;
@@ -42,6 +43,7 @@ export function SessionListItem({
   onArchive: (sessionId: string) => Promise<void>;
   onSessionSelect?: () => void;
   onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
+  onMarkUnread: (sessionId: string) => void;
 }) {
   const { hasPermission } = useCurrentUserAuthorization();
   const canManageLifecycle = hasPermission("sessions.lifecycle");
@@ -65,6 +67,7 @@ export function SessionListItem({
   const [isArchiving, setIsArchiving] = useState(false);
   const [showArchiveDialog, setShowArchiveDialog] = useState(false);
   const [isMarkingLatestRead, setIsMarkingLatestRead] = useState(false);
+  const canMarkUnread = !session.readState.unread && session.readState.latestMessageId !== null;
   const [title, setTitle] = useState(displayTitle);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const isStartingRenameRef = useRef(false);
@@ -119,6 +122,11 @@ export function SessionListItem({
     } finally {
       setIsMarkingLatestRead(false);
     }
+  };
+
+  const handleMarkUnread = () => {
+    setIsActionsOpen(false);
+    onMarkUnread(session.id);
   };
 
   const handleConfirmArchive = async () => {
@@ -312,7 +320,7 @@ export function SessionListItem({
           </Link>
         )}
 
-        {(canManageLifecycle || session.readState.unread) && (
+        {(canManageLifecycle || session.readState.unread || canMarkUnread) && (
           <div className="absolute inset-y-0 right-2 flex items-center">
             <DropdownMenu open={isActionsOpen} onOpenChange={setIsActionsOpen}>
               <DropdownMenuTrigger asChild>
@@ -352,6 +360,9 @@ export function SessionListItem({
                     Mark as read
                   </DropdownMenuItem>
                 )}
+                {canMarkUnread && (
+                  <DropdownMenuItem onSelect={handleMarkUnread}>Mark as unread</DropdownMenuItem>
+                )}
                 {canManageLifecycle && (
                   <DropdownMenuItem onClick={handleStartArchive} disabled={isArchiving}>
                     <ArchiveIcon className="w-4 h-4" />
@@ -382,6 +393,7 @@ export function ChildSessionListItem({
   onSessionSelect,
   depth,
   onMarkLatestMessageRead,
+  onMarkUnread,
 }: {
   session: SessionItem;
   isActive: boolean;
@@ -389,8 +401,10 @@ export function ChildSessionListItem({
   onSessionSelect?: () => void;
   depth: number;
   onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
+  onMarkUnread: (sessionId: string) => void;
 }) {
   const [isMarkingLatestRead, setIsMarkingLatestRead] = useState(false);
+  const canMarkUnread = !session.readState.unread && session.readState.latestMessageId !== null;
   const timestamp = session.updatedAt || session.createdAt;
   const relativeTime = formatRelativeTime(timestamp);
   const prDisplay = pullRequestSummaryDisplay(session.pullRequestSummary);
@@ -406,6 +420,9 @@ export function ChildSessionListItem({
     } finally {
       setIsMarkingLatestRead(false);
     }
+  };
+  const handleMarkUnread = () => {
+    onMarkUnread(session.id);
   };
   return (
     <div className="group relative">
@@ -438,7 +455,7 @@ export function ChildSessionListItem({
           )}
         </div>
       </Link>
-      {session.readState.unread && (
+      {(session.readState.unread || canMarkUnread) && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
@@ -454,9 +471,17 @@ export function ChildSessionListItem({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onSelect={handleMarkLatestMessageRead} disabled={isMarkingLatestRead}>
-              Mark as read
-            </DropdownMenuItem>
+            {session.readState.unread && (
+              <DropdownMenuItem
+                onSelect={handleMarkLatestMessageRead}
+                disabled={isMarkingLatestRead}
+              >
+                Mark as read
+              </DropdownMenuItem>
+            )}
+            {canMarkUnread && (
+              <DropdownMenuItem onSelect={handleMarkUnread}>Mark as unread</DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       )}

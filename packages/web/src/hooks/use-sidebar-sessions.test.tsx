@@ -11,6 +11,7 @@ import type {
 } from "@open-inspect/shared/types/session-inbox";
 import { useSidebarSessions } from "./use-sidebar-sessions";
 import { reconcileSessionReadState } from "@/lib/session-read-state";
+import { readManualUnreadIds } from "@/lib/session-manual-unread";
 
 vi.mock("@/lib/auth-session", () => ({
   useAuthSession: () => ({ data: { user: { id: "github:123", name: "Test User" } } }),
@@ -57,6 +58,17 @@ function unreadItem(id: string): SessionInboxItem {
     rootSession: {
       ...base.rootSession,
       readState: { latestMessageId: "msg-1", version: 1, unread: true },
+    },
+  };
+}
+
+function readItem(id: string): SessionInboxItem {
+  const base = item(id);
+  return {
+    ...base,
+    rootSession: {
+      ...base.rootSession,
+      readState: { latestMessageId: "msg-1", version: 1, unread: false },
     },
   };
 }
@@ -128,6 +140,50 @@ describe("useSidebarSessions", () => {
     expect(result.current.needsAttention.map(({ id }) => id)).toEqual(["attention"]);
     expect(result.current.inProgress.map(({ id }) => id)).toEqual(["running"]);
     expect(result.current.finished.map(({ id }) => id)).toEqual(["finished"]);
+  });
+
+  it("marks a read session unread in place and persists the flag per user", async () => {
+    const fetcher = vi.fn(async () => ({
+      categories: {
+        needs_attention: page(["attention"]),
+        in_progress: { items: [readItem("running")], hasMore: false, nextCursor: null },
+        finished: page(["finished"]),
+      },
+    }));
+    const { result } = renderHook(() => useSidebarSessions(), { wrapper: wrapper(fetcher) });
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.inProgress[0].readState.unread).toBe(false);
+
+    act(() => result.current.handleMarkUnread("running"));
+
+    expect(result.current.inProgress[0].readState.unread).toBe(true);
+    expect(result.current.finished[0].readState.unread).toBe(false);
+    expect(readManualUnreadIds("github:123")).toEqual(new Set(["running"]));
+  });
+
+  it("clears a manual unread flag when the session is marked read", async () => {
+    localStorage.setItem(
+      "open-inspect-session-manual-unread:github:123",
+      JSON.stringify(["running"])
+    );
+    const readRunning = readItem("running");
+    const fetcher = vi.fn(async () => ({
+      categories: {
+        needs_attention: page(["attention"]),
+        in_progress: { items: [readRunning], hasMore: false, nextCursor: null },
+        finished: page(["finished"]),
+      },
+    }));
+    const { result } = renderHook(() => useSidebarSessions(), { wrapper: wrapper(fetcher) });
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.inProgress[0].readState.unread).toBe(true);
+
+    await act(async () => result.current.handleMarkLatestMessageRead("running"));
+
+    expect(result.current.inProgress[0].readState.unread).toBe(false);
+    expect(readManualUnreadIds("github:123")).toEqual(new Set());
   });
 
   it("polls only the canonical endpoint every 30 seconds while visible", async () => {

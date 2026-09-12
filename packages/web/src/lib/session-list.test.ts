@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   applyTitleUpdate,
+  buildGroupedSessionList,
   buildSessionSearchValue,
   buildSessionsPageKey,
   CURRENT_USER_CREATED_BY,
@@ -11,6 +12,7 @@ import {
   type SessionListResponse,
 } from "./session-list";
 import type { Session } from "@open-inspect/shared/types/sessions";
+import type { SessionListItem as InboxSessionListItem } from "@open-inspect/shared/types/session-inbox";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -116,6 +118,84 @@ describe("buildSessionSearchValue", () => {
 
   it("falls back to the scalar repository fields", () => {
     expect(buildSessionSearchValue(session("legacy"))).toContain("open-inspect/background-agents");
+  });
+});
+
+function inboxSession(
+  id: string,
+  overrides: Partial<InboxSessionListItem> = {}
+): InboxSessionListItem {
+  return {
+    id,
+    title: id.toUpperCase(),
+    repoOwner: "acme",
+    repoName: "web",
+    baseBranch: null,
+    status: "active",
+    parentSessionId: null,
+    spawnSource: "user",
+    environmentId: null,
+    createdAt: 1000,
+    updatedAt: 2000,
+    readState: { latestMessageId: null, version: 0, unread: false },
+    ...overrides,
+  };
+}
+
+describe("buildGroupedSessionList", () => {
+  it("groups one repository's sessions with manual before automatic", () => {
+    const groups = buildGroupedSessionList([
+      inboxSession("auto", { spawnSource: "automation" }),
+      inboxSession("manual"),
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].key).toBe("repository:acme/web");
+    expect(groups[0].label).toBe("acme/web");
+    expect(groups[0].buckets.map((bucket) => bucket.source)).toEqual(["manual", "automatic"]);
+    expect(groups[0].buckets[0].sessions.map((item) => item.id)).toEqual(["manual"]);
+    expect(groups[0].buckets[1].sessions.map((item) => item.id)).toEqual(["auto"]);
+  });
+
+  it("keeps different repositories in separate groups", () => {
+    const groups = buildGroupedSessionList([
+      inboxSession("web", { repoOwner: "acme", repoName: "web" }),
+      inboxSession("api", { repoOwner: "acme", repoName: "api" }),
+    ]);
+
+    expect(groups.map((group) => group.label)).toEqual(["acme/web", "acme/api"]);
+  });
+
+  it("orders groups by their most recent activity", () => {
+    const groups = buildGroupedSessionList([
+      inboxSession("older", { updatedAt: 1000 }),
+      inboxSession("newer", { repoOwner: "acme", repoName: "api", updatedAt: 5000 }),
+    ]);
+
+    expect(groups.map((group) => group.label)).toEqual(["acme/api", "acme/web"]);
+  });
+
+  it("lands multi-repository and repository-less sessions in their own groups", () => {
+    const groups = buildGroupedSessionList([
+      inboxSession("multi", {
+        repositories: [
+          { repoOwner: "acme", repoName: "web", repoId: 1, baseBranch: "main" },
+          { repoOwner: "acme", repoName: "api", repoId: 2, baseBranch: "main" },
+        ],
+      }),
+      inboxSession("orphan", { repoOwner: null, repoName: null }),
+    ]);
+
+    expect(groups.map((group) => group.label)).toEqual(["Multiple repositories", "No repository"]);
+  });
+
+  it("preserves recency order within a bucket", () => {
+    const groups = buildGroupedSessionList([
+      inboxSession("older", { updatedAt: 100 }),
+      inboxSession("newer", { updatedAt: 200 }),
+    ]);
+
+    expect(groups[0].buckets[0].sessions.map((item) => item.id)).toEqual(["older", "newer"]);
   });
 });
 

@@ -27,6 +27,7 @@ import {
   subscribeSessionReadStateReconciliation,
   type SessionReadStateReconciledDetail,
 } from "@/lib/session-read-state";
+import { readManualUnreadIds, writeManualUnreadId } from "@/lib/session-manual-unread";
 
 const VISIBLE_INBOX_POLL_MS = 30_000;
 const SESSION_CREATOR_FILTER_STORAGE_KEY = "open-inspect-sidebar-session-creator-filter";
@@ -337,6 +338,42 @@ export function useSidebarSessions() {
     return result;
   }, [inboxItems]);
 
+  const [manualUnreadIds, setManualUnreadIds] = useState<Set<string>>(() => new Set());
+
+  useEffect(() => {
+    setManualUnreadIds(userId ? readManualUnreadIds(userId) : new Set());
+  }, [userId]);
+
+  const overlayManualUnread = useCallback(
+    (session: SessionItem): SessionItem =>
+      manualUnreadIds.has(session.id) && session.readState.latestMessageId !== null
+        ? { ...session, readState: { ...session.readState, unread: true } }
+        : session,
+    [manualUnreadIds]
+  );
+  const overlaidChildrenMap = useMemo(() => {
+    const result = new Map<string, SessionItem[]>();
+    for (const [parentId, siblings] of childrenMap) {
+      result.set(parentId, siblings.map(overlayManualUnread));
+    }
+    return result;
+  }, [childrenMap, overlayManualUnread]);
+
+  const clearManualUnread = useCallback(
+    (sessionId: string) => {
+      if (!userId || !manualUnreadIds.has(sessionId)) return;
+      setManualUnreadIds(writeManualUnreadId(userId, sessionId, false));
+    },
+    [manualUnreadIds, userId]
+  );
+  const handleMarkUnread = useCallback(
+    (sessionId: string) => {
+      if (!userId) return;
+      setManualUnreadIds(writeManualUnreadId(userId, sessionId, true));
+    },
+    [userId]
+  );
+
   const updateAttentionRetained = attention.updateRetainedItems;
   const updateInProgressRetained = inProgress.updateRetainedItems;
   const updateFinishedRetained = finished.updateRetainedItems;
@@ -356,6 +393,7 @@ export function useSidebarSessions() {
   // are updated in place; only a hierarchy leaving attention restarts a chain.
   const reconcileSidebarReadState = useCallback(
     ({ sessionId, outcome, readState }: SessionReadStateReconciledDetail) => {
+      clearManualUnread(sessionId);
       const applyReadState = (item: SessionInboxItem) =>
         applySessionInboxItemReadState(item, sessionId, readState);
       updateAttentionRetained((item) => {
@@ -402,6 +440,7 @@ export function useSidebarSessions() {
     },
     [
       attentionItems,
+      clearManualUnread,
       mutateCache,
       resetFinishedRetained,
       resetInProgressRetained,
@@ -434,16 +473,20 @@ export function useSidebarSessions() {
     [refreshInbox, updateAllRetainedItems]
   );
 
-  const handleMarkLatestMessageRead = useCallback(async (sessionId: string) => {
-    const result = await markLatestMessageRead(sessionId);
-    await reconcileSessionReadState(result);
-  }, []);
+  const handleMarkLatestMessageRead = useCallback(
+    async (sessionId: string) => {
+      const result = await markLatestMessageRead(sessionId);
+      await reconcileSessionReadState(result);
+      clearManualUnread(sessionId);
+    },
+    [clearManualUnread]
+  );
 
   return {
-    needsAttention: attentionItems.map((item) => item.rootSession),
-    inProgress: inProgressItems.map((item) => item.rootSession),
-    finished: finishedItems.map((item) => item.rootSession),
-    childrenMap,
+    needsAttention: attentionItems.map((item) => overlayManualUnread(item.rootSession)),
+    inProgress: inProgressItems.map((item) => overlayManualUnread(item.rootSession)),
+    finished: finishedItems.map((item) => overlayManualUnread(item.rootSession)),
+    childrenMap: overlaidChildrenMap,
     loading: sessionCreatorFilter === null || isLoading,
     sessionsError: snapshotError ?? categoryResults.find((result) => result.error)?.error,
     refreshSnapshot,
@@ -460,5 +503,6 @@ export function useSidebarSessions() {
     setSessionCreatorFilter,
     handleSessionArchived,
     handleMarkLatestMessageRead,
+    handleMarkUnread,
   };
 }
