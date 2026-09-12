@@ -68,6 +68,8 @@ export function formatAutomationRequestError(parseError: z.ZodError, rawBody: un
 
   if (field === "eventType") return "eventType must be a non-empty string";
 
+  if (field === "executionMode") return issue.message;
+
   if (field === "triggerConfig") {
     if (issue.path.length === 2 && issue.path[1] === "conditions") {
       return "triggerConfig.conditions must be an array";

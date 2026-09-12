@@ -65,25 +65,31 @@ not pass through Hono.
 
 ### Sessions
 
-| Endpoint                        | Method    | Description                    |
-| ------------------------------- | --------- | ------------------------------ |
-| `/sessions`                     | GET       | List workspace sessions        |
-| `/sessions`                     | POST      | Create new session             |
-| `/sessions/:id`                 | GET       | Get canonical session snapshot |
-| `/sessions/:id`                 | DELETE    | Delete session                 |
-| `/sessions/:id/sandbox-access`  | GET       | Get sandbox connection details |
-| `/sessions/:id/prompt`          | POST      | Enqueue prompt                 |
-| `/sessions/:id/stop`            | POST      | Stop execution                 |
-| `/sessions/:id/ws`              | WebSocket | Real-time connection           |
-| `/sessions/:id/events`          | GET       | Paginated events               |
-| `/sessions/:id/artifacts`       | GET       | List artifacts                 |
-| `/sessions/:id/participants`    | GET       | List runtime participants      |
-| `/sessions/:id/messages`        | GET       | List messages                  |
-| `/sessions/:id/pr`              | POST      | Create pull request            |
-| `/sessions/:id/scm-credentials` | POST      | Broker sandbox git credentials |
-| `/sessions/:id/ws-token`        | POST      | Generate WebSocket token       |
-| `/sessions/:id/archive`         | POST      | Archive session                |
-| `/sessions/:id/unarchive`       | POST      | Unarchive session              |
+| Endpoint                                  | Method    | Description                         |
+| ----------------------------------------- | --------- | ----------------------------------- |
+| `/sessions`                               | GET       | List workspace sessions             |
+| `/sessions`                               | POST      | Create new session                  |
+| `/sessions/:id`                           | GET       | Get canonical session snapshot      |
+| `/sessions/:id`                           | DELETE    | Delete session                      |
+| `/sessions/:id/sandbox-access`            | GET       | Get sandbox connection details      |
+| `/sessions/:id/prompt`                    | POST      | Enqueue prompt                      |
+| `/sessions/:id/stop`                      | POST      | Stop execution                      |
+| `/sessions/:id/ws`                        | WebSocket | Real-time connection                |
+| `/sessions/:id/events`                    | GET       | Paginated events                    |
+| `/sessions/:id/artifacts`                 | GET       | List artifacts                      |
+| `/sessions/:id/participants`              | GET       | List runtime participants           |
+| `/sessions/:id/messages`                  | GET       | List messages                       |
+| `/sessions/:id/pr`                        | POST      | Create pull request                 |
+| `/sessions/:id/scm-credentials`           | POST      | Broker sandbox git credentials      |
+| `/sessions/:id/ws-token`                  | POST      | Generate WebSocket token            |
+| `/sessions/:id/archive`                   | POST      | Archive session                     |
+| `/sessions/:id/unarchive`                 | POST      | Unarchive session                   |
+| `/sessions/:id/children`                  | POST      | Spawn a child session               |
+| `/sessions/:id/children`                  | GET       | List child sessions                 |
+| `/sessions/:id/children/:childId`         | GET       | Get child session status            |
+| `/sessions/:id/children/:childId/prompt`  | POST      | Enqueue a prompt on a child session |
+| `/sessions/:id/children/:childId/cancel`  | POST      | Cancel a child session              |
+| `/sessions/:id/acknowledge-context-reset` | POST      | Acknowledge a sandbox context reset |
 
 ### Create PR Payload
 

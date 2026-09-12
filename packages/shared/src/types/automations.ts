@@ -190,6 +190,13 @@ export const createAutomationRequestSchema = z.object({
   environmentIds: automationEnvironmentIdsSchema.optional(),
   /** Complete pin set. Omission creates the automation without pins. */
   providerSelections: modelProviderSelectionsSchema.optional(),
+  /**
+   * Removed. Stale bundles still send it; rejecting (instead of silently
+   * stripping) keeps shared-workspace intent from becoming per-repo fanout.
+   */
+  executionMode: z
+    .never({ error: "executionMode was removed; use environments for shared workspaces" })
+    .optional(),
 });
 export type CreateAutomationRequest = z.input<typeof createAutomationRequestSchema>;
 
@@ -209,6 +216,10 @@ export const updateAutomationRequestSchema = z.object({
   environmentIds: automationEnvironmentIdsSchema.optional(),
   /** Replaces every provider pin when present; an empty map clears all pins. */
   providerSelections: modelProviderSelectionsSchema.optional(),
+  /** Removed; see the note on the create schema. */
+  executionMode: z
+    .never({ error: "executionMode was removed; use environments for shared workspaces" })
+    .optional(),
 });
 export type UpdateAutomationRequest = z.input<typeof updateAutomationRequestSchema>;
 

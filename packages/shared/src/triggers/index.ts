@@ -29,6 +29,7 @@ export {
   sentryAutomationEventSchema,
   webhookAutomationEventSchema,
   slackAutomationEventSchema,
+  automationTriggerTypeSchema,
   triggerConfigSchema,
 } from "./types";
 

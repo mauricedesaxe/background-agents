@@ -21,6 +21,18 @@ reapply.
 - **Terminal-toggle functional state updater** (#18) — trivial correctness nit, not worth carrying.
 - **github-bot sources lazar-review prompt** (#1) — dropped.
 - **slack-bot page-cap `truncated` warning** — Slack unused.
+- **Slack activity-indicator refresh subsystem** — the callbacks route, schema, replay, and sender
+  pieces around Slack activity indicators were removed coherently (verified zero dangling
+  references). Deliberately removed; an honest reapply agent must not resurrect it.
+
+## Intentional sync omissions (upstream owns these)
+
+Upstream material the sync deliberately did not restore. Confirmed stay dropped:
+
+- **Fork migration 9009 (`automation execution_mode`)** — upstream migration 0030 supersedes it;
+  restoring the fork copy would collide with upstream's.
+- **`packages/sandbox-runtime/tests/test_bridge_readiness.py`** — covered by
+  `test_bridge_harness_lifecycle.py` after the harness refactor.
 
 ## Intended reconstruction drops (confirmed stay dropped)
 

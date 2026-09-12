@@ -52,6 +52,10 @@ locals {
     # interpolates the base file whether or not MinIO is among the services the
     # AWS overlay leaves running. Nothing reads it here.
     MINIO_ROOT_PASSWORD = "unused-on-aws"
+
+    # Must match the host's code default (packages/control-plane, 5 min); set
+    # here so AWS operators can see the intent without reading the source.
+    SANDBOX_INACTIVITY_TIMEOUT_MS = "300000"
   }
 
   # `for_each` needs its keys known at plan time, and filtering on a value makes

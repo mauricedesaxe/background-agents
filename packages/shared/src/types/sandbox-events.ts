@@ -123,8 +123,12 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
   }),
   messageSandboxEventBaseSchema.extend({
     type: z.literal("provider_retry"),
-    /** 1-based count of consecutive provider rejections for this message. */
-    attempt: z.number().int().positive(),
+    /**
+     * Count of consecutive provider rejections for this message. New runtimes
+     * count from 1; pre-sync runtimes emit 0, so accept min(0) rather than
+     * dropping their retry events.
+     */
+    attempt: z.number().int().min(0),
     /** Epoch seconds of the provider's next attempt, when its payload carries one. */
     nextRetryAt: z.number().optional(),
   }),
