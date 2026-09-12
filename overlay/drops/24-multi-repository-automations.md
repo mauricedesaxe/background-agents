@@ -1,14 +1,14 @@
 ---
 id: 24-multi-repository-automations
 title: Automations can work across multiple repositories
-type: rebuild
+type: drop
 priority: high
 placement: upstream-code
 depends_on: []
 origin: fork; multi-repository maintenance automations
 ---
 
-## Requirement
+## Requirement (retired 2026-09-12 — decision by Alex)
 
 A repository-independent automation can target no repository, one repository, or up to ten
 repositories. When several repositories are selected, the user chooses how the automation works.
@@ -58,3 +58,16 @@ One **OPEN PRODUCT CALL** is recorded: for a multi-repository automation, is the
 "one shared workspace" choice the right model, or are upstream's environments the shared-workspace
 primitive? Decision owner: Alex, tracked in #328. Until that call lands, prefer upstream's native
 behavior and do not rebuild the fork's choice on top of it.
+
+## Disposition (2026-09-12 audit vs upstream 0e9ecf98; decision 2026-09-12)
+
+Retired, not rebuilt. Upstream ships multi-repository automations natively: repository selection
+with a ten-repository cap, one-session-per-repository fan-out, and firing-time snapshots of the
+selection. The shared-workspace behavior the card's second mode asked for is upstream's
+environments: repos grouped in an environment run as one session. The form expresses the choice as
+repositories versus environment rather than a toggle on one selection, and that is the accepted
+answer.
+
+Never restore fork migration 9009 — it collides with upstream's 0030 (both create
+automation_repositories). A requirements-first agent that sees value in a workspace-mode toggle
+should not re-introduce it; this is a decision, not an oversight (owner: Alex, mirror: #328).
