@@ -314,7 +314,7 @@ describe("SessionStatusService.archive cascade", () => {
     expect(h.parentFetch).not.toHaveBeenCalled();
   });
 
-  it("caps the awaited fan-out and logs the truncation", async () => {
+  it("cascades every child in batches until none remain", async () => {
     const h = harness({ session: createSession({ status: "active" }) });
     h.sessionIndex.listByParent.mockResolvedValue(
       Array.from({ length: 60 }, (_, i) => child(`child-${i}`, "active"))
@@ -322,10 +322,30 @@ describe("SessionStatusService.archive cascade", () => {
 
     expect(await h.service.transition("archived")).toBe(true);
 
-    expect(h.parentFetch).toHaveBeenCalledTimes(50);
+    expect(h.parentFetch).toHaveBeenCalledTimes(60);
+    expect(h.log.warn).not.toHaveBeenCalledWith(
+      "session.archive_cascade.children_truncated",
+      expect.anything()
+    );
+  });
+
+  it("caps the cascade at 500 children and logs the truncation", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+    h.sessionIndex.listByParent.mockResolvedValue(
+      Array.from({ length: 600 }, (_, i) => child(`child-${i}`, "active"))
+    );
+
+    expect(await h.service.transition("archived")).toBe(true);
+
+    expect(h.parentFetch).toHaveBeenCalledTimes(500);
     expect(h.log.warn).toHaveBeenCalledWith(
       "session.archive_cascade.children_truncated",
-      expect.objectContaining({ session_id: "public-session-1", children: 60, limit: 50 })
+      expect.objectContaining({
+        session_id: "public-session-1",
+        cascaded: 500,
+        remaining: 100,
+        limit: 500,
+      })
     );
   });
 

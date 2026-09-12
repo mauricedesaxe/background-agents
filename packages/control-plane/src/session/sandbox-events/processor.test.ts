@@ -57,6 +57,7 @@ function createProcessor(promptHoldOverride?: QueuedPromptHold) {
     clearMessageAwaitingStopConfirmation: vi.fn(),
     updateSandboxGitSyncStatus: vi.fn(),
     updateSessionCurrentSha: vi.fn(),
+    updateSessionAgentSessionId: vi.fn(),
   };
   const eventRepository = {
     upsertTokenEvent: vi.fn(),
@@ -415,6 +416,7 @@ describe("SessionSandboxEventProcessor", () => {
         timestamp: 1000,
       });
 
+      expect(h.repository.updateSessionAgentSessionId).toHaveBeenCalledWith("ses-other");
       expect(h.broadcast).toHaveBeenCalledWith({
         type: "sandbox_event",
         event: expect.objectContaining({
@@ -439,6 +441,7 @@ describe("SessionSandboxEventProcessor", () => {
       });
 
       expect(contextResetCalls(h)).toHaveLength(0);
+      expect(h.repository.updateSessionAgentSessionId).not.toHaveBeenCalled();
       expect(h.promptHold.holdQueuedPrompt).not.toHaveBeenCalled();
     });
 
@@ -452,6 +455,23 @@ describe("SessionSandboxEventProcessor", () => {
         timestamp: 1000,
       });
 
+      expect(contextResetCalls(h)).toHaveLength(0);
+      expect(h.promptHold.holdQueuedPrompt).not.toHaveBeenCalled();
+    });
+
+    it("records the vendor id a ready reports for a session that had none", async () => {
+      const h = createProcessor();
+      h.repository.getSession.mockReturnValue({ harness: "opencode", agent_session_id: null });
+
+      await h.processor.processSandboxEvent({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: "ses-first",
+        resumed: true,
+        timestamp: 1000,
+      });
+
+      expect(h.repository.updateSessionAgentSessionId).toHaveBeenCalledWith("ses-first");
       expect(contextResetCalls(h)).toHaveLength(0);
       expect(h.promptHold.holdQueuedPrompt).not.toHaveBeenCalled();
     });

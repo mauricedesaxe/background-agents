@@ -150,6 +150,18 @@ export class SessionCoreRepository {
     );
   }
 
+  /**
+   * Records the vendor conversation id the sandbox bridge reported on ready.
+   * Working state like current_sha: only the bridge learns it at runtime, and
+   * the context-recovery divergence check compares against this column.
+   */
+  updateSessionAgentSessionId(agentSessionId: string): void {
+    this.sql.exec(
+      `UPDATE session SET agent_session_id = ? WHERE id = (SELECT id FROM session LIMIT 1)`,
+      agentSessionId
+    );
+  }
+
   updateSessionTitle(sessionId: string, title: string, updatedAt: number): void {
     this.sql.exec(
       `UPDATE session SET title = ?, updated_at = ? WHERE id = ?`,

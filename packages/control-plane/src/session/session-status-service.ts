@@ -25,8 +25,11 @@ import { isSessionPromptable, isTurnSettled } from "@open-inspect/shared/types/s
 /** The failure reason recorded on prompts a transition to `archived` strands. */
 const ARCHIVED_PROMPT_FAILURE = "Session was archived";
 
-/** Hard cap on the awaited per-child archive fan-out. */
-const ARCHIVE_CASCADE_MAX_CHILDREN = 50;
+/** Hard cap on the total children one archive transition cascades. */
+const ARCHIVE_CASCADE_MAX_CHILDREN = 500;
+
+/** Children cascaded per awaited round; each round re-lists what is left. */
+const ARCHIVE_CASCADE_BATCH_SIZE = 50;
 
 /** How long one child's cascade fetch may hold the parent's transition open. */
 const ARCHIVE_CASCADE_CHILD_TIMEOUT_MS = 5_000;
@@ -149,52 +152,70 @@ export class SessionStatusService {
    * lands back here through its own transition, which is what reaches
    * grandchildren. Best-effort per child: an unreachable or never-created
    * child DO is logged and never fails the parent's archive. The awaited
-   * shape is kept — spawn depth is capped platform-wide — but each child is
-   * timed and the fan-out is capped, so one wedged child or one oversized
-   * family cannot hold the parent's transition open.
+   * shape is kept — spawn depth is capped platform-wide — and the listing
+   * loops in batches until no non-archived child remains, so an oversized
+   * family drains instead of starving past the first batch. Two hard stops
+   * bound the loop: the total-children cap below, and the attempted-id set
+   * that keeps a child which fails to archive (it stays listed) from being
+   * re-cascaded forever.
    */
   private async cascadeArchiveToChildren(parentId: string): Promise<void> {
-    let children: SessionEntry[];
-    try {
-      children = await this.sessionIndex.listByParent(parentId);
-    } catch (error) {
-      this.log.error("session.archive_cascade.list_children_failed", {
-        session_id: parentId,
-        error,
-      });
-      return;
-    }
-
-    const pending = children.filter((child) => child.status !== "archived");
-    const cascading = pending.slice(0, ARCHIVE_CASCADE_MAX_CHILDREN);
-    if (cascading.length < pending.length) {
-      this.log.warn("session.archive_cascade.children_truncated", {
-        session_id: parentId,
-        children: pending.length,
-        limit: ARCHIVE_CASCADE_MAX_CHILDREN,
-      });
-    }
-
-    const results = await Promise.allSettled(
-      cascading.map((child) => this.archiveCascadeChild(child.id))
-    );
-    results.forEach((result, index) => {
-      if (result.status === "rejected") {
-        this.log.error("session.archive_cascade.child_failed", {
-          session_id: cascading[index].id,
-          parent_id: parentId,
-          error: result.reason,
+    const attempted = new Set<string>();
+    let cascaded = 0;
+    for (;;) {
+      let children: SessionEntry[];
+      try {
+        children = await this.sessionIndex.listByParent(parentId);
+      } catch (error) {
+        this.log.error("session.archive_cascade.list_children_failed", {
+          session_id: parentId,
+          error,
         });
         return;
       }
-      if (!result.value.ok) {
-        this.log.warn("session.archive_cascade.child_rejected", {
-          session_id: cascading[index].id,
-          parent_id: parentId,
-          http_status: result.value.status,
+
+      const pending = children.filter(
+        (child) => child.status !== "archived" && !attempted.has(child.id)
+      );
+      if (pending.length === 0) return;
+      if (cascaded >= ARCHIVE_CASCADE_MAX_CHILDREN) {
+        this.log.warn("session.archive_cascade.children_truncated", {
+          session_id: parentId,
+          cascaded,
+          remaining: pending.length,
+          limit: ARCHIVE_CASCADE_MAX_CHILDREN,
         });
+        return;
       }
-    });
+
+      const batch = pending.slice(
+        0,
+        Math.min(ARCHIVE_CASCADE_BATCH_SIZE, ARCHIVE_CASCADE_MAX_CHILDREN - cascaded)
+      );
+      for (const child of batch) attempted.add(child.id);
+      cascaded += batch.length;
+
+      const results = await Promise.allSettled(
+        batch.map((child) => this.archiveCascadeChild(child.id))
+      );
+      results.forEach((result, index) => {
+        if (result.status === "rejected") {
+          this.log.error("session.archive_cascade.child_failed", {
+            session_id: batch[index].id,
+            parent_id: parentId,
+            error: result.reason,
+          });
+          return;
+        }
+        if (!result.value.ok) {
+          this.log.warn("session.archive_cascade.child_rejected", {
+            session_id: batch[index].id,
+            parent_id: parentId,
+            http_status: result.value.status,
+          });
+        }
+      });
+    }
   }
 
   /** Archive one child, giving up on it after `ARCHIVE_CASCADE_CHILD_TIMEOUT_MS`. */

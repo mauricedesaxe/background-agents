@@ -45,9 +45,14 @@ export function buildChildResultPrompt(childSessionId: string, detail: ChildSess
   return lines.join("\n");
 }
 
+/**
+ * Cuts by code point, not UTF-16 unit: a plain `slice` at the cap can split
+ * a surrogate pair and corrupt the last character.
+ */
 function truncateChildResponse(text: string): string {
   if (text.length <= MAX_CHILD_RESPONSE_CHARS) return text;
-  return `${text.slice(0, MAX_CHILD_RESPONSE_CHARS)}\n[truncated]`;
+  const truncated = Array.from(text).slice(0, MAX_CHILD_RESPONSE_CHARS).join("");
+  return `${truncated}\n[truncated]`;
 }
 
 /**
@@ -73,6 +78,27 @@ export interface ChildResultDeliveryDeps {
 }
 
 /**
+ * Whether a 409 from the prompt route is the terminal not-promptable drop.
+ * The route emits `SessionNotPromptableError` as a bare `{ error }` body
+ * ("Cannot prompt a <status> session"); its other 409s (budget exhausted,
+ * request conflict) carry a `code`. Only the bare shape advances the edge —
+ * an exhausted budget or an unknown body leaves it armed so the next status
+ * replay retries.
+ */
+async function isTerminalNotPromptableDrop(response: Response): Promise<boolean> {
+  try {
+    const body = (await response.json()) as { error?: unknown; code?: unknown };
+    return (
+      body.code === undefined &&
+      typeof body.error === "string" &&
+      body.error.includes("Cannot prompt a")
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Delivers a settled child's result into this (parent) session's prompt
  * queue. Edge-triggered: `shouldDeliverFor` compares against each child's
  * last-seen status and fires only on a transition INTO a settled status, so
@@ -80,13 +106,16 @@ export interface ChildResultDeliveryDeps {
  * same-status replays from the archive cascade never double-fire.
  *
  * The last-seen status is persisted only after the enqueue attempt settles:
- * success and the quiet 409 drop advance the edge, but a failed enqueue or a
- * crash mid-delivery leaves it armed, so the next status replay retries the
+ * success and the terminal 409 drop advance the edge, but a failed enqueue,
+ * a recoverable 409 (budget exhausted, request conflict), or a crash
+ * mid-delivery leaves it armed, so the next status replay retries the
  * delivery instead of losing the result.
  *
  * The enqueue rides this session's own prompt route, whose handler maps
  * `SessionNotPromptableError` to 409; a parent archived or cancelled
  * mid-flight (typically by the archive cascade) therefore drops quietly.
+ * The same route maps budget exhaustion to 409 too, so the body is
+ * inspected: only the not-promptable shape is terminal.
  */
 export class ChildResultDelivery {
   constructor(private readonly deps: ChildResultDeliveryDeps) {}
@@ -151,7 +180,14 @@ export class ChildResultDelivery {
     try {
       const response = await this.deps.enqueueAgentPrompt(request);
       if (response.status === 409) {
-        this.markLastSeenStatus(childSessionId, status);
+        if (await isTerminalNotPromptableDrop(response)) {
+          this.markLastSeenStatus(childSessionId, status);
+          return;
+        }
+        this.deps.log.warn("child_result.enqueue_recoverable_409", {
+          child_id: childSessionId,
+          status,
+        });
         return;
       }
       if (!response.ok) {

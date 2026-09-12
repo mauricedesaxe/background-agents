@@ -104,6 +104,15 @@ export class SandboxRuntimeEventHandler {
   }
 
   /**
+   * Records the vendor conversation id the bridge reported, then decides
+   * whether this sandbox is running a different conversation than the
+   * session's timeline shows. The write keeps the session row's id live:
+   * the bridge's copy only survives inside its own sandbox, and a later
+   * ready must compare against what is actually persisted now, not what a
+   * spawn payload seeded. A reported id is only persisted when it differs —
+   * a null report means the bridge started nothing, which is exactly the
+   * divergence the check below holds on, so clearing the row would hide it.
+   *
    * A replacement sandbox that did not resume the session's vendor
    * conversation would silently run its next prompt on an empty context
    * while the timeline still shows every prior turn. Surface the reset and
@@ -114,9 +123,12 @@ export class SandboxRuntimeEventHandler {
     context: SandboxEventContext
   ): Promise<void> {
     const persistedSessionId = this.repository.getSession()?.agent_session_id ?? null;
+    const reportedSessionId = event.opencodeSessionId ?? null;
+    if (reportedSessionId && reportedSessionId !== persistedSessionId) {
+      this.repository.updateSessionAgentSessionId(reportedSessionId);
+    }
     if (!persistedSessionId) return;
 
-    const reportedSessionId = event.opencodeSessionId ?? null;
     const reason =
       event.resumed !== true
         ? ("fresh_session" as const)

@@ -580,6 +580,66 @@ describe("POST /internal/sandbox-event", () => {
     expect(rows[0].context_reset_hold).toBe(0);
   });
 
+  it("persists the vendor id a ready reports, and a later divergent ready holds through it", async () => {
+    const { stub } = await initSession();
+
+    const first = await stub.fetch("http://internal/internal/sandbox-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: "ses-live-1",
+        resumed: true,
+        timestamp: Date.now() / 1000,
+      }),
+    });
+    expect(first.status).toBe(200);
+
+    const stored = await queryDO<{ agent_session_id: string | null }>(
+      stub,
+      "SELECT agent_session_id FROM session LIMIT 1"
+    );
+    expect(stored[0].agent_session_id).toBe("ses-live-1");
+
+    const participants = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    await seedMessage(stub, {
+      id: "msg-held-by-write",
+      authorId: participants[0].id,
+      content: "Next turn",
+      source: "web",
+      status: "pending",
+      createdAt: Date.now(),
+    });
+
+    const divergent = await stub.fetch("http://internal/internal/sandbox-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: null,
+        timestamp: Date.now() / 1000,
+      }),
+    });
+    expect(divergent.status).toBe(200);
+
+    const rows = await queryDO<{ context_reset_hold: number; status: string }>(
+      stub,
+      "SELECT context_reset_hold, status FROM messages WHERE id = 'msg-held-by-write'"
+    );
+    expect(rows[0]).toEqual({ context_reset_hold: 1, status: "pending" });
+
+    const resets = await queryDO<{ data: string }>(
+      stub,
+      "SELECT data FROM events WHERE type = 'context_reset'"
+    );
+    expect(JSON.parse(resets[0].data)).toMatchObject({ reason: "fresh_session" });
+  });
+
   it("holds a prompt enqueued after the reset until acknowledge", async () => {
     const { stub } = await initSession();
     await queryDO(stub, `UPDATE session SET agent_session_id = 'ses-stored'`);

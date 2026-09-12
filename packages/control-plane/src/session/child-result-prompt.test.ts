@@ -87,6 +87,28 @@ describe("buildChildResultPrompt", () => {
     expect(prompt).not.toContain("THE END");
   });
 
+  it("keeps a surrogate pair intact when an emoji lands on the truncation boundary", () => {
+    const text = "x".repeat(7999) + "🎉" + "y".repeat(10);
+    const detail = createDetail({
+      finalResponse: {
+        textContent: text,
+        toolCalls: [],
+        artifacts: [],
+        mediaArtifacts: [],
+        success: true,
+        messageId: "msg-1",
+        completedAt: 200,
+        eventCount: 2,
+        eventLimitReached: false,
+      },
+    });
+
+    const prompt = buildChildResultPrompt("child-1", detail);
+
+    expect(prompt).toContain("🎉\n[truncated]");
+    expect(prompt).not.toContain("yyyy");
+  });
+
   it("carries the error cause for a failed child inside the child frame", () => {
     const detail = createDetail({
       session: { ...createDetail().session, status: "failed" },
@@ -239,11 +261,11 @@ describe("ChildResultDelivery", () => {
     expect(delivery.shouldDeliverFor("child-1", settled)).toBe(false);
   });
 
-  it("advances the last-seen status on the quiet 409 drop", async () => {
+  it("advances the last-seen status on the terminal not-promptable 409 drop", async () => {
     const sql = inMemorySql();
     const deps = createDeliveryDeps(sql);
     deps.enqueueAgentPrompt.mockResolvedValueOnce(
-      Response.json({ error: "not promptable" }, { status: 409 })
+      Response.json({ error: "Cannot prompt a archived session" }, { status: 409 })
     );
     const delivery = new ChildResultDelivery(deps);
 
@@ -252,6 +274,32 @@ describe("ChildResultDelivery", () => {
 
     expect(sql.rows.get("child-1")?.last_seen_status).toBe("completed");
     expect(delivery.shouldDeliverFor("child-1", settled)).toBe(false);
+  });
+
+  it("leaves the edge armed when a budget-exhausted 409 rejects the parent", async () => {
+    const sql = inMemorySql();
+    const deps = createDeliveryDeps(sql);
+    deps.enqueueAgentPrompt.mockResolvedValueOnce(
+      Response.json(
+        {
+          error:
+            "Session cost limit reached. The session owner must raise or remove the limit to continue.",
+          code: "BUDGET_EXHAUSTED",
+        },
+        { status: 409 }
+      )
+    );
+    const delivery = new ChildResultDelivery(deps);
+
+    expect(delivery.shouldDeliverFor("child-1", settled)).toBe(true);
+    await delivery.deliver("child-1", settled);
+
+    expect(sql.rows.get("child-1")).toBeUndefined();
+    expect(delivery.shouldDeliverFor("child-1", settled)).toBe(true);
+    expect(deps.log.warn).toHaveBeenCalledWith(
+      "child_result.enqueue_recoverable_409",
+      expect.objectContaining({ child_id: "child-1", status: "completed" })
+    );
   });
 
   it("records the status immediately when delivery is suppressed", () => {
