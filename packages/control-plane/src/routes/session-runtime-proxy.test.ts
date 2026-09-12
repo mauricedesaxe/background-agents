@@ -163,6 +163,11 @@ describe("session runtime proxy routes", () => {
     },
     { method: "POST", path: "/sessions/session-1/archive", internal: "archive" },
     { method: "POST", path: "/sessions/session-1/unarchive", internal: "unarchive" },
+    {
+      method: "POST",
+      path: "/sessions/session-1/acknowledge-context-reset",
+      internal: "acknowledgeContextReset",
+    },
   ] as const)(
     "routes $method $path to the runtime's $internal path",
     async ({ method, path, internal, ...options }) => {

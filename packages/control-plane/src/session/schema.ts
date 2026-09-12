@@ -84,6 +84,8 @@ CREATE TABLE IF NOT EXISTS session (
   max_cost_usd REAL,                                -- Mutable effective session cost limit; NULL = unlimited
   budget_exhausted INTEGER NOT NULL DEFAULT 0,      -- Pauses prompt admission and dispatch
   environment_id TEXT,                              -- Launch environment provenance; NULL for repo-launched/ad-hoc sessions
+  context_reset_pending INTEGER NOT NULL DEFAULT 0, -- Blocks dispatch of EVERY prompt until the reset is acknowledged
+  context_reset_hold_deadline INTEGER,              -- When the pending context reset auto-releases
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   CHECK (
@@ -693,6 +695,17 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
     id: 51,
     description: "Add context-reset prompt hold to messages",
     run: `ALTER TABLE messages ADD COLUMN context_reset_hold INTEGER NOT NULL DEFAULT 0`,
+  },
+  {
+    id: 52,
+    description: "Add session-level context-reset pending flag and auto-release deadline",
+    run: (sql) => {
+      runMigration(
+        sql,
+        `ALTER TABLE session ADD COLUMN context_reset_pending INTEGER NOT NULL DEFAULT 0`
+      );
+      runMigration(sql, `ALTER TABLE session ADD COLUMN context_reset_hold_deadline INTEGER`);
+    },
   },
 ];
 

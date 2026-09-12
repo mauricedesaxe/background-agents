@@ -395,6 +395,12 @@ export class SessionMessageQueue {
       });
       return;
     }
+    if (this.messageRepository.isContextResetPending()) {
+      this.log.debug("processMessageQueue: prompt held by pending context reset", {
+        message_id: message.id,
+      });
+      return;
+    }
     const now = Date.now();
     const session = this.repository.getSession();
     const resolvedModel = getValidModelOrDefault(message.model || session?.model);

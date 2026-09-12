@@ -489,7 +489,10 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
   const updateLastActivity = (timestamp: number) => lifecycleManager.updateLastActivity(timestamp);
   const promptHold = new ContextResetPromptHold(
     messageRepository,
+    eventRepository,
     () => messageQueue.processMessageQueue(),
+    (event) => messenger.broadcast({ type: "sandbox_event", event }),
+    alarmScheduler,
     log
   );
   const streamingEventHandler = new SandboxStreamingEventHandler(
@@ -555,6 +558,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     lifecycleManager,
     terminalMessageProjection,
     alarmScheduler,
+    contextResetHold: promptHold,
     getExecutionTimeoutMs,
     now: () => Date.now(),
     log,

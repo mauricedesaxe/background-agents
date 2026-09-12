@@ -1188,6 +1188,28 @@ describe("Scheduler", () => {
       );
     });
 
+    it("disables an overlap-blocked once automation when the guarded insert loses the race", async () => {
+      const onceAutomation = {
+        ...sampleAutomation,
+        trigger_type: "once",
+        schedule_cron: null,
+      };
+      mockStore.getOverdueAutomations.mockResolvedValue([onceAutomation]);
+      selectRepositories("auto-1", [repositoryRow("auto-1")]);
+      mockStore.insertInvocationGuarded.mockResolvedValue({ inserted: false });
+
+      const scheduler = createScheduler();
+      const result = await scheduler.tick();
+
+      expect(result.skipped).toBe(1);
+
+      expect(mockStore.insertSkippedInvocation).toHaveBeenCalledWith(
+        expect.objectContaining({ skip_reason: "concurrent_run_active" }),
+        undefined,
+        onceAutomation.next_run_at
+      );
+    });
+
     it("re-advances the schedule and stands down on a cron double-fire", async () => {
       mockStore.getOverdueAutomations.mockResolvedValue([sampleAutomation]);
       selectRepositories("auto-1", [repositoryRow("auto-1")]);

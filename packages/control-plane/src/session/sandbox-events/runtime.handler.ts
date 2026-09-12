@@ -15,8 +15,8 @@ import { persistSandboxEvent, type SandboxEventContext } from "./context";
  * acknowledge route that releases it.
  */
 export interface QueuedPromptHold {
-  holdQueuedPrompt(): void;
-  releaseQueuedPromptHold(): void;
+  holdQueuedPrompt(): Promise<void>;
+  releaseQueuedPromptHold(): Promise<{ released: number; acknowledged: boolean }>;
 }
 
 /**
@@ -59,7 +59,10 @@ export class SandboxRuntimeEventHandler {
     this.applySessionTitleUpdate(event.title, { onlyIfUnset: true });
   }
 
-  handleReady(event: Extract<SandboxEvent, { type: "ready" }>, context: SandboxEventContext): void {
+  async handleReady(
+    event: Extract<SandboxEvent, { type: "ready" }>,
+    context: SandboxEventContext
+  ): Promise<void> {
     // The runtime reports which harness actually booted; the session's
     // harness is fixed at create, so a mismatch is an image/config drift
     // worth a log line, never something to reconcile silently.
@@ -106,10 +109,10 @@ export class SandboxRuntimeEventHandler {
    * while the timeline still shows every prior turn. Surface the reset and
    * hold the queued prompt until the user acknowledges it.
    */
-  private handleContextRecovery(
+  private async handleContextRecovery(
     event: Extract<SandboxEvent, { type: "ready" }>,
     context: SandboxEventContext
-  ): void {
+  ): Promise<void> {
     const persistedSessionId = this.repository.getSession()?.agent_session_id ?? null;
     if (!persistedSessionId) return;
 
@@ -136,6 +139,6 @@ export class SandboxRuntimeEventHandler {
       persisted_session_id: persistedSessionId,
       reported_session_id: reportedSessionId,
     });
-    this.promptHold.holdQueuedPrompt();
+    await this.promptHold.holdQueuedPrompt();
   }
 }

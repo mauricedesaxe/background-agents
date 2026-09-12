@@ -60,6 +60,8 @@ export interface SessionRow {
   max_cost_usd: number | null; // Mutable effective session cost limit; NULL = unlimited
   budget_exhausted: number; // 0 = promptable by budget, 1 = paused
   environment_id: string | null; // Launch environment provenance; NULL for repo-launched/ad-hoc sessions
+  context_reset_pending: number;
+  context_reset_hold_deadline: number | null;
   created_at: number;
   updated_at: number;
 }

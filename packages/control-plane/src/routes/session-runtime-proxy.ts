@@ -437,6 +437,15 @@ sessionRuntimeProxyRoutes.post("/sessions/:id/archive", LIFECYCLE, (c) =>
 sessionRuntimeProxyRoutes.post("/sessions/:id/unarchive", LIFECYCLE, (c) =>
   dispatchSession(c, lifecycleProxy(SessionInternalPaths.unarchive))
 );
+sessionRuntimeProxyRoutes.post("/sessions/:id/acknowledge-context-reset", LIFECYCLE, (c) =>
+  dispatchSession(
+    c,
+    simpleProxy({
+      internalPath: SessionInternalPaths.acknowledgeContextReset,
+      runtimeMethod: "POST",
+    })
+  )
+);
 sessionRuntimeProxyRoutes.patch(
   "/sessions/:id/budget",
   admit({

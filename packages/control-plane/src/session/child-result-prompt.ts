@@ -53,11 +53,15 @@ export interface ChildResultDeliveryDeps {
 
 /**
  * Delivers a settled child's result into this (parent) session's prompt
- * queue. Edge-triggered: `shouldDeliverFor` persists each child's last-seen
- * status and fires only on a transition INTO a settled status, so repeated
- * settled updates (title changes re-send the settled status) and same-status
- * replays from the archive cascade never double-fire. Every caller goes
- * through `shouldDeliverFor`, which is what makes the replay safe.
+ * queue. Edge-triggered: `shouldDeliverFor` compares against each child's
+ * last-seen status and fires only on a transition INTO a settled status, so
+ * repeated settled updates (title changes re-send the settled status) and
+ * same-status replays from the archive cascade never double-fire.
+ *
+ * The last-seen status is persisted only after the enqueue attempt settles:
+ * success and the quiet 409 drop advance the edge, but a failed enqueue or a
+ * crash mid-delivery leaves it armed, so the next status replay retries the
+ * delivery instead of losing the result.
  *
  * The enqueue rides this session's own prompt route, whose handler maps
  * `SessionNotPromptableError` to 409; a parent archived or cancelled
@@ -67,9 +71,10 @@ export class ChildResultDelivery {
   constructor(private readonly deps: ChildResultDeliveryDeps) {}
 
   /**
-   * Record `status` as the child's last-seen status and answer whether this
-   * update should deliver the child's result. `deliverResult: false`
-   * suppresses delivery while still recording the status.
+   * Answer whether this update should deliver the child's result, without
+   * persisting anything when the answer is yes — the caller persists via
+   * `markLastSeenStatus` only after `deliver` settles. `deliverResult: false`
+   * suppresses delivery while still recording the status immediately.
    */
   shouldDeliverFor(
     childSessionId: string,
@@ -78,17 +83,10 @@ export class ChildResultDelivery {
   ): boolean {
     this.deps.sql.exec(CHILD_DELIVERY_STATE_TABLE_SQL);
     const previous = readLastSeenStatus(this.deps.sql, childSessionId);
-    this.deps.sql.exec(
-      `INSERT INTO child_delivery_state (child_session_id, last_seen_status, updated_at)
-       VALUES (?, ?, ?)
-       ON CONFLICT (child_session_id) DO UPDATE SET
-         last_seen_status = excluded.last_seen_status,
-         updated_at = excluded.updated_at`,
-      childSessionId,
-      status,
-      Date.now()
-    );
-    if (deliverResult === false) return false;
+    if (deliverResult === false) {
+      this.markLastSeenStatus(childSessionId, status);
+      return false;
+    }
     return previous !== status && isTurnSettled(status);
   }
 
@@ -96,7 +94,7 @@ export class ChildResultDelivery {
    * Fetch the settled child's summary (final response included), build the
    * parent prompt, and enqueue it as an agent-sourced prompt.
    */
-  async deliver(childSessionId: string): Promise<void> {
+  async deliver(childSessionId: string, status: SessionStatus): Promise<void> {
     const authorId = this.deps.resolveAuthorUserId();
     if (!authorId) {
       this.deps.log.warn("child_result.no_author", { child_id: childSessionId });
@@ -130,7 +128,10 @@ export class ChildResultDelivery {
     });
     try {
       const response = await this.deps.enqueueAgentPrompt(request);
-      if (response.status === 409) return;
+      if (response.status === 409) {
+        this.markLastSeenStatus(childSessionId, status);
+        return;
+      }
       if (!response.ok) {
         this.deps.log.warn("child_result.enqueue_failed", {
           child_id: childSessionId,
@@ -138,6 +139,7 @@ export class ChildResultDelivery {
         });
         return;
       }
+      this.markLastSeenStatus(childSessionId, status);
       this.deps.log.info("child_result.delivered", { child_id: childSessionId });
     } catch (error) {
       this.deps.log.error("child_result.enqueue_error", {
@@ -145,6 +147,19 @@ export class ChildResultDelivery {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  private markLastSeenStatus(childSessionId: string, status: SessionStatus): void {
+    this.deps.sql.exec(
+      `INSERT INTO child_delivery_state (child_session_id, last_seen_status, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT (child_session_id) DO UPDATE SET
+         last_seen_status = excluded.last_seen_status,
+         updated_at = excluded.updated_at`,
+      childSessionId,
+      status,
+      Date.now()
+    );
   }
 }
 

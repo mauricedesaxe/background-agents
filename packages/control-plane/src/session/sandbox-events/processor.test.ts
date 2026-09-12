@@ -20,6 +20,7 @@ import type { MessageRepository } from "../message-repository";
 import type { SessionStatusService } from "../session-status-service";
 import type { SessionWebSocketManager } from "../websocket-manager";
 import type { SessionBudgetService } from "../budget-service";
+import type { AlarmScheduler } from "../../platform-ports";
 import type { Logger } from "../../logger";
 
 function createPushSpec(repoOwner: string, repoName: string, targetBranch: string): GitPushSpec {
@@ -317,6 +318,7 @@ describe("SessionSandboxEventProcessor", () => {
      */
     function createHoldHarness() {
       const messages = [{ id: "msg-queued", status: "pending" as const, context_reset_hold: 0 }];
+      let resetPending: number | null = null;
       const messageRepository = {
         holdPendingMessages(): number {
           let written = 0;
@@ -338,6 +340,18 @@ describe("SessionSandboxEventProcessor", () => {
           }
           return written;
         },
+        setContextResetPending(deadline: number): void {
+          resetPending = deadline;
+        },
+        clearContextResetPending(): void {
+          resetPending = null;
+        },
+        isContextResetPending(): boolean {
+          return resetPending !== null;
+        },
+        getContextResetHoldDeadline(): number | null {
+          return resetPending;
+        },
       };
       const drainQueue = vi.fn(async () => {});
       const log = {
@@ -349,7 +363,12 @@ describe("SessionSandboxEventProcessor", () => {
       } as unknown as Logger;
       const hold = new ContextResetPromptHold(
         messageRepository as unknown as MessageRepository,
+        {
+          createEvent: vi.fn(),
+        } as unknown as EventRepository,
         drainQueue,
+        vi.fn(),
+        { schedule: vi.fn(async () => {}) } as unknown as AlarmScheduler,
         log
       );
       return { hold, messages, drainQueue };

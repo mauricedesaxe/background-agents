@@ -577,4 +577,107 @@ describe("POST /internal/sandbox-event", () => {
     );
     expect(rows[0].context_reset_hold).toBe(0);
   });
+
+  it("holds a prompt enqueued after the reset until acknowledge", async () => {
+    const { stub } = await initSession();
+    await queryDO(stub, `UPDATE session SET agent_session_id = 'ses-stored'`);
+
+    const ready = await stub.fetch("http://internal/internal/sandbox-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: null,
+        timestamp: Date.now() / 1000,
+      }),
+    });
+    expect(ready.status).toBe(200);
+
+    const prompt = await stub.fetch("http://internal/internal/prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "After the reset", authorId: "user-1", source: "web" }),
+    });
+    expect(prompt.status).toBe(200);
+
+    const queued = await queryDO<{ status: string }>(
+      stub,
+      "SELECT status FROM messages WHERE content = 'After the reset'"
+    );
+    expect(queued[0].status).toBe("pending");
+    const flagged = await queryDO<{ context_reset_pending: number }>(
+      stub,
+      "SELECT context_reset_pending FROM session LIMIT 1"
+    );
+    expect(flagged[0].context_reset_pending).toBe(1);
+
+    const acknowledge = await stub.fetch("http://internal/internal/acknowledge-context-reset", {
+      method: "POST",
+    });
+    expect(acknowledge.status).toBe(200);
+
+    const flaggedAfter = await queryDO<{ context_reset_pending: number }>(
+      stub,
+      "SELECT context_reset_pending FROM session LIMIT 1"
+    );
+    expect(flaggedAfter[0].context_reset_pending).toBe(0);
+  });
+
+  it("auto-releases the context-reset hold when its deadline passes", async () => {
+    const { stub } = await initSession();
+    await queryDO(stub, `UPDATE session SET agent_session_id = 'ses-stored'`);
+
+    const participants = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    await seedMessage(stub, {
+      id: "msg-auto-release",
+      authorId: participants[0].id,
+      content: "Stuck behind the reset",
+      source: "web",
+      status: "pending",
+      createdAt: Date.now(),
+    });
+
+    const ready = await stub.fetch("http://internal/internal/sandbox-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: null,
+        timestamp: Date.now() / 1000,
+      }),
+    });
+    expect(ready.status).toBe(200);
+
+    const held = await queryDO<{
+      context_reset_pending: number;
+      context_reset_hold_deadline: number | null;
+    }>(stub, "SELECT context_reset_pending, context_reset_hold_deadline FROM session LIMIT 1");
+    expect(held[0].context_reset_pending).toBe(1);
+    expect(held[0].context_reset_hold_deadline).toEqual(expect.any(Number));
+
+    await queryDO(stub, `UPDATE session SET context_reset_hold_deadline = ?`, Date.now() - 1000);
+    await runInSessionDO(stub, (instance: SessionDO) => instance.alarm());
+
+    const released = await queryDO<{
+      context_reset_pending: number;
+      context_reset_hold_deadline: number | null;
+    }>(stub, "SELECT context_reset_pending, context_reset_hold_deadline FROM session LIMIT 1");
+    expect(released[0]).toEqual({ context_reset_pending: 0, context_reset_hold_deadline: null });
+
+    const warnings = await queryDO<{ data: string }>(
+      stub,
+      "SELECT data FROM events WHERE type = 'warning' ORDER BY created_at DESC LIMIT 1"
+    );
+    expect(JSON.parse(warnings[0].data)).toMatchObject({ scope: "context" });
+
+    const acknowledge = await stub.fetch("http://internal/internal/acknowledge-context-reset", {
+      method: "POST",
+    });
+    expect(acknowledge.status).toBe(409);
+  });
 });

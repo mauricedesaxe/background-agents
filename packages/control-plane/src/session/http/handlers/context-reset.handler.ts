@@ -10,8 +10,8 @@ export class ContextResetHandler {
   constructor(private readonly promptHold: ContextResetPromptHold) {}
 
   async acknowledgeContextReset(): Promise<Response> {
-    const { released } = await this.promptHold.releaseQueuedPromptHold();
-    if (released === 0) {
+    const { released, acknowledged } = await this.promptHold.releaseQueuedPromptHold();
+    if (!acknowledged) {
       return Response.json({ error: "No context-reset hold to acknowledge" }, { status: 409 });
     }
     return Response.json({ status: "released", released });

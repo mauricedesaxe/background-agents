@@ -37,6 +37,8 @@ import {
 import type { Artifact, SandboxEvent } from "@/types/session";
 import type { SessionParticipantProfile } from "@open-inspect/shared/types/sessions";
 import { CheckIcon, CopyIcon, ErrorIcon } from "@/components/ui/icons";
+import { Button } from "@/components/ui/button";
+import { acknowledgeContextReset } from "@/lib/acknowledge-context-reset";
 import { resolveParticipantDisplay } from "@/lib/participant-display";
 import type { PromptQueueItem } from "@open-inspect/shared/types/server-messages";
 
@@ -634,13 +636,42 @@ function ProviderRetryEvent({ event }: EventRendererProps) {
   );
 }
 
-function ContextResetEvent({ event }: EventRendererProps) {
-  if (event.type !== "context_reset") return null;
+function ContextResetEvent({ event, sessionId }: EventRendererProps) {
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [acknowledging, setAcknowledging] = useState(false);
+  const isContextReset = event.type === "context_reset";
+  const handleAcknowledge = useCallback(async () => {
+    setAcknowledging(true);
+    const released = await acknowledgeContextReset(sessionId);
+    setAcknowledging(false);
+    if (released) setAcknowledged(true);
+  }, [sessionId]);
+  if (!isContextReset) return null;
 
   return (
     <StatusRow tone="warning" time={formatEventTime(event)}>
-      This sandbox starts a fresh context — earlier conversation history is shown but the agent no
-      longer has it. Acknowledge to dispatch the queued prompt.
+      <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+        <span>
+          This sandbox starts a fresh context — earlier conversation history is shown but the agent
+          no longer has it. Acknowledge to dispatch the queued prompt.
+        </span>
+        {acknowledged ? (
+          <span className="shrink-0 text-xs font-medium">Acknowledged</span>
+        ) : (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            disabled={acknowledging}
+            onClick={() => {
+              void handleAcknowledge();
+            }}
+          >
+            {acknowledging ? "Acknowledging…" : "Acknowledge"}
+          </Button>
+        )}
+      </span>
     </StatusRow>
   );
 }

@@ -83,6 +83,8 @@ class _PromptState:
     pending_overflow_error: str | None = None
     provider_retry_count: int = 0
     provider_retry_cap_reached: bool = False
+    # Why: a stream that ends right after a rejection never reaches idle.
+    last_provider_rejection: str | None = None
 
     def __post_init__(self) -> None:
         self.attribution = MessageAttribution(
@@ -249,6 +251,22 @@ class OpenCodePromptStream:
                 for event in self._flush_unassociated_child_activity(state):
                     yield event
 
+                uncapped_rejection = (
+                    state.last_provider_rejection if not state.provider_retry_cap_reached else None
+                )
+                if uncapped_rejection is not None:
+                    self._log.error(
+                        "bridge.provider_rejection_ended_stream",
+                        error_msg=uncapped_rejection,
+                        message_id=message_id,
+                    )
+                    yield {
+                        "type": "error",
+                        "error": uncapped_rejection,
+                        "messageId": message_id,
+                    }
+                    return
+
         except _PromptMaxDurationTimeout:
             elapsed = time.time() - state.start_time
             self._log.error(
@@ -296,6 +314,10 @@ class OpenCodePromptStream:
             await self._client.request_stop(opencode_session_id, reason="inactivity_timeout")
             async for final_event in self._fetch_final_message_state(state):
                 yield final_event
+            if state.last_provider_rejection is not None and not state.provider_retry_cap_reached:
+                raise RuntimeError(
+                    f"Provider request kept failing: {state.last_provider_rejection}"
+                ) from None
             raise RuntimeError(
                 f"SSE stream inactive for {self._sse_inactivity_timeout_seconds:.0f}s "
                 f"(no data received). Total elapsed: {elapsed:.0f}s"
@@ -681,6 +703,9 @@ class OpenCodePromptStream:
         makes the stream loop ask OpenCode to stop.
         """
         state.provider_retry_count += 1
+        state.last_provider_rejection = (
+            self._extract_error_message(error) or "provider request rejected"
+        )
         event: dict[str, Any] = {
             "type": "provider_retry",
             "attempt": state.provider_retry_count,

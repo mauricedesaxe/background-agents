@@ -1228,6 +1228,77 @@ class TestProviderRetryCapStream:
         )
 
 
+class TestUncappedRejectionStreamEnd:
+    @staticmethod
+    async def _collect(stream: OpenCodePromptStream, sse_iterator) -> list[dict]:
+        client = MagicMock()
+        client.events = MagicMock()
+        client.events.return_value = AsyncNullContext(sse_iterator)
+        client.post_prompt = AsyncMock()
+        client.request_stop = AsyncMock()
+        client.get_messages = AsyncMock(return_value=[])
+        stream._client = client
+
+        collected = []
+        async for event in stream.stream_prompt(
+            opencode_session_id=PARENT_SESSION_ID,
+            message_id="cp-msg-1",
+            content="hello",
+        ):
+            collected.append(event)
+        return collected
+
+    async def test_stream_ending_after_uncapped_rejection_fails_with_provider_message(self):
+        async def sse_events():
+            yield sse(
+                "session.error",
+                {"sessionID": PARENT_SESSION_ID, "error": provider_rejection_error()},
+            )
+
+        stream = make_stream()
+        collected = await self._collect(stream, sse_events())
+
+        terminal = [event for event in collected if event.get("type") == "error"]
+        assert terminal == [
+            {
+                "type": "error",
+                "error": "429 rate limit exceeded",
+                "messageId": "cp-msg-1",
+            }
+        ]
+        stream._client.request_stop.assert_not_awaited()
+
+    async def test_idle_after_rejection_still_completes_successfully(self):
+        async def sse_events():
+            yield sse(
+                "session.error",
+                {"sessionID": PARENT_SESSION_ID, "error": provider_rejection_error()},
+            )
+            yield sse("session.idle", {"sessionID": PARENT_SESSION_ID})
+            await asyncio.Future()
+
+        stream = make_stream()
+        collected = await self._collect(stream, sse_events())
+
+        terminal = [event for event in collected if event.get("type") == "error"]
+        assert terminal == []
+
+    async def test_inactivity_timeout_after_rejection_carries_provider_cause(self):
+        from sandbox_runtime.harness.opencode_client import SSEInactivityTimeoutError
+
+        async def sse_events():
+            yield sse(
+                "session.error",
+                {"sessionID": PARENT_SESSION_ID, "error": provider_rejection_error()},
+            )
+            raise SSEInactivityTimeoutError("no data for 120s")
+
+        stream = make_stream()
+
+        with pytest.raises(RuntimeError, match="429 rate limit exceeded"):
+            await self._collect(stream, sse_events())
+
+
 class AsyncNullContext:
     def __init__(self, iterator) -> None:
         self.iterator = iterator

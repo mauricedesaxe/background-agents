@@ -107,7 +107,8 @@ export class SessionDO extends DurableObject<WorkerBindings> {
       return;
     }
     const childSessionId = update.childSessionId;
-    tasks.submit(() => delivery.deliver(childSessionId), {
+    const { status } = update;
+    tasks.submit(() => delivery.deliver(childSessionId, status), {
       name: "child_result.deliver",
       context: { child_session_id: childSessionId },
     });

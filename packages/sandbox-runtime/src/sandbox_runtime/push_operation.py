@@ -14,6 +14,8 @@ GIT_PUSH_TIMEOUT_SECONDS = 300.0
 GIT_PUSH_TERMINATE_GRACE_SECONDS = 5.0
 JJ_COMMAND_TIMEOUT_SECONDS = 60.0
 
+JJ_LOCK_ERROR_PATTERN = re.compile(r"lock", re.IGNORECASE)
+
 
 @dataclass(frozen=True)
 class PushRequest:
@@ -224,8 +226,23 @@ class PushOperation:
                 branch_name=branch_name,
                 stderr=stderr_text,
             )
+            if self._is_jj_lock_conflict(stderr_text):
+                raise PushRejected(
+                    "Push failed - jj workspace is locked by a concurrent jj process; "
+                    "not falling back to the raw refspec to avoid publishing stale state"
+                )
             return False
         return True
+
+    @staticmethod
+    def _is_jj_lock_conflict(stderr_text: str) -> bool:
+        """Whether a failed jj command lost its lock to a concurrent jj process.
+
+        Why: the refspec fallback would publish whatever HEAD points at in a
+        checkout another jj process is mid-write on, silently publishing stale
+        state. A missing binary is the only failure that still falls back.
+        """
+        return bool(JJ_LOCK_ERROR_PATTERN.search(stderr_text))
 
     def _member_checkout(self, request: PushRequest) -> Path:
         # Only canonical manifest paths select checkouts, never spec-supplied paths.

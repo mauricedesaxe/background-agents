@@ -71,7 +71,7 @@ export class SessionSandboxEventProcessor {
         this.runtime.handleSessionTitle(event);
         return;
       case "ready":
-        this.runtime.handleReady(event, context);
+        await this.runtime.handleReady(event, context);
         return;
       case "git_sync":
         this.runtime.handleGitSync(event, context);

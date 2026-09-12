@@ -280,6 +280,70 @@ describe("context reset", () => {
 
     expect(screen.getByText(/This sandbox starts a fresh context/)).toBeInTheDocument();
   });
+
+  it("acknowledges the reset and marks the row when the release succeeds", async () => {
+    const fetchMock = vi.fn(
+      async () => new Response(JSON.stringify({ status: "released" }), { status: 200 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <EventItem
+        event={{
+          type: "context_reset",
+          reason: "fresh_session",
+          agentSessionId: null,
+          sandboxId: "sandbox-1",
+          timestamp: 1_789_168_900,
+        }}
+        sessionId="session-1"
+        currentParticipantId={null}
+        participantProfiles={{}}
+        onOpenMedia={() => {}}
+      />
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Acknowledge" }));
+
+    await screen.findByText("Acknowledged");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sessions/session-1/acknowledge-context-reset",
+      expect.objectContaining({ method: "POST" })
+    );
+    expect(screen.queryByRole("button", { name: "Acknowledge" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the acknowledge button when the hold was already released", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: "No context-reset hold to acknowledge" }), {
+          status: 409,
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <EventItem
+        event={{
+          type: "context_reset",
+          reason: "fresh_session",
+          agentSessionId: null,
+          sandboxId: "sandbox-1",
+          timestamp: 1_789_168_900,
+        }}
+        sessionId="session-1"
+        currentParticipantId={null}
+        participantProfiles={{}}
+        onOpenMedia={() => {}}
+      />
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Acknowledge" }));
+
+    await vi.waitFor(() => {
+      expect(screen.getByRole("button", { name: "Acknowledge" })).toBeEnabled();
+    });
+  });
 });
 
 const baseTimelineProps = {

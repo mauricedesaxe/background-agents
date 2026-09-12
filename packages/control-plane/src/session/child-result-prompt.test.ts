@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChildSessionDetail } from "@open-inspect/shared/types/session-api";
-import { buildChildResultPrompt } from "./child-result-prompt";
+import type { SqlResult } from "./sql-storage";
+import { buildChildResultPrompt, ChildResultDelivery } from "./child-result-prompt";
 
 function createDetail(overrides: Partial<ChildSessionDetail> = {}): ChildSessionDetail {
   return {
@@ -93,5 +94,110 @@ describe("buildChildResultPrompt", () => {
     expect(prompt).toContain("Pull request: https://github.com/acme/web-app/pull/42");
     expect(prompt).not.toContain("shot.png");
     expect(prompt.match(/Pull request:/g)).toHaveLength(1);
+  });
+});
+
+function inMemorySql(): {
+  exec: (sql: string, ...params: unknown[]) => SqlResult;
+  rows: Map<string, { last_seen_status: string; updated_at: number }>;
+} {
+  const rows = new Map<string, { last_seen_status: string; updated_at: number }>();
+  const toArray = () => [];
+  const exec = (sql: string, ...params: unknown[]) => {
+    if (sql.startsWith("CREATE TABLE")) return { toArray } as unknown as SqlResult;
+    if (sql.startsWith("SELECT")) {
+      const row = rows.get(params[0] as string);
+      return {
+        toArray: () => (row ? [{ last_seen_status: row.last_seen_status }] : []),
+      } as unknown as SqlResult;
+    }
+    rows.set(params[0] as string, {
+      last_seen_status: params[1] as string,
+      updated_at: params[2] as number,
+    });
+    return { toArray } as unknown as SqlResult;
+  };
+  return { exec, rows };
+}
+
+function createDeliveryDeps(sql: ReturnType<typeof inMemorySql>) {
+  return {
+    sql,
+    fetchChildSummary: vi.fn(async () => Response.json(createDetail())),
+    enqueueAgentPrompt: vi.fn(async () => Response.json({ status: "queued" })),
+    resolveAuthorUserId: () => "user-1",
+    log: {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      child: vi.fn(),
+    },
+  };
+}
+
+const settled = "completed" as const;
+
+describe("ChildResultDelivery", () => {
+  it("does not advance the last-seen status when the enqueue throws", async () => {
+    const sql = inMemorySql();
+    const deps = createDeliveryDeps(sql);
+    deps.enqueueAgentPrompt.mockRejectedValueOnce(new Error("socket gone"));
+    const delivery = new ChildResultDelivery(deps);
+
+    expect(delivery.shouldDeliverFor("child-1", settled)).toBe(true);
+    await delivery.deliver("child-1", settled);
+
+    expect(sql.rows.get("child-1")).toBeUndefined();
+
+    expect(delivery.shouldDeliverFor("child-1", settled)).toBe(true);
+  });
+
+  it("does not advance the last-seen status when the enqueue fails", async () => {
+    const sql = inMemorySql();
+    const deps = createDeliveryDeps(sql);
+    deps.enqueueAgentPrompt.mockResolvedValueOnce(
+      Response.json({ error: "overloaded" }, { status: 503 })
+    );
+    const delivery = new ChildResultDelivery(deps);
+
+    expect(delivery.shouldDeliverFor("child-1", settled)).toBe(true);
+    await delivery.deliver("child-1", settled);
+
+    expect(sql.rows.get("child-1")).toBeUndefined();
+  });
+
+  it("advances the last-seen status after a successful enqueue", async () => {
+    const sql = inMemorySql();
+    const delivery = new ChildResultDelivery(createDeliveryDeps(sql));
+
+    expect(delivery.shouldDeliverFor("child-1", settled)).toBe(true);
+    await delivery.deliver("child-1", settled);
+
+    expect(sql.rows.get("child-1")?.last_seen_status).toBe("completed");
+    expect(delivery.shouldDeliverFor("child-1", settled)).toBe(false);
+  });
+
+  it("advances the last-seen status on the quiet 409 drop", async () => {
+    const sql = inMemorySql();
+    const deps = createDeliveryDeps(sql);
+    deps.enqueueAgentPrompt.mockResolvedValueOnce(
+      Response.json({ error: "not promptable" }, { status: 409 })
+    );
+    const delivery = new ChildResultDelivery(deps);
+
+    expect(delivery.shouldDeliverFor("child-1", settled)).toBe(true);
+    await delivery.deliver("child-1", settled);
+
+    expect(sql.rows.get("child-1")?.last_seen_status).toBe("completed");
+    expect(delivery.shouldDeliverFor("child-1", settled)).toBe(false);
+  });
+
+  it("records the status immediately when delivery is suppressed", () => {
+    const sql = inMemorySql();
+    const delivery = new ChildResultDelivery(createDeliveryDeps(sql));
+
+    expect(delivery.shouldDeliverFor("child-1", "running", false)).toBe(false);
+    expect(sql.rows.get("child-1")?.last_seen_status).toBe("running");
   });
 });

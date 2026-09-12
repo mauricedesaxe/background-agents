@@ -646,9 +646,11 @@ export class Scheduler {
    * Record an overlap-blocked firing. Manual firings surface as a 409 with no
    * row; schedule and event firings persist a childless skipped invocation —
    * for schedule slots atomically with the schedule advance (a skip recorded
-   * without its advance would re-collide on the same slot every tick). A skip
-   * never stores the event trigger_key: a skip must not consume the dedup
-   * slot of a firing that never ran.
+   * without its advance would re-collide on the same slot every tick). A once
+   * trigger's slot-CAS disable rides every skip: without it an overlap-blocked
+   * once automation stays overdue and retries every tick. A skip never stores
+   * the event trigger_key: a skip must not consume the dedup slot of a firing
+   * that never ran.
    */
   private async recordOverlapSkip(
     store: AutomationStore,
@@ -678,9 +680,7 @@ export class Scheduler {
         params.advanceToNextRunAt !== undefined
         ? { fromSlot: params.scheduledAt, nextRunAt: params.advanceToNextRunAt }
         : undefined,
-      options.advanceSchedule && params.disableAfterFire && params.scheduledAt !== undefined
-        ? params.scheduledAt
-        : undefined
+      params.disableAfterFire && params.scheduledAt !== undefined ? params.scheduledAt : undefined
     );
     return { outcome: "skipped" };
   }

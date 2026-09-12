@@ -89,6 +89,7 @@ beforeEach(() => {
     setSessionCreatorFilter: vi.fn(),
     handleSessionArchived: vi.fn(),
     handleMarkLatestMessageRead: vi.fn(),
+    handleMarkUnread: vi.fn(),
   });
 });
 
@@ -119,14 +120,98 @@ describe("SessionSidebar", () => {
     expect(screen.queryByRole("button", { name: /New session/ })).not.toBeInTheDocument();
   });
 
-  it("renders server-classified sections and nested descendants", () => {
+  it("renders server-classified sections and collapses child trees until expanded", () => {
     render(<SessionSidebar />);
 
     expect(screen.getByRole("heading", { name: "Needs attention" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "In progress" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Recent" })).toBeInTheDocument();
-    expect(screen.getByText("Checking tests")).toBeInTheDocument();
+    expect(screen.queryByText("Checking tests")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Signed in as Test User" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand 1 sub-task" }));
+
+    expect(screen.getByText("Checking tests")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Collapse 1 sub-task" })).toBeInTheDocument();
+  });
+
+  it("renders no manual/automatic filter control", () => {
+    render(<SessionSidebar />);
+
+    expect(screen.queryByRole("button", { name: "Manual" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Automatic" })).not.toBeInTheDocument();
+  });
+
+  it("groups each section by repository and splits manual from automatic", () => {
+    const value = mockHook();
+    const webManual = {
+      ...session("web-manual", "Manual web work"),
+      repoOwner: "acme",
+      repoName: "web",
+    };
+    const webAutomatic = {
+      ...session("web-auto", "Scheduled sweep"),
+      repoOwner: "acme",
+      repoName: "web",
+      spawnSource: "automation" as const,
+    };
+    const apiManual = {
+      ...session("api-manual", "API work"),
+      repoOwner: "acme",
+      repoName: "api",
+    };
+    mockHook.mockReturnValue({
+      ...value,
+      needsAttention: [webManual, webAutomatic, apiManual],
+      inProgress: [],
+      finished: [],
+      childrenMap: new Map(),
+    });
+    render(<SessionSidebar />);
+
+    expect(screen.getByRole("group", { name: "acme/web" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "acme/api" })).toBeInTheDocument();
+    const webGroup = screen.getByRole("group", { name: "acme/web" });
+    expect(webGroup).toHaveTextContent("Manual");
+    expect(webGroup).toHaveTextContent("Automatic");
+    expect(screen.getByText("Scheduled sweep")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "acme/api" })).not.toHaveTextContent("Manual");
+  });
+
+  it("marks a read session unread from its actions menu", async () => {
+    const value = mockHook();
+    const readSession = {
+      ...session("running", "Implementing inbox"),
+      readState: { latestMessageId: "msg-1", version: 1, unread: false },
+    };
+    let current = readSession;
+    const handleMarkUnread = vi.fn(() => {
+      current = { ...current, readState: { ...current.readState, unread: true } };
+      mockHook.mockReturnValue({
+        ...value,
+        inProgress: [current],
+        childrenMap: new Map(),
+        handleMarkUnread,
+      });
+    });
+    mockHook.mockReturnValue({
+      ...value,
+      inProgress: [readSession],
+      childrenMap: new Map(),
+      handleMarkUnread,
+    });
+    const { rerender } = render(<SessionSidebar />);
+    expect(screen.queryByText("Unread")).not.toBeInTheDocument();
+
+    fireEvent.pointerDown(screen.getAllByRole("button", { name: "Session actions" })[1], {
+      button: 0,
+      ctrlKey: false,
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Mark as unread" }));
+    rerender(<SessionSidebar />);
+
+    expect(handleMarkUnread).toHaveBeenCalledExactlyOnceWith("running");
+    expect(screen.getByText("Unread")).toBeInTheDocument();
   });
 
   it("loads more only in the requested section", () => {
