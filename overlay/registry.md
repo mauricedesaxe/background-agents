@@ -33,3 +33,23 @@ own version of the idea first).
 2. Archive stop-then-transition — if upstream softens the guards itself, this becomes pure-subtract;
    retire instead of re-patch.
 3. Once trigger — upstream's invocation model is actively moving under it.
+
+## Round-7 findings (2026-09-12, forward-merge rehearsal + live measurements)
+
+1. **UPSTREAM #1869 COLLIDES WITH CARD 20 (intent, highest priority).** Upstream added hard 409
+   guards (skipped_cancelled, skipped_queued_work) inside canonical `archive()` — the exact behavior
+   card 20 removes. In the rehearsed merge, a wedged session with undrained queued work 409s instead
+   of archiving. Escalate to Alex before the next sync: either upstream's guard intent wins (retire
+   card 20's wedge case) or the fork re-asserts.
+2. **DRIFT RATE DOUBLED.** Rehearsal against upstream HEAD (12 commits past our snapshot, growing
+   live): 8 conflicted files, 0.67 conflicts/commit, ~half judgment-grade. Extrapolated to a 2-week
+   cycle: 13-20 conflicts. Shorten the sync interval to <=1 week.
+3. **DO-schema migration IDs collided on first try** (both sides claimed 51). Reserve a fork-local
+   ID range (or suffix strategy) for DO migrations, like D1's 9xxx floor.
+4. **DO NOT remove the archived_lineage CTE.** Measured on the live Node host at 14k sessions: it is
+   load-bearing for the planner — removing it collapses the inbox query ~100x (10.9s vs 91ms
+   offline; list p50 60-105ms with it). Single-connection SQL is the concurrency ceiling; 5-tab
+   polling stays under the Doherty bar at this scale.
+5. Rehearsed-merge silent-auto-merge class: duplicated shared exports and signature ripples pass the
+   merge and surface only in typecheck — typecheck is a required gate step of every future
+   rehearsal.
