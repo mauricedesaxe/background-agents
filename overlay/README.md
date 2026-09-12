@@ -83,6 +83,7 @@ overlay/
   orchestrator.md      the weekly-sync orchestrator playbook (Phase 4, #328)
   cards/               one card per kept divergence
   drops/               do-not-rebuild cards
+  registry.md          fragile-divergence registry: what the next reapply must know
 ```
 
 The GitHub issue `#328` is the discussion mirror, not the source of truth. When a decision changes,
