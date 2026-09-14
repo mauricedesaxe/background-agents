@@ -317,6 +317,17 @@ class TestPinnedHarness:
         poteto_skill = (claude / "skills" / "pstack-poteto-mode" / "SKILL.md").read_text()
         assert "standing project-scale program routes to **Orchestrate**" in poteto_skill
 
+        assert (claude / "skills" / "matt-grilling" / "SKILL.md").is_file()
+        product_shaping_path = (
+            claude / "skills" / "pstack-poteto-mode" / "playbooks" / "product-shaping.md"
+        )
+        assert product_shaping_path.is_file()
+        product_shaping = product_shaping_path.read_text()
+        assert (
+            "Natural-language requests always enter this playbook through "
+            "`pstack-poteto-mode`, the sole router." in product_shaping
+        )
+
         orchestrate = (
             claude / "skills" / "pstack-poteto-mode" / "playbooks" / "orchestrate.md"
         ).read_text()

@@ -25,7 +25,7 @@ JJ_VERSION = "0.44.0"
 BD_VERSION = "1.2.2"
 BD_SHA256 = "8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8"
 SANDBOX_VERSION = (
-    "daytona-v13-8gb-jj-bd-vnc-opencode-1-18-18"  # bump to invalidate the Daytona snapshot
+    "daytona-v14-8gb-jj-bd-vnc-opencode-1-18-18"  # bump to invalidate the Daytona snapshot
 )
 
 
