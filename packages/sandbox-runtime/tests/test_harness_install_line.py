@@ -10,9 +10,7 @@ breaks the shape fails here.
 import re
 from pathlib import Path
 
-TOOLCHAIN = (
-    Path(__file__).resolve().parents[2] / "daytona-infra" / "src" / "toolchain.py"
-)
+TOOLCHAIN = Path(__file__).resolve().parents[2] / "daytona-infra" / "src" / "toolchain.py"
 
 
 def toolchain_source() -> str:
