@@ -3,6 +3,7 @@ import { env } from "cloudflare:test";
 import { SessionIndexStore, type SessionEntry } from "../../src/db/session-index";
 import { cleanD1Tables } from "./cleanup";
 import { serviceFetch } from "./helpers";
+import type { SessionInboxCategory } from "@open-inspect/shared/types/session-inbox";
 
 const VIEWER_ID = "11111111111111111111111111111111";
 
@@ -157,45 +158,6 @@ describe("session inbox", () => {
     ]);
   });
 
-  it("hides an active sub-task whose ancestor is archived", async () => {
-    const store = new SessionIndexStore(env.DB);
-    await store.create(session("visible", { status: "active", updatedAt: 5000 }));
-    await store.create(session("archived-parent", { status: "active", updatedAt: 4000 }));
-    await store.create(
-      session("orphan-child", {
-        status: "active",
-        parentSessionId: "archived-parent",
-        spawnSource: "agent",
-        spawnDepth: 1,
-        updatedAt: 3500,
-      })
-    );
-    await store.create(
-      session("orphan-grandchild", {
-        status: "active",
-        parentSessionId: "orphan-child",
-        spawnSource: "agent",
-        spawnDepth: 2,
-        updatedAt: 3000,
-      })
-    );
-
-    await store.updateStatus("archived-parent", "archived");
-
-    const response = await serviceFetch("https://example.com/sessions/inbox?category=in_progress");
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      items: Array<{ rootSession: { id: string }; descendantSessions: Array<{ id: string }> }>;
-    };
-    expect(body.items.map((item) => item.rootSession.id)).toEqual(["visible"]);
-    const everyRenderedId = body.items.flatMap((item) => [
-      item.rootSession.id,
-      ...item.descendantSessions.map(({ id }) => id),
-    ]);
-    expect(everyRenderedId).not.toContain("orphan-child");
-    expect(everyRenderedId).not.toContain("orphan-grandchild");
-  });
-
   it("puts active sessions with unread terminal output in needs attention", async () => {
     await serviceFetch("https://example.com/sessions/inbox?category=finished");
     const store = new SessionIndexStore(env.DB);
@@ -327,15 +289,25 @@ describe("session inbox", () => {
     expect(finishedBody.items[0].descendantSessions.map(({ id }) => id)).toEqual(["draft-child"]);
   });
 
-  it("limits the Mine view to user-created non-automation sessions", async () => {
+  it("shows automation children but excludes directly automated sessions from Mine", async () => {
     await serviceFetch("https://example.com/sessions/inbox?category=finished");
     const store = new SessionIndexStore(env.DB);
     await store.create(session("mine"));
     await store.create(session("another-user", { userId: "22222222222222222222222222222222" }));
+    await store.create(session("github-bot", { spawnSource: "github-bot" }));
     await store.create(
       session("automation", {
         automationId: "automation-1",
         spawnSource: "automation",
+      })
+    );
+    await store.create(
+      session("automation-child", {
+        parentSessionId: "automation",
+        spawnSource: "agent",
+        spawnDepth: 1,
+        automationId: "automation-1",
+        updatedAt: 3000,
       })
     );
 
@@ -345,7 +317,7 @@ describe("session inbox", () => {
     const body = (await response.json()) as {
       items: Array<{ rootSession: { id: string } }>;
     };
-    expect(body.items.map((item) => item.rootSession.id)).toEqual(["mine"]);
+    expect(body.items.map((item) => item.rootSession.id)).toEqual(["automation-child", "mine"]);
   });
 
   it("reroots every visible subtree when Mine filters out the persisted root", async () => {
@@ -411,6 +383,108 @@ describe("session inbox", () => {
     };
     expect(body.items.map((item) => item.rootSession.id)).toEqual(["visible-root", "visible-leaf"]);
     expect(body.items.every((item) => item.descendantSessions.length === 0)).toBe(true);
+  });
+
+  it("hides an active sub-task whose ancestor is archived", async () => {
+    await serviceFetch("https://example.com/sessions/inbox?category=finished");
+    const store = new SessionIndexStore(env.DB);
+    await store.create(session("archived-parent", { status: "archived", updatedAt: 5000 }));
+    await store.create(
+      session("orphan-child", {
+        status: "active",
+        parentSessionId: "archived-parent",
+        spawnSource: "agent",
+        spawnDepth: 1,
+        updatedAt: 4000,
+      })
+    );
+    await store.create(
+      session("orphan-grandchild", {
+        parentSessionId: "orphan-child",
+        spawnSource: "agent",
+        spawnDepth: 2,
+        updatedAt: 3500,
+      })
+    );
+    await store.create(session("sibling-parent", { updatedAt: 3000 }));
+
+    const response = await serviceFetch("https://example.com/sessions/inbox");
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      categories: Record<
+        string,
+        {
+          items: Array<{ rootSession: { id: string }; descendantSessions: Array<{ id: string }> }>;
+        }
+      >;
+    };
+    const visibleIds = Object.values(body.categories).flatMap((page) =>
+      page.items.flatMap((item) => [
+        item.rootSession.id,
+        ...item.descendantSessions.map(({ id }) => id),
+      ])
+    );
+    expect(visibleIds).toEqual(["sibling-parent"]);
+  });
+
+  it("reroots a child whose parent row is gone at query time", async () => {
+    await serviceFetch("https://example.com/sessions/inbox?category=finished");
+    const store = new SessionIndexStore(env.DB);
+    await store.create(session("live-root", { updatedAt: 5000 }));
+    await env.DB.prepare(
+      `INSERT INTO sessions (id, parent_session_id, spawn_source, spawn_depth, created_at, updated_at)
+       VALUES (?, ?, 'agent', 1, ?, ?)`
+    )
+      .bind("deleted-parent-child", "hard-deleted-root", 1000, 4000)
+      .run();
+
+    const response = await serviceFetch("https://example.com/sessions/inbox?category=finished");
+    const body = (await response.json()) as {
+      items: Array<{ rootSession: { id: string } }>;
+    };
+    expect(body.items.map((item) => item.rootSession.id)).toEqual([
+      "live-root",
+      "deleted-parent-child",
+    ]);
+  });
+
+  it("reroots a Mine-filtered subtree while archived lineage stays hidden", async () => {
+    await serviceFetch("https://example.com/sessions/inbox?category=finished");
+    const store = new SessionIndexStore(env.DB);
+    await store.create(
+      session("mine-filtered-root", {
+        userId: "22222222222222222222222222222222",
+        status: "active",
+        updatedAt: 5000,
+      })
+    );
+    await store.create(
+      session("mine-filtered-child", {
+        parentSessionId: "mine-filtered-root",
+        spawnSource: "agent",
+        spawnDepth: 1,
+        status: "active",
+        updatedAt: 4000,
+      })
+    );
+    await store.create(session("archived-parent", { status: "archived", updatedAt: 3000 }));
+    await store.create(
+      session("archived-child", {
+        parentSessionId: "archived-parent",
+        spawnSource: "agent",
+        spawnDepth: 1,
+        status: "active",
+        updatedAt: 2000,
+      })
+    );
+
+    const response = await serviceFetch(
+      "https://example.com/sessions/inbox?category=in_progress&mine=true"
+    );
+    const body = (await response.json()) as {
+      items: Array<{ rootSession: { id: string } }>;
+    };
+    expect(body.items.map((item) => item.rootSession.id)).toEqual(["mine-filtered-child"]);
   });
 
   it("paginates roots independently with cursors", async () => {
@@ -528,5 +602,138 @@ describe("session inbox", () => {
       page.items.map((item) => item.rootSession.id)
     );
     expect(rootIds).toHaveLength(new Set(rootIds).size);
+  });
+});
+
+describe("inbox category conformance", () => {
+  beforeEach(cleanD1Tables);
+
+  // The category is decided by a CASE expression inside a query that also uses
+  // it as a WHERE predicate and a pagination key, so it cannot move out of SQL.
+  // These cases pin the rule by driving real rows through the real query and
+  // asserting the category each tree shape must land in. Expectations are
+  // stated, not computed: a second implementation to compare against would just
+  // be a second thing that can drift.
+  const CASES: Array<{
+    name: string;
+    tree: Array<{ status: SessionEntry["status"]; unread: boolean }>;
+    expected: SessionInboxCategory;
+  }> = [
+    {
+      name: "single idle session",
+      tree: [{ status: "completed", unread: false }],
+      expected: "finished",
+    },
+    {
+      name: "single active session",
+      tree: [{ status: "active", unread: false }],
+      expected: "in_progress",
+    },
+    {
+      name: "single unread session",
+      tree: [{ status: "completed", unread: true }],
+      expected: "needs_attention",
+    },
+    {
+      name: "single draft",
+      tree: [{ status: "created", unread: false }],
+      expected: "finished",
+    },
+    {
+      name: "single failed session",
+      tree: [{ status: "failed", unread: false }],
+      expected: "finished",
+    },
+    {
+      name: "idle root with an active child",
+      tree: [
+        { status: "completed", unread: false },
+        { status: "active", unread: false },
+      ],
+      expected: "in_progress",
+    },
+    {
+      name: "idle root with an unread child",
+      tree: [
+        { status: "completed", unread: false },
+        { status: "completed", unread: true },
+      ],
+      expected: "needs_attention",
+    },
+    {
+      name: "active root with an unread child (attention outranks progress)",
+      tree: [
+        { status: "active", unread: false },
+        { status: "completed", unread: true },
+      ],
+      expected: "needs_attention",
+    },
+    {
+      name: "wholly finished tree",
+      tree: [
+        { status: "completed", unread: false },
+        { status: "failed", unread: false },
+      ],
+      expected: "finished",
+    },
+    // Archived rows are filtered by the eligibility clause before the
+    // aggregate runs, so they contribute nothing -- not their unread flag and
+    // not their status. These two cases are the only ones that can catch a
+    // fold which forgets that, which is why the first draft of this suite
+    // omitting `archived` left a real divergence undetected.
+    {
+      name: "idle root with an archived unread child",
+      tree: [
+        { status: "completed", unread: false },
+        { status: "archived", unread: true },
+      ],
+      expected: "finished",
+    },
+    {
+      name: "idle root with an archived active child",
+      tree: [
+        { status: "completed", unread: false },
+        { status: "archived", unread: false },
+      ],
+      expected: "finished",
+    },
+  ];
+
+  it.each(CASES)("files a $name under $expected", async ({ tree, expected }) => {
+    // Prime the viewer row first: unreadSql gates on
+    // `latest_terminal_message_completed_at >= viewer.created_at`, so a message
+    // seeded before the viewer exists can never read as unread.
+    await serviceFetch("https://example.com/sessions/inbox?category=finished");
+    const store = new SessionIndexStore(env.DB);
+    const rootId = "root";
+    const readAfter = Date.now();
+
+    for (const [index, node] of tree.entries()) {
+      const id = index === 0 ? rootId : `descendant-${index}`;
+      await store.create(
+        session(id, {
+          status: node.status,
+          parentSessionId: index === 0 ? null : rootId,
+          spawnSource: index === 0 ? "user" : "agent",
+          spawnDepth: index === 0 ? 0 : 1,
+          updatedAt: 5000 - index,
+        })
+      );
+      if (node.unread) {
+        await store.recordLatestTerminalMessage({
+          sessionId: id,
+          messageId: `message-${index}`,
+          messageCreatedAt: readAfter,
+          terminalMessageCompletedAt: readAfter,
+        });
+      }
+    }
+
+    const response = await serviceFetch(`https://example.com/sessions/inbox?category=${expected}`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      items: Array<{ rootSession: { id: string } }>;
+    };
+    expect(body.items.map(({ rootSession }) => rootSession.id)).toEqual([rootId]);
   });
 });

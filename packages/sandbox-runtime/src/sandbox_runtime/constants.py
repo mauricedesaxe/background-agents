@@ -6,7 +6,7 @@ BIN_INSTALL_DIR_ENV_VAR = "OPENINSPECT_BIN_INSTALL_DIR"
 DEFAULT_BIN_INSTALL_DIR = "/usr/local/bin"
 
 # Sandbox lifetime and the env contract used to pass it to the bridge.
-DEFAULT_SANDBOX_TIMEOUT_SECONDS = 14400
+DEFAULT_SANDBOX_TIMEOUT_SECONDS = 7200
 SANDBOX_TIMEOUT_ENV_VAR = "SANDBOX_TIMEOUT_SECONDS"
 MAX_SNAPSHOT_RESERVE_SECONDS = 900
 SNAPSHOT_RESERVE_FRACTION = 0.25
@@ -57,9 +57,11 @@ IMAGE_BUILD_EXECUTION_TIMEOUT_ENV_VAR = "OI_IMAGE_BUILD_EXECUTION_TIMEOUT_SECOND
 # channel) and drained by the bridge as `warning` sandbox events after its
 # WebSocket handshake. JSONL: one {scope, message, repoOwner?, repoName?} per line.
 BOOT_WARNINGS_FILE_PATH = "/tmp/oi-boot-warnings.jsonl"
-
-OPENCODE_SESSION_ID_ENV_VAR = "OPENCODE_SESSION_ID"
-OPENCODE_SESSION_ID_FILE_PATH = "/tmp/opencode-session-id"
+# Written by the bridge before it exits with DETERMINISTIC_FAILURE_EXIT_CODE;
+# the supervisor reports its contents instead of restarting the bridge.
+BRIDGE_FATAL_ERROR_FILE_PATH = "/tmp/oi-bridge-fatal-error.txt"
+# Supervisor → bridge handoff for the Claude harness (workdir, config dir, MCP servers).
+CLAUDE_HARNESS_FILE_PATH = "/tmp/oi-claude-harness.json"
 
 # Canonical repository manifest written by the supervisor before any child
 # process starts, rewritten on every boot. Consumed by the bridge (push

@@ -15,7 +15,6 @@ export function SessionWithChildren({
   onSessionSelect,
   onMarkLatestMessageRead,
   onMarkUnread,
-  selection,
 }: {
   session: SessionItem;
   environmentName?: string;
@@ -25,8 +24,7 @@ export function SessionWithChildren({
   onArchive: (sessionId: string) => Promise<void>;
   onSessionSelect?: () => void;
   onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
-  onMarkUnread: (sessionId: string) => Promise<void>;
-  selection?: { selected: boolean; onSelectedChange: (selected: boolean) => void };
+  onMarkUnread: (sessionId: string) => void;
 }) {
   const childSessions = childrenMap.get(session.id) ?? [];
   const [expanded, setExpanded] = useState(false);
@@ -51,7 +49,6 @@ export function SessionWithChildren({
           onSessionSelect={onSessionSelect}
           onMarkLatestMessageRead={onMarkLatestMessageRead}
           onMarkUnread={onMarkUnread}
-          selection={selection}
         />
       </div>
       {expanded && (
@@ -88,7 +85,7 @@ function ChildSessionTree({
   isMobile: boolean;
   onSessionSelect?: () => void;
   onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
-  onMarkUnread: (sessionId: string) => Promise<void>;
+  onMarkUnread: (sessionId: string) => void;
   visitedIds: Set<string>;
   depth: number;
 }) {
@@ -131,7 +128,7 @@ function CollapsibleChildSession({
   isMobile: boolean;
   onSessionSelect?: () => void;
   onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
-  onMarkUnread: (sessionId: string) => Promise<void>;
+  onMarkUnread: (sessionId: string) => void;
   visitedIds: Set<string>;
   depth: number;
 }) {

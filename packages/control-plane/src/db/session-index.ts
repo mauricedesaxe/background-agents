@@ -1,3 +1,8 @@
+import {
+  DEFAULT_HARNESS,
+  getValidHarnessOrDefault,
+  type HarnessId,
+} from "@open-inspect/shared/harnesses";
 import type {
   PullRequestSummary,
   SessionReadAction,
@@ -11,7 +16,17 @@ import {
   DEFAULT_SESSION_LIST_OFFSET,
 } from "@open-inspect/shared/session-list-query";
 import type { SessionListRepository } from "@open-inspect/shared/types/repositories";
+import {
+  sessionModelProviderAuthSchema,
+  SUBSCRIPTION_PROVIDER_IDS,
+} from "@open-inspect/shared/types/provider-accounts";
 import type { SessionSkillManifestInput } from "../session/skill-resolution";
+import {
+  assertProviderAuthSelection,
+  type ModelProviderId,
+  type SessionModelProviderAuthInput,
+} from "../model-provider-accounts/provider-auth-contracts";
+import { bulkInsertStatements } from "./bulk-insert";
 import { attachSessionListMetadata } from "./session-list-metadata";
 import {
   SessionInboxStore,
@@ -19,22 +34,9 @@ import {
   type ListSessionInboxResult,
   type ListSessionInboxSnapshotResult,
 } from "./session-inbox-store";
+import { INACTIVE_SESSION_STATUS_SQL } from "@open-inspect/shared/types/session-activity";
 import { readStateFromRow, unreadSql, type ViewerReadStateRow } from "./session-read-state";
 import type { SqlDatabase, SqlStatement } from "./sql-database";
-
-export type {
-  ListSessionInboxOptions,
-  ListSessionInboxResult,
-  ListSessionInboxSnapshotResult,
-} from "./session-inbox-store";
-
-const TERMINAL_STATUSES = [
-  "completed",
-  "failed",
-  "archived",
-  "cancelled",
-] satisfies SessionStatus[];
-const TERMINAL_STATUS_SQL = TERMINAL_STATUSES.map((status) => `'${status}'`).join(", ");
 
 const CHILD_ADMISSION_LEASE_TTL_MS = 5 * 60 * 1000;
 
@@ -57,13 +59,16 @@ const MAX_DESCENDANT_DEPTH = 10;
  * primary, mirrored into the scalar repo_owner/repo_name columns). Aliases
  * the shared wire type so Session.repositories and this share one shape.
  */
-export type SessionIndexRepository = SessionListRepository;
+type SessionIndexRepository = SessionListRepository;
 
+/** Persisted session metadata with optional viewer-specific read state. */
 export interface SessionEntry {
   id: string;
   title: string | null;
   repoOwner: string | null;
   repoName: string | null;
+  /** Agent harness; absent on reads of pre-harness rows is impossible (column default). */
+  harness?: HarnessId;
   model: string;
   reasoningEffort: string | null;
   baseBranch: string | null;
@@ -101,6 +106,8 @@ export interface SessionEntry {
   skillManifest?: SessionSkillManifestInput;
   /** Parent manifest to copy atomically for an agent-spawned child. */
   skillManifestSourceSessionId?: string;
+  /** Complete immutable model-provider authentication snapshot. */
+  providerAuth?: SessionModelProviderAuthInput[];
 }
 
 interface SessionRow {
@@ -108,6 +115,7 @@ interface SessionRow {
   title: string | null;
   repo_owner: string | null;
   repo_name: string | null;
+  harness: HarnessId;
   model: string;
   reasoning_effort: string | null;
   base_branch: string | null;
@@ -129,24 +137,32 @@ interface SessionRow {
   updated_at: number;
 }
 
+interface SessionModelProviderAuthRow {
+  provider: string;
+  auth_mode: string;
+  provider_account_id: string | null;
+  selection_source: string;
+  inherited_from_session_id: string | null;
+}
+
+/** Filters, pagination, and viewer read state for a session list query. */
 export interface ListSessionsOptions {
   status?: SessionStatus;
   excludeStatus?: SessionStatus;
   excludeAutomationLineage?: boolean;
-  repoOwner?: string;
-  repoName?: string;
   createdByUserIds?: readonly string[];
   limit?: number;
   offset?: number;
   viewerUserId?: string;
 }
 
+/** Paginated session index entries. */
 export interface ListSessionsResult {
   sessions: SessionEntry[];
   hasMore: boolean;
 }
 
-interface ViewerSessionRow extends SessionRow, ViewerReadStateRow {}
+type ViewerSessionRow = SessionRow & ViewerReadStateRow;
 
 function toEntry(row: SessionRow): SessionEntry {
   return {
@@ -154,6 +170,7 @@ function toEntry(row: SessionRow): SessionEntry {
     title: row.title,
     repoOwner: row.repo_owner,
     repoName: row.repo_name,
+    harness: getValidHarnessOrDefault(row.harness),
     model: row.model,
     reasoningEffort: row.reasoning_effort,
     baseBranch: row.base_branch,
@@ -173,6 +190,30 @@ function toEntry(row: SessionRow): SessionEntry {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function toProviderAuth(row: SessionModelProviderAuthRow): SessionModelProviderAuthInput {
+  const auth = sessionModelProviderAuthSchema.parse({
+    provider: row.provider,
+    authMode: row.auth_mode,
+    ...(row.provider_account_id ? { providerAccountId: row.provider_account_id } : {}),
+    selectionSource: row.selection_source,
+  });
+  return {
+    ...auth,
+    ...(row.inherited_from_session_id
+      ? { inheritedFromSessionId: row.inherited_from_session_id }
+      : {}),
+  };
+}
+
+function isCompleteProviderAuth(providerAuth: readonly SessionModelProviderAuthInput[]): boolean {
+  return (
+    providerAuth.length === SUBSCRIPTION_PROVIDER_IDS.length &&
+    SUBSCRIPTION_PROVIDER_IDS.every((provider) =>
+      providerAuth.some((auth) => auth.provider === provider)
+    )
+  );
 }
 
 function normalizeRepoIdentifier(value: string | null | undefined): string | null {
@@ -199,18 +240,7 @@ function normalizeSessionRepositoryFields(session: SessionEntry): {
   };
 }
 
-function readStateOutcome(
-  action: SessionReadAction,
-  latestMessageId: string,
-  writeApplied: boolean
-): "marked_read" | "already_read" | "not_latest" | "marked_unread" {
-  if (action.action === "mark_unread") return "marked_unread";
-  if (action.action === "mark_message_read" && latestMessageId !== action.messageId) {
-    return "not_latest";
-  }
-  return writeApplied ? "marked_read" : "already_read";
-}
-
+/** D1-backed session index and viewer-specific list projection. */
 export class SessionIndexStore {
   constructor(private readonly db: SqlDatabase) {}
 
@@ -229,16 +259,32 @@ export class SessionIndexStore {
       throw new Error("Session cannot both resolve and copy a managed skill manifest");
     }
 
+    const providers = new Set<string>();
+    for (const auth of session.providerAuth ?? []) {
+      assertProviderAuthSelection(
+        auth.provider,
+        auth.authMode,
+        "providerAccountId" in auth ? auth.providerAccountId : null
+      );
+      if (providers.has(auth.provider))
+        throw new Error(`Duplicate provider auth: ${auth.provider}`);
+      providers.add(auth.provider);
+    }
+    if (session.providerAuth && !isCompleteProviderAuth(session.providerAuth)) {
+      throw new Error("Session provider auth snapshot must include every subscription provider");
+    }
+
     const sessionStmt = this.db
       .prepare(
-        `INSERT OR IGNORE INTO sessions (id, title, repo_owner, repo_name, model, reasoning_effort, base_branch, status, parent_session_id, root_session_id, spawn_source, spawn_depth, automation_id, automation_run_id, scm_login, user_id, environment_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN ? ELSE (SELECT root_session_id FROM sessions WHERE id = ?) END, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO sessions (id, title, repo_owner, repo_name, harness, model, reasoning_effort, base_branch, status, parent_session_id, root_session_id, spawn_source, spawn_depth, automation_id, automation_run_id, scm_login, user_id, environment_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN ? ELSE (SELECT root_session_id FROM sessions WHERE id = ?) END, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         session.id,
         session.title,
         repository.repoOwner,
         repository.repoName,
+        session.harness ?? DEFAULT_HARNESS,
         session.model,
         session.reasoningEffort,
         repository.baseBranch,
@@ -279,11 +325,38 @@ export class SessionIndexStore {
       : session.skillManifestSourceSessionId
         ? this.bindManifestCopy(session.id, session.skillManifestSourceSessionId)
         : [];
-    const results = await this.db.batch([sessionStmt, ...repositoryStmts, ...manifestStmts]);
+    const providerAuthStmts = (session.providerAuth ?? []).map((auth) =>
+      this.db
+        .prepare(
+          `INSERT INTO session_model_provider_auth (
+             session_id, provider, auth_mode, provider_account_id, selection_source,
+             inherited_from_session_id, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (session_id, provider) DO UPDATE SET
+             auth_mode = excluded.auth_mode,
+             provider_account_id = excluded.provider_account_id,
+             selection_source = excluded.selection_source,
+             inherited_from_session_id = excluded.inherited_from_session_id,
+             created_at = excluded.created_at`
+        )
+        .bind(
+          session.id,
+          auth.provider,
+          auth.authMode,
+          "providerAccountId" in auth ? auth.providerAccountId : null,
+          auth.selectionSource,
+          auth.inheritedFromSessionId ?? null,
+          session.createdAt
+        )
+    );
+    const results = await this.db.batch([
+      sessionStmt,
+      ...repositoryStmts,
+      ...manifestStmts,
+      ...providerAuthStmts,
+    ]);
 
-    // INSERT OR IGNORE swallows every constraint violation, which would leave
-    // the session invisible to dashboards while the DO proceeds. Session ids
-    // are always freshly generated, so a skipped insert is a bug — surface it;
+    // Session ids are always freshly generated, so a skipped insert is a bug;
     // initialize.ts relies on D1 failures being caught before sandbox spawn.
     if ((results[0]?.meta?.changes ?? 0) === 0) {
       throw new Error(
@@ -296,6 +369,10 @@ export class SessionIndexStore {
    * Build manifest statements for the session-creation batch. The caller owns
    * execution so the session, repository snapshot, and pinned skills commit
    * atomically rather than leaving a partially initialized session.
+   *
+   * Revisions are packed into multi-row INSERTs: the pinned set is as wide as
+   * the applicable catalog, and a statement per skill would spend the
+   * invocation's whole query budget on one session create.
    */
   private bindManifestInserts(
     sessionId: string,
@@ -318,26 +395,21 @@ export class SessionIndexStore {
           manifest.manifestSha256,
           manifest.resolvedAt
         ),
-      ...manifest.skills.map((skill, position) =>
-        this.db
-          .prepare(
-            `INSERT INTO session_skill_revisions
-             (session_id, position, skill_id, revision_id, skill_name, description,
-              revision_number, revision_sha256, total_bytes, assignment_sources)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          )
-          .bind(
-            sessionId,
-            position,
-            skill.skillId,
-            skill.revisionId,
-            skill.name,
-            skill.description,
-            skill.revisionNumber,
-            skill.revisionSha256,
-            skill.totalBytes,
-            JSON.stringify(skill.assignmentSources)
-          )
+      ...bulkInsertStatements(
+        this.db,
+        "session_skill_revisions",
+        manifest.skills.map((skill, position) => ({
+          session_id: sessionId,
+          position,
+          skill_id: skill.skillId,
+          revision_id: skill.revisionId,
+          skill_name: skill.name,
+          description: skill.description,
+          revision_number: skill.revisionNumber,
+          revision_sha256: skill.revisionSha256,
+          total_bytes: skill.totalBytes,
+          assignment_sources: JSON.stringify(skill.assignmentSources),
+        }))
       ),
     ];
   }
@@ -377,6 +449,43 @@ export class SessionIndexStore {
     return result ? toEntry(result) : null;
   }
 
+  private async getProviderAuth(sessionId: string): Promise<SessionModelProviderAuthInput[]> {
+    const result = await this.db
+      .prepare(
+        `SELECT provider, auth_mode, provider_account_id, selection_source,
+                inherited_from_session_id
+         FROM session_model_provider_auth
+         WHERE session_id = ? ORDER BY provider`
+      )
+      .bind(sessionId)
+      .all<SessionModelProviderAuthRow>();
+    return (result.results ?? []).map(toProviderAuth);
+  }
+
+  async getCompleteProviderAuth(sessionId: string): Promise<SessionModelProviderAuthInput[]> {
+    const providerAuth = await this.getProviderAuth(sessionId);
+    if (!isCompleteProviderAuth(providerAuth)) {
+      throw new Error(`Session provider auth snapshot is incomplete for session ${sessionId}`);
+    }
+    return providerAuth;
+  }
+
+  async getProviderAuthForProvider(
+    sessionId: string,
+    provider: ModelProviderId
+  ): Promise<SessionModelProviderAuthInput | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT provider, auth_mode, provider_account_id, selection_source,
+                inherited_from_session_id
+         FROM session_model_provider_auth
+         WHERE session_id = ? AND provider = ?`
+      )
+      .bind(sessionId, provider)
+      .first<SessionModelProviderAuthRow>();
+    return row ? toProviderAuth(row) : null;
+  }
+
   /**
    * Whether the session exists and the repository is in its repository set
    * (the scalar primary mirror or a session_repositories row). This is the
@@ -393,30 +502,29 @@ export class SessionIndexStore {
     const row = await this.db
       .prepare(
         `SELECT 1 AS ok FROM sessions
-         WHERE id = ?1
+         WHERE id = ?
            AND (
-             (LOWER(repo_owner) = LOWER(?2) AND LOWER(repo_name) = LOWER(?3))
+             (LOWER(repo_owner) = LOWER(?) AND LOWER(repo_name) = LOWER(?))
              OR EXISTS (
                SELECT 1 FROM session_repositories sr
                WHERE sr.session_id = sessions.id
-                 AND LOWER(sr.repo_owner) = LOWER(?2)
-                 AND LOWER(sr.repo_name) = LOWER(?3)
+                 AND LOWER(sr.repo_owner) = LOWER(?)
+                 AND LOWER(sr.repo_name) = LOWER(?)
              )
            )`
       )
-      .bind(sessionId, repoOwner, repoName)
+      .bind(sessionId, repoOwner, repoName, repoOwner, repoName)
       .first<{ ok: number }>();
 
     return row !== null;
   }
 
+  /** List sessions with optional viewer-specific read state. */
   async list(options: ListSessionsOptions = {}): Promise<ListSessionsResult> {
     const {
       status,
       excludeStatus,
       excludeAutomationLineage,
-      repoOwner,
-      repoName,
       createdByUserIds,
       limit = DEFAULT_SESSION_LIST_LIMIT,
       offset = DEFAULT_SESSION_LIST_OFFSET,
@@ -444,39 +552,14 @@ export class SessionIndexStore {
       conditions.push("automation_id IS NULL AND spawn_source NOT IN ('automation', 'github-bot')");
     }
 
-    // Repo filters match against the membership table so a session is found
-    // through ANY member, not just the scalar primary mirror. The scalar arm
-    // is the fallback for pre-feature sessions without member rows.
-    const normalizedRepoOwner = normalizeRepoIdentifier(repoOwner);
-    const normalizedRepoName = normalizeRepoIdentifier(repoName);
-    if (normalizedRepoOwner || normalizedRepoName) {
-      const memberConditions: string[] = [];
-      const scalarConditions: string[] = [];
-      const repoFilterParams: unknown[] = [];
-      if (normalizedRepoOwner) {
-        memberConditions.push("sr.repo_owner = ?");
-        scalarConditions.push("repo_owner = ?");
-        repoFilterParams.push(normalizedRepoOwner);
-      }
-      if (normalizedRepoName) {
-        memberConditions.push("sr.repo_name = ?");
-        scalarConditions.push("repo_name = ?");
-        repoFilterParams.push(normalizedRepoName);
-      }
-      conditions.push(
-        `(EXISTS (SELECT 1 FROM session_repositories sr WHERE sr.session_id = sessions.id AND ${memberConditions.join(" AND ")}) OR (${scalarConditions.join(" AND ")}))`
-      );
-      params.push(...repoFilterParams, ...repoFilterParams);
-    }
-
     if (createdByUserIds?.length) {
       conditions.push(`user_id IN (${createdByUserIds.map(() => "?").join(", ")})`);
       params.push(...createdByUserIds);
     }
-
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
     const pageSql = `SELECT * FROM sessions ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`;
+    const pageParams = [...params, limit + 1, offset];
     const result = viewerUserId
       ? await this.db
           .prepare(
@@ -490,11 +573,11 @@ export class SessionIndexStore {
               AND read_state.user_id = viewer.id
              ORDER BY paged_sessions.updated_at DESC`
           )
-          .bind(...params, limit + 1, offset, viewerUserId)
+          .bind(...pageParams, viewerUserId)
           .all<ViewerSessionRow>()
       : await this.db
           .prepare(pageSql)
-          .bind(...params, limit + 1, offset)
+          .bind(...pageParams)
           .all<SessionRow>();
 
     const rows = result.results || [];
@@ -511,10 +594,12 @@ export class SessionIndexStore {
     };
   }
 
+  /** List one inbox category with viewer-specific read state. */
   async listInbox(options: ListSessionInboxOptions): Promise<ListSessionInboxResult> {
     return new SessionInboxStore(this.db).list(options);
   }
 
+  /** List the first page of every inbox category with viewer-specific read state. */
   async listInboxSnapshot(
     options: Omit<ListSessionInboxOptions, "category" | "cursor">
   ): Promise<ListSessionInboxSnapshotResult> {
@@ -560,11 +645,6 @@ export class SessionIndexStore {
     return (result.meta.changes ?? 0) > 0;
   }
 
-  /** Current single-tenant visibility boundary; future grants belong here. */
-  async getVisibleForUser(sessionId: string, _userId: string): Promise<SessionEntry | null> {
-    return this.get(sessionId);
-  }
-
   async updateReadState(
     userId: string,
     sessionId: string,
@@ -575,52 +655,32 @@ export class SessionIndexStore {
       const result = await this.db
         .prepare(
           `INSERT INTO session_read_states
-             (user_id, session_id, last_read_message_id, manually_unread, updated_at)
-           SELECT ?, id, latest_terminal_message_id, 0, ?
+             (user_id, session_id, last_read_message_id, updated_at)
+           SELECT ?, id, latest_terminal_message_id, ?
            FROM sessions
            WHERE id = ? AND latest_terminal_message_id = ?
            ON CONFLICT(user_id, session_id) DO UPDATE SET
               last_read_message_id = excluded.last_read_message_id,
-              manually_unread = 0,
               updated_at = excluded.updated_at
             WHERE session_read_states.last_read_message_id
-              != excluded.last_read_message_id
-              OR session_read_states.manually_unread != 0`
+              != excluded.last_read_message_id`
         )
         .bind(userId, Date.now(), sessionId, action.messageId)
-        .run();
-      writeApplied = (result.meta.changes ?? 0) > 0;
-    } else if (action.action === "mark_latest_message_read") {
-      const result = await this.db
-        .prepare(
-          `INSERT INTO session_read_states
-             (user_id, session_id, last_read_message_id, manually_unread, updated_at)
-           SELECT ?, id, latest_terminal_message_id, 0, ?
-           FROM sessions
-           WHERE id = ? AND latest_terminal_message_id IS NOT NULL
-           ON CONFLICT(user_id, session_id) DO UPDATE SET
-              last_read_message_id = excluded.last_read_message_id,
-              manually_unread = 0,
-              updated_at = excluded.updated_at
-            WHERE session_read_states.last_read_message_id
-              != excluded.last_read_message_id
-              OR session_read_states.manually_unread != 0`
-        )
-        .bind(userId, Date.now(), sessionId)
         .run();
       writeApplied = (result.meta.changes ?? 0) > 0;
     } else {
       const result = await this.db
         .prepare(
           `INSERT INTO session_read_states
-             (user_id, session_id, last_read_message_id, manually_unread, updated_at)
-           SELECT ?, id, latest_terminal_message_id, 1, ?
+             (user_id, session_id, last_read_message_id, updated_at)
+           SELECT ?, id, latest_terminal_message_id, ?
            FROM sessions
            WHERE id = ? AND latest_terminal_message_id IS NOT NULL
            ON CONFLICT(user_id, session_id) DO UPDATE SET
-              manually_unread = 1,
+              last_read_message_id = excluded.last_read_message_id,
               updated_at = excluded.updated_at
-            WHERE session_read_states.manually_unread != 1`
+            WHERE session_read_states.last_read_message_id
+              != excluded.last_read_message_id`
         )
         .bind(userId, Date.now(), sessionId)
         .run();
@@ -636,13 +696,21 @@ export class SessionIndexStore {
         outcome: "no_terminal_message",
         unread: false,
         latestMessageId: null,
+        version: currentReadState.version,
       };
     }
+    const outcome =
+      action.action === "mark_message_read" && latestMessageId !== action.messageId
+        ? "not_latest"
+        : writeApplied
+          ? "marked_read"
+          : "already_read";
     return {
       sessionId,
-      outcome: readStateOutcome(action, latestMessageId, writeApplied),
+      outcome,
       unread: currentReadState.unread,
       latestMessageId,
+      version: currentReadState.version,
     };
   }
 
@@ -653,6 +721,7 @@ export class SessionIndexStore {
     const row = await this.db
       .prepare(
         `SELECT sessions.latest_terminal_message_id,
+                sessions.latest_terminal_message_created_at,
                 ${unreadSql("sessions")} AS unread
          FROM sessions
          LEFT JOIN users viewer ON viewer.id = ?
@@ -664,15 +733,6 @@ export class SessionIndexStore {
       .bind(userId, sessionId)
       .first<ViewerReadStateRow>();
     return row ? readStateFromRow(row) : null;
-  }
-
-  async updateTitle(id: string, title: string): Promise<boolean> {
-    const result = await this.db
-      .prepare("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?")
-      .bind(title, Date.now(), id)
-      .run();
-
-    return (result.meta.changes ?? 0) > 0;
   }
 
   async updateTitleIfNewer(id: string, title: string, updatedAt: number): Promise<boolean> {
@@ -795,10 +855,23 @@ export class SessionIndexStore {
     return (result.meta?.changes ?? 0) > 0;
   }
 
-  /** List children of a parent session, newest first. */
+  /**
+   * List children of a parent session, newest first, excluding archived ones.
+   *
+   * Why the filter is the child's own status only: the archive cascade reads
+   * this same listing right after projecting its own parent as `archived`, so
+   * a lineage filter over ancestors would hide exactly the children the
+   * cascade still has to archive. Convergence covers the rest — the cascade
+   * archives every reachable child of an archived parent, and the top-level
+   * listing already excludes archived lineage outright.
+   */
   async listByParent(parentSessionId: string): Promise<SessionEntry[]> {
     const result = await this.db
-      .prepare(`SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY created_at DESC`)
+      .prepare(
+        `SELECT * FROM sessions
+         WHERE parent_session_id = ? AND status != 'archived'
+         ORDER BY created_at DESC`
+      )
       .bind(parentSessionId)
       .all<SessionRow>();
     return this.attachListMetadata((result.results || []).map(toEntry));
@@ -817,7 +890,7 @@ export class SessionIndexStore {
            WHERE descendants.depth < ${MAX_DESCENDANT_DEPTH}
          )
          SELECT id FROM descendants
-         WHERE status NOT IN (${TERMINAL_STATUS_SQL})
+         WHERE status NOT IN (${INACTIVE_SESSION_STATUS_SQL})
          ORDER BY depth DESC`
       )
       .bind(parentSessionId)
@@ -849,7 +922,7 @@ export class SessionIndexStore {
          WHERE (
            SELECT COUNT(*) FROM (
              SELECT id AS child_session_id FROM sessions
-             WHERE parent_session_id = ? AND status NOT IN (${TERMINAL_STATUS_SQL})
+             WHERE parent_session_id = ? AND status NOT IN (${INACTIVE_SESSION_STATUS_SQL})
              UNION
              SELECT child_session_id FROM child_admission_leases
              WHERE parent_session_id = ? AND expires_at > ?

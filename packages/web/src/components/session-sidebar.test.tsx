@@ -2,37 +2,34 @@
 /// <reference types="@testing-library/jest-dom" />
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import * as matchers from "@testing-library/jest-dom/matchers";
 import { SessionSidebar } from "./session-sidebar";
 
 expect.extend(matchers);
 
-const { mockArchiveSessions, mockHook, mockRouterPush, toastMock } = vi.hoisted(() => ({
-  mockArchiveSessions: vi.fn(),
+const { mockHook, authorization } = vi.hoisted(() => ({
   mockHook: vi.fn(),
-  mockRouterPush: vi.fn(),
-  toastMock: { error: vi.fn() },
+  authorization: { permissions: null as Set<string> | null },
 }));
 
 vi.mock("@/hooks/use-sidebar-sessions", () => ({ useSidebarSessions: mockHook }));
 vi.mock("@/lib/auth-session", () => ({
-  useAuthSession: () => ({
-    data: { user: { id: "user_test", name: "Test User", email: "test@example.com" } },
-  }),
+  useAuthSession: () => ({ data: { user: { name: "Test User", email: "test@example.com" } } }),
   signOut: vi.fn(),
 }));
 vi.mock("@/hooks/use-media-query", () => ({ useIsMobile: () => false }));
 vi.mock("@/hooks/use-environments", () => ({ useEnvironments: () => ({ environments: [] }) }));
+vi.mock("@/hooks/use-current-user-authorization", () => ({
+  useCurrentUserAuthorization: () => ({
+    hasPermission: (permission: string) =>
+      authorization.permissions === null || authorization.permissions.has(permission),
+  }),
+}));
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/session/child",
-  useRouter: () => ({ push: mockRouterPush }),
+  usePathname: () => "/",
+  useRouter: () => ({ push: vi.fn() }),
 }));
-vi.mock("@/lib/archive-session", () => ({
-  archiveSession: vi.fn(),
-  archiveSessions: mockArchiveSessions,
-}));
-vi.mock("sonner", () => ({ toast: toastMock }));
 
 function session(id: string, title: string, parentSessionId: string | null = null) {
   return {
@@ -56,7 +53,7 @@ function session(id: string, title: string, parentSessionId: string | null = nul
     messageCount: 0,
     prCount: 0,
     environmentId: null,
-    readState: { latestMessageId: null, unread: false } as const,
+    readState: { latestMessageId: null, version: 0, unread: false } as const,
     createdAt: 1,
     updatedAt: 2,
   };
@@ -70,27 +67,27 @@ const noPagination = {
 };
 
 beforeEach(() => {
+  authorization.permissions = null;
   const attention = session("attention", "Needs review");
   const running = session("running", "Implementing inbox");
   const child = session("child", "Checking tests", running.id);
   const recent = { ...session("recent", "Finished work"), status: "completed" as const };
   mockHook.mockReturnValue({
     needsAttention: [attention],
-    running: [running],
-    recent: [recent],
+    inProgress: [running],
+    finished: [recent],
     childrenMap: new Map([[running.id, [child]]]),
     loading: false,
     sessionsError: undefined,
     refreshSnapshot: vi.fn(async () => undefined),
     sectionPagination: {
       needsAttention: noPagination,
-      running: noPagination,
-      recent: noPagination,
+      inProgress: noPagination,
+      finished: noPagination,
     },
     sessionCreatorFilter: "all",
     setSessionCreatorFilter: vi.fn(),
     handleSessionArchived: vi.fn(),
-    handleSessionsArchived: vi.fn(),
     handleMarkLatestMessageRead: vi.fn(),
     handleMarkUnread: vi.fn(),
   });
@@ -102,57 +99,119 @@ afterEach(() => {
 });
 
 describe("SessionSidebar", () => {
-  it("archives selected roots, keeps child rows out of selection, and redirects from a descendant", async () => {
-    const value = mockHook();
-    const handleSessionsArchived = vi.fn(async () => undefined);
-    mockHook.mockReturnValue({ ...value, handleSessionsArchived });
-    mockArchiveSessions.mockResolvedValue([{ kind: "archived", sessionId: "running" }]);
+  it("renders the shared application destinations", () => {
     render(<SessionSidebar />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Select sessions" }));
-    expect(screen.getByRole("checkbox", { name: "Select Implementing inbox" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Expand 1 sub-task" }));
-    expect(
-      screen.queryByRole("checkbox", { name: "Select Checking tests" })
-    ).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("checkbox", { name: "Select Implementing inbox" }));
-    fireEvent.click(screen.getByRole("button", { name: "Archive selected (1)" }));
-    expect(screen.getByRole("heading", { name: "Archive 1 session" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Archive selected" }));
-
-    await vi.waitFor(() =>
-      expect(handleSessionsArchived).toHaveBeenCalledWith(new Set(["running"]))
+    expect(screen.getByTitle("Settings")).toHaveAttribute("href", "/settings");
+    expect(screen.getByRole("link", { name: "Automations" })).toHaveAttribute(
+      "href",
+      "/automations"
     );
-    expect(mockRouterPush).toHaveBeenCalledWith("/");
+    expect(screen.getByRole("link", { name: "Analytics" })).toHaveAttribute("href", "/analytics");
   });
 
-  it("keeps failed roots selected and shows one failure summary", async () => {
-    mockArchiveSessions.mockResolvedValue([
-      { kind: "failed", sessionId: "attention", reason: "Denied" },
-    ]);
+  it("hides application destinations without their canonical read permission", () => {
+    authorization.permissions = new Set(["automations.read"]);
+
     render(<SessionSidebar />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Select sessions" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "Select Needs review" }));
-    fireEvent.click(screen.getByRole("button", { name: "Archive selected (1)" }));
-    fireEvent.click(screen.getByRole("button", { name: "Archive selected" }));
-
-    await vi.waitFor(() =>
-      expect(toastMock.error).toHaveBeenCalledWith("Failed to archive 1 session: Denied")
-    );
-    expect(screen.getByRole("button", { name: "Archive selected (1)" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Automations" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Analytics" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /New session/ })).not.toBeInTheDocument();
   });
 
-  it("renders server-classified sections and nested descendants", () => {
+  it("renders server-classified sections and collapses child trees until expanded", () => {
     render(<SessionSidebar />);
 
     expect(screen.getByRole("heading", { name: "Needs attention" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Running" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "In progress" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Recent" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Expand 1 sub-task" }));
-    expect(screen.getByText("Checking tests")).toBeInTheDocument();
+    expect(screen.queryByText("Checking tests")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Signed in as Test User" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand 1 sub-task" }));
+
+    expect(screen.getByText("Checking tests")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Collapse 1 sub-task" })).toBeInTheDocument();
+  });
+
+  it("renders no manual/automatic filter control", () => {
+    render(<SessionSidebar />);
+
+    expect(screen.queryByRole("button", { name: "Manual" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Automatic" })).not.toBeInTheDocument();
+  });
+
+  it("groups each section by repository and splits manual from automatic", () => {
+    const value = mockHook();
+    const webManual = {
+      ...session("web-manual", "Manual web work"),
+      repoOwner: "acme",
+      repoName: "web",
+    };
+    const webAutomatic = {
+      ...session("web-auto", "Scheduled sweep"),
+      repoOwner: "acme",
+      repoName: "web",
+      spawnSource: "automation" as const,
+    };
+    const apiManual = {
+      ...session("api-manual", "API work"),
+      repoOwner: "acme",
+      repoName: "api",
+    };
+    mockHook.mockReturnValue({
+      ...value,
+      needsAttention: [webManual, webAutomatic, apiManual],
+      inProgress: [],
+      finished: [],
+      childrenMap: new Map(),
+    });
+    render(<SessionSidebar />);
+
+    expect(screen.getByRole("group", { name: "acme/web" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "acme/api" })).toBeInTheDocument();
+    const webGroup = screen.getByRole("group", { name: "acme/web" });
+    expect(webGroup).toHaveTextContent("Manual");
+    expect(webGroup).toHaveTextContent("Automatic");
+    expect(screen.getByText("Scheduled sweep")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "acme/api" })).not.toHaveTextContent("Manual");
+  });
+
+  it("marks a read session unread from its actions menu", async () => {
+    const value = mockHook();
+    const readSession = {
+      ...session("running", "Implementing inbox"),
+      readState: { latestMessageId: "msg-1", version: 1, unread: false },
+    };
+    let current = readSession;
+    const handleMarkUnread = vi.fn(() => {
+      current = { ...current, readState: { ...current.readState, unread: true } };
+      mockHook.mockReturnValue({
+        ...value,
+        inProgress: [current],
+        childrenMap: new Map(),
+        handleMarkUnread,
+      });
+    });
+    mockHook.mockReturnValue({
+      ...value,
+      inProgress: [readSession],
+      childrenMap: new Map(),
+      handleMarkUnread,
+    });
+    const { rerender } = render(<SessionSidebar />);
+    expect(screen.queryByText("Unread")).not.toBeInTheDocument();
+
+    fireEvent.pointerDown(screen.getAllByRole("button", { name: "Session actions" })[1], {
+      button: 0,
+      ctrlKey: false,
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Mark as unread" }));
+    rerender(<SessionSidebar />);
+
+    expect(handleMarkUnread).toHaveBeenCalledExactlyOnceWith("running");
+    expect(screen.getByText("Unread")).toBeInTheDocument();
   });
 
   it("loads more only in the requested section", () => {
@@ -162,12 +221,12 @@ describe("SessionSidebar", () => {
       ...value,
       sectionPagination: {
         ...value.sectionPagination,
-        running: { hasMore: true, loadingMore: false, loadMore: loadMoreRunning },
+        inProgress: { hasMore: true, loadingMore: false, loadMore: loadMoreRunning },
       },
     });
     render(<SessionSidebar />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Load more running" }));
+    fireEvent.click(screen.getByRole("button", { name: "Load more in progress" }));
     expect(loadMoreRunning).toHaveBeenCalledOnce();
   });
 
@@ -195,7 +254,7 @@ describe("SessionSidebar", () => {
     expect(screen.getByText("Unable to load needs attention")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(retry).toHaveBeenCalledOnce();
-    expect(screen.getByRole("heading", { name: "Running" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "In progress" })).toBeInTheDocument();
   });
 
   it("surfaces a retryable error when the initial snapshot fails", () => {
@@ -204,8 +263,8 @@ describe("SessionSidebar", () => {
     mockHook.mockReturnValue({
       ...value,
       needsAttention: [],
-      running: [],
-      recent: [],
+      inProgress: [],
+      finished: [],
       childrenMap: new Map(),
       sessionsError: new Error("snapshot unavailable"),
       refreshSnapshot,
@@ -216,74 +275,5 @@ describe("SessionSidebar", () => {
     expect(screen.queryByText("No sessions yet")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(refreshSnapshot).toHaveBeenCalledOnce();
-  });
-
-  it("groups by repo, splits manual from automatic, nests children, and marks unread", () => {
-    const value = mockHook();
-    const webManual = {
-      ...session("web-manual", "Manual web work"),
-      repoOwner: "acme",
-      repoName: "web",
-      readState: { latestMessageId: "m1", unread: true } as const,
-    };
-    const webChild = {
-      ...session("web-child", "Nested subtask", webManual.id),
-      repoOwner: "acme",
-      repoName: "web",
-    };
-    const webAuto = {
-      ...session("web-auto", "Scheduled sweep"),
-      repoOwner: "acme",
-      repoName: "web",
-      spawnSource: "automation" as const,
-    };
-    const apiManual = {
-      ...session("api-manual", "API work"),
-      repoOwner: "acme",
-      repoName: "api",
-    };
-    mockHook.mockReturnValue({
-      ...value,
-      needsAttention: [webManual, webAuto, apiManual],
-      running: [],
-      recent: [],
-      childrenMap: new Map([[webManual.id, [webChild]]]),
-    });
-    render(<SessionSidebar />);
-
-    const webGroup = screen.getByRole("group", { name: "acme/web" });
-    expect(webGroup).toBeInTheDocument();
-    expect(screen.getByRole("group", { name: "acme/api" })).toBeInTheDocument();
-    expect(within(webGroup).getByText("Manual")).toBeInTheDocument();
-    expect(within(webGroup).getByText("Automatic")).toBeInTheDocument();
-    expect(screen.getByText("Unread")).toBeInTheDocument();
-
-    expect(screen.queryByText("Nested subtask")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Expand 1 sub-task" }));
-    expect(screen.getByText("Nested subtask")).toBeInTheDocument();
-  });
-
-  it("keeps children hidden until the parent is expanded", () => {
-    const value = mockHook();
-    const parent = session("parent-one", "Parent session");
-    const child = session("child-one", "Hidden child", parent.id);
-    mockHook.mockReturnValue({
-      ...value,
-      needsAttention: [],
-      running: [],
-      recent: [parent],
-      childrenMap: new Map([[parent.id, [child]]]),
-    });
-    render(<SessionSidebar />);
-
-    expect(screen.getByText("Parent session")).toBeInTheDocument();
-    expect(screen.queryByText("Hidden child")).not.toBeInTheDocument();
-
-    const toggle = screen.getByRole("button", { name: "Expand 1 sub-task" });
-    fireEvent.click(toggle);
-    expect(screen.getByText("Hidden child")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Collapse 1 sub-task" }));
-    expect(screen.queryByText("Hidden child")).not.toBeInTheDocument();
   });
 });

@@ -74,9 +74,10 @@ is simply absent, which is the point.
 Wait for the snapshot rebuild first — see the sandbox-outage note below — then:
 
 1. Create a session against a known repo, send a trivial prompt.
-2. Assert the session reaches **connected within 90 s** and produces a **first response within 180
-   s** (not just "sandbox created").
-3. Assert idle-stop fires **4-7 min** later.
+2. Assert the session reaches **connected within 240 s (the upstream connect watchdog)** and
+   produces a **first response within 180 s** (not just "sandbox created").
+3. Assert idle-stop fires **≈5 min after the last prompt once card 02's 300000 default applies, plus
+   up to 5 min more when a browser client is connected (upstream client-grace)**.
 4. On any failure: the sync is NOT good. Block / roll back.
 
 ### Expected: a few-minutes sandbox-creation outage while the snapshot rebuilds

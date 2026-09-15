@@ -44,11 +44,8 @@ reddens the function test.
   item.
 - Client-side, over the loaded page set (see the pagination caveat in the requirement).
 
-## Dated evidence (2026-08-20, non-binding hints)
+## Provenance
 
-- Helper + test: `packages/web/src/lib/group-automations-by-repository.ts` and its `.test.ts`
-  (exports `groupAutomationsByRepository`, `MULTIPLE_REPOSITORIES_GROUP_LABEL`).
-- Component: `packages/web/src/components/automations/automations-list.tsx` renders a `<section>`
-  with an `<h2>` heading per group and the automation rows inside each.
-- Component test: `packages/web/src/components/automations/automations-list.test.tsx`, case "groups
-  a single-repository automation under an owner/name heading".
+Fork-only since before the first blind sync; rebuilt on the 2026-09-11 preview branch. The as-built
+diff lives in the sync PR; this card carries only the requirement, the acceptance test, and the
+placement category.

@@ -10,6 +10,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { SafeMarkdown } from "@/components/safe-markdown";
 import { ScreenshotArtifactCard } from "@/components/screenshot-artifact-card";
 import { SessionWorkGroup } from "@/components/session-work-group";
@@ -19,18 +20,29 @@ import { ToolCallGroup } from "@/components/tool-call-group";
 import { copyToClipboard } from "@/lib/format";
 import {
   buildSessionTimelineItems,
+  isRenderableTimelineEvent,
   toolCallKey,
+  type DirectTimelineEventType,
   type FlatTimelineItem,
+  type RenderableTimelineEvent,
   type TimelineItem,
   type ToolCallEvent,
 } from "@/lib/timeline-items";
+import {
+  buildTimelineVirtualRows,
+  estimateTimelineRowSize,
+  TIMELINE_VIRTUALIZER_DEFAULTS,
+  type TimelineVirtualRow,
+} from "@/lib/timeline-virtual-rows";
 import type { Artifact, SandboxEvent } from "@/types/session";
 import type { SessionParticipantProfile } from "@open-inspect/shared/types/sessions";
 import { CheckIcon, CopyIcon, ErrorIcon } from "@/components/ui/icons";
+import { Button } from "@/components/ui/button";
+import { acknowledgeContextReset } from "@/lib/acknowledge-context-reset";
 import { resolveParticipantDisplay } from "@/lib/participant-display";
-import { TerminalMessageReadObserver } from "./terminal-message-read-observer";
-import type { SessionReadAttemptDisposition } from "@/lib/session-read-state";
 import type { PromptQueueItem } from "@open-inspect/shared/types/server-messages";
+
+const EMPTY_PROMPT_QUEUE: PromptQueueItem[] = [];
 
 export function SessionTimeline({
   events,
@@ -38,13 +50,11 @@ export function SessionTimeline({
   currentParticipantId,
   participantProfiles,
   isProcessing,
-  promptQueue = [],
+  promptQueue = EMPTY_PROMPT_QUEUE,
   loadingHistory,
   showSkeleton,
   onLoadOlder,
   onOpenMedia,
-  terminalMessageReadObservationEnabled = false,
-  onMarkMessageRead,
 }: {
   events: SandboxEvent[];
   sessionId: string;
@@ -56,10 +66,7 @@ export function SessionTimeline({
   showSkeleton: boolean;
   onLoadOlder: () => void;
   onOpenMedia: (artifactId: string) => void;
-  terminalMessageReadObservationEnabled?: boolean;
-  onMarkMessageRead?: (messageId: string) => Promise<SessionReadAttemptDisposition>;
 }) {
-  const timelineItems = useMemo(() => buildSessionTimelineItems(events), [events]);
   const pendingMessageIds = useMemo(
     () =>
       new Set(
@@ -67,49 +74,51 @@ export function SessionTimeline({
       ),
     [promptQueue]
   );
+  const timelineItems = useMemo(
+    () => buildSessionTimelineItems(events, pendingMessageIds),
+    [events, pendingMessageIds]
+  );
   const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(new Set());
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set());
   const [expandedWorkGroups, setExpandedWorkGroups] = useState<Set<string>>(new Set());
-  const latestTerminalMessageId = useMemo(() => {
-    for (let index = events.length - 1; index >= 0; index -= 1) {
-      const event = events[index];
-      if (event?.type === "execution_complete" && event.messageId) return event.messageId;
-    }
-    return null;
-  }, [events]);
-  const latestTerminalMessageGroupRange = useMemo(() => {
-    if (!latestTerminalMessageId) return null;
-    const completionIndex = timelineItems.findIndex(
-      (item) =>
-        item.type === "single" &&
-        item.event.type === "execution_complete" &&
-        item.event.messageId === latestTerminalMessageId
-    );
-    if (completionIndex < 0) return null;
-    const outputIndex = timelineItems.findIndex(
-      (item) =>
-        item.type === "single" &&
-        item.event.type === "token" &&
-        item.event.messageId === latestTerminalMessageId
-    );
-    return {
-      start: outputIndex >= 0 ? Math.min(outputIndex, completionIndex) : completionIndex,
-      end: Math.max(outputIndex, completionIndex),
-    };
-  }, [timelineItems, latestTerminalMessageId]);
+  const [expandedTaskSections, setExpandedTaskSections] = useState<Set<string>>(new Set());
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const topSentinelRef = useRef<HTMLDivElement>(null);
   const hasScrolledRef = useRef(false);
-  const isPrependingRef = useRef(false);
-  const didPrependRef = useRef(false);
-  const prevScrollHeightRef = useRef(0);
   const isNearBottomRef = useRef(true);
+  const virtualRows = useMemo(
+    () =>
+      buildTimelineVirtualRows({
+        items: timelineItems,
+        loadingHistory,
+        isProcessing,
+      }),
+    [isProcessing, loadingHistory, timelineItems]
+  );
+  const getVirtualRowKey = useCallback(
+    (index: number) => virtualRows[index]?.id ?? index,
+    [virtualRows]
+  );
+  const estimateVirtualRowSize = useCallback(
+    (index: number) => estimateTimelineRowSize(virtualRows[index]),
+    [virtualRows]
+  );
+  const rowVirtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
+    ...TIMELINE_VIRTUALIZER_DEFAULTS,
+    count: showSkeleton ? 0 : virtualRows.length,
+    getScrollElement: () => scrollContainerRef.current,
+    getItemKey: getVirtualRowKey,
+    estimateSize: estimateVirtualRowSize,
+  });
+  const totalSize = rowVirtualizer.getTotalSize();
 
   const handleScroll = useCallback(() => {
     hasScrolledRef.current = true;
     const el = scrollContainerRef.current;
     if (el) {
-      isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+      isNearBottomRef.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight <
+        TIMELINE_VIRTUALIZER_DEFAULTS.scrollEndThreshold;
     }
   }, []);
 
@@ -125,8 +134,6 @@ export function SessionTimeline({
           hasScrolledRef.current &&
           container.scrollHeight > container.clientHeight
         ) {
-          prevScrollHeightRef.current = container.scrollHeight;
-          isPrependingRef.current = true;
           onLoadOlder();
         }
       },
@@ -138,24 +145,22 @@ export function SessionTimeline({
   }, [onLoadOlder]);
 
   useLayoutEffect(() => {
-    if (isPrependingRef.current && scrollContainerRef.current) {
-      const el = scrollContainerRef.current;
-      el.scrollTop += el.scrollHeight - prevScrollHeightRef.current;
-      isPrependingRef.current = false;
-      didPrependRef.current = true;
-    }
-  }, [events]);
+    const container = scrollContainerRef.current;
+    if (!container || typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(() => {
+      if (isNearBottomRef.current) container.scrollTop = container.scrollHeight;
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
 
   useLayoutEffect(() => {
-    if (didPrependRef.current) {
-      didPrependRef.current = false;
-      return;
-    }
     if (isNearBottomRef.current) {
       const container = scrollContainerRef.current;
       if (container) container.scrollTop = container.scrollHeight;
     }
-  }, [events, isProcessing]);
+  }, [totalSize]);
 
   const toggleToolCall = useCallback((event: ToolCallEvent) => {
     const key = toolCallKey(event);
@@ -189,6 +194,15 @@ export function SessionTimeline({
     });
   }, []);
 
+  const toggleTaskSection = useCallback((key: string) => {
+    setExpandedTaskSections((expanded) => {
+      const next = new Set(expanded);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
   const renderFlatItem = (item: FlatTimelineItem): ReactNode => {
     if (item.type === "tool_group") {
       return (
@@ -201,13 +215,6 @@ export function SessionTimeline({
           onToggleTool={toggleToolCall}
         />
       );
-    }
-    if (
-      item.event.type === "user_message" &&
-      item.event.messageId &&
-      pendingMessageIds.has(item.event.messageId)
-    ) {
-      return null;
     }
     return (
       <EventItem
@@ -223,7 +230,14 @@ export function SessionTimeline({
 
   const renderBaseTimelineItem = (item: TimelineItem): ReactNode =>
     item.type === "task_group" ? (
-      <TaskActivityItem key={item.id} event={item.event} hasActivity={item.activity.length > 0}>
+      <TaskActivityItem
+        key={item.id}
+        event={item.event}
+        hasActivity={item.activity.length > 0}
+        expansionKey={item.id}
+        expandedSections={expandedTaskSections}
+        onToggleSection={toggleTaskSection}
+      >
         {item.activity.map(renderFlatItem)}
       </TaskActivityItem>
     ) : (
@@ -244,6 +258,17 @@ export function SessionTimeline({
       renderBaseTimelineItem(item)
     );
 
+  const renderVirtualRow = (row: TimelineVirtualRow): ReactNode => {
+    switch (row.type) {
+      case "loading":
+        return <div className="text-center text-muted-foreground text-sm py-2">Loading...</div>;
+      case "thinking":
+        return <ThinkingIndicator />;
+      case "item":
+        return renderTimelineItem(row.item);
+    }
+  };
+
   return (
     <div
       ref={scrollContainerRef}
@@ -254,49 +279,28 @@ export function SessionTimeline({
       // ancestor overflow clip, and grow the page itself.
       className="relative h-full overflow-y-auto overflow-x-hidden p-3 sm:p-4"
     >
-      <div className="w-full min-w-0 max-w-3xl mx-auto space-y-2">
-        <div ref={topSentinelRef} className="h-1" />
-        {loadingHistory && (
-          <div className="text-center text-muted-foreground text-sm py-2">Loading...</div>
-        )}
+      <div className="relative w-full min-w-0 max-w-3xl mx-auto">
+        <div ref={topSentinelRef} className="absolute left-0 top-0 h-1 w-full" />
         {showSkeleton ? (
           <TimelineSkeleton />
         ) : (
-          timelineItems.map((item, index) => {
-            if (
-              latestTerminalMessageGroupRange &&
-              onMarkMessageRead &&
-              index === latestTerminalMessageGroupRange.start
-            ) {
+          <div className="relative w-full" style={{ height: `${totalSize}px` }}>
+            {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+              const row = virtualRows[virtualRow.index];
               return (
-                <TerminalMessageReadObserver
-                  key={`terminal-message-${latestTerminalMessageId}`}
-                  messageId={latestTerminalMessageId!}
-                  enabled={terminalMessageReadObservationEnabled}
-                  onMarkMessageRead={onMarkMessageRead}
+                <div
+                  key={virtualRow.key}
+                  ref={rowVirtualizer.measureElement}
+                  data-index={virtualRow.index}
+                  className="absolute left-0 top-0 w-full"
+                  style={{ transform: `translateY(${virtualRow.start}px)` }}
                 >
-                  {timelineItems
-                    .slice(
-                      latestTerminalMessageGroupRange.start,
-                      latestTerminalMessageGroupRange.end + 1
-                    )
-                    .map(renderTimelineItem)}
-                </TerminalMessageReadObserver>
+                  {renderVirtualRow(row)}
+                </div>
               );
-            }
-            if (
-              latestTerminalMessageGroupRange &&
-              onMarkMessageRead &&
-              index > latestTerminalMessageGroupRange.start &&
-              index <= latestTerminalMessageGroupRange.end
-            ) {
-              return null;
-            }
-            return renderTimelineItem(item);
-          })
+            })}
+          </div>
         )}
-        {isProcessing && <ThinkingIndicator />}
-        <div />
       </div>
     </div>
   );
@@ -332,7 +336,7 @@ function TimelineSkeleton() {
 }
 
 type EventRendererProps = {
-  event: SandboxEvent;
+  event: RenderableTimelineEvent;
   sessionId: string;
   currentParticipantId: string | null;
   participantProfiles: Record<string, SessionParticipantProfile>;
@@ -475,7 +479,6 @@ function UserMessageEvent({
 }: EventRendererProps) {
   if (event.type !== "user_message") return null;
   const attachments = event.attachments ?? [];
-  if (!event.content && attachments.length === 0) return null;
 
   const isCurrentUser =
     event.author?.participantId && currentParticipantId
@@ -509,6 +512,23 @@ function UserMessageEvent({
       copyButtonClassName="p-1 text-secondary-foreground hover:text-foreground hover:bg-muted/60 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto focus-visible:opacity-100 focus-visible:pointer-events-auto transition-colors"
       onCopyContent={onCopyContent}
     >
+      {event.origin && (
+        <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border pb-2 text-xs">
+          <span className="font-medium text-accent">Resumed by PR feedback</span>
+          <span className="text-muted-foreground">
+            {event.origin.kind === "pr_comment" ? "PR comment" : "Review"} ·{" "}
+            {event.origin.authorType === "bot" ? "Bot" : "Human"}
+          </span>
+          <a
+            href={event.origin.feedbackUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="text-accent hover:underline"
+          >
+            Open feedback
+          </a>
+        </div>
+      )}
       {event.content && (
         <pre className="whitespace-pre-wrap text-sm text-foreground [overflow-wrap:anywhere]">
           {event.content}
@@ -522,7 +542,7 @@ function UserMessageEvent({
 }
 
 function AssistantMessageEvent({ event, copied, onCopyContent }: EventRendererProps) {
-  if (event.type !== "token" || !event.content) return null;
+  if (event.type !== "token") return null;
 
   return (
     <MessageFrame
@@ -540,7 +560,7 @@ function AssistantMessageEvent({ event, copied, onCopyContent }: EventRendererPr
 }
 
 function ToolResultEvent({ event }: EventRendererProps) {
-  if (event.type !== "tool_result" || !event.error) return null;
+  if (event.type !== "tool_result") return null;
 
   return (
     <div className="flex min-w-0 items-start gap-2 py-1 text-sm text-destructive">
@@ -561,13 +581,7 @@ function GitSyncEvent({ event }: EventRendererProps) {
 }
 
 function ArtifactEvent({ event, sessionId, onOpenMedia }: EventRendererProps) {
-  if (
-    event.type !== "artifact" ||
-    (event.artifactType !== "screenshot" && event.artifactType !== "video") ||
-    !event.artifactId
-  ) {
-    return null;
-  }
+  if (event.type !== "artifact") return null;
 
   return (
     <div className="space-y-2 border border-border-muted bg-card p-3 sm:p-4">
@@ -608,6 +622,60 @@ function WarningEvent({ event }: EventRendererProps) {
   );
 }
 
+function ProviderRetryEvent({ event }: EventRendererProps) {
+  if (event.type !== "provider_retry") return null;
+
+  const nextRetry =
+    event.nextRetryAt != null
+      ? ` · next attempt at ${new Date(event.nextRetryAt * 1000).toLocaleTimeString()}`
+      : "";
+  return (
+    <StatusRow tone="warning" time={formatEventTime(event)}>
+      Provider retrying (attempt {event.attempt}){nextRetry}
+    </StatusRow>
+  );
+}
+
+function ContextResetEvent({ event, sessionId }: EventRendererProps) {
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [acknowledging, setAcknowledging] = useState(false);
+  const isContextReset = event.type === "context_reset";
+  const handleAcknowledge = useCallback(async () => {
+    setAcknowledging(true);
+    const released = await acknowledgeContextReset(sessionId);
+    setAcknowledging(false);
+    if (released) setAcknowledged(true);
+  }, [sessionId]);
+  if (!isContextReset) return null;
+
+  return (
+    <StatusRow tone="warning" time={formatEventTime(event)}>
+      <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+        <span>
+          This sandbox starts a fresh context — earlier conversation history is shown but the agent
+          no longer has it. Acknowledge to dispatch the queued prompt.
+        </span>
+        {acknowledged ? (
+          <span className="shrink-0 text-xs font-medium">Acknowledged</span>
+        ) : (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            disabled={acknowledging}
+            onClick={() => {
+              void handleAcknowledge();
+            }}
+          >
+            {acknowledging ? "Acknowledging…" : "Acknowledge"}
+          </Button>
+        )}
+      </span>
+    </StatusRow>
+  );
+}
+
 function ExecutionCompleteEvent({ event }: EventRendererProps) {
   if (event.type !== "execution_complete") return null;
 
@@ -622,19 +690,6 @@ function ExecutionCompleteEvent({ event }: EventRendererProps) {
   return (
     <StatusRow tone="success" time={formatEventTime(event)}>
       Execution complete
-    </StatusRow>
-  );
-}
-
-function ProviderRetryEvent({ event }: EventRendererProps) {
-  if (event.type !== "provider_retry") return null;
-
-  const who = event.providerName ? `${event.providerName} ` : "";
-  const nextAt = new Date(event.nextAttemptAtMs).toLocaleTimeString();
-
-  return (
-    <StatusRow tone="destructive" time={formatEventTime(event)}>
-      {who}retry {event.attempt} at {nextAt}: {event.message}
     </StatusRow>
   );
 }
@@ -655,9 +710,7 @@ function formatEventTime(event: SandboxEvent): string {
   return new Date(event.timestamp * 1000).toLocaleTimeString();
 }
 
-const eventRenderers: Partial<
-  Record<SandboxEvent["type"], (props: EventRendererProps) => ReactNode>
-> = {
+const eventRenderers = {
   user_message: UserMessageEvent,
   token: AssistantMessageEvent,
   tool_result: ToolResultEvent,
@@ -665,10 +718,11 @@ const eventRenderers: Partial<
   artifact: ArtifactEvent,
   error: ErrorEvent,
   warning: WarningEvent,
+  provider_retry: ProviderRetryEvent,
+  context_reset: ContextResetEvent,
   execution_complete: ExecutionCompleteEvent,
   context_compacted: ContextCompactedEvent,
-  provider_retry: ProviderRetryEvent,
-};
+} satisfies Record<DirectTimelineEventType, (props: EventRendererProps) => ReactNode>;
 
 export const EventItem = memo(function EventItem({
   event,
@@ -708,8 +762,8 @@ export const EventItem = memo(function EventItem({
     }, 1500);
   }, []);
 
+  if (!isRenderableTimelineEvent(event) || event.type === "tool_call") return null;
   const render = eventRenderers[event.type];
-  if (!render) return null;
 
   return render({
     event,

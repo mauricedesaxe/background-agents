@@ -6,19 +6,21 @@ the synchronous per-event translator (`_apply_sse_event`) dispositions and
 the cross-prompt session-title dedupe, which are directly testable now.
 """
 
-from unittest.mock import MagicMock
+import asyncio
+import time
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from sandbox_runtime.constants import MAX_SNAPSHOT_RESERVE_SECONDS
-from sandbox_runtime.opencode_identifier import OpenCodeIdentifier
-from sandbox_runtime.prompt_stream import (
+from sandbox_runtime.harness.opencode_stream import (
     MAX_PROVIDER_RETRY_ATTEMPTS,
     OpenCodePromptStream,
     _Disposition,
     _message_created_epoch_ms,
     _PromptState,
 )
+from sandbox_runtime.opencode_identifier import OpenCodeIdentifier
 from tests.conftest import oc_message_id
 
 PARENT_SESSION_ID = "oc-session-123"
@@ -118,104 +120,6 @@ class TestApplySseEventDispositions:
         )
 
         assert step.disposition is _Disposition.FINISHED_IDLE
-
-    def test_parent_provider_retry_surfaces_event_without_ending_stream(self):
-        step = make_stream()._apply_sse_event(
-            make_state(),
-            sse(
-                "session.status",
-                {
-                    "sessionID": PARENT_SESSION_ID,
-                    "status": {
-                        "type": "retry",
-                        "attempt": 3,
-                        "message": "Usage limit reached. It will reset in 45 hours",
-                        "next": 1786006100468,
-                        "action": {"reason": "account_rate_limit", "provider": "zai-coding-plan"},
-                    },
-                },
-            ),
-        )
-
-        assert step.disposition is _Disposition.CONTINUE
-        assert step.events == [
-            {
-                "type": "provider_retry",
-                "attempt": 3,
-                "message": "Usage limit reached. It will reset in 45 hours",
-                "nextAttemptAtMs": 1786006100468,
-                "providerName": "zai-coding-plan",
-            }
-        ]
-
-    def test_sibling_provider_retry_is_ignored(self):
-        step = make_stream()._apply_sse_event(
-            make_state(),
-            sse(
-                "session.status",
-                {
-                    "sessionID": "oc-session-other",
-                    "status": {
-                        "type": "retry",
-                        "attempt": 1,
-                        "message": "Rate limited",
-                        "next": 1786006100468,
-                    },
-                },
-            ),
-        )
-
-        assert step.disposition is _Disposition.CONTINUE
-        assert [event for event in step.events if event["type"] == "provider_retry"] == []
-
-    def test_provider_retry_stops_and_surfaces_failure_at_the_cap(self):
-        stream = make_stream()
-        state = make_state()
-
-        def retry(attempt: int):
-            return sse(
-                "session.status",
-                {
-                    "sessionID": PARENT_SESSION_ID,
-                    "status": {
-                        "type": "retry",
-                        "attempt": attempt,
-                        "message": "Usage limit reached",
-                        "next": 1786006100468,
-                        "action": {"provider": "zai-coding-plan"},
-                    },
-                },
-            )
-
-        steps = [
-            stream._apply_sse_event(state, retry(attempt))
-            for attempt in range(1, MAX_PROVIDER_RETRY_ATTEMPTS + 1)
-        ]
-
-        for step in steps[:-1]:
-            assert step.disposition is _Disposition.CONTINUE
-            assert [event["type"] for event in step.events] == ["provider_retry"]
-
-        final = steps[-1]
-        assert final.disposition is _Disposition.FAILED
-        assert [event["type"] for event in final.events] == ["provider_retry", "error"]
-        error_event = final.events[-1]
-        assert error_event["messageId"] == "cp-msg-1"
-        assert "zai-coding-plan" in error_event["error"]
-        assert str(MAX_PROVIDER_RETRY_ATTEMPTS) in error_event["error"]
-
-    def test_slow_live_session_without_rejections_is_not_capped(self):
-        stream = make_stream()
-        state = make_state()
-
-        steps = [
-            stream._apply_sse_event(state, sse("server.heartbeat", {}))
-            for _ in range(MAX_PROVIDER_RETRY_ATTEMPTS * 3)
-        ]
-
-        assert all(step.disposition is _Disposition.CONTINUE for step in steps)
-        assert all(step.events == [] for step in steps)
-        assert state.provider_retry_count == 0
 
     def test_parent_session_error_fails_stream(self):
         step = make_stream()._apply_sse_event(
@@ -1071,6 +975,374 @@ class TestSessionTitleDedupe:
         step = self.title_event(stream, make_state(), "New Session - 2026-07-18T00:00:00.000Z")
 
         assert step.events == []
+
+
+def provider_rejection_error(
+    *,
+    name: str = "APIError",
+    message: str = "429 rate limit exceeded",
+    extra_data: dict | None = None,
+) -> dict:
+    """Synthesized NamedError fixture in OpenCode's error-part shape.
+
+    Built from the shape the bridge already parses (``_extract_error_message``
+    reads ``{"name", "data": {"message"}}``), extended with the AI-SDK fields
+    the provider-rejection detector matches on. Not captured from a live
+    OpenCode stream: OpenCode retries provider rejections internally and
+    usually emits nothing, so there is no traffic to record.
+    """
+    data: dict = {"message": message}
+    if extra_data:
+        data.update(extra_data)
+    return {"name": name, "data": data}
+
+
+class TestProviderRetryDetection:
+    def test_parent_session_error_classified_as_rejection_emits_retry_and_continues(self):
+        stream = make_stream()
+
+        step = stream._apply_sse_event(
+            make_state(),
+            sse(
+                "session.error",
+                {
+                    "sessionID": PARENT_SESSION_ID,
+                    "error": provider_rejection_error(),
+                },
+            ),
+        )
+
+        assert step.disposition is _Disposition.CONTINUE
+        assert step.events == [{"type": "provider_retry", "attempt": 1, "messageId": "cp-msg-1"}]
+
+    def test_retryable_status_without_known_name_is_a_rejection(self):
+        error = provider_rejection_error(
+            name="ProviderMysteryError",
+            extra_data={"statusCode": 429},
+        )
+
+        assert OpenCodePromptStream._is_provider_rejection(error) is True
+
+    def test_explicit_is_retryable_flag_is_a_rejection(self):
+        error = provider_rejection_error(
+            name="ProviderMysteryError",
+            extra_data={"isRetryable": True},
+        )
+
+        assert OpenCodePromptStream._is_provider_rejection(error) is True
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            {"name": "SomeError", "data": {"message": "It broke"}},
+            {"name": "ProviderAuthError", "data": {"message": "bad key"}},
+            {"name": "ContextOverflowError", "data": {"message": "too long"}},
+            {"name": "ProviderMysteryError", "data": {"message": "boom", "statusCode": 401}},
+            {"name": "ProviderMysteryError", "data": {"message": "boom"}},
+            "a plain string",
+            None,
+        ],
+    )
+    def test_unknown_shapes_stay_terminal_errors(self, error):
+        assert OpenCodePromptStream._is_provider_rejection(error) is False
+
+    @pytest.mark.parametrize("hostile_name", [["AI_RetryError"], {"name": "AI_RetryError"}])
+    def test_unhashable_error_name_stays_terminal_and_stream_survives(self, hostile_name):
+        error = {"name": hostile_name, "data": {"message": "boom"}}
+
+        assert OpenCodePromptStream._is_provider_rejection(error) is False
+
+        step = make_stream()._apply_sse_event(
+            make_state(),
+            sse("session.error", {"sessionID": PARENT_SESSION_ID, "error": error}),
+        )
+
+        assert step.disposition is _Disposition.FAILED
+        assert step.events[0]["type"] == "error"
+
+    def test_huge_retry_after_does_not_crash_and_omits_next_retry_at(self):
+        error = provider_rejection_error(extra_data={"retryAfter": 10**400})
+
+        assert OpenCodePromptStream._extract_next_retry_at(error) is None
+
+        step = make_stream()._apply_sse_event(
+            make_state(),
+            sse("session.error", {"sessionID": PARENT_SESSION_ID, "error": error}),
+        )
+
+        assert "nextRetryAt" not in step.events[0]
+
+    def test_retry_after_header_sets_next_retry_at(self):
+        error = provider_rejection_error(extra_data={"responseHeaders": {"retry-after": "30"}})
+
+        step = make_stream()._apply_sse_event(
+            make_state(),
+            sse("session.error", {"sessionID": PARENT_SESSION_ID, "error": error}),
+        )
+
+        event = step.events[0]
+        assert event["type"] == "provider_retry"
+        assert event["nextRetryAt"] == pytest.approx(time.time() + 30.0, abs=5.0)
+
+    def test_retry_after_ms_field_sets_next_retry_at(self):
+        error = provider_rejection_error(extra_data={"retryAfter": 5000})
+
+        next_retry_at = OpenCodePromptStream._extract_next_retry_at(error)
+
+        assert next_retry_at == pytest.approx(time.time() + 5.0, abs=5.0)
+
+    def test_unparseable_retry_hint_omits_next_retry_at(self):
+        error = provider_rejection_error(
+            extra_data={"responseHeaders": {"retry-after": "Fri, 31 Dec 2027 23:59:59 GMT"}}
+        )
+
+        step = make_stream()._apply_sse_event(
+            make_state(),
+            sse("session.error", {"sessionID": PARENT_SESSION_ID, "error": error}),
+        )
+
+        assert "nextRetryAt" not in step.events[0]
+
+    def test_attempts_count_consecutively_per_message(self):
+        stream = make_stream()
+        state = make_state()
+        rejection = sse(
+            "session.error", {"sessionID": PARENT_SESSION_ID, "error": provider_rejection_error()}
+        )
+
+        first = stream._apply_sse_event(state, rejection)
+        second = stream._apply_sse_event(state, rejection)
+
+        assert first.events[0]["attempt"] == 1
+        assert second.events[0]["attempt"] == 2
+
+    def test_max_provider_retry_attempts_is_pinned_to_four(self):
+        """Constant drift must be a deliberate act, not an accident."""
+        assert MAX_PROVIDER_RETRY_ATTEMPTS == 4
+
+    def test_cap_trips_terminal_error_and_capped_disposition(self):
+        stream = make_stream()
+        state = make_state()
+        rejection = sse(
+            "session.error", {"sessionID": PARENT_SESSION_ID, "error": provider_rejection_error()}
+        )
+
+        step = None
+        for _attempt in range(MAX_PROVIDER_RETRY_ATTEMPTS):
+            step = stream._apply_sse_event(state, rejection)
+
+        assert step is not None
+        assert step.disposition is _Disposition.CAPPED
+        assert step.events[0]["attempt"] == MAX_PROVIDER_RETRY_ATTEMPTS
+        assert step.events[1] == {
+            "type": "error",
+            "error": f"provider kept rejecting after {MAX_PROVIDER_RETRY_ATTEMPTS} retries",
+            "messageId": "cp-msg-1",
+        }
+
+    def test_non_retry_error_after_rejections_still_fails_stream(self):
+        stream = make_stream()
+        state = make_state()
+        rejection = sse(
+            "session.error", {"sessionID": PARENT_SESSION_ID, "error": provider_rejection_error()}
+        )
+        stream._apply_sse_event(state, rejection)
+
+        step = stream._apply_sse_event(
+            state,
+            sse(
+                "session.error",
+                {"sessionID": PARENT_SESSION_ID, "error": {"name": "SomeError"}},
+            ),
+        )
+
+        assert step.disposition is _Disposition.FAILED
+
+    def test_message_part_error_classified_as_rejection_emits_retry(self):
+        stream = make_stream()
+        state = make_state()
+
+        step = stream._apply_sse_event(
+            state,
+            sse(
+                "message.updated",
+                {
+                    "info": {
+                        "id": "msg_parent_1",
+                        "sessionID": PARENT_SESSION_ID,
+                        "parentID": state.opencode_message_id,
+                        "role": "assistant",
+                        "error": provider_rejection_error(),
+                    }
+                },
+            ),
+        )
+
+        assert [event["type"] for event in step.events] == ["provider_retry"]
+        assert step.disposition is _Disposition.CONTINUE
+        assert state.provider_retry_count == 1
+
+    def test_cap_tripping_via_message_error_yields_capped_step(self):
+        stream = make_stream()
+        state = make_state()
+        error_info = {
+            "info": {
+                "id": "msg_parent_1",
+                "sessionID": PARENT_SESSION_ID,
+                "parentID": state.opencode_message_id,
+                "role": "assistant",
+                "error": provider_rejection_error(),
+            }
+        }
+
+        step = None
+        for _ in range(MAX_PROVIDER_RETRY_ATTEMPTS):
+            step = stream._apply_sse_event(state, sse("message.updated", error_info))
+
+        assert step is not None
+        assert step.disposition is _Disposition.CAPPED
+        retry_events = [event for event in step.events if event.get("type") == "provider_retry"]
+        terminal = [event for event in step.events if event.get("type") == "error"]
+        assert [event["attempt"] for event in retry_events] == [MAX_PROVIDER_RETRY_ATTEMPTS]
+        assert terminal == [
+            {
+                "type": "error",
+                "error": f"provider kept rejecting after {MAX_PROVIDER_RETRY_ATTEMPTS} retries",
+                "messageId": "cp-msg-1",
+            }
+        ]
+
+
+class TestProviderRetryCapStream:
+    @staticmethod
+    async def _collect(stream: OpenCodePromptStream, state_session_id: str) -> list[dict]:
+        async def sse_events():
+            for _ in range(MAX_PROVIDER_RETRY_ATTEMPTS):
+                yield sse(
+                    "session.error",
+                    {
+                        "sessionID": state_session_id,
+                        "error": provider_rejection_error(),
+                    },
+                )
+            yield sse("session.idle", {"sessionID": state_session_id})
+            await asyncio.Future()
+
+        client = MagicMock()
+        client.events = MagicMock()
+        client.events.return_value = AsyncNullContext(sse_events())
+        client.post_prompt = AsyncMock()
+        client.request_stop = AsyncMock()
+        client.get_messages = AsyncMock(return_value=[])
+        stream._client = client
+
+        collected = []
+        async for event in stream.stream_prompt(
+            opencode_session_id=state_session_id,
+            message_id="cp-msg-1",
+            content="hello",
+        ):
+            collected.append(event)
+        return collected
+
+    async def test_cap_requests_stop_and_emits_terminal_error(self):
+        stream = make_stream()
+
+        collected = await self._collect(stream, PARENT_SESSION_ID)
+
+        retry_events = [event for event in collected if event.get("type") == "provider_retry"]
+        terminal = [event for event in collected if event.get("type") == "error"]
+        assert [event["attempt"] for event in retry_events] == list(
+            range(1, MAX_PROVIDER_RETRY_ATTEMPTS + 1)
+        )
+        assert terminal[-1]["error"] == (
+            f"provider kept rejecting after {MAX_PROVIDER_RETRY_ATTEMPTS} retries"
+        )
+        stream._client.request_stop.assert_awaited_once_with(
+            PARENT_SESSION_ID, reason="provider_retry_cap"
+        )
+
+
+class TestUncappedRejectionStreamEnd:
+    @staticmethod
+    async def _collect(stream: OpenCodePromptStream, sse_iterator) -> list[dict]:
+        client = MagicMock()
+        client.events = MagicMock()
+        client.events.return_value = AsyncNullContext(sse_iterator)
+        client.post_prompt = AsyncMock()
+        client.request_stop = AsyncMock()
+        client.get_messages = AsyncMock(return_value=[])
+        stream._client = client
+
+        collected = []
+        async for event in stream.stream_prompt(
+            opencode_session_id=PARENT_SESSION_ID,
+            message_id="cp-msg-1",
+            content="hello",
+        ):
+            collected.append(event)
+        return collected
+
+    async def test_stream_ending_after_uncapped_rejection_fails_with_provider_message(self):
+        async def sse_events():
+            yield sse(
+                "session.error",
+                {"sessionID": PARENT_SESSION_ID, "error": provider_rejection_error()},
+            )
+
+        stream = make_stream()
+        collected = await self._collect(stream, sse_events())
+
+        terminal = [event for event in collected if event.get("type") == "error"]
+        assert terminal == [
+            {
+                "type": "error",
+                "error": "429 rate limit exceeded",
+                "messageId": "cp-msg-1",
+            }
+        ]
+        stream._client.request_stop.assert_not_awaited()
+
+    async def test_idle_after_rejection_still_completes_successfully(self):
+        async def sse_events():
+            yield sse(
+                "session.error",
+                {"sessionID": PARENT_SESSION_ID, "error": provider_rejection_error()},
+            )
+            yield sse("session.idle", {"sessionID": PARENT_SESSION_ID})
+            await asyncio.Future()
+
+        stream = make_stream()
+        collected = await self._collect(stream, sse_events())
+
+        terminal = [event for event in collected if event.get("type") == "error"]
+        assert terminal == []
+
+    async def test_inactivity_timeout_after_rejection_carries_provider_cause(self):
+        from sandbox_runtime.harness.opencode_client import SSEInactivityTimeoutError
+
+        async def sse_events():
+            yield sse(
+                "session.error",
+                {"sessionID": PARENT_SESSION_ID, "error": provider_rejection_error()},
+            )
+            raise SSEInactivityTimeoutError("no data for 120s")
+
+        stream = make_stream()
+
+        with pytest.raises(RuntimeError, match="429 rate limit exceeded"):
+            await self._collect(stream, sse_events())
+
+
+class AsyncNullContext:
+    def __init__(self, iterator) -> None:
+        self.iterator = iterator
+
+    async def __aenter__(self):
+        return self.iterator
+
+    async def __aexit__(self, *exc_info) -> None:
+        return None
 
 
 if __name__ == "__main__":

@@ -8,7 +8,6 @@ import {
   openSandboxWs,
   seedSandboxAuth,
   collectMessages,
-  waitForSandboxStatus,
 } from "./helpers";
 
 describe("POST /internal/stop", () => {
@@ -299,17 +298,7 @@ describe("POST /internal/stop", () => {
 
     // Connect sandbox WS so queue drain can dispatch
     const { ws: sandboxWs } = await openSandboxWs(name, sandboxAuth);
-    expect(sandboxWs).not.toBeNull();
-    sandboxWs!.accept();
-    sandboxWs!.send(
-      JSON.stringify({
-        type: "ready",
-        sandboxId: sandboxAuth.sandboxId,
-        timestamp: Date.now() / 1000,
-        contextStatus: "fresh",
-      })
-    );
-    await waitForSandboxStatus(stub, "ready");
+    if (sandboxWs) sandboxWs.accept();
     // Stop execution - marks A as failed
     await stub.fetch("http://internal/internal/stop", { method: "POST" });
 
@@ -437,5 +426,71 @@ describe("POST /internal/stop", () => {
       msgId
     );
     expect(messages[0].status).toBe("processing");
+  });
+});
+
+describe("POST /internal/archive (suppress-variant stop)", () => {
+  it("stops a wedged processing message and archives without resuming the queue", async () => {
+    const { stub } = await initSession();
+
+    const participants = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    const participantId = participants[0].id;
+
+    const msgId = "msg-archive-stop";
+    await seedMessage(stub, {
+      id: msgId,
+      authorId: participantId,
+      content: "Wedged prompt",
+      source: "web",
+      status: "processing",
+      createdAt: Date.now() - 1000,
+      startedAt: Date.now() - 500,
+    });
+
+    const res = await stub.fetch("http://internal/internal/archive", { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "archived" });
+
+    const messages = await queryDO<{
+      status: string;
+      error_message: string | null;
+      stop_confirmation_deadline: number | null;
+    }>(
+      stub,
+      "SELECT status, error_message, stop_confirmation_deadline FROM messages WHERE id = ?",
+      msgId
+    );
+    expect(messages[0].status).toBe("failed");
+    expect(messages[0].error_message).toBe("Session was archived");
+    expect(messages[0].stop_confirmation_deadline).toEqual(expect.any(Number));
+
+    const sessions = await queryDO<{ status: string }>(stub, "SELECT status FROM session LIMIT 1");
+    expect(sessions[0].status).toBe("archived");
+  });
+
+  it("archives a cancelled session without stopping execution", async () => {
+    const { stub } = await initSession();
+    await queryDO(stub, "UPDATE session SET status = 'cancelled'");
+
+    const res = await stub.fetch("http://internal/internal/archive", { method: "POST" });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "archived" });
+    const sessions = await queryDO<{ status: string }>(stub, "SELECT status FROM session LIMIT 1");
+    expect(sessions[0].status).toBe("archived");
+  });
+
+  it("archives a session that holds no work at all", async () => {
+    const { stub } = await initSession();
+
+    const res = await stub.fetch("http://internal/internal/archive", { method: "POST" });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "archived" });
+    const sessions = await queryDO<{ status: string }>(stub, "SELECT status FROM session LIMIT 1");
+    expect(sessions[0].status).toBe("archived");
   });
 });

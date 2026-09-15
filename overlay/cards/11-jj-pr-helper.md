@@ -22,25 +22,27 @@ they error at the first command and the flow the sandbox exists to run breaks. T
 ## Acceptance test (the contract)
 
 Create a session in a jj-colocated repo -> the agent makes changes -> the PR helper pushes a
-**non-empty** branch carrying the actual work (not an empty branch off a lagging `HEAD`). This
+**non-empty** branch carrying the actual work (not an empty branch off a lagging git HEAD). This
 protects fan-out (card `04-child-result-delivery`), which depends on children producing real PRs.
 
 ## Placement decision (durable)
 
-- **jj binary install moves into the external `lazar-harness` `install.sh`** (config-ward), so it
-  leaves the upstream-owned tree and rides in with the harness. This couples to card
-  `15-harness-install`; sequence after it. Removing the jj block from the upstream-owned image build
-  is the point — anything in lazar-harness survives a blind sync untouched.
+- **The jj binary install moves into the external `lazar-harness` install script** (config-ward), so
+  it leaves the upstream-owned tree and rides in with the harness. This couples to card
+  `15-harness-install`; sequence after it. Removing the jj install from the upstream-owned image
+  build is the point — anything in lazar-harness survives a blind sync untouched.
 - **The jj-aware PR helper stays as reapplied code** in the upstream-owned tree, redone each sync.
-  It fixes a problem jj creates: the control plane builds specs against git `HEAD`, but a
-  jj-colocated checkout pins `.git/HEAD` to `@-`, so pushing `HEAD` publishes an empty branch. The
-  helper detects `.jj`, picks `@` or `@-`, and sets the bookmark to the branch name.
+  It fixes a problem jj creates: the control plane builds its push specs against git HEAD, but a
+  jj-colocated checkout parks the git HEAD ref away from the working copy, so pushing that ref
+  publishes an empty branch. The helper detects the jj checkout, targets the working-copy revision
+  (or its parent), and sets the bookmark to the branch name.
 
-## Gotcha
+## Durable constraint
 
-A `HARNESS_REF` bump alone will not rebuild the Daytona snapshot (`source_hash` tracks `.py/.js/.ts`
-only), so moving the jj binary in via the harness needs a `SANDBOX_VERSION` bump too. Reapply and
-version bump travel together (same as cards 01, 15).
+An image-side harness change propagates only through the snapshot content hash (card 01's
+constraint): the harness content must sit inside the hashed payload roots or it ships nothing, and
+no version-stamp bump substitutes for a real hashed change. The old "bump the version stamp along
+with the harness ref" recipe is superseded — see Provenance.
 
 ## Notes
 
@@ -50,7 +52,11 @@ version bump travel together (same as cards 01, 15).
 - The local-workspaces benefit of jj does not apply in a sandbox (each sandbox is its own checkout).
   It was never the reason; the skills dependency is.
 
-## Dated evidence (2026-08-19, non-binding hints)
+## Provenance
 
-- PR helper lived as `bridge.py` code (~line 2079). Do not assume it stays in one file or co-located
-  with the connect/provider logic at reapply time.
+The fork built both parts; the binary install then moved into the external lazar-harness (ref
+c28bc423) so it would stop being wiped, while the PR helper stayed as reapplied bridge code. The
+2026-08-19 card anchored the helper to one file and line of that era's bridge and warned that a
+harness-ref bump needed a version-stamp bump to rebuild the snapshot; both were dropped in the
+2026-09-11 conversion — the anchor is anatomy, and the recipe is superseded by the content-hash
+propagation recorded in the fork ops notes. The skills-dependency rationale stands unchanged.

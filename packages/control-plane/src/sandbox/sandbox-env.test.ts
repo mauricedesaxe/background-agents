@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import {
   applyScmCloneEnv,
+  BOOT_MODE_ENV_KEYS,
   buildImageBuildCallbackEnv,
   buildImageBuildEnvVars,
   buildSandboxEnvVars,
@@ -25,6 +26,7 @@ const baseInput = {
   sessionId: "session-123",
   repoOwner: "testowner",
   repoName: "testrepo",
+  harness: "opencode" as const,
   provider: "anthropic",
   model: "anthropic/claude-sonnet-4-5",
 };
@@ -37,6 +39,7 @@ describe("buildSessionConfig", () => {
       session_id: "session-123",
       repo_owner: "testowner",
       repo_name: "testrepo",
+      harness: "opencode",
       provider: "anthropic",
       model: "anthropic/claude-sonnet-4-5",
       mcp_servers: mcpServers,
@@ -107,6 +110,7 @@ describe("buildSessionConfig", () => {
       session_id: "session-123",
       repo_owner: "testowner",
       repo_name: "testrepo",
+      harness: "opencode",
       provider: "anthropic",
       model: "anthropic/claude-sonnet-4-5",
     });
@@ -157,6 +161,7 @@ describe("buildSandboxEnvVars", () => {
     repoName: "testrepo",
     controlPlaneUrl: "https://control-plane.test",
     sandboxAuthToken: "auth-token-abc",
+    harness: "opencode" as const,
     provider: "anthropic",
     model: "anthropic/claude-sonnet-4-5",
   };
@@ -184,6 +189,7 @@ describe("buildSandboxEnvVars", () => {
       session_id: "session-123",
       repo_owner: "testowner",
       repo_name: "testrepo",
+      harness: "opencode",
       provider: "anthropic",
       model: "anthropic/claude-sonnet-4-5",
     });
@@ -191,16 +197,6 @@ describe("buildSandboxEnvVars", () => {
     expect(envVars).not.toHaveProperty("VCS_CLONE_TOKEN");
     expect(envVars).not.toHaveProperty("GITHUB_TOKEN");
     expect(envVars).not.toHaveProperty("GITHUB_APP_TOKEN");
-  });
-
-  it("passes the expected OpenCode session ID as canonical env", () => {
-    const envVars = buildSandboxEnvVars(
-      { ...baseConfig, opencodeSessionId: "ses-existing" },
-      { scmIdentity: scmCloneIdentity("github") }
-    );
-
-    expect(envVars.OPENCODE_SESSION_ID).toBe("ses-existing");
-    expect(JSON.parse(envVars.SESSION_CONFIG).opencode_session_id).toBe("ses-existing");
   });
 
   it("passes a configured sandbox timeout to the runtime", () => {
@@ -216,18 +212,13 @@ describe("buildSandboxEnvVars", () => {
     const envVars = buildSandboxEnvVars(
       {
         ...baseConfig,
-        userEnvVars: {
-          SANDBOX_ID: "user-override",
-          VCS_HOST: "evil.example",
-          OPENCODE_SESSION_ID: "user-session",
-        },
+        userEnvVars: { SANDBOX_ID: "user-override", VCS_HOST: "evil.example" },
       },
       { scmIdentity: scmCloneIdentity("github") }
     );
 
     expect(envVars.SANDBOX_ID).toBe("sandbox-456");
     expect(envVars.VCS_HOST).toBe("github.com");
-    expect(envVars).not.toHaveProperty("OPENCODE_SESSION_ID");
   });
 
   it("serializes null repo identity to empty strings", () => {
@@ -272,6 +263,32 @@ describe("buildSandboxEnvVars", () => {
     );
     expect(enabled.VNC_PASSWORD).toBe("derived-password");
     expect(enabled.NOVNC_PORT).toBe("6099");
+  });
+
+  it("strips boot-mode markers from the user layer", () => {
+    // Providers add these after buildSandboxEnvVars returns, and only when the
+    // mode is real, so they are not part of the system overlay that shadows user
+    // vars. A repo secret of the same name would otherwise reach
+    // BootMode.from_env and let a plain session claim it booted from a repo
+    // image, a snapshot, or an image build.
+    const envVars = buildSandboxEnvVars(
+      {
+        ...baseConfig,
+        userEnvVars: {
+          FROM_REPO_IMAGE: "true",
+          REPO_IMAGE_SHA: "deadbeef",
+          RESTORED_FROM_SNAPSHOT: "true",
+          IMAGE_BUILD_MODE: "true",
+          LEGITIMATE_SECRET: "keep-me",
+        },
+      },
+      { scmIdentity: scmCloneIdentity("github") }
+    );
+
+    for (const marker of BOOT_MODE_ENV_KEYS) {
+      expect(envVars).not.toHaveProperty(marker);
+    }
+    expect(envVars.LEGITIMATE_SECRET).toBe("keep-me");
   });
 
   it("sets the slack-notify flag only when enabled", () => {

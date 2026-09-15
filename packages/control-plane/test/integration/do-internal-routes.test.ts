@@ -403,6 +403,92 @@ describe("DO internal sub-session routes", () => {
     });
   });
 
+  describe("POST /internal/acknowledge-context-reset", () => {
+    async function seedHeldPendingMessage(stub: DurableObjectStub): Promise<void> {
+      const [{ id: participantId }] = await queryDO<{ id: string }>(
+        stub,
+        "SELECT id FROM participants LIMIT 1"
+      );
+      await seedMessage(stub, {
+        id: "msg-held-1",
+        authorId: participantId,
+        content: "Continue after the reset",
+        source: "web",
+        status: "pending",
+        createdAt: Date.now(),
+      });
+      await queryDO(stub, "UPDATE messages SET context_reset_hold = 1");
+    }
+
+    it("releases the held prompt and reports the release", async () => {
+      const { stub } = await initSession({
+        repoOwner: "acme",
+        repoName: "web-app",
+        userId: "user-1",
+      });
+      await seedHeldPendingMessage(stub);
+
+      const res = await stub.fetch("http://internal/internal/acknowledge-context-reset", {
+        method: "POST",
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ status: "released", released: 1 });
+      const rows = await queryDO<{ context_reset_hold: number; status: string }>(
+        stub,
+        "SELECT context_reset_hold, status FROM messages WHERE id = 'msg-held-1'"
+      );
+      expect(rows[0]).toEqual({ context_reset_hold: 0, status: "pending" });
+    });
+
+    it("answers 409 when nothing is held", async () => {
+      const { stub } = await initSession({
+        repoOwner: "acme",
+        repoName: "web-app",
+        userId: "user-1",
+      });
+
+      const res = await stub.fetch("http://internal/internal/acknowledge-context-reset", {
+        method: "POST",
+      });
+
+      expect(res.status).toBe(409);
+      await expect(res.json()).resolves.toEqual({ error: "No context-reset hold to acknowledge" });
+    });
+
+    it("keeps a terminal message's hold flag untouched", async () => {
+      const { stub } = await initSession({
+        repoOwner: "acme",
+        repoName: "web-app",
+        userId: "user-1",
+      });
+      const [{ id: participantId }] = await queryDO<{ id: string }>(
+        stub,
+        "SELECT id FROM participants LIMIT 1"
+      );
+      await seedMessage(stub, {
+        id: "msg-done",
+        authorId: participantId,
+        content: "Already ran",
+        source: "web",
+        status: "completed",
+        createdAt: Date.now(),
+      });
+      await queryDO(stub, "UPDATE messages SET context_reset_hold = 1");
+
+      const res = await stub.fetch("http://internal/internal/acknowledge-context-reset", {
+        method: "POST",
+      });
+
+      expect(res.status).toBe(409);
+      const rows = await queryDO<{ context_reset_hold: number }>(
+        stub,
+        "SELECT context_reset_hold FROM messages WHERE id = 'msg-done'"
+      );
+      expect(rows[0].context_reset_hold).toBe(1);
+    });
+  });
+
   describe("POST /internal/expire-draft", () => {
     it("archives a session that never left the draft status", async () => {
       const { stub } = await initSession();

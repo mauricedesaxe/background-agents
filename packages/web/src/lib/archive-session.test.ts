@@ -1,60 +1,71 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
+import { archiveSession } from "./archive-session";
 
-const { mockBrowserApiFetch } = vi.hoisted(() => ({ mockBrowserApiFetch: vi.fn() }));
-
-vi.mock("@/lib/browser-api-fetch", () => ({ browserApiFetch: mockBrowserApiFetch }));
-
-import { archiveSession, archiveSessions } from "./archive-session";
+vi.mock("sonner", () => ({
+  toast: { success: vi.fn(), error: vi.fn() },
+}));
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
-describe("archiveSession", () => {
-  it("returns the API error as a failed outcome", async () => {
-    mockBrowserApiFetch.mockResolvedValue(
-      new Response(JSON.stringify({ error: "Archive denied" }), { status: 403 })
-    );
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
 
-    await expect(archiveSession("session-1")).resolves.toEqual({
-      kind: "failed",
-      sessionId: "session-1",
-      reason: "Archive denied",
-    });
+describe("archiveSession", () => {
+  it("returns true and stays quiet when the archive succeeds", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(200, { status: "archived" })));
+
+    expect(await archiveSession("session-1")).toBe(true);
+    expect(toast.error).not.toHaveBeenCalled();
   });
 
-  it("limits bulk archive requests to four concurrent calls", async () => {
-    let activeRequests = 0;
-    let highestConcurrency = 0;
-    const resolveRequests: Array<() => void> = [];
-    mockBrowserApiFetch.mockImplementation(
-      () =>
-        new Promise<Response>((resolve) => {
-          activeRequests += 1;
-          highestConcurrency = Math.max(highestConcurrency, activeRequests);
-          resolveRequests.push(() => {
-            activeRequests -= 1;
-            resolve(new Response(null, { status: 200 }));
-          });
+  it("shows the server message for known lifecycle errors", async () => {
+    const lifecycleErrors: Array<[number, string]> = [
+      [404, "Session not found"],
+      [409, "Session is not promptable"],
+      [403, "Forbidden"],
+    ];
+
+    for (const [status, error] of lifecycleErrors) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(status, { error })));
+
+      expect(await archiveSession("session-1")).toBe(false);
+      expect(toast.error).toHaveBeenCalledWith(error);
+    }
+  });
+
+  it("falls back to the generic message when a 5xx body leaks internals", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(500, {
+          error: "Error: D1_EXECUTION_ERROR: internal use only: SELECT * FROM secrets",
         })
+      )
     );
 
-    const archived = archiveSessions(new Set(["one", "two", "three", "four", "five", "six"]));
-    expect(mockBrowserApiFetch).toHaveBeenCalledTimes(4);
+    expect(await archiveSession("session-1")).toBe(false);
+    expect(toast.error).toHaveBeenCalledWith("Failed to archive session");
+  });
 
-    while (resolveRequests.length > 0) {
-      resolveRequests.shift()?.();
-      await Promise.resolve();
-    }
+  it("falls back to the generic message when the error body is not JSON", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("Bad Gateway", { status: 502 })));
 
-    await expect(archived).resolves.toEqual([
-      { kind: "archived", sessionId: "one" },
-      { kind: "archived", sessionId: "two" },
-      { kind: "archived", sessionId: "three" },
-      { kind: "archived", sessionId: "four" },
-      { kind: "archived", sessionId: "five" },
-      { kind: "archived", sessionId: "six" },
-    ]);
-    expect(highestConcurrency).toBe(4);
+    expect(await archiveSession("session-1")).toBe(false);
+    expect(toast.error).toHaveBeenCalledWith("Failed to archive session");
+  });
+
+  it("falls back to the generic message when the request itself fails", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network offline")));
+
+    expect(await archiveSession("session-1")).toBe(false);
+    expect(toast.error).toHaveBeenCalledWith("Failed to archive session");
   });
 });

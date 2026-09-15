@@ -1,8 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { createSourceControlProvider } from "./index";
+import { GitHubSourceControlProvider } from "./github-provider";
+import { GitLabSourceControlProvider } from "./gitlab-provider";
 import { SourceControlProviderError } from "../errors";
 
 describe("createSourceControlProvider", () => {
+  it("creates github provider", () => {
+    const provider = createSourceControlProvider({ provider: "github" });
+    expect(provider).toBeInstanceOf(GitHubSourceControlProvider);
+  });
+
+  it("creates gitlab provider when config is provided", () => {
+    const provider = createSourceControlProvider({
+      provider: "gitlab",
+      gitlab: { accessToken: "glpat-test" },
+    });
+    expect(provider).toBeInstanceOf(GitLabSourceControlProvider);
+  });
+
   it("throws for gitlab without configuration", () => {
     expect(() => createSourceControlProvider({ provider: "gitlab" })).toThrow(
       SourceControlProviderError

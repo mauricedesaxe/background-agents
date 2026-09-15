@@ -7,6 +7,8 @@ import pytest
 
 from sandbox_runtime.repo_config import RepoEntry
 from sandbox_runtime.repository_sync import (
+    DEFAULT_GIT_CLONE_TIMEOUT_SECONDS,
+    DEFAULT_GIT_FETCH_TIMEOUT_SECONDS,
     RepositorySynchronizer,
     RepositorySyncOutcome,
     RepositorySyncStatus,
@@ -28,6 +30,13 @@ def _hung_process() -> MagicMock:
     process.communicate = AsyncMock(side_effect=communicate_forever)
     process.wait = AsyncMock(return_value=-signal.SIGKILL)
     return process
+
+
+def test_git_operation_timeout_defaults_are_named() -> None:
+    synchronizer = RepositorySynchronizer("github.com", MagicMock())
+
+    assert synchronizer.clone_timeout_seconds == DEFAULT_GIT_CLONE_TIMEOUT_SECONDS
+    assert synchronizer.fetch_timeout_seconds == DEFAULT_GIT_FETCH_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio
@@ -110,37 +119,3 @@ async def test_multi_repository_sync_identifies_timed_out_member(tmp_path: Path)
     assert result.failures == (repositories[1],)
     assert result.timed_out == (repositories[1],)
     assert synchronizer._sync_repo.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_persistent_resume_refreshes_without_replacing_checkout(tmp_path: Path) -> None:
-    synchronizer = RepositorySynchronizer("github.com", MagicMock())
-    repo = _repository(tmp_path)
-    repo.path.mkdir()
-    synchronizer._ensure_plain_origin = AsyncMock(return_value=True)
-    synchronizer._fetch_branch = AsyncMock(return_value=True)
-    synchronizer._checkout_branch = AsyncMock(return_value=True)
-
-    result = await synchronizer._update_existing_repo(repo, BootMode.PERSISTENT_RESUME)
-
-    assert result is True
-    synchronizer._fetch_branch.assert_awaited_once_with(repo, "main")
-    synchronizer._checkout_branch.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_persistent_resume_preserves_existing_diff_baseline(tmp_path: Path) -> None:
-    synchronizer = RepositorySynchronizer("github.com", MagicMock())
-    repo = _repository(tmp_path)
-    synchronizer._sync_repo = AsyncMock(return_value=True)
-
-    with patch(
-        "sandbox_runtime.repository_sync.resolve_session_diff_baselines",
-        new_callable=AsyncMock,
-        return_value=[repo],
-    ) as resolve_baselines:
-        await synchronizer.sync([repo], BootMode.PERSISTENT_RESUME)
-
-    resolve_baselines.assert_awaited_once_with(
-        [repo], discover_missing=False, get_head_sha=synchronizer._get_head_sha
-    )

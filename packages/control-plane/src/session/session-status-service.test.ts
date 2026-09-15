@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
+import { createTestBackgroundTasks } from "../background-tasks.test-support";
 import { SessionStatusService } from "./session-status-service";
-import { buildSessionInternalUrl, SessionInternalPaths } from "./contracts";
+import { SessionInternalPaths } from "./contracts";
+import type { SessionRuntimeClient } from "./runtime-client";
 import type { Logger } from "../logger";
-import type { SessionIndexStore } from "../db/session-index";
 import type { SessionRow, ArtifactRow, MessageRow } from "./types";
 import type { SessionCoreRepository } from "./session-core-repository";
-import type { ArtifactRepository } from "./artifact-repository";
 import type { MessageRepository } from "./message-repository";
+import type { SessionEntry } from "../db/session-index";
+import type { ArtifactRepository } from "./artifact-repository";
 import type { SessionMessenger } from "./messenger";
 
 function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
@@ -39,7 +41,7 @@ function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
   } as SessionRow;
 }
 
-function harness(options: { session?: SessionRow | null; sessionIndex?: null } = {}) {
+function harness(options: { session?: SessionRow | null } = {}) {
   const session = options.session === undefined ? createSession() : options.session;
 
   const repository = {
@@ -49,6 +51,8 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
     getLatestTerminalMessage: vi.fn(() => null as MessageRow | null),
     getMessageCount: vi.fn(() => 3),
     getActiveDurationMs: vi.fn(() => 4500),
+    listPendingMessagesWithCreatedAt: vi.fn(() => [] as Array<{ id: string; created_at: number }>),
+    recordMessageCompletion: vi.fn<MessageRepository["recordMessageCompletion"]>(() => null),
   };
   const artifactRepository = {
     listArtifacts: vi.fn(
@@ -59,22 +63,20 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
   const broadcast = vi.fn();
   const messenger = { broadcast, sendToSandbox: vi.fn(async () => {}) } as SessionMessenger;
 
-  const sessionIndex =
-    options.sessionIndex === null
-      ? null
-      : {
-          updateStatus: vi.fn(async () => true),
-          repairStatus: vi.fn(async () => true),
-          finalizeChildAdmission: vi.fn(async () => {}),
-          updateMetrics: vi.fn(async () => true),
-        };
-
-  const parentFetch = vi.fn(async (_request: Request) => new Response(null, { status: 200 }));
-  const parentStub = { fetch: parentFetch };
-  const parentSessions = {
-    idFromName: vi.fn(() => "parent-do-id"),
-    get: vi.fn(() => parentStub),
+  const sessionIndex = {
+    updateStatus: vi.fn(async () => true),
+    repairStatus: vi.fn(async () => true),
+    finalizeChildAdmission: vi.fn(async () => {}),
+    updateMetrics: vi.fn(async () => true),
+    listByParent: vi.fn(async () => [] as SessionEntry[]),
+    recordLatestTerminalMessage: vi.fn(async () => true),
   };
+
+  const parentFetch = vi.fn(
+    async (_sessionId: string, _path: string, _init?: RequestInit) =>
+      new Response(null, { status: 200 })
+  );
+  const parentSessions: SessionRuntimeClient = { fetch: parentFetch };
 
   const log = {
     debug: vi.fn(),
@@ -83,10 +85,7 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
     error: vi.fn(),
     child: vi.fn(),
   };
-  const waitUntil = vi.fn((task: Promise<unknown>) =>
-    task.catch((error) => log.error("background_task.failed", { error }))
-  );
-  const backgroundTasks = { submit: waitUntil };
+  const backgroundTasks = createTestBackgroundTasks();
 
   const service = new SessionStatusService(
     backgroundTasks,
@@ -95,8 +94,8 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
     repository as unknown as MessageRepository,
     artifactRepository,
     messenger,
-    sessionIndex as unknown as SessionIndexStore | null,
-    parentSessions as unknown as DurableObjectNamespace
+    sessionIndex,
+    parentSessions
   );
 
   return {
@@ -105,7 +104,7 @@ function harness(options: { session?: SessionRow | null; sessionIndex?: null } =
     artifactRepository,
     broadcast,
     sessionIndex,
-    waitUntil,
+    backgroundTasks,
     parentSessions,
     parentFetch,
     log,
@@ -119,7 +118,7 @@ describe("SessionStatusService.transition", () => {
     expect(await h.service.transition("active")).toBe(false);
 
     expect(h.repository.updateSessionStatus).not.toHaveBeenCalled();
-    expect(h.sessionIndex!.updateStatus).not.toHaveBeenCalled();
+    expect(h.sessionIndex.updateStatus).not.toHaveBeenCalled();
     expect(h.broadcast).not.toHaveBeenCalled();
   });
 
@@ -135,12 +134,12 @@ describe("SessionStatusService.transition", () => {
     );
     const updatedAt = h.repository.updateSessionStatus.mock.calls[0][2] as number;
     expect(updatedAt).toBeGreaterThan(2000);
-    expect(h.sessionIndex!.updateStatus).toHaveBeenCalledWith(
+    expect(h.sessionIndex.updateStatus).toHaveBeenCalledWith(
       "public-session-1",
       "active",
       updatedAt
     );
-    expect(h.sessionIndex!.finalizeChildAdmission).toHaveBeenCalledWith("public-session-1");
+    expect(h.sessionIndex.finalizeChildAdmission).toHaveBeenCalledWith("public-session-1");
     expect(h.broadcast).toHaveBeenCalledWith({ type: "session_status", status: "active" });
   });
 
@@ -149,7 +148,7 @@ describe("SessionStatusService.transition", () => {
 
     expect(await h.service.transition("active")).toBe(false);
 
-    expect(h.sessionIndex!.updateStatus).toHaveBeenCalledWith("public-session-1", "active", 2000);
+    expect(h.sessionIndex.updateStatus).toHaveBeenCalledWith("public-session-1", "active", 2000);
     expect(h.repository.updateSessionStatus).not.toHaveBeenCalled();
     expect(h.broadcast).not.toHaveBeenCalled();
     expect(h.parentFetch).not.toHaveBeenCalled();
@@ -160,13 +159,13 @@ describe("SessionStatusService.transition", () => {
 
     await h.service.transition("completed");
 
-    expect(h.sessionIndex!.updateMetrics).toHaveBeenCalledWith("public-session-1", {
+    expect(h.sessionIndex.updateMetrics).toHaveBeenCalledWith("public-session-1", {
       totalCost: 2.5,
       activeDurationMs: 4500,
       messageCount: 3,
       prCount: 2,
     });
-    expect(h.waitUntil).toHaveBeenCalled();
+    expect(h.backgroundTasks.submissions).not.toHaveLength(0);
   });
 
   it("syncs metrics even when already in the terminal status", async () => {
@@ -174,7 +173,7 @@ describe("SessionStatusService.transition", () => {
 
     expect(await h.service.transition("failed")).toBe(false);
 
-    expect(h.sessionIndex!.updateMetrics).toHaveBeenCalledWith(
+    expect(h.sessionIndex.updateMetrics).toHaveBeenCalledWith(
       "public-session-1",
       expect.any(Object)
     );
@@ -185,12 +184,12 @@ describe("SessionStatusService.transition", () => {
 
     await h.service.transition("active");
 
-    expect(h.sessionIndex!.updateMetrics).not.toHaveBeenCalled();
+    expect(h.sessionIndex.updateMetrics).not.toHaveBeenCalled();
   });
 
   it("logs index sync failures without throwing", async () => {
     const h = harness({ session: createSession({ status: "created" }) });
-    h.sessionIndex!.updateStatus.mockRejectedValue(new Error("d1 down"));
+    h.sessionIndex.updateStatus.mockRejectedValue(new Error("d1 down"));
 
     expect(await h.service.transition("active")).toBe(true);
 
@@ -205,15 +204,6 @@ describe("SessionStatusService.transition", () => {
     expect(h.broadcast).toHaveBeenCalledWith({ type: "session_status", status: "active" });
   });
 
-  it("skips index and metrics writes when no session index is bound", async () => {
-    const h = harness({ session: createSession({ status: "active" }), sessionIndex: null });
-
-    expect(await h.service.transition("completed")).toBe(true);
-
-    expect(h.broadcast).toHaveBeenCalledWith({ type: "session_status", status: "completed" });
-    expect(h.waitUntil).not.toHaveBeenCalled();
-  });
-
   it("submits the parent notification as a background job", async () => {
     const h = harness({
       session: createSession({ status: "active", parent_session_id: "parent-1" }),
@@ -221,18 +211,17 @@ describe("SessionStatusService.transition", () => {
 
     await h.service.transition("completed");
 
-    expect(h.parentSessions.idFromName).toHaveBeenCalledWith("parent-1");
     expect(h.parentFetch).toHaveBeenCalledTimes(1);
-    const request = h.parentFetch.mock.calls[0][0];
-    expect(request.url).toBe(buildSessionInternalUrl(SessionInternalPaths.childSessionUpdate));
-    expect(request.method).toBe("POST");
-    expect(await request.json()).toEqual({
+    const [parentId, path, init] = h.parentFetch.mock.calls[0];
+    expect(parentId).toBe("parent-1");
+    expect(path).toBe(SessionInternalPaths.childSessionUpdate);
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({
       childSessionId: "public-session-1",
       status: "completed",
       title: "Session title",
-      deliverResult: true,
     });
-    expect(h.waitUntil).toHaveBeenCalled();
+    expect(h.backgroundTasks.submissions).not.toHaveLength(0);
   });
 
   it("does not notify a parent when the session has none", async () => {
@@ -244,11 +233,199 @@ describe("SessionStatusService.transition", () => {
   });
 });
 
+describe("SessionStatusService.archive cascade", () => {
+  function child(id: string, status: SessionEntry["status"]): SessionEntry {
+    return {
+      id,
+      title: null,
+      repoOwner: null,
+      repoName: null,
+      model: "anthropic/claude-haiku-4-5",
+      reasoningEffort: null,
+      baseBranch: null,
+      status,
+      createdAt: 1,
+      updatedAt: 2,
+    };
+  }
+
+  it("fans the archive out to non-archived children on a real transition", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+    h.sessionIndex.listByParent.mockResolvedValue([
+      child("child-active", "active"),
+      child("child-archived", "archived"),
+    ]);
+
+    expect(await h.service.transition("archived")).toBe(true);
+
+    expect(h.sessionIndex.listByParent).toHaveBeenCalledWith("public-session-1");
+    expect(h.parentFetch).toHaveBeenCalledTimes(1);
+    const [childId, path, init] = h.parentFetch.mock.calls[0];
+    expect(childId).toBe("child-active");
+    expect(path).toBe(SessionInternalPaths.archiveCascade);
+    expect(init?.method).toBe("POST");
+  });
+
+  it("does not cascade on a same-status refresh", async () => {
+    const h = harness({ session: createSession({ status: "archived" }) });
+
+    expect(await h.service.transition("archived")).toBe(false);
+
+    expect(h.sessionIndex.listByParent).not.toHaveBeenCalled();
+    expect(h.parentFetch).not.toHaveBeenCalled();
+  });
+
+  it("logs a rejected child fan-out without failing the transition", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+    h.sessionIndex.listByParent.mockResolvedValue([child("child-unreachable", "active")]);
+    h.parentFetch.mockRejectedValue(new Error("child DO unreachable"));
+
+    expect(await h.service.transition("archived")).toBe(true);
+
+    expect(h.log.error).toHaveBeenCalledWith(
+      "session.archive_cascade.child_failed",
+      expect.objectContaining({ session_id: "child-unreachable", parent_id: "public-session-1" })
+    );
+  });
+
+  it("logs a non-OK child response without failing the transition", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+    h.sessionIndex.listByParent.mockResolvedValue([child("child-never-created", "created")]);
+    h.parentFetch.mockResolvedValue(new Response("Session not found", { status: 404 }));
+
+    expect(await h.service.transition("archived")).toBe(true);
+
+    expect(h.log.warn).toHaveBeenCalledWith(
+      "session.archive_cascade.child_rejected",
+      expect.objectContaining({ session_id: "child-never-created", http_status: 404 })
+    );
+  });
+
+  it("logs when listing children fails, without failing the transition", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+    h.sessionIndex.listByParent.mockRejectedValue(new Error("d1 down"));
+
+    expect(await h.service.transition("archived")).toBe(true);
+
+    expect(h.log.error).toHaveBeenCalledWith(
+      "session.archive_cascade.list_children_failed",
+      expect.objectContaining({ session_id: "public-session-1" })
+    );
+    expect(h.parentFetch).not.toHaveBeenCalled();
+  });
+
+  it("cascades every child in batches until none remain", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+    h.sessionIndex.listByParent.mockResolvedValue(
+      Array.from({ length: 60 }, (_, i) => child(`child-${i}`, "active"))
+    );
+
+    expect(await h.service.transition("archived")).toBe(true);
+
+    expect(h.parentFetch).toHaveBeenCalledTimes(60);
+    expect(h.log.warn).not.toHaveBeenCalledWith(
+      "session.archive_cascade.children_truncated",
+      expect.anything()
+    );
+  });
+
+  it("caps the cascade at 500 children and logs the truncation", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+    h.sessionIndex.listByParent.mockResolvedValue(
+      Array.from({ length: 600 }, (_, i) => child(`child-${i}`, "active"))
+    );
+
+    expect(await h.service.transition("archived")).toBe(true);
+
+    expect(h.parentFetch).toHaveBeenCalledTimes(500);
+    expect(h.log.warn).toHaveBeenCalledWith(
+      "session.archive_cascade.children_truncated",
+      expect.objectContaining({
+        session_id: "public-session-1",
+        cascaded: 500,
+        remaining: 100,
+        limit: 500,
+      })
+    );
+  });
+
+  it("gives up on a child that outlives the per-child timeout and logs the outcome", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness({ session: createSession({ status: "active" }) });
+      h.sessionIndex.listByParent.mockResolvedValue([child("child-slow", "active")]);
+      h.parentFetch.mockImplementation(() => new Promise<Response>(() => {}));
+
+      const transition = h.service.transition("archived");
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(await transition).toBe(true);
+      expect(h.log.error).toHaveBeenCalledWith(
+        "session.archive_cascade.child_failed",
+        expect.objectContaining({
+          session_id: "child-slow",
+          parent_id: "public-session-1",
+          error: expect.objectContaining({
+            message: expect.stringContaining("timed out after 5000ms"),
+          }),
+        })
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails prompts stranded by the archive transition with the archived cause", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+    h.repository.listPendingMessagesWithCreatedAt.mockReturnValue([
+      { id: "msg-stranded", created_at: 1000 },
+    ]);
+    h.repository.recordMessageCompletion.mockImplementation(
+      (event: { messageId: string }, completedAt: number) => ({
+        messageId: event.messageId,
+        messageCreatedAt: 1000,
+        messageStartedAt: null,
+        completedAt,
+        status: "failed" as const,
+      })
+    );
+
+    expect(await h.service.transition("archived")).toBe(true);
+
+    expect(h.repository.recordMessageCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "execution_complete",
+        messageId: "msg-stranded",
+        success: false,
+        error: "Session was archived",
+      }),
+      expect.any(Number),
+      "pending"
+    );
+    expect(h.broadcast).toHaveBeenCalledWith({
+      type: "sandbox_event",
+      event: expect.objectContaining({ messageId: "msg-stranded", success: false }),
+    });
+    expect(h.sessionIndex.recordLatestTerminalMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "public-session-1", messageId: "msg-stranded" })
+    );
+  });
+
+  it("records nothing when the archive transition strands no prompts", async () => {
+    const h = harness({ session: createSession({ status: "active" }) });
+
+    expect(await h.service.transition("archived")).toBe(true);
+
+    expect(h.repository.recordMessageCompletion).not.toHaveBeenCalled();
+    expect(h.sessionIndex.recordLatestTerminalMessage).not.toHaveBeenCalled();
+  });
+});
+
 describe("SessionStatusService.cancel", () => {
   it("closes local status and unfinished messages before publishing projections", async () => {
     const h = harness({ session: createSession({ status: "active" }) });
     let releaseIndex!: () => void;
-    h.sessionIndex!.updateStatus.mockImplementation(
+    h.sessionIndex.updateStatus.mockImplementation(
       () => new Promise<boolean>((resolve) => (releaseIndex = () => resolve(true)))
     );
     const terminalize = vi.fn();
@@ -297,9 +474,38 @@ describe("SessionStatusService.reconcileAfterExecution", () => {
 
     expect(h.broadcast).toHaveBeenCalledWith({ type: "session_status", status: "failed" });
   });
+
+  it("leaves a session archived while its terminal projection was in flight", async () => {
+    // Archive is admissible once the completion is recorded (no unfinished
+    // message remains), and the reconcile runs after the D1 projection await.
+    const h = harness({ session: createSession({ status: "archived" }) });
+
+    await h.service.reconcileAfterExecution(true);
+
+    expect(h.repository.updateSessionStatus).not.toHaveBeenCalled();
+    expect(h.broadcast).not.toHaveBeenCalled();
+  });
+
+  it("leaves a session cancelled while its terminal projection was in flight", async () => {
+    const h = harness({ session: createSession({ status: "cancelled" }) });
+
+    await h.service.reconcileAfterExecution(false);
+
+    expect(h.repository.updateSessionStatus).not.toHaveBeenCalled();
+    expect(h.broadcast).not.toHaveBeenCalled();
+  });
 });
 
 describe("SessionStatusService.reconcileAfterQueueRemoval", () => {
+  it("leaves a cancelled session cancelled", async () => {
+    const h = harness({ session: createSession({ status: "cancelled" }) });
+
+    await h.service.reconcileAfterQueueRemoval();
+
+    expect(h.repository.updateSessionStatus).not.toHaveBeenCalled();
+    expect(h.broadcast).not.toHaveBeenCalled();
+  });
+
   it("preserves the latest failed execution outcome", async () => {
     const h = harness({ session: createSession({ status: "active" }) });
     h.repository.getLatestTerminalMessage.mockReturnValue({ status: "failed" } as MessageRow);
@@ -342,13 +548,13 @@ describe("SessionStatusService.repairIndexStatus", () => {
 
     await h.service.repairIndexStatus();
 
-    expect(h.sessionIndex!.repairStatus).toHaveBeenCalledWith("public-session-1", "completed");
+    expect(h.sessionIndex.repairStatus).toHaveBeenCalledWith("public-session-1", "completed");
   });
 
   it("logs and propagates repair failures", async () => {
     const h = harness({ session: createSession({ status: "completed" }) });
     const error = new Error("d1 down");
-    h.sessionIndex!.repairStatus.mockRejectedValue(error);
+    h.sessionIndex.repairStatus.mockRejectedValue(error);
 
     await expect(h.service.repairIndexStatus()).rejects.toThrow(error);
 
@@ -401,15 +607,15 @@ describe("SessionStatusService.notifyParentOfChildUpdate", () => {
       { status: "active", title: "New title" }
     );
 
-    expect(h.parentSessions.idFromName).toHaveBeenCalledWith("parent-1");
-    const request = h.parentFetch.mock.calls[0][0];
-    expect(await request.json()).toEqual({
+    const [parentId, path, init] = h.parentFetch.mock.calls[0];
+    expect(parentId).toBe("parent-1");
+    expect(path).toBe(SessionInternalPaths.childSessionUpdate);
+    expect(JSON.parse(String(init?.body))).toEqual({
       childSessionId: "public-session-1",
       status: "active",
       title: "New title",
-      deliverResult: false,
     });
-    expect(h.waitUntil).toHaveBeenCalledTimes(1);
+    expect(h.backgroundTasks.submissions).toHaveLength(1);
   });
 
   it("logs (and does not throw) when the parent notification fails", async () => {
@@ -422,12 +628,11 @@ describe("SessionStatusService.notifyParentOfChildUpdate", () => {
       { status: "failed", title: null }
     );
 
-    // Drain the fire-and-forget promise handed to waitUntil.
-    await h.waitUntil.mock.results[0]!.value;
+    // Drain the fire-and-forget notification; its failure is absorbed by the
+    // boundary rather than thrown at the caller.
+    await h.backgroundTasks.settle();
 
-    expect(h.log.error).toHaveBeenCalledWith("background_task.failed", {
-      error: expect.any(Error),
-    });
+    expect(h.backgroundTasks.failures).toEqual([expect.any(Error)]);
   });
 
   it("is a no-op without a parent session id", () => {
@@ -438,7 +643,7 @@ describe("SessionStatusService.notifyParentOfChildUpdate", () => {
       title: null,
     });
 
-    expect(h.parentSessions.idFromName).not.toHaveBeenCalled();
-    expect(h.waitUntil).not.toHaveBeenCalled();
+    expect(h.parentFetch).not.toHaveBeenCalled();
+    expect(h.backgroundTasks.submissions).toHaveLength(0);
   });
 });

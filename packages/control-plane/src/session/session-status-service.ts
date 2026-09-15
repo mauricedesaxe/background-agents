@@ -8,19 +8,42 @@
  * a transition on that one noun.
  */
 
-import { buildSessionInternalUrl, SessionInternalPaths } from "./contracts";
+import { SessionInternalPaths } from "./contracts";
+import type { SessionRuntimeClient } from "./runtime-client";
 import type { Logger } from "../logger";
-import type { SessionIndexStore } from "../db/session-index";
+import type { SessionEntry, SessionIndexStore } from "../db/session-index";
 import type { SessionStatus } from "@open-inspect/shared/types/sessions";
+import type { SandboxEvent } from "@open-inspect/shared/types/sandbox-events";
 import type { SessionRow } from "./types";
 import type { SessionCoreRepository } from "./session-core-repository";
-import type { MessageRepository } from "./message-repository";
+import type { MessageRepository, RecordedMessageCompletion } from "./message-repository";
 import type { ArtifactRepository } from "./artifact-repository";
 import type { SessionMessenger } from "./messenger";
 import type { BackgroundTasks } from "../platform-ports";
+import { isSessionPromptable, isTurnSettled } from "@open-inspect/shared/types/session-activity";
 
-/** Statuses that indicate a session is finished — metrics are synced to D1 on these transitions. */
-const TERMINAL_STATUSES: SessionStatus[] = ["completed", "failed", "cancelled"];
+/** The failure reason recorded on prompts a transition to `archived` strands. */
+const ARCHIVED_PROMPT_FAILURE = "Session was archived";
+
+/** Hard cap on the total children one archive transition cascades. */
+const ARCHIVE_CASCADE_MAX_CHILDREN = 500;
+
+/** Children cascaded per awaited round; each round re-lists what is left. */
+const ARCHIVE_CASCADE_BATCH_SIZE = 50;
+
+/** How long one child's cascade fetch may hold the parent's transition open. */
+const ARCHIVE_CASCADE_CHILD_TIMEOUT_MS = 5_000;
+
+/** The index projections this service keeps consistent with the session row. */
+type SessionIndexProjections = Pick<
+  SessionIndexStore,
+  | "updateStatus"
+  | "repairStatus"
+  | "finalizeChildAdmission"
+  | "updateMetrics"
+  | "listByParent"
+  | "recordLatestTerminalMessage"
+>;
 
 export class SessionStatusService {
   constructor(
@@ -30,8 +53,9 @@ export class SessionStatusService {
     private readonly messageRepository: MessageRepository,
     private readonly artifactRepository: ArtifactRepository,
     private readonly messenger: SessionMessenger,
-    private readonly sessionIndex: SessionIndexStore | null,
-    private readonly parentSessions: DurableObjectNamespace | null
+    private readonly sessionIndex: SessionIndexProjections,
+    /** Reaches the parent session's runtime for the child rollup. */
+    private readonly sessions: SessionRuntimeClient
   ) {}
 
   /**
@@ -53,7 +77,7 @@ export class SessionStatusService {
       ).catch((error) =>
         this.logSessionIndexStatusSyncError(publicSessionId, status, session.updated_at, error)
       );
-      if (TERMINAL_STATUSES.includes(status)) {
+      if (isTurnSettled(status)) {
         this.syncSessionMetrics(publicSessionId);
       }
       return false;
@@ -62,6 +86,10 @@ export class SessionStatusService {
     const updatedAt = Math.max(Date.now(), session.updated_at + 1);
     this.repository.updateSessionStatus(session.id, status, updatedAt);
     await this.projectTransition(session, publicSessionId, status, updatedAt);
+    if (status === "archived") {
+      this.failPromptsStrandedByArchive(publicSessionId);
+      await this.cascadeArchiveToChildren(publicSessionId);
+    }
 
     return true;
   }
@@ -77,7 +105,7 @@ export class SessionStatusService {
    */
   async repairIndexStatus(): Promise<void> {
     const session = this.repository.getSession();
-    if (!session || !this.sessionIndex) return;
+    if (!session) return;
 
     const publicSessionId = this.getPublicSessionId(session);
     const repaired = await this.sessionIndex
@@ -115,6 +143,159 @@ export class SessionStatusService {
     return true;
   }
 
+  /**
+   * Why: archiving a parent flips only the parent's row, so the sidebar's next
+   * refetch resurrects the still-active children as orphaned sub-task rows.
+   * The fan-out fires from the transition itself, gated on `archived`, so it
+   * runs once per real transition no matter which entrypoint archived the
+   * session. Each child archives through the trusted cascade endpoint and
+   * lands back here through its own transition, which is what reaches
+   * grandchildren. Best-effort per child: an unreachable or never-created
+   * child DO is logged and never fails the parent's archive. The awaited
+   * shape is kept — spawn depth is capped platform-wide — and the listing
+   * loops in batches until no non-archived child remains, so an oversized
+   * family drains instead of starving past the first batch. Two hard stops
+   * bound the loop: the total-children cap below, and the attempted-id set
+   * that keeps a child which fails to archive (it stays listed) from being
+   * re-cascaded forever.
+   */
+  private async cascadeArchiveToChildren(parentId: string): Promise<void> {
+    const attempted = new Set<string>();
+    let cascaded = 0;
+    for (;;) {
+      let children: SessionEntry[];
+      try {
+        children = await this.sessionIndex.listByParent(parentId);
+      } catch (error) {
+        this.log.error("session.archive_cascade.list_children_failed", {
+          session_id: parentId,
+          error,
+        });
+        return;
+      }
+
+      const pending = children.filter(
+        (child) => child.status !== "archived" && !attempted.has(child.id)
+      );
+      if (pending.length === 0) return;
+      if (cascaded >= ARCHIVE_CASCADE_MAX_CHILDREN) {
+        this.log.warn("session.archive_cascade.children_truncated", {
+          session_id: parentId,
+          cascaded,
+          remaining: pending.length,
+          limit: ARCHIVE_CASCADE_MAX_CHILDREN,
+        });
+        return;
+      }
+
+      const batch = pending.slice(
+        0,
+        Math.min(ARCHIVE_CASCADE_BATCH_SIZE, ARCHIVE_CASCADE_MAX_CHILDREN - cascaded)
+      );
+      for (const child of batch) attempted.add(child.id);
+      cascaded += batch.length;
+
+      const results = await Promise.allSettled(
+        batch.map((child) => this.archiveCascadeChild(child.id))
+      );
+      results.forEach((result, index) => {
+        if (result.status === "rejected") {
+          this.log.error("session.archive_cascade.child_failed", {
+            session_id: batch[index].id,
+            parent_id: parentId,
+            error: result.reason,
+          });
+          return;
+        }
+        if (!result.value.ok) {
+          this.log.warn("session.archive_cascade.child_rejected", {
+            session_id: batch[index].id,
+            parent_id: parentId,
+            http_status: result.value.status,
+          });
+        }
+      });
+    }
+  }
+
+  /** Archive one child, giving up on it after `ARCHIVE_CASCADE_CHILD_TIMEOUT_MS`. */
+  private async archiveCascadeChild(childId: string): Promise<Response> {
+    const request = this.sessions.fetch(childId, SessionInternalPaths.archiveCascade, {
+      method: "POST",
+    });
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        request,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(`archive cascade timed out after ${ARCHIVE_CASCADE_CHILD_TIMEOUT_MS}ms`)
+              ),
+            ARCHIVE_CASCADE_CHILD_TIMEOUT_MS
+          );
+        }),
+      ]);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Why: a prompt admitted between the archive's stop and its transition is
+   * already persisted while the session still reads `active`, and the
+   * transition strands it — `archived` is not promptable, so no queue pump
+   * will ever dispatch it. The transition is the moment those prompts became
+   * unrunnable, so it closes them through the same completion record every
+   * failure takes and publishes the same failure event to connected clients.
+   * The D1 terminal-message mirror rides along; the bot callback notification
+   * stays with MessageFailureService, which this service does not reach.
+   * Best-effort: the archive never fails on a stranded prompt's bookkeeping.
+   */
+  private failPromptsStrandedByArchive(parentId: string): void {
+    const pending = this.messageRepository.listPendingMessagesWithCreatedAt();
+    if (pending.length === 0) return;
+
+    const completedAt = Date.now();
+    let latest: RecordedMessageCompletion | null = null;
+    for (const message of pending) {
+      const event: Extract<SandboxEvent, { type: "execution_complete" }> = {
+        type: "execution_complete",
+        messageId: message.id,
+        success: false,
+        error: ARCHIVED_PROMPT_FAILURE,
+        sandboxId: "",
+        timestamp: completedAt / 1000,
+      };
+      const completion = this.messageRepository.recordMessageCompletion(
+        event,
+        completedAt,
+        "pending"
+      );
+      if (!completion) continue;
+      latest = completion;
+      this.messenger.broadcast({ type: "sandbox_event", event });
+    }
+
+    const mirrored = latest;
+    if (!mirrored) return;
+    this.sessionIndex
+      .recordLatestTerminalMessage({
+        sessionId: parentId,
+        messageId: mirrored.messageId,
+        messageCreatedAt: mirrored.messageCreatedAt,
+        terminalMessageCompletedAt: mirrored.completedAt,
+      })
+      .catch((error) =>
+        this.log.warn("session.archive_stranded_prompt.projection_failed", {
+          session_id: parentId,
+          message_id: mirrored.messageId,
+          error,
+        })
+      );
+  }
+
   private async projectTransition(
     session: SessionRow,
     publicSessionId: string,
@@ -127,83 +308,46 @@ export class SessionStatusService {
 
     this.messenger.broadcast({ type: "session_status", status });
 
-    if (TERMINAL_STATUSES.includes(status)) {
+    if (isTurnSettled(status)) {
       this.syncSessionMetrics(publicSessionId);
     }
 
+    // Notify parent session (if this is a child) so its UI can refresh
     this.notifyParentOfStatusChange(session, publicSessionId, status);
-
-    if (status === "archived") {
-      this.cascadeArchiveToChildren(publicSessionId);
-    }
-  }
-
-  /**
-   * Archive every child of the given session by calling each child DO's trusted
-   * archive endpoint, so archiving a parent removes its whole subtree from the
-   * sidebar instead of leaving orphaned "sub-task" rows.
-   *
-   * Gated on "archived" in projectTransition, so it fires once per real
-   * transition and each archived child cascades to its own children. Best-effort
-   * per child (an unreachable or evicted child DO is logged, not retried, and
-   * never fails the parent's archive), and children already archived are skipped
-   * so a re-archive does not re-walk the subtree.
-   */
-  private cascadeArchiveToChildren(parentSessionId: string): void {
-    if (!this.sessionIndex || !this.parentSessions) return;
-
-    const sessionBinding = this.parentSessions;
-    const sessionIndex = this.sessionIndex;
-
-    this.backgroundTasks.submit(
-      sessionIndex
-        .listByParent(parentSessionId)
-        .then((children) =>
-          Promise.all(
-            children
-              .filter((child) => child.status !== "archived")
-              .map((child) =>
-                sessionBinding
-                  .get(sessionBinding.idFromName(child.id))
-                  .fetch(
-                    new Request(buildSessionInternalUrl(SessionInternalPaths.archiveCascade), {
-                      method: "POST",
-                    })
-                  )
-                  .then(() => undefined)
-                  .catch((error) => {
-                    this.log.error("cascade_archive.child_failed", {
-                      parent_id: parentSessionId,
-                      child_id: child.id,
-                      error,
-                    });
-                  })
-              )
-          )
-        )
-        .then(() => undefined),
-      {
-        name: "session.cascade_archive",
-        context: { parent_id: parentSessionId },
-      }
-    );
   }
 
   /**
    * After an execution finishes, settle the session status: back to active
    * when more prompts are queued, otherwise completed/failed by outcome.
+   * Leaves a session that was cancelled or archived meanwhile as it is.
    */
   async reconcileAfterExecution(success: boolean): Promise<void> {
+    if (this.isSessionClosed()) return;
     const pendingOrProcessing = this.messageRepository.getPendingOrProcessingCount();
     const nextStatus: SessionStatus =
       pendingOrProcessing > 0 ? "active" : success ? "completed" : "failed";
     await this.transition(nextStatus);
   }
 
+  /** Leaves a session that was cancelled or archived meanwhile as it is. */
   async reconcileAfterQueueRemoval(): Promise<void> {
+    if (this.isSessionClosed()) return;
     if (this.messageRepository.getPendingOrProcessingCount() > 0) return;
     const nextStatus = this.getIdleStatusFromTerminalMessages();
     await this.transition(nextStatus);
+  }
+
+  /**
+   * Whether the session has been cancelled or archived. A reconcile derives
+   * the next status from message state, and message state says nothing about
+   * a status the user chose; a reconcile that runs after an await (the
+   * terminal projection, the stop alarm) must not move such a session, and
+   * `transition` writes whatever it is given. Read in the same turn as the
+   * transition it guards.
+   */
+  private isSessionClosed(): boolean {
+    const session = this.repository.getSession();
+    return session !== null && !isSessionPromptable(session.status);
   }
 
   async settleFromMessageState(): Promise<SessionStatus> {
@@ -215,6 +359,16 @@ export class SessionStatusService {
     return nextStatus;
   }
 
+  /**
+   * The status an idle session should hold, read off its finished messages.
+   *
+   * Falling back to `created` sends a session *backwards* into draft, which
+   * looks like a bug and is not. It is reachable only when the session has no
+   * messages at all -- cancelling the only pending prompt deletes its row --
+   * and returning an empty session to draft is what lets the 8-hour
+   * abandoned-draft sweep reclaim it. That behaviour was added deliberately
+   * after dead sessions accumulated. Do not "fix" it to `completed`.
+   */
   private getIdleStatusFromTerminalMessages(): SessionStatus {
     const latestMessage = this.messageRepository.getLatestTerminalMessage();
     return latestMessage ? (latestMessage.status === "failed" ? "failed" : "completed") : "created";
@@ -227,27 +381,22 @@ export class SessionStatusService {
   notifyParentOfChildUpdate(
     session: Pick<SessionRow, "parent_session_id" | "title">,
     childSessionId: string,
-    update: { status: SessionStatus; title: string | null; deliverResult?: boolean }
+    update: { status: SessionStatus; title: string | null }
   ): void {
     const parentId = session.parent_session_id;
-    if (!parentId || !this.parentSessions) return;
-
-    const parentDoId = this.parentSessions.idFromName(parentId);
-    const parentStub = this.parentSessions.get(parentDoId);
+    if (!parentId) return;
 
     this.backgroundTasks.submit(
-      parentStub.fetch(
-        new Request(buildSessionInternalUrl(SessionInternalPaths.childSessionUpdate), {
+      () =>
+        this.sessions.fetch(parentId, SessionInternalPaths.childSessionUpdate, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             childSessionId,
             status: update.status,
             title: update.title,
-            deliverResult: update.deliverResult === true,
           }),
-        })
-      ),
+        }),
       {
         name: "session.notify_parent",
         context: {
@@ -267,7 +416,6 @@ export class SessionStatusService {
     this.notifyParentOfChildUpdate(session, childSessionId, {
       status,
       title: session.title,
-      deliverResult: true,
     });
   }
 
@@ -280,7 +428,6 @@ export class SessionStatusService {
     status: SessionStatus,
     updatedAt: number
   ): Promise<void> {
-    if (!this.sessionIndex) return;
     const projected = await this.sessionIndex.updateStatus(sessionId, status, updatedAt);
     if (projected && status === "active") {
       await this.sessionIndex.finalizeChildAdmission(sessionId);
@@ -302,8 +449,6 @@ export class SessionStatusService {
   }
 
   private syncSessionMetrics(sessionId: string): void {
-    if (!this.sessionIndex) return;
-
     const session = this.repository.getSession();
     if (!session) return;
 
@@ -313,12 +458,13 @@ export class SessionStatusService {
     const prCount = artifacts.filter((a) => a.type === "pr").length;
 
     this.backgroundTasks.submit(
-      this.sessionIndex.updateMetrics(sessionId, {
-        totalCost: session.total_cost ?? 0,
-        activeDurationMs,
-        messageCount,
-        prCount,
-      }),
+      () =>
+        this.sessionIndex.updateMetrics(sessionId, {
+          totalCost: session.total_cost ?? 0,
+          activeDurationMs,
+          messageCount,
+          prCount,
+        }),
       {
         name: "session_index.update_metrics",
         context: { session_id: sessionId },

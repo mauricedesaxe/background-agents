@@ -4,9 +4,12 @@ Agent bridge - bidirectional communication between sandbox and control plane.
 This module handles:
 - WebSocket connection to control plane Durable Object
 - Heartbeat loop for connection health
-- Event forwarding from OpenCode to control plane
+- Event forwarding from the agent harness to the control plane
 - Command handling from control plane (prompt, stop, snapshot)
 - Git identity configuration per prompt author
+
+The agent itself sits behind the ``AgentHarness`` seam (see ``harness/``);
+this module never speaks a vendor protocol.
 """
 
 import argparse
@@ -15,30 +18,25 @@ import contextlib
 import json
 import math
 import os
-import re
+import sys
+import tempfile
 import time
-from collections.abc import AsyncIterator
-from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 
-import httpx
 import websockets
 from websockets import ClientConnection, State
 from websockets.exceptions import InvalidStatus
 
 from .attachment_processor import (
     AttachmentProcessor,
-    HydratedSessionAttachment,
     parse_session_image_attachments,
 )
 from .constants import (
     BOOT_WARNINGS_FILE_PATH,
+    BRIDGE_FATAL_ERROR_FILE_PATH,
     DEFAULT_SANDBOX_TIMEOUT_SECONDS,
     MAX_SNAPSHOT_RESERVE_SECONDS,
-    OPENCODE_SESSION_ID_ENV_VAR,
-    OPENCODE_SESSION_ID_FILE_PATH,
     REPO_MANIFEST_FILE_PATH,
     SANDBOX_TIMEOUT_ENV_VAR,
     SNAPSHOT_RESERVE_FRACTION,
@@ -46,10 +44,22 @@ from .constants import (
 from .diff_capture import ControlPlaneDiffClient, SessionDiffRefreshWorker
 from .event_forwarder import BufferedEventForwarder
 from .git_signing import GitSigningError, GitSigningRuntime
+from .harness import (
+    DEFAULT_HARNESS_ID,
+    DETERMINISTIC_FAILURE_EXIT_CODE,
+    AgentHarness,
+    BridgeIdentity,
+    HarnessId,
+    HarnessPrompt,
+    HarnessStartError,
+    PromptLimits,
+    TurnOutcome,
+    build_agent_harness,
+    parse_harness_id,
+)
 from .log_config import configure_logging, get_logger
-from .opencode_client import OpenCodeClient
-from .prompt_stream import OpenCodePromptStream
-from .repo_config import find_repo_entry, load_repo_manifest
+from .push_operation import PushOperation
+from .repo_config import load_repo_manifest
 from .types import GitUser
 
 configure_logging()
@@ -79,71 +89,6 @@ def parse_prompt_git_author(author_data: object) -> GitUser | None:
     return GitUser(name=name.strip(), email=email.strip())
 
 
-@dataclass(frozen=True)
-class PushRequest:
-    """The provider-generated push spec, normalized for execution.
-
-    Absent fields normalize to ""/False; _validate_push_request decides
-    which of those are fatal.
-    """
-
-    branch_name: str
-    repo_owner: str
-    repo_name: str
-    refspec: str
-    push_url: str
-    redacted_push_url: str
-    force: bool
-
-    @classmethod
-    def from_push_spec(cls, push_spec: dict[str, Any] | None) -> "PushRequest":
-        """Normalize the raw spec; missing fields become ""/False, never errors."""
-        spec = push_spec or {}
-
-        def field(key: str) -> str:
-            return str(spec.get(key, "")).strip()
-
-        return cls(
-            branch_name=field("targetBranch"),
-            repo_owner=field("repoOwner"),
-            repo_name=field("repoName"),
-            refspec=field("refspec"),
-            push_url=field("remoteUrl"),
-            redacted_push_url=field("redactedRemoteUrl"),
-            force=bool(spec.get("force", False)),
-        )
-
-    @property
-    def has_repo_identity(self) -> bool:
-        """True when the spec names its target repository.
-
-        Owner and name always travel together — _validate_push_request
-        rejects partial identity before anything consults this.
-        """
-        return bool(self.repo_owner and self.repo_name)
-
-    @property
-    def repo_full_name(self) -> str:
-        return f"{self.repo_owner}/{self.repo_name}"
-
-    def repo_fields(self) -> dict[str, Any]:
-        """Repo identity echoed on push events when the spec carried it."""
-        fields: dict[str, Any] = {}
-        if self.repo_owner:
-            fields["repoOwner"] = self.repo_owner
-        if self.repo_name:
-            fields["repoName"] = self.repo_name
-        return fields
-
-
-class PushRejected(Exception):
-    """A push that cannot proceed; str(exc) is the user-facing error message.
-
-    Raise sites log their own specific event first — this exception only
-    carries the message to the single push_error emitter in _handle_push.
-    """
-
-
 class SessionTerminatedError(Exception):
     """Raised when the control plane has terminated the session (HTTP 410).
 
@@ -155,20 +100,14 @@ class SessionTerminatedError(Exception):
     pass
 
 
-class OpenCodeContextStatus(StrEnum):
-    FRESH = "fresh"
-    EXISTING = "existing"
-    UNAVAILABLE = "unavailable"
-
-
 class AgentBridge:
     """
-    Bridge between sandbox OpenCode instance and control plane.
+    Bridge between the sandbox's agent harness and the control plane.
 
     Handles:
     - WebSocket connection management with reconnection
     - Heartbeat for connection health
-    - Event streaming from OpenCode to control plane
+    - Event streaming from the harness to the control plane
     - Command handling (prompt, stop, snapshot, shutdown)
     - Git identity management per prompt author
     """
@@ -176,15 +115,13 @@ class AgentBridge:
     HEARTBEAT_INTERVAL = 30.0
     RECONNECT_BACKOFF_BASE = 2.0
     RECONNECT_MAX_DELAY = 60.0
-    SSE_INACTIVITY_TIMEOUT = 120.0
+    # Liveness check for a harness that stopped talking, not a budget for how
+    # long the model may think. Stays under the control plane's own inactivity
+    # watchdog (SANDBOX_INACTIVITY_TIMEOUT_MS) so the bridge owns the outcome.
+    SSE_INACTIVITY_TIMEOUT = 300.0
     SSE_INACTIVITY_TIMEOUT_MIN = 5.0
     SSE_INACTIVITY_TIMEOUT_MAX = 3600.0
-    GIT_PUSH_TIMEOUT_SECONDS = 300.0
-    GIT_PUSH_TERMINATE_GRACE_SECONDS = 5.0
-    JJ_COMMAND_TIMEOUT_SECONDS = 30.0
     DIFF_REFRESH_SHUTDOWN_TIMEOUT_SECONDS = 5.0
-    CONTEXT_VERIFY_BACKOFF_BASE_SECONDS = 1.0
-    CONTEXT_VERIFY_MAX_DELAY_SECONDS = 10.0
 
     def __init__(
         self,
@@ -193,15 +130,14 @@ class AgentBridge:
         control_plane_url: str,
         auth_token: str,
         opencode_port: int = 4096,
-        opencode_client: OpenCodeClient | None = None,
-        expected_opencode_session_id: str | None = None,
+        harness_id: HarnessId = DEFAULT_HARNESS_ID,
+        harness: AgentHarness | None = None,
     ):
         self.sandbox_id = sandbox_id
         self.session_id = session_id
         self.control_plane_url = control_plane_url
         self.auth_token = auth_token
         self.opencode_port = opencode_port
-        self.opencode_base_url = f"http://localhost:{opencode_port}"
 
         # Logger
         self.log = get_logger(
@@ -218,7 +154,7 @@ class AgentBridge:
             warn_user=self._send_media_warning,
         )
 
-        self.sse_inactivity_timeout = self._resolve_timeout_seconds(
+        inactivity_timeout_seconds = self._resolve_timeout_seconds(
             name="BRIDGE_SSE_INACTIVITY_TIMEOUT",
             default=self.SSE_INACTIVITY_TIMEOUT,
             min_value=self.SSE_INACTIVITY_TIMEOUT_MIN,
@@ -232,11 +168,14 @@ class AgentBridge:
             MAX_SNAPSHOT_RESERVE_SECONDS,
             sandbox_timeout_seconds * SNAPSHOT_RESERVE_FRACTION,
         )
-        self.prompt_cleanup_timeout_seconds = snapshot_reserve_seconds
-        self.prompt_max_duration_seconds = sandbox_timeout_seconds - snapshot_reserve_seconds
+        self.prompt_limits = PromptLimits(
+            inactivity_timeout_seconds=inactivity_timeout_seconds,
+            prompt_max_duration_seconds=sandbox_timeout_seconds - snapshot_reserve_seconds,
+            prompt_cleanup_timeout_seconds=snapshot_reserve_seconds,
+        )
         self.log.info(
             "bridge.prompt_timeout_config",
-            timeout_ms=int(self.prompt_max_duration_seconds * 1000),
+            timeout_ms=int(self.prompt_limits.prompt_max_duration_seconds * 1000),
             sandbox_timeout_ms=int(sandbox_timeout_seconds * 1000),
             snapshot_reserve_ms=int(snapshot_reserve_seconds * 1000),
         )
@@ -245,11 +184,11 @@ class AgentBridge:
         self.shutdown_event = asyncio.Event()
         self.git_sync_complete = asyncio.Event()
 
-        # Session state
-        self.expected_opencode_session_id = expected_opencode_session_id or None
-        self.opencode_session_id: str | None = None
-        self.context_status = OpenCodeContextStatus.FRESH
-        self.session_id_file = Path(OPENCODE_SESSION_ID_FILE_PATH)
+        # Vendor session id persistence. The legacy file name is still read so
+        # snapshots taken before the rename keep their conversation history.
+        temp_dir = Path(tempfile.gettempdir())
+        self.session_id_file = temp_dir / "agent-session-id"
+        self.legacy_session_id_file = temp_dir / "opencode-session-id"
         self.repo_path = Path("/workspace")
         # Supervisor-written canonical repo manifest; push targeting resolves
         # member checkout paths through it rather than joining spec-supplied
@@ -262,16 +201,22 @@ class AgentBridge:
             repo_manifest_path=self.repo_manifest_path,
         )
 
-        # OpenCode transport client; owns its connection pool unless one was
-        # injected (mirrors ControlPlaneDiffClient).
-        self.opencode_client = opencode_client or OpenCodeClient(
-            base_url=self.opencode_base_url,
+        # The agent behind the seam. Injected in tests; built from the
+        # registry in production.
+        self.harness: AgentHarness = harness or build_agent_harness(
+            harness_id,
+            identity=BridgeIdentity(
+                sandbox_id=sandbox_id,
+                session_id=session_id,
+                control_plane_url=control_plane_url,
+                auth_token=auth_token,
+                repo_manifest_path=self.repo_manifest_path,
+            ),
+            attachment_processor=self.attachment_processor,
             log=self.log,
+            limits=self.prompt_limits,
+            opencode_port=opencode_port,
         )
-
-        # Prompt SSE translator; created on first prompt so that
-        # sse_inactivity_timeout stays overridable until streaming starts.
-        self._prompt_stream: OpenCodePromptStream | None = None
 
         # Track the current prompt task so _handle_stop can cancel it
         self._current_prompt_task: asyncio.Task[None] | None = None
@@ -293,6 +238,12 @@ class AgentBridge:
         self._connection_count = 0
         self._reconnect_attempt_count = 0
         self._total_connected_duration_seconds = 0.0
+        self._agent_session_resumed = False
+
+    @property
+    def agent_session_id(self) -> str | None:
+        """The vendor session id, once created or resumed."""
+        return self.harness.session_id
 
     @property
     def ws_url(self) -> str:
@@ -302,11 +253,17 @@ class AgentBridge:
 
     def _build_ready_event(self) -> dict[str, Any]:
         repositories = load_repo_manifest(self.repo_manifest_path)
+        # The image bakes SANDBOX_VERSION; reporting it lets the control plane
+        # stamp snapshots with the runtime that produced them and retire the
+        # ones a later compatibility floor rules out.
+        runtime_version = os.environ.get("SANDBOX_VERSION", "")
         return {
             "type": "ready",
             "sandboxId": self.sandbox_id,
-            "opencodeSessionId": self.opencode_session_id,
-            "contextStatus": self.context_status.value,
+            "opencodeSessionId": self.agent_session_id,
+            "harness": self.harness.id.value,
+            **({"runtimeVersion": runtime_version} if runtime_version else {}),
+            **({"resumed": True} if self._agent_session_resumed else {}),
             "repositories": [
                 {
                     "position": position,
@@ -319,29 +276,31 @@ class AgentBridge:
             ],
         }
 
-    @staticmethod
-    def _redact_git_stderr(stderr_text: str, push_url: str, redacted_push_url: str) -> str:
-        """Redact credential-bearing URLs from git stderr."""
-        redacted_stderr = stderr_text
-        if push_url and redacted_push_url:
-            redacted_stderr = redacted_stderr.replace(push_url, redacted_push_url)
-
-        return re.sub(r"(https?://)([^/\s@]+)@", r"\1***@", redacted_stderr)
-
     async def run(self) -> None:
         """Main bridge loop with reconnection handling.
 
         Handles reconnection for transient errors (network issues, etc.) but
         exits gracefully for terminal errors like HTTP 410 (session terminated).
         """
-        self.log.info("bridge.run_start")
-
-        await self._load_session_id()
+        self.log.info("bridge.run_start", harness=self.harness.id.value)
         reconnect_attempts = 0
-        run_outcome = "shutdown"
+        run_outcome = "harness_start_failed"
         signing_initialized = False
 
+        # One lifecycle: whatever the harness acquires in open() is released
+        # in the finally below, whether startup, session loading or the run
+        # loop is what ends the bridge.
         try:
+            try:
+                await self.harness.open()
+            except HarnessStartError as error:
+                self._record_fatal_error(str(error))
+                self.log.error(
+                    "bridge.harness_open_failed", exc=error, harness=self.harness.id.value
+                )
+                raise
+            await self._load_session_id()
+            run_outcome = "shutdown"
             while not self.shutdown_event.is_set():
                 run_outcome = "shutdown"
                 try:
@@ -361,7 +320,9 @@ class AgentBridge:
                 except Exception as e:
                     error_str = str(e)
                     # Check for fatal HTTP errors that shouldn't trigger retry
-                    if self._is_fatal_connection_error(error_str):
+                    if (
+                        isinstance(e, GitSigningError) and not e.retryable
+                    ) or self._is_fatal_connection_error(error_str):
                         run_outcome = "fatal_error"
                         self.shutdown_event.set()
                         break
@@ -394,10 +355,20 @@ class AgentBridge:
                 self._current_prompt_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._current_prompt_task
-            await self.diff_refresh.close(
-                timeout_seconds=self.DIFF_REFRESH_SHUTDOWN_TIMEOUT_SECONDS
-            )
-            await self.opencode_client.aclose()
+            # Cleanup failures are logged, never raised: an exception here
+            # would replace the one that ended the run, and a HarnessStartError
+            # has to reach main() as itself so the supervisor sees the
+            # deterministic exit code.
+            try:
+                await self.diff_refresh.close(
+                    timeout_seconds=self.DIFF_REFRESH_SHUTDOWN_TIMEOUT_SECONDS
+                )
+            except Exception as close_error:
+                self.log.error("bridge.diff_refresh_close_failed", exc=close_error)
+            try:
+                await self.harness.close()
+            except Exception as close_error:
+                self.log.error("bridge.harness_close_failed", exc=close_error)
             self.log.info(
                 "bridge.run_complete",
                 outcome=run_outcome,
@@ -498,9 +469,6 @@ class AgentBridge:
                     )
                     await self.event_forwarder.bind(ws)
                     await self._send_event(self._build_ready_event())
-                    if self.context_status is OpenCodeContextStatus.UNAVAILABLE:
-                        self.shutdown_event.set()
-                        return
                     await self._drain_boot_warnings()
 
                     heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -685,7 +653,7 @@ class AgentBridge:
         self.diff_refresh.request(str(event.get("messageId") or "") or None)
 
     async def _handle_prompt(self, cmd: dict[str, Any]) -> None:
-        """Handle prompt command - send to OpenCode and stream response."""
+        """Handle prompt command - run the turn through the harness and terminalise it."""
         message_id = cmd.get("messageId") or cmd.get("message_id", "unknown")
         content = cmd.get("content", "")
         model = cmd.get("model")
@@ -694,6 +662,9 @@ class AgentBridge:
         author_data = cmd.get("author", {})
         start_time = time.time()
         outcome = "success"
+        message_cost_usd: float | None = None
+        had_error = False
+        error_message = None
 
         self.log.info(
             "prompt.start",
@@ -706,8 +677,7 @@ class AgentBridge:
             prompt_author = parse_prompt_git_author(author_data)
             await self._configure_git_identity(prompt_author)
 
-            if not self.opencode_session_id:
-                await self._create_opencode_session()
+            await self._ensure_agent_session()
 
             session_attachments, rejected_attachments = parse_session_image_attachments(
                 raw_attachments
@@ -723,22 +693,46 @@ class AgentBridge:
                 )
             attachments = await self.attachment_processor.process(session_attachments)
 
-            had_error = False
-            error_message = None
             emitted_output = False
-            async for event in self._stream_opencode_response_sse(
-                message_id, content, model, reasoning_effort, attachments
-            ):
-                if event.get("type") == "error":
-                    had_error = True
-                    error_message = event.get("error")
-                elif event.get("type") in ("token", "tool_call", "step_finish"):
+
+            async def emit(event: dict[str, Any]) -> None:
+                nonlocal emitted_output, message_cost_usd
+                if event.get("type") == "execution_complete":
+                    raise RuntimeError("harness must not emit execution_complete")
+                if event.get("type") in ("token", "tool_call", "step_finish"):
                     emitted_output = True
+                # A cancelled turn never returns an outcome, so the last cost
+                # report is the only figure execution_complete can carry then.
+                # When an outcome does arrive it is authoritative (below).
+                if event.get("type") == "step_finish" and "messageCostUsd" in event:
+                    message_cost_usd = event["messageCostUsd"]
                 await self._send_event(event)
+
+            turn: TurnOutcome = await self.harness.run_prompt(
+                HarnessPrompt(
+                    message_id=message_id,
+                    text=content,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    attachments=tuple(attachments or ()),
+                    author=author_data if isinstance(author_data, dict) else {},
+                ),
+                emit,
+            )
+            await self._persist_rotated_session_id()
+            # The outcome is authoritative for cost and success once it
+            # exists; the bridge adds only the no-output guard below.
+            if turn.message_cost_usd is not None:
+                message_cost_usd = turn.message_cost_usd
+            if not turn.success:
+                had_error = True
+                error_message = turn.error or "Unknown error"
+            if turn.cancelled:
+                raise asyncio.CancelledError
 
             if not had_error and not emitted_output:
                 had_error = True
-                error_message = "OpenCode completed without emitting assistant output."
+                error_message = "The agent completed without emitting assistant output."
                 self.log.error(
                     "prompt.no_output",
                     message_id=message_id,
@@ -749,26 +743,18 @@ class AgentBridge:
             if had_error:
                 outcome = "error"
 
-            await self._send_event(
-                {
-                    "type": "execution_complete",
-                    "messageId": message_id,
-                    "success": not had_error,
-                    **({"error": error_message} if error_message else {}),
-                }
-            )
-
+        except asyncio.CancelledError:
+            # This top-level command boundary settles cancellation just like
+            # other prompt failures, while the turn's cost is still available.
+            # The done callback remains a fallback for cancellation before start.
+            outcome = "cancelled"
+            had_error = True
+            error_message = "Task was cancelled"
         except Exception as e:
             outcome = "error"
+            had_error = True
+            error_message = str(e)
             self.log.error("prompt.error", exc=e, message_id=message_id)
-            await self._send_event(
-                {
-                    "type": "execution_complete",
-                    "messageId": message_id,
-                    "success": False,
-                    "error": str(e),
-                }
-            )
         finally:
             duration_ms = int((time.time() - start_time) * 1000)
             self.log.info(
@@ -780,62 +766,31 @@ class AgentBridge:
                 duration_ms=duration_ms,
             )
 
-    async def _create_opencode_session(self) -> None:
-        """Create a new OpenCode session."""
-        self.opencode_session_id = await self.opencode_client.create_session()
-        self.log.info(
-            "opencode.session.ensure",
-            opencode_session_id=self.opencode_session_id,
-            action="created",
+        await self._send_event(
+            {
+                "type": "execution_complete",
+                "messageId": message_id,
+                "success": not had_error,
+                **({"error": error_message} if error_message else {}),
+                **({"messageCostUsd": message_cost_usd} if message_cost_usd is not None else {}),
+            }
         )
 
+    async def _ensure_agent_session(self) -> None:
+        """Create the vendor session on first use and persist its id."""
+        if self.agent_session_id:
+            return
+        await self.harness.create_session()
         await self._save_session_id()
-        await self._send_event(self._build_ready_event())
-
-    def _ensure_prompt_stream(self) -> OpenCodePromptStream:
-        """The long-lived prompt SSE translator, created on first use."""
-        if self._prompt_stream is None:
-            self._prompt_stream = OpenCodePromptStream(
-                client=self.opencode_client,
-                attachment_processor=self.attachment_processor,
-                log=self.log,
-                sse_inactivity_timeout_seconds=self.sse_inactivity_timeout,
-                prompt_max_duration_seconds=self.prompt_max_duration_seconds,
-                prompt_cleanup_timeout_seconds=self.prompt_cleanup_timeout_seconds,
-            )
-        return self._prompt_stream
-
-    async def _stream_opencode_response_sse(
-        self,
-        message_id: str,
-        content: str,
-        model: str | None = None,
-        reasoning_effort: str | None = None,
-        attachments: list[HydratedSessionAttachment] | None = None,
-    ) -> AsyncIterator[dict[str, Any]]:
-        """Stream one prompt's response events (see prompt_stream.py)."""
-        if not self.opencode_session_id:
-            raise RuntimeError("OpenCode session not initialized")
-
-        stream = self._ensure_prompt_stream()
-        async for event in stream.stream_prompt(
-            opencode_session_id=self.opencode_session_id,
-            message_id=message_id,
-            content=content,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            attachments=attachments,
-        ):
-            yield event
 
     async def _handle_stop(self) -> None:
-        """Handle stop command - cancel prompt task and request OpenCode stop."""
+        """Handle stop command - cancel prompt task and ask the harness to abort."""
         self.log.info("bridge.stop")
         task = self._current_prompt_task
         if task and not task.done():
             task.cancel()
-        # Best-effort: also tell OpenCode to stop (saves LLM compute cost)
-        await self._request_opencode_stop(reason="command")
+        # Best-effort: also tell the agent to stop (saves LLM compute cost)
+        await self.harness.abort()
 
     async def _handle_snapshot(self) -> None:
         """Handle snapshot command - prepare for snapshot."""
@@ -843,7 +798,7 @@ class AgentBridge:
         await self._send_event(
             {
                 "type": "snapshot_ready",
-                "opencodeSessionId": self.opencode_session_id,
+                "opencodeSessionId": self.agent_session_id,
             }
         )
 
@@ -855,329 +810,19 @@ class AgentBridge:
         self.shutdown_event.set()
 
     async def _handle_push(self, cmd: dict[str, Any]) -> None:
-        """Handle push command using provider-generated push spec.
-
-        Pipeline: parse → validate → resolve checkout → run git push. Every
-        failure raises PushRejected (logged at the raise site) and lands in
-        the single push_error emitter below.
-        """
-        push_spec = cmd.get("pushSpec") if isinstance(cmd.get("pushSpec"), dict) else None
-        request = PushRequest.from_push_spec(push_spec)
-
-        self.log.info(
-            "git.push_start",
-            branch_name=request.branch_name,
-            repo_owner=request.repo_owner,
-            repo_name=request.repo_name,
-            mode="push_spec",
-        )
-
-        try:
-            self._validate_push_request(request, spec_present=push_spec is not None)
-            repo_dir = self._resolve_push_checkout(request)
-            refspec = await self._resolve_push_refspec(request, repo_dir)
-            await self._run_git_push(request, repo_dir, refspec)
-        except PushRejected as rejection:
-            await self._send_push_error(str(rejection), request)
-            return
-        except Exception as e:
-            self.log.error("git.push_error", exc=e, branch_name=request.branch_name)
-            await self._send_push_error(str(e), request)
-            return
-
-        self.log.info(
-            "git.push_complete",
-            branch_name=request.branch_name,
-            repo_owner=request.repo_owner,
-            repo_name=request.repo_name,
-        )
+        """Execute locally, then emit exactly one timestamped result event."""
+        result = await PushOperation(
+            repo_path=self.repo_path,
+            manifest_path=self.repo_manifest_path,
+            logger=self.log,
+        ).execute(cmd.get("pushSpec"))
         await self._send_event(
             {
-                "type": "push_complete",
-                "branchName": request.branch_name,
-                **request.repo_fields(),
-                "timestamp": time.time(),
-            }
-        )
-
-    def _reject_push(self, *, reason: str, message: str, **log_fields: Any) -> NoReturn:
-        """Log a push rejection and raise it toward _handle_push's emitter."""
-        self.log.warn("git.push_error", reason=reason, **log_fields)
-        raise PushRejected(message)
-
-    def _validate_push_request(self, request: PushRequest, *, spec_present: bool) -> None:
-        """Reject structurally unusable specs before touching the workspace."""
-        if not spec_present:
-            self._reject_push(
-                reason="missing_push_spec",
-                message="Push failed - missing push specification",
-            )
-        if bool(request.repo_owner) != bool(request.repo_name):
-            self._reject_push(
-                reason="partial_repo_identity",
-                message="Push failed - pushSpec must carry both repoOwner and repoName",
-                repo_owner=request.repo_owner,
-                repo_name=request.repo_name,
-            )
-        if not request.branch_name:
-            self._reject_push(
-                reason="missing_target_branch",
-                message="Push failed - missing target branch",
-            )
-        if not request.refspec or not request.push_url:
-            self._reject_push(
-                reason="invalid_push_spec",
-                message="Push failed - invalid push specification",
-            )
-
-    def _resolve_push_checkout(self, request: PushRequest) -> Path:
-        """Pick the git checkout the push runs in."""
-        if request.has_repo_identity:
-            return self._member_checkout(request)
-        return self._sole_workspace_checkout()
-
-    def _member_checkout(self, request: PushRequest) -> Path:
-        """Checkout of the session member the spec names.
-
-        The identity is matched against the supervisor-written manifest and
-        the matched entry's path is used verbatim — spec-supplied strings
-        never become filesystem paths, so a crafted name cannot select a
-        checkout outside the session.
-        """
-        member = find_repo_entry(
-            load_repo_manifest(self.repo_manifest_path),
-            request.repo_owner,
-            request.repo_name,
-        )
-        if member is None:
-            self._reject_push(
-                reason="repo_not_session_member",
-                message=f"Repository {request.repo_full_name} is not part of this session",
-                repo_owner=request.repo_owner,
-                repo_name=request.repo_name,
-            )
-        if not (member.path / ".git").exists():
-            self._reject_push(
-                reason="repo_not_in_workspace",
-                message=f"Repository {request.repo_full_name} not found in workspace",
-                repo_owner=request.repo_owner,
-                repo_name=request.repo_name,
-            )
-        return member.path
-
-    def _sole_workspace_checkout(self) -> Path:
-        """Checkout for a spec that names no repository (legacy control
-        planes, single-repo sessions): the one clone directly under
-        /workspace. Sorted only to be deterministic if that invariant is
-        ever violated."""
-        repo_dirs = sorted(self.repo_path.glob("*/.git"))
-        if not repo_dirs:
-            self._reject_push(reason="no_repo_configured", message="No repository found")
-        return repo_dirs[0].parent
-
-    async def _resolve_push_refspec(self, request: PushRequest, repo_dir: Path) -> str:
-        """Return the refspec to push, rewritten for a Jujutsu working copy.
-
-        The control plane builds every spec against git `HEAD` because that is
-        the only ref a plain clone is guaranteed to have. A jj-colocated
-        checkout has no branch checked out: jj pins `.git/HEAD` to `@-` and
-        keeps the working-copy commit `@` outside git's view entirely, so
-        `HEAD` lags the session's work by at least one commit and pushing it
-        publishes an empty branch. In that repo the bookmark is the ref that
-        names the work, so we make one and push it instead. jj exports every
-        bookmark to `refs/heads/<name>` on each command, so the bookmark is
-        already a git ref by the time git push reads it.
-        """
-        if not (repo_dir / ".jj").exists():
-            return request.refspec
-
-        revision = "@" if await self._jj_working_copy_has_changes(repo_dir) else "@-"
-        await self._reject_if_no_commits_beyond_trunk(request, repo_dir, revision)
-
-        bookmark = request.branch_name
-        await self._run_jj(
-            repo_dir,
-            ["bookmark", "set", bookmark, "--revision", revision, "--allow-backwards"],
-            failure="Push failed - could not point a jj bookmark at the session's work",
-        )
-        self.log.info(
-            "git.push_jj_bookmark",
-            branch_name=request.branch_name,
-            bookmark=bookmark,
-            revision=revision,
-        )
-        return f"refs/heads/{bookmark}:refs/heads/{request.branch_name}"
-
-    async def _jj_working_copy_has_changes(self, repo_dir: Path) -> bool:
-        """True when `@` carries work of its own rather than sitting empty.
-
-        jj auto-snapshots the working directory into `@`, so unsaved edits live
-        there and nowhere else. An empty `@` is what `jj commit` leaves behind,
-        and then `@-` is the tip.
-        """
-        stdout = await self._run_jj(
-            repo_dir,
-            ["log", "--no-graph", "--revisions", "@", "--template", 'if(empty, "", "changed")'],
-            failure="Push failed - could not read the jj working copy",
-        )
-        return stdout.strip() == "changed"
-
-    async def _reject_if_no_commits_beyond_trunk(
-        self, request: PushRequest, repo_dir: Path, revision: str
-    ) -> None:
-        """Reject a push whose revision adds nothing to trunk.
-
-        Pushing it would succeed and create a branch identical to the base,
-        which reads as a completed push everywhere downstream while delivering
-        none of the session's work. That silent success is the failure this
-        whole path exists to prevent, so it has to be loud.
-        """
-        stdout = await self._run_jj(
-            repo_dir,
-            [
-                "log",
-                "--no-graph",
-                "--revisions",
-                f"trunk()..{revision}",
-                "--template",
-                'change_id.short() ++ "\n"',
-            ],
-            failure="Push failed - could not check the jj revision against trunk",
-        )
-        if stdout.strip():
-            return
-        self._reject_push(
-            reason="jj_revision_empty",
-            message=(
-                f"Push failed - {revision} has no commits beyond trunk(), "
-                "so pushing it would publish an empty branch"
-            ),
-            branch_name=request.branch_name,
-            revision=revision,
-        )
-
-    async def _run_jj(self, repo_dir: Path, args: list[str], *, failure: str) -> str:
-        """Run a jj command in repo_dir and return its stdout.
-
-        A jj command that fails leaves us unable to tell which revision holds
-        the work, and the fallback of pushing `HEAD` anyway is the bug, so
-        every failure raises rather than degrading to git.
-        """
-        try:
-            process = await asyncio.create_subprocess_exec(
-                "jj",
-                *args,
-                cwd=repo_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except FileNotFoundError:
-            raise PushRejected(
-                f"{failure} - the checkout has a .jj directory but jj is not installed"
-            ) from None
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=self.JJ_COMMAND_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            await self._terminate_push_process(process, "jj")
-            raise PushRejected(
-                f"{failure} - jj timed out after {int(self.JJ_COMMAND_TIMEOUT_SECONDS)}s"
-            ) from None
-
-        if process.returncode != 0:
-            stderr_text = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
-            self.log.warn("git.push_jj_failed", args=args, stderr=stderr_text)
-            raise PushRejected(f"{failure}: {stderr_text}" if stderr_text else failure)
-
-        return stdout.decode("utf-8", errors="replace")
-
-    async def _run_git_push(self, request: PushRequest, repo_dir: Path, refspec: str) -> None:
-        """Run git push in repo_dir; raises PushRejected on failure or timeout."""
-        self.log.info(
-            "git.push_command",
-            branch_name=request.branch_name,
-            refspec=refspec,
-            force=request.force,
-            remote_url=request.redacted_push_url,
-        )
-
-        process = await asyncio.create_subprocess_exec(
-            "git",
-            "push",
-            request.push_url,
-            refspec,
-            *(["-f"] if request.force else []),
-            cwd=repo_dir,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        try:
-            _stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=self.GIT_PUSH_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            self.log.warn(
-                "git.push_timeout",
-                branch_name=request.branch_name,
-                timeout_ms=int(self.GIT_PUSH_TIMEOUT_SECONDS * 1000),
-            )
-            await self._terminate_push_process(process, "git push")
-            raise PushRejected(
-                f"Push failed - git push timed out after {int(self.GIT_PUSH_TIMEOUT_SECONDS)}s"
-            ) from None
-
-        if process.returncode != 0:
-            stderr_text = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
-            redacted_stderr_text = self._redact_git_stderr(
-                stderr_text,
-                request.push_url,
-                request.redacted_push_url,
-            )
-            self.log.warn(
-                "git.push_failed",
-                branch_name=request.branch_name,
-                stderr=redacted_stderr_text,
-            )
-            raise PushRejected(
-                f"Push failed: {redacted_stderr_text}"
-                if redacted_stderr_text
-                else "Push failed - unknown error"
-            )
-
-    async def _terminate_push_process(
-        self, process: asyncio.subprocess.Process, command: str
-    ) -> None:
-        """Terminate a hung push subprocess, escalating to kill after a grace period."""
-        with contextlib.suppress(ProcessLookupError):
-            process.terminate()
-        try:
-            await asyncio.wait_for(
-                process.wait(),
-                timeout=self.GIT_PUSH_TERMINATE_GRACE_SECONDS,
-            )
-        except TimeoutError:
-            self.log.warn(
-                "git.push_kill",
-                command=command,
-                timeout_ms=int(self.GIT_PUSH_TERMINATE_GRACE_SECONDS * 1000),
-            )
-            with contextlib.suppress(ProcessLookupError):
-                process.kill()
-            await process.wait()
-
-    async def _send_push_error(self, error: str, request: PushRequest) -> None:
-        """Emit push_error. branchName is included even when empty so the
-        control plane can resolve its pending push instead of leaking it."""
-        await self._send_event(
-            {
-                "type": "push_error",
-                "error": error,
-                "branchName": request.branch_name,
-                **request.repo_fields(),
+                "type": "push_error" if result.error is not None else "push_complete",
+                **({"error": result.error} if result.error is not None else {}),
+                # Even an empty branch resolves the control plane's pending push.
+                "branchName": result.request.branch_name,
+                **result.request.repo_fields(),
                 "timestamp": time.time(),
             }
         )
@@ -1186,83 +831,62 @@ class AgentBridge:
         """Refresh signing state and configure prompt-scoped author identity."""
         await self.git_signing.refresh(user)
 
+    def _read_persisted_session_id(self) -> str | None:
+        for path in (self.session_id_file, self.legacy_session_id_file):
+            if not path.exists():
+                continue
+            persisted = path.read_text().strip()
+            if persisted:
+                return persisted
+        return None
+
     async def _load_session_id(self) -> None:
-        """Resolve and verify the expected OpenCode context before readiness."""
-        candidate = self.expected_opencode_session_id
-        if candidate is None and self.session_id_file.exists():
-            try:
-                candidate = self.session_id_file.read_text().strip() or None
-            except Exception as e:
-                self.log.error("opencode.session.load_error", exc=e)
+        """Resume the persisted vendor session, if any, through the harness.
 
-        if candidate is None:
-            self.context_status = OpenCodeContextStatus.FRESH
-            return
-
-        self.opencode_session_id = candidate
-        self.log.info(
-            "opencode.session.ensure",
-            opencode_session_id=candidate,
-            action="expected" if self.expected_opencode_session_id else "loaded",
-        )
-        attempt = 0
-        while not self.shutdown_event.is_set():
-            try:
-                if await self.opencode_client.session_exists(candidate):
-                    self.context_status = OpenCodeContextStatus.EXISTING
-                else:
-                    self.context_status = OpenCodeContextStatus.UNAVAILABLE
-                    self.log.error(
-                        "opencode.session.unavailable",
-                        opencode_session_id=candidate,
-                    )
-                return
-            except (httpx.TransportError, httpx.HTTPStatusError) as error:
-                if not self._is_transient_context_verification_error(error):
-                    raise
-                attempt += 1
-                delay = min(
-                    self.CONTEXT_VERIFY_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
-                    self.CONTEXT_VERIFY_MAX_DELAY_SECONDS,
-                )
-                self.log.warn(
-                    "opencode.session.verify_retry",
-                    opencode_session_id=candidate,
-                    attempt=attempt,
-                    delay_s=delay,
-                    exc=error,
-                )
-                if not await self._wait_for_context_retry(delay):
-                    return
-
-    @staticmethod
-    def _is_transient_context_verification_error(error: Exception) -> bool:
-        if isinstance(error, httpx.TransportError):
-            return True
-        if isinstance(error, httpx.HTTPStatusError):
-            status_code = error.response.status_code
-            return status_code in (408, 425, 429) or status_code >= 500
-        return False
-
-    async def _wait_for_context_retry(self, delay_seconds: float) -> bool:
+        Startup only resumes. A missing or invalid id leaves the harness
+        without a session and the first prompt creates one, as it always has;
+        startup never replaces a conversation as a side effect of loading it.
+        """
         try:
-            await asyncio.wait_for(self.shutdown_event.wait(), timeout=delay_seconds)
-        except TimeoutError:
-            return True
-        return False
+            persisted = self._read_persisted_session_id()
+        except Exception as e:
+            self.log.error("agent.session.load_error", exc=e)
+            return
+        if not persisted:
+            return
+        try:
+            resumed = await self.harness.resume_session(persisted)
+        except Exception as e:
+            self.log.error("agent.session.load_error", exc=e)
+            return
+        if resumed:
+            self._agent_session_resumed = True
+            await self._save_session_id()
+
+    async def _persist_rotated_session_id(self) -> None:
+        """A conversation reset rotates the vendor id mid-connection; keep the file current."""
+        try:
+            persisted = self._read_persisted_session_id()
+        except Exception as e:
+            self.log.error("agent.session.load_error", exc=e)
+            return
+        if self.agent_session_id and self.agent_session_id != persisted:
+            await self._save_session_id()
 
     async def _save_session_id(self) -> None:
-        """Save OpenCode session ID to file for persistence."""
-        if self.opencode_session_id:
+        """Persist the vendor session id so a snapshot restore can resume it."""
+        session_id = self.agent_session_id
+        if session_id:
             try:
-                self.session_id_file.write_text(self.opencode_session_id)
+                self.session_id_file.write_text(session_id)
             except Exception as e:
-                self.log.error("opencode.session.save_error", exc=e)
+                self.log.error("agent.session.save_error", exc=e)
 
-    async def _request_opencode_stop(self, reason: str) -> bool:
-        if not self.opencode_session_id:
-            return False
-        return await self.opencode_client.request_stop(self.opencode_session_id, reason=reason)
+    @staticmethod
+    def _record_fatal_error(message: str) -> None:
+        """Leave the deterministic-failure cause where the supervisor reports it from."""
+        with contextlib.suppress(Exception):
+            Path(BRIDGE_FATAL_ERROR_FILE_PATH).write_text(message)
 
     def _resolve_timeout_seconds(
         self,
@@ -1343,6 +967,11 @@ async def main() -> None:
     parser.add_argument("--control-plane", required=True, help="Control plane URL")
     parser.add_argument("--token", required=True, help="Auth token")
     parser.add_argument("--opencode-port", type=int, default=4096, help="OpenCode port")
+    parser.add_argument(
+        "--harness",
+        default=DEFAULT_HARNESS_ID.value,
+        help="Agent harness id",
+    )
 
     args = parser.parse_args()
 
@@ -1352,10 +981,15 @@ async def main() -> None:
         control_plane_url=args.control_plane,
         auth_token=args.token,
         opencode_port=args.opencode_port,
-        expected_opencode_session_id=os.environ.get(OPENCODE_SESSION_ID_ENV_VAR),
+        harness_id=parse_harness_id(args.harness),
     )
 
-    await bridge.run()
+    try:
+        await bridge.run()
+    except HarnessStartError:
+        # The cause is already recorded for the supervisor; this exit code
+        # tells it not to spend its restart budget.
+        sys.exit(DETERMINISTIC_FAILURE_EXIT_CODE)
 
 
 if __name__ == "__main__":

@@ -2,71 +2,47 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useMemo, useCallback, useEffect, useState } from "react";
-import { toast } from "sonner";
+import { useMemo, useCallback } from "react";
 import { useAuthSession } from "@/lib/auth-session";
-import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
+import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
 import { useIsMobile } from "@/hooks/use-media-query";
 import { useSidebarSessions } from "@/hooks/use-sidebar-sessions";
 import type { SessionItem } from "@/hooks/use-sidebar-sessions";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import {
-  SidebarIcon,
-  PlusIcon,
-  SearchIcon,
-  SettingsIcon,
-  AutomationsIcon,
-  DataControlsIcon,
-  ChevronRightIcon,
-} from "@/components/ui/icons";
+import { SidebarIcon, PlusIcon, SearchIcon, ChevronRightIcon } from "@/components/ui/icons";
+import { PRIMARY_APP_DESTINATIONS, SETTINGS_DESTINATION } from "@/components/app-destinations";
 import { Button } from "@/components/ui/button";
-import { ArchiveSessionDialog } from "@/components/archive-session-dialog";
 import { useEnvironments } from "@/hooks/use-environments";
 import { SessionWithChildren } from "@/components/session-with-children";
 import { UserMenu } from "@/components/sidebar-user-menu";
-import { buildGroupedSessionList, type SessionSourceFilter } from "@/lib/session-list";
-import { archiveSessions } from "@/lib/archive-session";
+import { useCurrentUserAuthorization } from "@/hooks/use-current-user-authorization";
+import {
+  buildGroupedSessionList,
+  type SessionRepositoryGroup,
+  type SessionSourceBucket,
+  type SessionSourceFilter,
+} from "@/lib/session-list";
 
 const SOURCE_LABELS: Record<SessionSourceFilter, string> = {
   manual: "Manual",
   automatic: "Automatic",
 };
 
-function includesSession(
-  rootSessionId: string,
-  currentSessionId: string,
-  childrenMap: Map<string, SessionItem[]>
-) {
-  const pendingIds = [rootSessionId];
-  const visitedIds = new Set<string>();
-
-  while (pendingIds.length > 0) {
-    const sessionId = pendingIds.pop();
-    if (!sessionId || visitedIds.has(sessionId)) continue;
-    if (sessionId === currentSessionId) return true;
-    visitedIds.add(sessionId);
-    pendingIds.push(...(childrenMap.get(sessionId) ?? []).map((session) => session.id));
-  }
-
-  return false;
-}
-
 export type { SessionItem } from "@/hooks/use-sidebar-sessions";
-
-export { MOBILE_LONG_PRESS_MS } from "@/components/session-list-item";
 
 interface SidebarActionButtonProps {
   onClick?: () => void;
 }
 
 export function SearchSessionsButton({ onClick }: SidebarActionButtonProps) {
+  const { labels } = useKeyboardShortcuts();
   return (
     <Button
       variant="ghost"
       size="icon"
       onClick={onClick}
-      title={`Search sessions (${SHORTCUT_LABELS.COMMAND_MENU})`}
-      aria-label={`Search sessions (${SHORTCUT_LABELS.COMMAND_MENU})`}
+      title={`Search sessions (${labels["open-command-menu"]})`}
+      aria-label={`Search sessions (${labels["open-command-menu"]})`}
     >
       <SearchIcon className="w-4 h-4" />
     </Button>
@@ -74,13 +50,14 @@ export function SearchSessionsButton({ onClick }: SidebarActionButtonProps) {
 }
 
 export function NewSessionButton({ onClick }: SidebarActionButtonProps) {
+  const { labels } = useKeyboardShortcuts();
   return (
     <Button
       variant="ghost"
       size="icon"
       onClick={onClick}
-      title={`New session (${SHORTCUT_LABELS.NEW_SESSION})`}
-      aria-label={`New session (${SHORTCUT_LABELS.NEW_SESSION})`}
+      title={`New session (${labels["new-session"]})`}
+      aria-label={`New session (${labels["new-session"]})`}
     >
       <PlusIcon className="w-4 h-4" />
     </Button>
@@ -94,13 +71,114 @@ interface SessionSidebarProps {
   onSessionSelect?: () => void;
 }
 
+interface RepositoryGroupProps {
+  repositoryGroup: SessionRepositoryGroup;
+  environmentNamesById: Map<string, string>;
+  childrenMap: Map<string, SessionItem[]>;
+  currentSessionId: string | null;
+  isMobile: boolean;
+  onArchive: (sessionId: string) => Promise<void>;
+  onSessionSelect?: () => void;
+  onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
+  onMarkUnread: (sessionId: string) => void;
+}
+
+function RepositoryGroup({
+  repositoryGroup,
+  environmentNamesById,
+  childrenMap,
+  currentSessionId,
+  isMobile,
+  onArchive,
+  onSessionSelect,
+  onMarkLatestMessageRead,
+  onMarkUnread,
+}: RepositoryGroupProps) {
+  return (
+    <div role="group" aria-label={repositoryGroup.label}>
+      <h3 className="px-4 pb-0.5 pt-2 text-xs font-medium text-muted-foreground truncate">
+        {repositoryGroup.label}
+      </h3>
+      {repositoryGroup.buckets.map((bucket) => (
+        <SourceBucket
+          key={bucket.source}
+          bucket={bucket}
+          showLabel={repositoryGroup.buckets.length > 1 || bucket.source === "automatic"}
+          environmentNamesById={environmentNamesById}
+          childrenMap={childrenMap}
+          currentSessionId={currentSessionId}
+          isMobile={isMobile}
+          onArchive={onArchive}
+          onSessionSelect={onSessionSelect}
+          onMarkLatestMessageRead={onMarkLatestMessageRead}
+          onMarkUnread={onMarkUnread}
+        />
+      ))}
+    </div>
+  );
+}
+
+interface SourceBucketProps {
+  bucket: SessionSourceBucket;
+  showLabel: boolean;
+  environmentNamesById: Map<string, string>;
+  childrenMap: Map<string, SessionItem[]>;
+  currentSessionId: string | null;
+  isMobile: boolean;
+  onArchive: (sessionId: string) => Promise<void>;
+  onSessionSelect?: () => void;
+  onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
+  onMarkUnread: (sessionId: string) => void;
+}
+
+function SourceBucket({
+  bucket,
+  showLabel,
+  environmentNamesById,
+  childrenMap,
+  currentSessionId,
+  isMobile,
+  onArchive,
+  onSessionSelect,
+  onMarkLatestMessageRead,
+  onMarkUnread,
+}: SourceBucketProps) {
+  return (
+    <div>
+      {showLabel && (
+        <p className="px-4 pb-0.5 pt-1 text-[0.65rem] font-medium uppercase tracking-wider text-secondary-foreground">
+          {SOURCE_LABELS[bucket.source]}
+        </p>
+      )}
+      {bucket.sessions.map((session) => (
+        <SessionWithChildren
+          key={session.id}
+          session={session}
+          environmentName={
+            session.environmentId ? environmentNamesById.get(session.environmentId) : undefined
+          }
+          childrenMap={childrenMap}
+          currentSessionId={currentSessionId}
+          isMobile={isMobile}
+          onArchive={onArchive}
+          onSessionSelect={onSessionSelect}
+          onMarkLatestMessageRead={onMarkLatestMessageRead}
+          onMarkUnread={onMarkUnread}
+        />
+      ))}
+    </div>
+  );
+}
+
 export function SessionSidebar({
   onNewSession,
   onSearchSessions,
   onToggle,
   onSessionSelect,
 }: SessionSidebarProps) {
+  const { labels } = useKeyboardShortcuts();
   const { data: authSession } = useAuthSession();
+  const { hasPermission } = useCurrentUserAuthorization();
   const pathname = usePathname();
   const router = useRouter();
   const isMobile = useIsMobile();
@@ -109,8 +187,8 @@ export function SessionSidebar({
 
   const {
     needsAttention,
-    running,
-    recent,
+    inProgress,
+    finished,
     childrenMap,
     loading,
     sessionsError,
@@ -119,20 +197,19 @@ export function SessionSidebar({
     sessionCreatorFilter,
     setSessionCreatorFilter,
     handleSessionArchived,
-    handleSessionsArchived,
     handleMarkLatestMessageRead,
     handleMarkUnread,
   } = useSidebarSessions();
 
-  /** Archiving the session on screen leaves nothing to show, so fall back to the home page. */
+  // Archiving the session on screen leaves nothing to show, so fall back to the home page.
   const handleArchivedSession = useCallback(
     async (sessionId: string) => {
       await handleSessionArchived(sessionId);
-      if (currentSessionId && includesSession(sessionId, currentSessionId, childrenMap)) {
+      if (currentSessionId === sessionId) {
         router.push("/");
       }
     },
-    [childrenMap, currentSessionId, handleSessionArchived, router]
+    [currentSessionId, handleSessionArchived, router]
   );
 
   // Environment provenance for the cards, resolved once for the whole list.
@@ -144,86 +221,6 @@ export function SessionSidebar({
     [environments]
   );
 
-  const [selectionMode, setSelectionMode] = useState(false);
-  const [selectedSessionIds, setSelectedSessionIds] = useState<ReadonlySet<string>>(new Set());
-  const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
-  const [archivingSelected, setArchivingSelected] = useState(false);
-  const visibleRootSessionIds = useMemo(
-    () => new Set([...needsAttention, ...running, ...recent].map((session) => session.id)),
-    [needsAttention, recent, running]
-  );
-  const selectedVisibleRootSessionIds = useMemo(
-    () =>
-      new Set([...selectedSessionIds].filter((sessionId) => visibleRootSessionIds.has(sessionId))),
-    [selectedSessionIds, visibleRootSessionIds]
-  );
-
-  useEffect(() => {
-    if (selectedVisibleRootSessionIds.size === selectedSessionIds.size) return;
-    setSelectedSessionIds(selectedVisibleRootSessionIds);
-  }, [selectedSessionIds.size, selectedVisibleRootSessionIds]);
-
-  const toggleSelectedSession = useCallback((sessionId: string, selected: boolean) => {
-    setSelectedSessionIds((current) => {
-      const next = new Set(current);
-      if (selected) next.add(sessionId);
-      else next.delete(sessionId);
-      return next;
-    });
-  }, []);
-
-  const cancelSelection = useCallback(() => {
-    setArchiveDialogOpen(false);
-    setSelectedSessionIds(new Set());
-    setSelectionMode(false);
-  }, []);
-
-  const handleArchiveSelected = useCallback(async () => {
-    setArchiveDialogOpen(false);
-    setArchivingSelected(true);
-    try {
-      const outcomes = await archiveSessions(selectedVisibleRootSessionIds);
-      const archivedSessionIds = new Set(
-        outcomes
-          .filter((outcome) => outcome.kind === "archived")
-          .map((outcome) => outcome.sessionId)
-      );
-      const failedOutcomes = outcomes.filter(
-        (outcome): outcome is Extract<typeof outcome, { kind: "failed" }> =>
-          outcome.kind === "failed"
-      );
-      const failedSessionIds = new Set(failedOutcomes.map((outcome) => outcome.sessionId));
-
-      if (archivedSessionIds.size > 0) {
-        await handleSessionsArchived(archivedSessionIds);
-        if (
-          currentSessionId &&
-          [...archivedSessionIds].some((sessionId) =>
-            includesSession(sessionId, currentSessionId, childrenMap)
-          )
-        ) {
-          router.push("/");
-        }
-      }
-
-      setSelectedSessionIds(failedSessionIds);
-      if (failedSessionIds.size > 0) {
-        const reasons = [...new Set(failedOutcomes.map((outcome) => outcome.reason))];
-        toast.error(
-          `Failed to archive ${failedSessionIds.size} session${failedSessionIds.size === 1 ? "" : "s"}: ${reasons.join(". ")}`
-        );
-      }
-    } finally {
-      setArchivingSelected(false);
-    }
-  }, [
-    childrenMap,
-    currentSessionId,
-    handleSessionsArchived,
-    router,
-    selectedVisibleRootSessionIds,
-  ]);
-
   const hasSessionListError = sessionsError;
   const emptyMessage =
     sessionCreatorFilter === "mine" ? "No sessions started by you" : "No sessions yet";
@@ -233,6 +230,7 @@ export function SessionSidebar({
       onSessionSelect?.();
     }
   }, [isMobile, onSessionSelect]);
+  const SettingsDestinationIcon = SETTINGS_DESTINATION.icon;
 
   const renderSessionGroup = (
     title: string,
@@ -249,7 +247,6 @@ export function SessionSidebar({
     if (groupSessions.length === 0 && !pagination.error) return null;
 
     const repositoryGroups = buildGroupedSessionList(groupSessions);
-    if (repositoryGroups.length === 0 && !pagination.error) return null;
 
     return (
       <section aria-labelledby={`session-group-${title.toLowerCase().replaceAll(" ", "-")}`}>
@@ -264,47 +261,18 @@ export function SessionSidebar({
           </h2>
         </div>
         {repositoryGroups.map((repositoryGroup) => (
-          <div key={repositoryGroup.key} role="group" aria-label={repositoryGroup.label}>
-            <h3 className="px-4 pb-0.5 pt-2 text-xs font-medium text-muted-foreground truncate">
-              {repositoryGroup.label}
-            </h3>
-            {repositoryGroup.buckets.map((bucket) => (
-              <div key={bucket.source}>
-                {(repositoryGroup.buckets.length > 1 || bucket.source === "automatic") && (
-                  <p className="px-4 pb-0.5 pt-1 text-[0.65rem] font-medium uppercase tracking-wider text-secondary-foreground">
-                    {SOURCE_LABELS[bucket.source]}
-                  </p>
-                )}
-                {bucket.sessions.map((session) => (
-                  <SessionWithChildren
-                    key={session.id}
-                    session={session}
-                    environmentName={
-                      session.environmentId
-                        ? environmentNamesById.get(session.environmentId)
-                        : undefined
-                    }
-                    childrenMap={childrenMap}
-                    currentSessionId={currentSessionId}
-                    isMobile={isMobile}
-                    onArchive={handleArchivedSession}
-                    onSessionSelect={onSessionSelect}
-                    onMarkLatestMessageRead={handleMarkLatestMessageRead}
-                    onMarkUnread={handleMarkUnread}
-                    selection={
-                      selectionMode
-                        ? {
-                            selected: selectedVisibleRootSessionIds.has(session.id),
-                            onSelectedChange: (selected) =>
-                              toggleSelectedSession(session.id, selected),
-                          }
-                        : undefined
-                    }
-                  />
-                ))}
-              </div>
-            ))}
-          </div>
+          <RepositoryGroup
+            key={repositoryGroup.key}
+            repositoryGroup={repositoryGroup}
+            environmentNamesById={environmentNamesById}
+            childrenMap={childrenMap}
+            currentSessionId={currentSessionId}
+            isMobile={isMobile}
+            onArchive={handleArchivedSession}
+            onSessionSelect={onSessionSelect}
+            onMarkLatestMessageRead={handleMarkLatestMessageRead}
+            onMarkUnread={handleMarkUnread}
+          />
         ))}
         {Boolean(pagination.error) && (
           <div className="mx-3 my-1 flex items-center justify-between gap-2 px-1 py-2 text-xs text-destructive">
@@ -338,75 +306,49 @@ export function SessionSidebar({
             variant="ghost"
             size="icon"
             onClick={onToggle}
-            title={`Toggle sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
-            aria-label={`Toggle sidebar (${SHORTCUT_LABELS.TOGGLE_SIDEBAR})`}
+            title={`Toggle sidebar (${labels["toggle-sidebar"]})`}
+            aria-label={`Toggle sidebar (${labels["toggle-sidebar"]})`}
           >
             <SidebarIcon className="w-4 h-4" />
           </Button>
           <SearchSessionsButton onClick={onSearchSessions} />
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {selectionMode ? (
-            <>
-              <Button variant="ghost" size="sm" onClick={cancelSelection}>
-                Cancel
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={selectedVisibleRootSessionIds.size === 0 || archivingSelected}
-                onClick={() => setArchiveDialogOpen(true)}
-              >
-                Archive selected ({selectedVisibleRootSessionIds.size})
-              </Button>
-            </>
-          ) : (
-            <Button variant="ghost" size="sm" onClick={() => setSelectionMode(true)}>
-              Select sessions
-            </Button>
-          )}
-          <NewSessionButton onClick={onNewSession} />
+          {hasPermission("sessions.create") && <NewSessionButton onClick={onNewSession} />}
           <Link
-            href="/settings"
+            href={SETTINGS_DESTINATION.href}
             onClick={handleNavigationSelect}
             className={`p-1.5 transition ${
-              pathname === "/settings"
+              pathname === SETTINGS_DESTINATION.href
                 ? "text-foreground bg-muted"
                 : "text-muted-foreground hover:text-foreground hover:bg-muted"
             }`}
-            title="Settings"
+            title={SETTINGS_DESTINATION.label}
           >
-            <SettingsIcon className="w-4 h-4" />
+            <SettingsDestinationIcon className="w-4 h-4" />
           </Link>
         </div>
       </div>
 
       {/* Nav links */}
       <div className="px-3 pt-2 pb-1 flex flex-col gap-0.5">
-        <Link
-          href="/automations"
-          onClick={handleNavigationSelect}
-          className={`flex items-center gap-2 px-3 py-1.5 text-sm rounded-md transition ${
-            pathname?.startsWith("/automations")
-              ? "text-foreground bg-muted"
-              : "text-muted-foreground hover:text-foreground hover:bg-muted"
-          }`}
-        >
-          <AutomationsIcon className="w-4 h-4" />
-          Automations
-        </Link>
-        <Link
-          href="/analytics"
-          onClick={handleNavigationSelect}
-          className={`flex items-center gap-2 px-3 py-1.5 text-sm rounded-md transition ${
-            pathname?.startsWith("/analytics")
-              ? "text-foreground bg-muted"
-              : "text-muted-foreground hover:text-foreground hover:bg-muted"
-          }`}
-        >
-          <DataControlsIcon className="w-4 h-4" />
-          Analytics
-        </Link>
+        {PRIMARY_APP_DESTINATIONS.filter((destination) =>
+          hasPermission(destination.requiredPermission)
+        ).map(({ href, label, icon: Icon }) => (
+          <Link
+            key={href}
+            href={href}
+            onClick={handleNavigationSelect}
+            className={`flex items-center gap-2 px-3 py-1.5 text-sm rounded-md transition ${
+              pathname?.startsWith(href)
+                ? "text-foreground bg-muted"
+                : "text-muted-foreground hover:text-foreground hover:bg-muted"
+            }`}
+          >
+            <Icon className="w-4 h-4" />
+            {label}
+          </Link>
+        ))}
       </div>
 
       <div className="px-3 py-2">
@@ -444,7 +386,7 @@ export function SessionSidebar({
           </div>
         ) : (
           <>
-            {needsAttention.length === 0 && running.length === 0 && recent.length === 0 ? (
+            {needsAttention.length === 0 && inProgress.length === 0 && finished.length === 0 ? (
               hasSessionListError ? (
                 <div className="flex items-center justify-between gap-2 px-4 py-8 text-sm text-destructive">
                   <span>Unable to load sessions</span>
@@ -465,8 +407,8 @@ export function SessionSidebar({
                   sectionPagination.needsAttention,
                   true
                 )}
-                {renderSessionGroup("Running", running, sectionPagination.running)}
-                {renderSessionGroup("Recent", recent, sectionPagination.recent)}
+                {renderSessionGroup("In progress", inProgress, sectionPagination.inProgress)}
+                {renderSessionGroup("Recent", finished, sectionPagination.finished)}
               </>
             )}
 
@@ -481,19 +423,6 @@ export function SessionSidebar({
           </>
         )}
       </div>
-
-      <ArchiveSessionDialog
-        open={archiveDialogOpen}
-        onOpenChange={setArchiveDialogOpen}
-        onConfirm={() => void handleArchiveSelected()}
-        title={`Archive ${selectedVisibleRootSessionIds.size} session${
-          selectedVisibleRootSessionIds.size === 1 ? "" : "s"
-        }`}
-        description={`Archive ${selectedVisibleRootSessionIds.size} selected session${
-          selectedVisibleRootSessionIds.size === 1 ? "" : "s"
-        }? You can restore archived sessions from Settings > Data Controls.`}
-        actionLabel="Archive selected"
-      />
 
       <div className="border-t border-border-muted p-2">
         <UserMenu user={authSession?.user} />

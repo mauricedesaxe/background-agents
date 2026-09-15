@@ -1,46 +1,49 @@
+import { toast } from "sonner";
 import { browserApiFetch } from "@/lib/browser-api-fetch";
 
-const ARCHIVE_CONCURRENCY = 4;
+const GENERIC_ARCHIVE_FAILURE = "Failed to archive session";
 
-export type ArchiveSessionOutcome =
-  | { kind: "archived"; sessionId: string }
-  | { kind: "failed"; sessionId: string; reason: string };
+/**
+ * Fragments of the lifecycle errors the server answers with, which are safe
+ * to show verbatim: not found, not promptable, forbidden. Anything else —
+ * especially a 5xx body — is server internals and falls back to the generic
+ * message.
+ */
+const SAFE_SERVER_ERROR_FRAGMENTS: readonly string[] = ["not found", "not promptable", "forbidden"];
 
-export async function archiveSession(sessionId: string): Promise<ArchiveSessionOutcome> {
+/** The server's `error` field, when it carries one a user may read. */
+async function readSafeServerErrorMessage(response: Response): Promise<string | null> {
+  try {
+    const body = (await response.json()) as { error?: unknown };
+    if (typeof body.error !== "string" || body.error.length === 0) return null;
+    const normalized = body.error.toLowerCase();
+    return SAFE_SERVER_ERROR_FRAGMENTS.some((fragment) => normalized.includes(fragment))
+      ? body.error
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Archives a session via the API.
+ *
+ * Returns `true` when the request succeeds. Callers are responsible for
+ * updating any client-side caches or navigation state.
+ */
+export async function archiveSession(sessionId: string): Promise<boolean> {
   try {
     const response = await browserApiFetch(`/api/sessions/${sessionId}/archive`, {
       method: "POST",
     });
     if (!response.ok) {
-      const reason = await response
-        .json()
-        .then((body: { error?: unknown }) => (typeof body.error === "string" ? body.error : null))
-        .catch(() => null);
-      return { kind: "failed", sessionId, reason: reason ?? "Failed to archive session" };
+      toast.error((await readSafeServerErrorMessage(response)) ?? GENERIC_ARCHIVE_FAILURE);
+      return false;
     }
 
-    return { kind: "archived", sessionId };
+    return true;
   } catch {
-    return { kind: "failed", sessionId, reason: "Failed to archive session" };
+    toast.error(GENERIC_ARCHIVE_FAILURE);
+    return false;
   }
-}
-
-export async function archiveSessions(
-  sessionIds: ReadonlySet<string>
-): Promise<ArchiveSessionOutcome[]> {
-  const ids = [...sessionIds];
-  const outcomes: ArchiveSessionOutcome[] = new Array(ids.length);
-  let nextIndex = 0;
-
-  await Promise.all(
-    Array.from({ length: Math.min(ARCHIVE_CONCURRENCY, ids.length) }, async () => {
-      while (nextIndex < ids.length) {
-        const index = nextIndex++;
-        const sessionId = ids[index];
-        if (sessionId) outcomes[index] = await archiveSession(sessionId);
-      }
-    })
-  );
-
-  return outcomes;
 }

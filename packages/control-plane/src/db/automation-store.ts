@@ -5,19 +5,36 @@
  * snake_case rows in the database, camelCase types at the API boundary.
  */
 
+import {
+  DEFAULT_HARNESS,
+  getValidHarnessOrDefault,
+  type HarnessId,
+} from "@open-inspect/shared/harnesses";
 import type {
   Automation,
+  AutomationExecutionSummary,
   AutomationInvocation,
   AutomationInvocationSource,
   AutomationInvocationStatus,
   AutomationRepository,
-  AutomationExecutionMode,
   AutomationRun,
   AutomationRunStatus,
 } from "@open-inspect/shared/types/automations";
-import type { TriggerConfig } from "@open-inspect/shared/triggers";
+import { automationInvocationStatusSchema } from "@open-inspect/shared/types/automations";
+import {
+  automationTriggerTypeSchema,
+  triggerConfigSchema,
+  type AutomationTriggerType,
+  type TriggerConfig,
+} from "@open-inspect/shared/triggers";
+import {
+  toProviderSelections,
+  type AutomationModelProviderAuthRow,
+} from "./automation-model-provider-auth";
 import type { SqlDatabase, SqlStatement } from "./sql-database";
 import type { AutomationListCursor } from "./automation-list-cursor";
+import { z } from "zod";
+import { UserStore } from "./user-store";
 
 function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, "\\$&");
@@ -55,6 +72,7 @@ export interface AutomationRow {
   trigger_type: string;
   schedule_cron: string | null;
   schedule_tz: string;
+  harness: HarnessId;
   model: string;
   reasoning_effort: string | null;
   enabled: number; // SQLite integer boolean
@@ -68,8 +86,6 @@ export interface AutomationRow {
   event_type: string | null;
   trigger_config: string | null; // JSON-serialized TriggerConfig
   trigger_auth_data: string | null;
-  /** Migration default preserves fan-out for legacy fixtures and rows. */
-  execution_mode?: AutomationExecutionMode;
 }
 
 type AutomationListResult = { automations: AutomationRow[] } & (
@@ -97,8 +113,6 @@ export interface AutomationRunRow {
   base_branch: string | null;
   /** Environment snapshot taken at firing time (null for repository/repo-less runs). */
   environment_id: string | null;
-  /** Ordered resolved RepositoryRef snapshot for a shared-workspace run. */
-  repository_set?: string | null;
 }
 
 export interface EnrichedRunRow extends AutomationRunRow {
@@ -114,7 +128,6 @@ export interface AutomationRepositoryRow {
   base_branch: string | null;
   created_at: number;
   updated_at: number;
-  position?: number;
 }
 
 /** Repository values for insert/replace (timestamps and owner id supplied by the store). */
@@ -144,6 +157,21 @@ export interface AutomationInvocationRow {
   updated_at: number;
 }
 
+const enrichedAutomationInvocationRowSchema = z.object({
+  id: z.string(),
+  automation_id: z.string(),
+  source: z.enum(["schedule", "manual", "event"]),
+  scheduled_at: z.number().nullable(),
+  skip_reason: z.string().nullable(),
+  created_at: z.number(),
+  derived_status: automationInvocationStatusSchema,
+  derived_completed_at: z.number().nullable(),
+});
+
+type EnrichedAutomationInvocationRow = z.infer<typeof enrichedAutomationInvocationRowSchema>;
+
+const countRowSchema = z.object({ count: z.number() });
+
 /**
  * Overlap scope for a new invocation: schedule/manual firings block on any
  * active run of the automation; event firings block per concurrency key.
@@ -151,6 +179,16 @@ export interface AutomationInvocationRow {
 export type InvocationOverlapScope =
   | { kind: "automation" }
   | { kind: "concurrencyKey"; concurrencyKey: string };
+
+/**
+ * A cron slot handover: move the schedule from the slot this firing claimed
+ * (`fromSlot`) to its successor. Carrying the claimed slot lets the UPDATE act
+ * as a compare-and-set, so only the firing that still owns the slot advances it.
+ */
+export interface ScheduleAdvance {
+  fromSlot: number;
+  nextRunAt: number;
+}
 
 /** Sibling-run aggregate for one invocation (finalization input). */
 export interface InvocationRunAggregate {
@@ -163,6 +201,23 @@ export interface InvocationRunAggregate {
 }
 
 // ─── Mappers ─────────────────────────────────────────────────────────────────
+
+export interface AutomationTriggerFields {
+  triggerType: AutomationTriggerType;
+  triggerConfig: TriggerConfig | null;
+}
+
+export function parseAutomationTriggerFields(
+  row: Pick<AutomationRow, "trigger_type" | "trigger_config">
+): AutomationTriggerFields {
+  return {
+    triggerType: automationTriggerTypeSchema.parse(row.trigger_type),
+    triggerConfig:
+      row.trigger_config === null
+        ? null
+        : triggerConfigSchema.parse(JSON.parse(row.trigger_config)),
+  };
+}
 
 function toAutomationRepository(row: AutomationRepositoryRow): AutomationRepository {
   return {
@@ -177,33 +232,34 @@ function toAutomationRepository(row: AutomationRepositoryRow): AutomationReposit
 export function toAutomation(
   row: AutomationRow,
   repositoryRows: AutomationRepositoryRow[],
-  environmentRows: AutomationEnvironmentRow[] = []
+  environmentRows: AutomationEnvironmentRow[],
+  providerAuthRows: AutomationModelProviderAuthRow[]
 ): Automation {
-  const triggerConfig: TriggerConfig | null = row.trigger_config
-    ? JSON.parse(row.trigger_config)
-    : null;
+  const { triggerType, triggerConfig } = parseAutomationTriggerFields(row);
 
   return {
     id: row.id,
     name: row.name,
     instructions: row.instructions,
-    triggerType: row.trigger_type as Automation["triggerType"],
+    triggerType,
     scheduleCron: row.schedule_cron,
     scheduleTz: row.schedule_tz,
+    harness: getValidHarnessOrDefault(row.harness),
     model: row.model,
     reasoningEffort: row.reasoning_effort,
     enabled: row.enabled === 1,
     nextRunAt: row.next_run_at,
     consecutiveFailures: row.consecutive_failures,
     createdBy: row.created_by,
+    userId: row.user_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     deletedAt: row.deleted_at,
     eventType: row.event_type ?? null,
     triggerConfig,
-    executionMode: row.execution_mode ?? "fanout",
     repositories: repositoryRows.map(toAutomationRepository),
     environmentIds: environmentRows.map((environment) => environment.environment_id),
+    providerSelections: toProviderSelections(providerAuthRows),
   };
 }
 
@@ -252,21 +308,32 @@ const DERIVED_INVOCATION_STATUS_SQL = `CASE
   ELSE 'partial_failed'
 END`;
 
-/** Hides a `once` automation settled without error (completed/skipped); errored, in-progress, and never-fired stay. */
-const HIDE_SETTLED_ONCE_SQL = `NOT (automations.trigger_type = 'once' AND EXISTS (
-  SELECT 1 FROM automation_invocations ai
-  LEFT JOIN automation_runs r ON r.invocation_id = ai.id
-  WHERE ai.automation_id = automations.id
-  GROUP BY ai.id
-  HAVING (${DERIVED_INVOCATION_STATUS_SQL}) IN ('completed', 'skipped')
-))`;
-
 /** Derived completion time: latest child completion once all children are terminal. */
 const DERIVED_INVOCATION_COMPLETED_AT_SQL = `CASE
   WHEN COUNT(r.id) = 0 THEN NULL
   WHEN SUM(CASE WHEN r.status IN ('starting', 'running') THEN 1 ELSE 0 END) > 0 THEN NULL
   ELSE MAX(r.completed_at)
 END`;
+
+/**
+ * A one-shot automation whose run settled without error is list noise: it is
+ * already disabled and will never fire again. Errored, in-progress, and
+ * never-fired one-shots stay visible, and non-`once` triggers are untouched.
+ * Reuses the invocation aggregate so "settled without error" keeps one
+ * definition. Applied in `list()` — server-side, so cursor pagination stays
+ * correct.
+ */
+const HIDE_SETTLED_ONCE_SQL = `NOT (
+  automations.trigger_type = 'once'
+  AND EXISTS (
+    SELECT 1
+    FROM automation_invocations i
+    LEFT JOIN automation_runs r ON r.invocation_id = i.id
+    WHERE i.automation_id = automations.id
+    GROUP BY i.id
+    HAVING ${DERIVED_INVOCATION_STATUS_SQL} IN ('completed', 'skipped')
+  )
+)`;
 
 /**
  * TS twin of DERIVED_INVOCATION_STATUS_SQL over a sibling aggregate. Keep the
@@ -293,14 +360,14 @@ export function deriveInvocationStatus(counts: {
 }
 
 function toAutomationInvocation(
-  row: AutomationInvocationRow & { derived_status: string; derived_completed_at: number | null },
+  row: EnrichedAutomationInvocationRow,
   runs: AutomationRun[]
 ): AutomationInvocation {
   const skipped = row.skip_reason !== null;
   return {
     id: row.id,
     automationId: row.automation_id,
-    status: row.derived_status as AutomationInvocationStatus,
+    status: row.derived_status,
     source: row.source,
     scheduledAt: row.scheduled_at,
     skipReason: row.skip_reason,
@@ -313,6 +380,7 @@ function toAutomationInvocation(
 
 // ─── Store ───────────────────────────────────────────────────────────────────
 
+/** Persists automations, invocations, runs, and composable lifecycle mutations. */
 export class AutomationStore {
   constructor(private readonly db: SqlDatabase) {}
 
@@ -327,9 +395,9 @@ export class AutomationStore {
       .prepare(
         `INSERT INTO automations
          (id, name, instructions,
-          trigger_type, schedule_cron, schedule_tz, model, reasoning_effort, enabled, next_run_at,
+          trigger_type, schedule_cron, schedule_tz, harness, model, reasoning_effort, enabled, next_run_at,
           consecutive_failures, created_by, user_id, created_at, updated_at, deleted_at,
-          event_type, trigger_config, trigger_auth_data, execution_mode)
+          event_type, trigger_config, trigger_auth_data)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
@@ -339,6 +407,7 @@ export class AutomationStore {
         row.trigger_type,
         row.schedule_cron,
         row.schedule_tz,
+        row.harness ?? DEFAULT_HARNESS,
         row.model,
         row.reasoning_effort,
         row.enabled,
@@ -351,8 +420,7 @@ export class AutomationStore {
         row.deleted_at,
         row.event_type,
         row.trigger_config,
-        row.trigger_auth_data,
-        row.execution_mode ?? "fanout"
+        row.trigger_auth_data
       );
   }
 
@@ -365,6 +433,29 @@ export class AutomationStore {
       .prepare("SELECT * FROM automations WHERE id = ? AND deleted_at IS NULL")
       .bind(id)
       .first<AutomationRow>();
+  }
+
+  /**
+   * Repair a legacy SCM-only owner with a compare-and-set and return the canonical row.
+   * Every ownership admission path calls this before comparing `user_id`, so repair is
+   * a storage invariant rather than a side effect of starting an invocation.
+   */
+  async resolveCanonicalOwner(automation: AutomationRow): Promise<AutomationRow> {
+    if (automation.user_id || !automation.created_by || automation.created_by === "anonymous") {
+      return automation;
+    }
+
+    const identity = await new UserStore(this.db).getIdentity("github", automation.created_by);
+    if (!identity) return automation;
+
+    const result = await this.db
+      .prepare("UPDATE automations SET user_id = ? WHERE id = ? AND user_id IS NULL")
+      .bind(identity.userId, automation.id)
+      .run();
+    if ((result.meta?.changes ?? 0) > 0) {
+      return { ...automation, user_id: identity.userId };
+    }
+    return (await this.getById(automation.id)) ?? automation;
   }
 
   async list(options: {
@@ -410,6 +501,56 @@ export class AutomationStore {
     };
   }
 
+  async listRecentExecutionsForAutomationIds(
+    automationIds: string[],
+    limit: number
+  ): Promise<Map<string, AutomationExecutionSummary[]>> {
+    const executionsByAutomation = new Map<string, AutomationExecutionSummary[]>();
+    for (const id of automationIds) executionsByAutomation.set(id, []);
+    if (automationIds.length === 0) return executionsByAutomation;
+
+    const placeholders = automationIds.map(() => "?").join(", ");
+    const result = await this.db
+      .prepare(
+        `WITH ranked_invocations AS (
+           SELECT i.id, i.automation_id, i.created_at,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY i.automation_id
+                    ORDER BY i.created_at DESC, i.id DESC
+                  ) AS position
+           FROM automation_invocations i
+           WHERE i.automation_id IN (${placeholders})
+         ),
+         recent_invocations AS (
+           SELECT id, automation_id, created_at
+           FROM ranked_invocations
+           WHERE position <= ?
+         )
+         SELECT i.id, i.automation_id, i.created_at,
+                ${DERIVED_INVOCATION_STATUS_SQL} AS derived_status
+         FROM recent_invocations i
+         LEFT JOIN automation_runs r ON r.invocation_id = i.id
+         GROUP BY i.id
+         ORDER BY i.automation_id, i.created_at DESC, i.id DESC`
+      )
+      .bind(...automationIds, limit)
+      .all<{
+        id: string;
+        automation_id: string;
+        created_at: number;
+        derived_status: AutomationInvocationStatus;
+      }>();
+
+    for (const row of result.results ?? []) {
+      executionsByAutomation.get(row.automation_id)?.push({
+        id: row.id,
+        status: row.derived_status,
+        createdAt: row.created_at,
+      });
+    }
+    return executionsByAutomation;
+  }
+
   /**
    * Build the dynamic UPDATE statement for the allowed automation fields, or
    * null when `fields` carries nothing to write. Public so a route can compose it
@@ -426,6 +567,7 @@ export class AutomationStore {
       "instructions",
       "schedule_cron",
       "schedule_tz",
+      "harness",
       "model",
       "reasoning_effort",
       "next_run_at",
@@ -434,7 +576,6 @@ export class AutomationStore {
       "event_type",
       "trigger_config",
       "trigger_auth_data",
-      "execution_mode",
     ];
 
     for (const field of allowedFields) {
@@ -463,36 +604,48 @@ export class AutomationStore {
     return this.getById(id);
   }
 
-  async softDelete(id: string): Promise<boolean> {
-    const now = Date.now();
-    const result = await this.db
+  /** Build a soft-delete statement for composition in an atomic batch. */
+  bindSoftDelete(id: string, now = Date.now()): SqlStatement {
+    return this.db
       .prepare(
         "UPDATE automations SET deleted_at = ?, next_run_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NULL"
       )
-      .bind(now, now, id)
-      .run();
+      .bind(now, now, id);
+  }
+
+  /** Soft-delete an automation and report whether a live row changed. */
+  async softDelete(id: string): Promise<boolean> {
+    const result = await this.bindSoftDelete(id).run();
     return (result.meta?.changes ?? 0) > 0;
   }
 
-  async pause(id: string): Promise<boolean> {
-    const now = Date.now();
-    const result = await this.db
+  /** Build a pause statement for composition in an atomic batch. */
+  bindPause(id: string, now = Date.now()): SqlStatement {
+    return this.db
       .prepare(
         "UPDATE automations SET enabled = 0, next_run_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NULL"
       )
-      .bind(now, id)
-      .run();
+      .bind(now, id);
+  }
+
+  /** Pause an automation and report whether a live row changed. */
+  async pause(id: string): Promise<boolean> {
+    const result = await this.bindPause(id).run();
     return (result.meta?.changes ?? 0) > 0;
   }
 
-  async resume(id: string, nextRunAt: number | null): Promise<boolean> {
-    const now = Date.now();
-    const result = await this.db
+  /** Build a resume statement for composition in an atomic batch. */
+  bindResume(id: string, nextRunAt: number | null, now = Date.now()): SqlStatement {
+    return this.db
       .prepare(
         "UPDATE automations SET enabled = 1, next_run_at = ?, consecutive_failures = 0, updated_at = ? WHERE id = ? AND deleted_at IS NULL"
       )
-      .bind(nextRunAt, now, id)
-      .run();
+      .bind(nextRunAt, now, id);
+  }
+
+  /** Resume an automation and report whether a live row changed. */
+  async resume(id: string, nextRunAt: number | null): Promise<boolean> {
+    const result = await this.bindResume(id, nextRunAt).run();
     return (result.meta?.changes ?? 0) > 0;
   }
 
@@ -521,7 +674,7 @@ export class AutomationStore {
       .prepare(
         `SELECT * FROM automation_repositories
          WHERE automation_id = ?
-         ORDER BY position, repo_owner, repo_name`
+         ORDER BY repo_owner, repo_name`
       )
       .bind(automationId)
       .all<AutomationRepositoryRow>();
@@ -541,7 +694,7 @@ export class AutomationStore {
       .prepare(
         `SELECT * FROM automation_repositories
          WHERE automation_id IN (${placeholders})
-         ORDER BY position, repo_owner, repo_name`
+         ORDER BY repo_owner, repo_name`
       )
       .bind(...automationIds)
       .all<AutomationRepositoryRow>();
@@ -558,12 +711,12 @@ export class AutomationStore {
     repositories: AutomationRepositoryInsert[],
     now: number
   ): SqlStatement[] {
-    return repositories.map((repository, position) =>
+    return repositories.map((repository) =>
       this.db
         .prepare(
           `INSERT INTO automation_repositories
-           (automation_id, repo_owner, repo_name, repo_id, base_branch, created_at, updated_at, position)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+           (automation_id, repo_owner, repo_name, repo_id, base_branch, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
         )
         .bind(
           automationId,
@@ -572,8 +725,7 @@ export class AutomationStore {
           repository.repo_id,
           repository.base_branch,
           now,
-          now,
-          position
+          now
         )
     );
   }
@@ -696,144 +848,6 @@ export class AutomationStore {
     return result.results || [];
   }
 
-  /**
-   * Insert a `trigger_type: "once"` automation and its targets, but only if
-   * `next_run_at` is still in the future at commit time. The guard runs in-DB
-   * (INSERT...SELECT WHERE next_run_at > now) so a task can't persist already
-   * overdue and fire on the very next tick. Returns false when the guard
-   * suppressed the insert.
-   */
-  async insertOnceIfFuture(
-    row: AutomationRow,
-    repositories: AutomationRepositoryInsert[],
-    environmentIds: string[]
-  ): Promise<boolean> {
-    const automation = this.db
-      .prepare(
-        `INSERT INTO automations
-         (id, name, instructions,
-          trigger_type, schedule_cron, schedule_tz, model, reasoning_effort, enabled, next_run_at,
-          consecutive_failures, created_by, user_id, created_at, updated_at, deleted_at,
-          event_type, trigger_config, trigger_auth_data, execution_mode)
-         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-         WHERE ? > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)`
-      )
-      .bind(
-        row.id,
-        row.name,
-        row.instructions,
-        row.trigger_type,
-        row.schedule_cron,
-        row.schedule_tz,
-        row.model,
-        row.reasoning_effort,
-        row.enabled,
-        row.next_run_at,
-        row.consecutive_failures,
-        row.created_by,
-        row.user_id,
-        row.created_at,
-        row.updated_at,
-        row.deleted_at,
-        row.event_type,
-        row.trigger_config,
-        row.trigger_auth_data,
-        row.execution_mode ?? "fanout",
-        row.next_run_at
-      );
-    const repositoryStatements = repositories.map((repository, position) =>
-      this.db
-        .prepare(
-          `INSERT INTO automation_repositories
-           (automation_id, repo_owner, repo_name, repo_id, base_branch, created_at, updated_at, position)
-           SELECT ?, ?, ?, ?, ?, ?, ?, ?
-           WHERE EXISTS (SELECT 1 FROM automations WHERE id = ?)`
-        )
-        .bind(
-          row.id,
-          repository.repo_owner,
-          repository.repo_name,
-          repository.repo_id,
-          repository.base_branch,
-          row.created_at,
-          row.updated_at,
-          position,
-          row.id
-        )
-    );
-    const environmentStatements = environmentIds.map((environmentId) =>
-      this.db
-        .prepare(
-          `INSERT INTO automation_environments
-           (automation_id, environment_id, created_at, updated_at)
-           SELECT ?, ?, ?, ?
-           WHERE EXISTS (SELECT 1 FROM automations WHERE id = ?)`
-        )
-        .bind(row.id, environmentId, row.created_at, row.updated_at, row.id)
-    );
-    const results = await this.db.batch([
-      automation,
-      ...repositoryStatements,
-      ...environmentStatements,
-    ]);
-    return (results[0]?.meta?.changes ?? 0) > 0;
-  }
-
-  async getByIdForOwner(id: string, userId: string): Promise<AutomationRow | null> {
-    return this.db
-      .prepare("SELECT * FROM automations WHERE id = ? AND user_id = ? AND deleted_at IS NULL")
-      .bind(id, userId)
-      .first<AutomationRow>();
-  }
-
-  async listOnceForOwner(userId: string): Promise<AutomationRow[]> {
-    const result = await this.db
-      .prepare(
-        `SELECT * FROM automations
-         WHERE user_id = ? AND trigger_type = 'once' AND deleted_at IS NULL
-         ORDER BY created_at DESC`
-      )
-      .bind(userId)
-      .all<AutomationRow>();
-    return result.results ?? [];
-  }
-
-  /**
-   * Cancel a one-shot task before it fires: disable it, but only while it has
-   * no invocation yet. Once the scheduler has started firing, the guard
-   * suppresses the update and the caller reports a 409.
-   */
-  async cancelOnce(id: string, userId: string): Promise<boolean> {
-    const now = Date.now();
-    const result = await this.db
-      .prepare(
-        `UPDATE automations
-         SET enabled = 0, next_run_at = NULL, updated_at = ?
-         WHERE id = ? AND user_id = ? AND trigger_type = 'once'
-           AND enabled = 1 AND deleted_at IS NULL
-           AND NOT EXISTS (
-             SELECT 1 FROM automation_invocations WHERE automation_id = automations.id
-           )`
-      )
-      .bind(now, id, userId)
-      .run();
-    return (result.meta?.changes ?? 0) > 0;
-  }
-
-  /**
-   * Disable a fired one-shot automation so no later tick re-picks it. The
-   * scheduler calls this atomically with the firing insert (and again on the
-   * dedup path); it is the replay-safe guard, not `next_run_at` advance.
-   */
-  async completeOnce(id: string): Promise<void> {
-    await this.db
-      .prepare(
-        "UPDATE automations SET enabled = 0, next_run_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NULL"
-      )
-      .bind(Date.now(), id)
-      .run();
-  }
-
   // --- Run management ---
 
   /**
@@ -876,17 +890,42 @@ export class AutomationStore {
     return (result.meta?.changes ?? 0) > 0;
   }
 
-  /** Fail stuck runs. Same SQL guard as updateRun — sweeps must never flip terminal rows. */
-  async bulkFailRuns(runIds: string[], reason: string, completedAt: number): Promise<void> {
+  /** Atomically assign a session only while a run still awaits launch. */
+  async claimRunSession(id: string, sessionId: string, startedAt: number): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE automation_runs
+         SET status = 'running', session_id = ?, started_at = ?
+         WHERE id = ? AND status = 'starting'`
+      )
+      .bind(sessionId, startedAt, id)
+      .run();
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
+  async bulkFailStartingRuns(runIds: string[], reason: string, completedAt: number): Promise<void> {
+    await this.bulkFailRunsInStatus(runIds, "starting", reason, completedAt);
+  }
+
+  async bulkFailRunningRuns(runIds: string[], reason: string, completedAt: number): Promise<void> {
+    await this.bulkFailRunsInStatus(runIds, "running", reason, completedAt);
+  }
+
+  private async bulkFailRunsInStatus(
+    runIds: string[],
+    status: "starting" | "running",
+    reason: string,
+    completedAt: number
+  ): Promise<void> {
     if (runIds.length === 0) return;
     const placeholders = runIds.map(() => "?").join(", ");
     await this.db
       .prepare(
         `UPDATE automation_runs
          SET status = 'failed', failure_reason = ?, completed_at = ?
-         WHERE id IN (${placeholders}) AND status IN ('starting', 'running')`
+         WHERE id IN (${placeholders}) AND status = ?`
       )
-      .bind(reason, completedAt, ...runIds)
+      .bind(reason, completedAt, ...runIds, status)
       .run();
   }
 
@@ -920,7 +959,7 @@ export class AutomationStore {
 
   /**
    * Per-source overlap predicate, used both as the cheap pre-check and inside
-   * the guarded insert (same SQL, one definition). Schedule/manual firings
+   * the conditional insert (same SQL, one definition). Schedule/manual firings
    * block on ANY active run of the automation (main parity with
    * getActiveRunForAutomation); event firings block per concurrency key only —
    * an automation-wide guard would serialize unrelated events.
@@ -954,8 +993,12 @@ export class AutomationStore {
    * statement ERROR — a 0-row INSERT…SELECT is a success and later statements
    * still run. The invocation insert is suppressed when the overlap predicate
    * matches; child inserts are 0-row no-ops when the invocation was
-   * suppressed; the schedule advance is deliberately unconditional (a blocked
-   * firing must still advance or the tick re-collides forever).
+   * suppressed; the schedule advance still runs for a blocked firing so the
+   * tick does not re-collide forever, but is conditioned on still owning the
+   * slot it claimed. Monotonicity is not enough: two ticks straddling a cron
+   * boundary both read slot S, and a "later timestamp wins" predicate lets the
+   * loser advance a second time from the winner's successor, skipping a slot
+   * outright. Only the transaction that observes S may move it.
    *
    * A UNIQUE violation (cron double-fire on the idempotency index, event dedup
    * on the trigger-key index) rolls back the WHOLE batch including the
@@ -967,14 +1010,12 @@ export class AutomationStore {
     invocation: AutomationInvocationRow;
     children: AutomationRunRow[];
     overlapScope: InvocationOverlapScope;
-    advanceSchedule?: { nextRunAt: number };
-    /** One-shot firing: disable the automation in the same batch (replay-safe). */
-    completeOnce?: boolean;
+    advanceSchedule?: ScheduleAdvance;
+    disableAfterSlot?: number;
   }): Promise<{ inserted: boolean }> {
     const invocation = params.invocation;
     const overlap = this.overlapPredicate(invocation.automation_id, params.overlapScope);
     const statements: SqlStatement[] = [];
-
     statements.push(
       this.db
         .prepare(
@@ -1006,9 +1047,9 @@ export class AutomationStore {
           .prepare(
             `INSERT INTO automation_runs
              (id, automation_id, invocation_id, session_id, status, skip_reason, failure_reason,
-               scheduled_at, started_at, completed_at, created_at,
-               repo_owner, repo_name, repo_id, base_branch, environment_id, repository_set)
-              SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+              scheduled_at, started_at, completed_at, created_at,
+              repo_owner, repo_name, repo_id, base_branch, environment_id)
+             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
              WHERE EXISTS (SELECT 1 FROM automation_invocations WHERE id = ?)`
           )
           .bind(
@@ -1028,7 +1069,6 @@ export class AutomationStore {
             child.repo_id,
             child.base_branch,
             child.environment_id,
-            child.repository_set ?? null,
             invocation.id
           )
       );
@@ -1039,21 +1079,19 @@ export class AutomationStore {
         this.db
           .prepare(
             `UPDATE automations SET next_run_at = ?, updated_at = ?
-             WHERE id = ? AND deleted_at IS NULL`
+             WHERE id = ? AND deleted_at IS NULL AND next_run_at = ?`
           )
-          .bind(params.advanceSchedule.nextRunAt, Date.now(), invocation.automation_id)
+          .bind(
+            params.advanceSchedule.nextRunAt,
+            Date.now(),
+            invocation.automation_id,
+            params.advanceSchedule.fromSlot
+          )
       );
     }
 
-    if (params.completeOnce) {
-      statements.push(
-        this.db
-          .prepare(
-            `UPDATE automations SET enabled = 0, next_run_at = NULL, updated_at = ?
-             WHERE id = ? AND deleted_at IS NULL`
-          )
-          .bind(Date.now(), invocation.automation_id)
-      );
+    if (params.disableAfterSlot !== undefined) {
+      statements.push(this.bindDisableAfterSlot(invocation.automation_id, params.disableAfterSlot));
     }
 
     const results = await this.db.batch(statements);
@@ -1063,21 +1101,25 @@ export class AutomationStore {
   /**
    * Record a skipped firing: a childless invocation carrying skip_reason,
    * atomically paired with the schedule advance when the skip serves a cron
-   * slot. INSERT OR IGNORE tolerates an idempotency-index race without
+   * slot. The conflict-tolerant insert absorbs an idempotency-index race without
    * blocking the advance — a skip recorded without the advance would
-   * re-collide on (automation_id, scheduled_at) every tick thereafter.
+   * re-collide on (automation_id, scheduled_at) every tick thereafter. The
+   * advance is a compare-and-set on the claimed slot, so a firing that lost
+   * the slot cannot move the schedule a second time.
    */
   async insertSkippedInvocation(
     invocation: AutomationInvocationRow,
-    advanceSchedule?: { nextRunAt: number }
+    advanceSchedule?: ScheduleAdvance,
+    disableAfterSlot?: number
   ): Promise<{ inserted: boolean }> {
     const statements: SqlStatement[] = [
       this.db
         .prepare(
-          `INSERT OR IGNORE INTO automation_invocations
+          `INSERT INTO automation_invocations
            (id, automation_id, source, scheduled_at, trigger_key, concurrency_key,
             trigger_metadata, skip_reason, failure_counted_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT DO NOTHING`
         )
         .bind(
           invocation.id,
@@ -1099,14 +1141,84 @@ export class AutomationStore {
         this.db
           .prepare(
             `UPDATE automations SET next_run_at = ?, updated_at = ?
-             WHERE id = ? AND deleted_at IS NULL`
+             WHERE id = ? AND deleted_at IS NULL AND next_run_at = ?`
           )
-          .bind(advanceSchedule.nextRunAt, Date.now(), invocation.automation_id)
+          .bind(
+            advanceSchedule.nextRunAt,
+            Date.now(),
+            invocation.automation_id,
+            advanceSchedule.fromSlot
+          )
       );
+    }
+
+    if (disableAfterSlot !== undefined) {
+      statements.push(this.bindDisableAfterSlot(invocation.automation_id, disableAfterSlot));
     }
 
     const results = await this.db.batch(statements);
     return { inserted: (results[0]?.meta?.changes ?? 0) > 0 };
+  }
+
+  /**
+   * Consume a once trigger's fire-at slot: disable the automation only while it
+   * still holds `fromSlot` as its next_run_at. The CAS makes a duplicate firing
+   * (idempotency-index loser or an overlap skip) harmless, and mirrors the
+   * schedule advance's slot-ownership rule.
+   */
+  async disableOnceAfterSlot(automationId: string, fromSlot: number): Promise<boolean> {
+    const result = await this.bindDisableAfterSlot(automationId, fromSlot).run();
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
+  private bindDisableAfterSlot(automationId: string, fromSlot: number): SqlStatement {
+    return this.db
+      .prepare(
+        `UPDATE automations SET enabled = 0, next_run_at = NULL, updated_at = ?
+         WHERE id = ? AND deleted_at IS NULL AND next_run_at = ?`
+      )
+      .bind(Date.now(), automationId, fromSlot);
+  }
+
+  /** Atomically record a denied cron slot and pause it so overdue denial cannot starve the queue. */
+  async recordAuthorizationDenied(
+    invocation: AutomationInvocationRow,
+    fromSlot: number
+  ): Promise<{ inserted: boolean; paused: boolean }> {
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          `INSERT INTO automation_invocations
+           (id, automation_id, source, scheduled_at, trigger_key, concurrency_key,
+            trigger_metadata, skip_reason, failure_counted_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT DO NOTHING`
+        )
+        .bind(
+          invocation.id,
+          invocation.automation_id,
+          invocation.source,
+          invocation.scheduled_at,
+          invocation.trigger_key,
+          invocation.concurrency_key,
+          invocation.trigger_metadata,
+          invocation.skip_reason,
+          invocation.failure_counted_at,
+          invocation.created_at,
+          invocation.updated_at
+        ),
+      this.db
+        .prepare(
+          `UPDATE automations
+           SET enabled = 0, next_run_at = NULL, updated_at = ?
+           WHERE id = ? AND deleted_at IS NULL AND enabled = 1 AND next_run_at = ?`
+        )
+        .bind(Date.now(), invocation.automation_id, fromSlot),
+    ]);
+    return {
+      inserted: (results[0]?.meta?.changes ?? 0) > 0,
+      paused: (results[1]?.meta?.changes ?? 0) > 0,
+    };
   }
 
   async getInvocationById(invocationId: string): Promise<AutomationInvocationRow | null> {
@@ -1188,11 +1300,10 @@ export class AutomationStore {
         .bind(automationId, options.limit, options.offset),
     ]);
 
-    const total = (countResult.results?.[0] as { count: number } | undefined)?.count ?? 0;
-    const rows = (pageResult.results ?? []) as (AutomationInvocationRow & {
-      derived_status: string;
-      derived_completed_at: number | null;
-    })[];
+    const total = countRowSchema.parse(countResult.results?.[0]).count;
+    // A malformed stored row is an integrity error, not a missing invocation.
+    // Reject the page instead of silently returning incomplete history.
+    const rows = enrichedAutomationInvocationRowSchema.array().parse(pageResult.results ?? []);
     if (rows.length === 0) return { invocations: [], total };
 
     const placeholders = rows.map(() => "?").join(", ");

@@ -50,16 +50,9 @@ that reverts the lookup to `user_id` only reddens the canonical case.
 - Leave the WebSocket-token handler on the `user_id`-only lookup (it creates a participant on a
   miss); only the lifecycle authorization uses the canonical-aware lookup.
 
-## Dated evidence (2026-08-20, non-binding hints)
+## Provenance
 
-- `packages/control-plane/src/session/participant-repository.ts`:
-  `getParticipantByUserIdOrCanonical` (`WHERE user_id = ? OR canonical_user_id = ?`), plus
-  `getByUserIdOrCanonical` in `participant-service.ts`.
-- Wiring: `packages/control-plane/src/session/durable-object.ts`, the `sessionLifecycleHandler`
-  getter passes `getParticipantForAuth` = `participantService.getByUserIdOrCanonical`. The lifecycle
-  handler's auth dependency is named `getParticipantForAuth` (distinct from the ws-token handler's
-  `getParticipantByUserId`, which stays `user_id`-only) so the canonical-aware semantics are legible
-  at the 403 decision, not just in a repository comment.
-- Tests: `packages/control-plane/src/session/participant-repository.test.ts` (both-column lookup)
-  and `packages/control-plane/test/integration/session-lifecycle.test.ts`, case "archive authorizes
-  the canonical user of a bot-rooted session".
+Fork-only since before the first blind sync. The 2026-09-11 audit marked the card SUPERSEDED:
+route-level admission now resolves the canonical subject before the DO is reached, so the
+participant OR-lookup this card once rebuilt has no landing spot. Kept so the next audit re-checks
+the premise instead of assuming it still holds.

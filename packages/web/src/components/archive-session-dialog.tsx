@@ -15,29 +15,22 @@ interface ArchiveSessionDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
-  title?: string;
-  description?: string;
-  actionLabel?: string;
 }
 
-export function ArchiveSessionDialog({
-  open,
-  onOpenChange,
-  onConfirm,
-  title = "Archive session",
-  description = "Archive this session? You can restore archived sessions from Settings > Data Controls.",
-  actionLabel = "Archive",
-}: ArchiveSessionDialogProps) {
+export function ArchiveSessionDialog({ open, onOpenChange, onConfirm }: ArchiveSessionDialogProps) {
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>{title}</AlertDialogTitle>
-          <AlertDialogDescription>{description}</AlertDialogDescription>
+          <AlertDialogTitle>Archive session</AlertDialogTitle>
+          <AlertDialogDescription>
+            Archive this session? You can restore archived sessions from Settings &gt; Data
+            Controls.
+          </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction onClick={onConfirm}>{actionLabel}</AlertDialogAction>
+          <AlertDialogAction onClick={onConfirm}>Archive</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

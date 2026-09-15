@@ -1,3 +1,4 @@
+import type { HarnessId } from "@open-inspect/shared/harnesses";
 import type { McpServerConfig } from "@open-inspect/shared/types/integrations";
 import { computeHmacHex } from "@open-inspect/shared/auth";
 import type { SourceControlProviderName } from "../source-control";
@@ -39,6 +40,8 @@ export interface SessionConfigPayload {
   session_id: string;
   repo_owner: string | null;
   repo_name: string | null;
+  /** Agent harness the runtime must boot. */
+  harness: HarnessId;
   provider: string;
   model: string;
   /** Omitted from the serialized payload when undefined. */
@@ -47,8 +50,6 @@ export interface SessionConfigPayload {
   branch?: string | null;
   /** Ordered member list; only present for multi-repo sessions. */
   repositories?: SessionRepositoryConfigPayload[];
-  /** Expected native OpenCode conversation on replacement boots. */
-  opencode_session_id?: string;
 }
 
 /** Provider-agnostic inputs needed to assemble a {@link SessionConfigPayload}. */
@@ -56,12 +57,12 @@ export interface SessionConfigInput {
   sessionId: string;
   repoOwner: string | null;
   repoName: string | null;
+  harness: HarnessId;
   provider: string;
   model: string;
   mcpServers?: McpServerConfig[];
   branch?: string | null;
   repositories?: SessionRepositoryInfo[];
-  opencodeSessionId?: string;
 }
 
 /**
@@ -77,10 +78,10 @@ export function buildSessionConfig(input: SessionConfigInput): SessionConfigPayl
     session_id: input.sessionId,
     repo_owner: input.repoOwner,
     repo_name: input.repoName,
+    harness: input.harness,
     provider: input.provider,
     model: input.model,
     mcp_servers: input.mcpServers,
-    ...(input.opencodeSessionId ? { opencode_session_id: input.opencodeSessionId } : {}),
   };
   if (input.branch !== undefined) {
     payload.branch = input.branch;
@@ -106,8 +107,20 @@ export function toRepositoryConfigPayload(
 const SESSION_CONFIG_ENV_VAR = "SESSION_CONFIG";
 /** Build-mode marker checked as `=== "true"` by the runtime entrypoint. */
 export const IMAGE_BUILD_MODE_ENV_VAR = "IMAGE_BUILD_MODE";
-export const OPENCODE_SESSION_ID_ENV_VAR = "OPENCODE_SESSION_ID";
 export const IMAGE_BUILD_EXECUTION_TIMEOUT_ENV_KEY = "OI_IMAGE_BUILD_EXECUTION_TIMEOUT_SECONDS";
+
+/**
+ * Every env var `BootMode.from_env` (sandbox_runtime/runtime_config.py) reads to
+ * decide how the runtime boots. Control-plane-owned: providers set these
+ * themselves when the mode applies, so they are stripped from the user layer.
+ * Keep in sync with that enum.
+ */
+export const BOOT_MODE_ENV_KEYS = [
+  IMAGE_BUILD_MODE_ENV_VAR,
+  "RESTORED_FROM_SNAPSHOT",
+  "FROM_REPO_IMAGE",
+  "REPO_IMAGE_SHA",
+] as const;
 
 /**
  * Env vars of the image-build callback contract, keyed by semantic name and
@@ -133,9 +146,9 @@ export interface ImageBuildCallbackEnvValues {
   failureCallbackUrl: string;
   token: string;
   /**
-   * Omitted from the returned map when absent: OpenComputer bakes the
+   * Omitted from the returned map when absent: OpenComputer and E2B bake the
    * callback env at create time, before the provider session id exists, and
-   * delivers the id separately at runtime start.
+   * deliver the id separately when starting the runtime.
    */
   providerSessionId?: string;
 }
@@ -275,7 +288,12 @@ export function buildSandboxEnvVars(
   const envVars: Record<string, string> = { ...(options.baseEnvVars ?? config.userEnvVars ?? {}) };
   delete envVars.VNC_PASSWORD;
   delete envVars.NOVNC_PORT;
-  delete envVars[OPENCODE_SESSION_ID_ENV_VAR];
+  // Boot mode is the control plane's to decide. These are applied by the caller
+  // after this returns (only when the corresponding mode is real), so unlike the
+  // system keys below they are not overlaid and a repo secret of the same name
+  // would otherwise survive into BootMode.from_env — letting a session claim it
+  // booted from a repo image, a snapshot, or an image build when it did not.
+  for (const marker of BOOT_MODE_ENV_KEYS) delete envVars[marker];
 
   const sessionConfig = buildSessionConfig(config);
 
@@ -289,10 +307,6 @@ export function buildSandboxEnvVars(
     REPO_NAME: config.repoName ?? "",
     [SESSION_CONFIG_ENV_VAR]: JSON.stringify(sessionConfig),
   });
-
-  if (config.opencodeSessionId) {
-    envVars[OPENCODE_SESSION_ID_ENV_VAR] = config.opencodeSessionId;
-  }
 
   if (config.codeServerEnabled) {
     envVars.CODE_SERVER_PORT = String(resolveServicePorts(config.sandboxSettings).codeServerPort);

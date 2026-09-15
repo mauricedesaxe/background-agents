@@ -1,19 +1,23 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   applyTitleUpdate,
-  applySessionReadState,
   buildGroupedSessionList,
   buildSessionSearchValue,
   buildSessionsPageKey,
   CURRENT_USER_CREATED_BY,
+  fetchSessionListPage,
   isArchivedSessionListKey,
   isSessionListKey,
   isUnarchivedSessionListKey,
-  sessionSource,
   type SessionListResponse,
 } from "./session-list";
-import type { SessionListItem } from "@open-inspect/shared/types/session-inbox";
 import type { Session } from "@open-inspect/shared/types/sessions";
+import type { SessionListItem as InboxSessionListItem } from "@open-inspect/shared/types/session-inbox";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 function session(id: string, overrides: Partial<Session> = {}): Session {
   return {
@@ -25,7 +29,8 @@ function session(id: string, overrides: Partial<Session> = {}): Session {
     branchName: null,
     baseSha: null,
     currentSha: null,
-    opencodeSessionId: null,
+    agentSessionId: null,
+    harness: "opencode",
     status: "active",
     parentSessionId: null,
     spawnSource: "user",
@@ -61,38 +66,31 @@ describe("buildSessionsPageKey", () => {
   });
 });
 
-describe("applySessionReadState", () => {
-  it("does not let an older mutation response overwrite a newer terminal message", () => {
-    const data: SessionListResponse = {
-      sessions: [
-        session("session-1", {
-          readState: {
-            unread: true,
-            latestMessageId: "message-b",
-          },
-        }),
-      ],
-      hasMore: false,
-    };
+describe("fetchSessionListPage", () => {
+  it("parses the session-list boundary", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          sessions: [session("session-1")],
+          hasMore: false,
+        })
+      )
+    );
 
-    expect(
-      applySessionReadState(data, "session-1", {
-        unread: false,
-        latestMessageId: "message-a",
-      })?.sessions[0].readState
-    ).toEqual({
-      unread: true,
-      latestMessageId: "message-b",
+    await expect(fetchSessionListPage(buildSessionsPageKey())).resolves.toMatchObject({
+      sessions: [{ id: "session-1", status: "active" }],
+      hasMore: false,
     });
-    expect(
-      applySessionReadState(data, "session-1", {
-        unread: false,
-        latestMessageId: "message-b",
-      })?.sessions[0].readState
-    ).toEqual({
-      unread: false,
-      latestMessageId: "message-b",
-    });
+  });
+
+  it("rejects malformed pages", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ sessions: [{ id: "session-1" }], hasMore: false }))
+    );
+
+    await expect(fetchSessionListPage(buildSessionsPageKey())).rejects.toThrow();
   });
 });
 
@@ -120,6 +118,84 @@ describe("buildSessionSearchValue", () => {
 
   it("falls back to the scalar repository fields", () => {
     expect(buildSessionSearchValue(session("legacy"))).toContain("open-inspect/background-agents");
+  });
+});
+
+function inboxSession(
+  id: string,
+  overrides: Partial<InboxSessionListItem> = {}
+): InboxSessionListItem {
+  return {
+    id,
+    title: id.toUpperCase(),
+    repoOwner: "acme",
+    repoName: "web",
+    baseBranch: null,
+    status: "active",
+    parentSessionId: null,
+    spawnSource: "user",
+    environmentId: null,
+    createdAt: 1000,
+    updatedAt: 2000,
+    readState: { latestMessageId: null, version: 0, unread: false },
+    ...overrides,
+  };
+}
+
+describe("buildGroupedSessionList", () => {
+  it("groups one repository's sessions with manual before automatic", () => {
+    const groups = buildGroupedSessionList([
+      inboxSession("auto", { spawnSource: "automation" }),
+      inboxSession("manual"),
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].key).toBe("repository:acme/web");
+    expect(groups[0].label).toBe("acme/web");
+    expect(groups[0].buckets.map((bucket) => bucket.source)).toEqual(["manual", "automatic"]);
+    expect(groups[0].buckets[0].sessions.map((item) => item.id)).toEqual(["manual"]);
+    expect(groups[0].buckets[1].sessions.map((item) => item.id)).toEqual(["auto"]);
+  });
+
+  it("keeps different repositories in separate groups", () => {
+    const groups = buildGroupedSessionList([
+      inboxSession("web", { repoOwner: "acme", repoName: "web" }),
+      inboxSession("api", { repoOwner: "acme", repoName: "api" }),
+    ]);
+
+    expect(groups.map((group) => group.label)).toEqual(["acme/web", "acme/api"]);
+  });
+
+  it("orders groups by their most recent activity", () => {
+    const groups = buildGroupedSessionList([
+      inboxSession("older", { updatedAt: 1000 }),
+      inboxSession("newer", { repoOwner: "acme", repoName: "api", updatedAt: 5000 }),
+    ]);
+
+    expect(groups.map((group) => group.label)).toEqual(["acme/api", "acme/web"]);
+  });
+
+  it("lands multi-repository and repository-less sessions in their own groups", () => {
+    const groups = buildGroupedSessionList([
+      inboxSession("multi", {
+        repositories: [
+          { repoOwner: "acme", repoName: "web", repoId: 1, baseBranch: "main" },
+          { repoOwner: "acme", repoName: "api", repoId: 2, baseBranch: "main" },
+        ],
+      }),
+      inboxSession("orphan", { repoOwner: null, repoName: null }),
+    ]);
+
+    expect(groups.map((group) => group.label)).toEqual(["Multiple repositories", "No repository"]);
+  });
+
+  it("preserves recency order within a bucket", () => {
+    const groups = buildGroupedSessionList([
+      inboxSession("older", { updatedAt: 100 }),
+      inboxSession("newer", { updatedAt: 200 }),
+    ]);
+
+    expect(groups[0].buckets[0].sessions.map((item) => item.id)).toEqual(["older", "newer"]);
   });
 });
 
@@ -212,88 +288,5 @@ describe("applyTitleUpdate", () => {
     applyTitleUpdate(before, "a", "Mutated");
 
     expect(before).toEqual(beforeSnapshot);
-  });
-});
-
-function listItem(id: string, overrides: Partial<SessionListItem> = {}): SessionListItem {
-  return {
-    id,
-    title: id.toUpperCase(),
-    repoOwner: "open-inspect",
-    repoName: "background-agents",
-    baseBranch: "main",
-    status: "active",
-    parentSessionId: null,
-    spawnSource: "user",
-    environmentId: null,
-    createdAt: 1000,
-    updatedAt: 2000,
-    readState: { latestMessageId: null, unread: false },
-    ...overrides,
-  };
-}
-
-describe("buildGroupedSessionList", () => {
-  it("groups roots by repository", () => {
-    const groups = buildGroupedSessionList([
-      listItem("a", { repoOwner: "acme", repoName: "web", updatedAt: 30 }),
-      listItem("b", { repoOwner: "acme", repoName: "api", updatedAt: 20 }),
-      listItem("c", { repoOwner: "acme", repoName: "web", updatedAt: 10 }),
-    ]);
-
-    const web = groups.find((group) => group.label === "acme/web");
-    const api = groups.find((group) => group.label === "acme/api");
-    expect(groups).toHaveLength(2);
-    expect(web?.buckets.flatMap((bucket) => bucket.sessions.map((s) => s.id))).toEqual(["a", "c"]);
-    expect(api?.buckets.flatMap((bucket) => bucket.sessions.map((s) => s.id))).toEqual(["b"]);
-  });
-
-  it("buckets a no-repository session and a multi-repository session apart", () => {
-    const groups = buildGroupedSessionList([
-      listItem("scalar", { repoOwner: "acme", repoName: "web" }),
-      listItem("none", { repoOwner: null, repoName: null }),
-      listItem("multi", {
-        repoOwner: "acme",
-        repoName: "web",
-        repositories: [
-          { repoOwner: "acme", repoName: "web", repoId: 1, baseBranch: "main" },
-          { repoOwner: "acme", repoName: "api", repoId: 2, baseBranch: "main" },
-        ],
-      }),
-    ]);
-
-    const labels = groups.map((group) => group.label).sort();
-    expect(labels).toEqual(["Multiple repositories", "No repository", "acme/web"]);
-  });
-
-  it("separates automatic sessions from manual ones inside a repo group", () => {
-    const groups = buildGroupedSessionList([
-      listItem("manual", { spawnSource: "user" }),
-      listItem("scheduled", { spawnSource: "automation" }),
-      listItem("bot", { spawnSource: "github-bot" }),
-    ]);
-
-    expect(groups).toHaveLength(1);
-    const [group] = groups;
-    const manual = group.buckets.find((bucket) => bucket.source === "manual");
-    const automatic = group.buckets.find((bucket) => bucket.source === "automatic");
-    expect(manual?.sessions.map((s) => s.id).sort()).toEqual(["bot", "manual"]);
-    expect(automatic?.sessions.map((s) => s.id)).toEqual(["scheduled"]);
-    expect(group.buckets.map((bucket) => bucket.source)).toEqual(["manual", "automatic"]);
-  });
-
-  it("classifies only the automation spawn source as automatic", () => {
-    expect(sessionSource({ spawnSource: "automation" })).toBe("automatic");
-    expect(sessionSource({ spawnSource: "user" })).toBe("manual");
-    expect(sessionSource({ spawnSource: "linear-bot" })).toBe("manual");
-  });
-
-  it("orders groups by their most recent session", () => {
-    const groups = buildGroupedSessionList([
-      listItem("old", { repoOwner: "acme", repoName: "api", updatedAt: 5 }),
-      listItem("new", { repoOwner: "acme", repoName: "web", updatedAt: 99 }),
-    ]);
-
-    expect(groups.map((group) => group.label)).toEqual(["acme/web", "acme/api"]);
   });
 });

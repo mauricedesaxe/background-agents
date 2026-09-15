@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
+import { sqlDatabase } from "./helpers";
 import {
   AutomationStore,
   toAutomation,
@@ -7,9 +8,10 @@ import {
   type AutomationRow,
   type AutomationRunRow,
 } from "../../src/db/automation-store";
+import { AutomationModelProviderAuthStore } from "../../src/db/automation-model-provider-auth";
 import { SessionIndexStore } from "../../src/db/session-index";
 import { cleanD1Tables } from "./cleanup";
-import { seedRun, fetchRuns, makeRunRow } from "./run-helpers";
+import { seedRun, fetchRuns } from "./run-helpers";
 
 function makeAutomation(overrides?: Partial<AutomationRow>): AutomationRow {
   const now = Date.now();
@@ -20,6 +22,7 @@ function makeAutomation(overrides?: Partial<AutomationRow>): AutomationRow {
     trigger_type: "schedule",
     schedule_cron: "0 9 * * *",
     schedule_tz: "UTC",
+    harness: "opencode",
     model: "anthropic/claude-sonnet-4-6",
     reasoning_effort: null,
     enabled: 1,
@@ -127,11 +130,13 @@ describe("AutomationStore (D1 integration)", () => {
       await store.create(makeAutomation({ id: "auto-env" }));
 
       const now = Date.now();
-      await env.DB.batch(store.bindReplaceEnvironments("auto-env", ["env_abc", "env_def"], now));
+      await sqlDatabase(env.DB).batch(
+        store.bindReplaceEnvironments("auto-env", ["env_abc", "env_def"], now)
+      );
       const selected = await store.getEnvironmentsForAutomation("auto-env");
       expect(selected.map((row) => row.environment_id)).toEqual(["env_abc", "env_def"]);
 
-      await env.DB.batch(store.bindReplaceEnvironments("auto-env", [], now));
+      await sqlDatabase(env.DB).batch(store.bindReplaceEnvironments("auto-env", [], now));
       expect(await store.getEnvironmentsForAutomation("auto-env")).toEqual([]);
     });
 
@@ -204,13 +209,42 @@ describe("AutomationStore (D1 integration)", () => {
       await store.create(row);
 
       const dbRow = (await store.getById("auto-map"))!;
-      const automation = toAutomation(dbRow, []);
+      const automation = toAutomation(dbRow, [], [], []);
       expect(automation.repositories).toEqual([]);
       expect(automation.scheduleCron).toBe("0 9 * * *");
       expect(automation.reasoningEffort).toBe("high");
       expect(automation.enabled).toBe(true);
       expect(automation.consecutiveFailures).toBe(2);
       expect(automation.createdBy).toBe("user-1");
+    });
+
+    it("round-trips provider selections into the hydrated automation", async () => {
+      const store = new AutomationStore(env.DB);
+      const providerAuthStore = new AutomationModelProviderAuthStore(env.DB);
+      const row = makeAutomation({ id: "auto-provider-auth" });
+      await store.create(row);
+      await sqlDatabase(env.DB).batch(
+        providerAuthStore.bindInserts(
+          row.id,
+          {
+            openai: { mode: "api_key" },
+            xai: { mode: "api_key" },
+          },
+          Date.now()
+        )
+      );
+
+      const automation = toAutomation(
+        (await store.getById(row.id))!,
+        [],
+        [],
+        await providerAuthStore.list(row.id)
+      );
+
+      expect(automation.providerSelections).toEqual({
+        openai: { mode: "api_key" },
+        xai: { mode: "api_key" },
+      });
     });
   });
 
@@ -229,11 +263,11 @@ describe("AutomationStore (D1 integration)", () => {
 
     it("filters by repo owner and name via repository rows", async () => {
       const store = new AutomationStore(env.DB);
-      await store.create(makeAutomation({ id: "auto-c", repo_owner: "acme", repo_name: "api" }));
+      await store.create(makeAutomation({ id: "auto-c" }));
       await store.replaceRepositories("auto-c", [
         { repo_owner: "acme", repo_name: "api", repo_id: 1, base_branch: null },
       ]);
-      await store.create(makeAutomation({ id: "auto-d", repo_owner: "acme", repo_name: "web" }));
+      await store.create(makeAutomation({ id: "auto-d" }));
       await store.replaceRepositories("auto-d", [
         { repo_owner: "acme", repo_name: "web", repo_id: 2, base_branch: null },
       ]);
@@ -247,10 +281,6 @@ describe("AutomationStore (D1 integration)", () => {
       await store.create(
         makeAutomation({
           id: "auto-multi",
-          repo_owner: null,
-          repo_name: null,
-          base_branch: null,
-          repo_id: null,
         })
       );
       await store.replaceRepositories("auto-multi", [
@@ -264,28 +294,6 @@ describe("AutomationStore (D1 integration)", () => {
       expect(byWeb.automations.map((a) => a.id)).toEqual(["auto-multi"]);
       const byOther = await store.list({ limit: 25, repoOwner: "acme", repoName: "other" });
       expect(byOther.automations).toHaveLength(0);
-    });
-
-    it("hides a settled one-shot but keeps a failed, pending, or non-once automation", async () => {
-      const store = new AutomationStore(env.DB);
-      await store.create(
-        makeAutomation({ id: "once-done", trigger_type: "once", schedule_cron: null, enabled: 0 })
-      );
-      await store.create(
-        makeAutomation({ id: "once-failed", trigger_type: "once", schedule_cron: null, enabled: 0 })
-      );
-      await store.create(
-        makeAutomation({ id: "once-pending", trigger_type: "once", schedule_cron: null })
-      );
-      await store.create(makeAutomation({ id: "sched-kept", trigger_type: "schedule" }));
-      await seedRun(makeRunRow("once-done", { status: "completed", completed_at: Date.now() }));
-      await seedRun(makeRunRow("once-failed", { status: "failed", completed_at: Date.now() }));
-
-      const ids = (await store.list({ limit: 25 })).automations.map((a) => a.id);
-      expect(ids).not.toContain("once-done");
-      expect(ids).toContain("once-failed");
-      expect(ids).toContain("once-pending");
-      expect(ids).toContain("sched-kept");
     });
 
     it("excludes soft-deleted automations", async () => {
@@ -357,6 +365,66 @@ describe("AutomationStore (D1 integration)", () => {
       expect(secondPage.automations.map((automation) => automation.id)).toEqual(["auto-a"]);
       expect(secondPage.hasMore).toBe(false);
       expect(secondPage.nextCursor).toBeNull();
+    });
+
+    it("hides a settled one-shot but keeps failed, pending, and non-once automations", async () => {
+      const store = new AutomationStore(env.DB);
+      const now = Date.now();
+
+      await store.create(
+        makeAutomation({ id: "auto-once-done", trigger_type: "once", created_at: now })
+      );
+      await seedRun(
+        makeRun("auto-once-done", {
+          id: "run-once-done",
+          status: "completed",
+          completed_at: now,
+        })
+      );
+
+      await store.create(
+        makeAutomation({ id: "auto-once-failed", trigger_type: "once", created_at: now })
+      );
+      await seedRun(
+        makeRun("auto-once-failed", {
+          id: "run-once-failed",
+          status: "failed",
+          failure_reason: "boom",
+          completed_at: now,
+        })
+      );
+
+      await store.create(
+        makeAutomation({ id: "auto-once-running", trigger_type: "once", created_at: now })
+      );
+      await seedRun(
+        makeRun("auto-once-running", {
+          id: "run-once-running",
+          status: "running",
+          started_at: now,
+        })
+      );
+
+      await store.create(
+        makeAutomation({ id: "auto-once-idle", trigger_type: "once", created_at: now })
+      );
+
+      await store.create(makeAutomation({ id: "auto-schedule-done", created_at: now }));
+      await seedRun(
+        makeRun("auto-schedule-done", {
+          id: "run-sched-done",
+          status: "completed",
+          completed_at: now,
+        })
+      );
+
+      const result = await store.list({ limit: 25 });
+      expect(result.automations.map((automation) => automation.id)).toEqual([
+        "auto-schedule-done",
+        "auto-once-running",
+        "auto-once-idle",
+        "auto-once-failed",
+      ]);
     });
   });
 
@@ -447,6 +515,33 @@ describe("AutomationStore (D1 integration)", () => {
 
       const count = await store.countOverdue(now);
       expect(count).toBe(0);
+    });
+
+    it("includes due once automations in overdue queries", async () => {
+      const store = new AutomationStore(env.DB);
+      const now = Date.now();
+      await store.create(
+        makeAutomation({
+          id: "auto-once-overdue",
+          trigger_type: "once",
+          schedule_cron: null,
+          next_run_at: now - 60000,
+          enabled: 1,
+        })
+      );
+      await store.create(
+        makeAutomation({
+          id: "auto-once-future",
+          trigger_type: "once",
+          schedule_cron: null,
+          next_run_at: now + 60000,
+          enabled: 1,
+        })
+      );
+
+      expect(await store.countOverdue(now)).toBe(1);
+      const overdue = await store.getOverdueAutomations(now, 10);
+      expect(overdue.map((automation) => automation.id)).toEqual(["auto-once-overdue"]);
     });
   });
 
@@ -806,8 +901,6 @@ describe("AutomationStore (D1 integration)", () => {
       await store.create(
         makeAutomation({
           id: "auto-ev1",
-          repo_owner: "acme",
-          repo_name: "api",
           trigger_type: "github_event",
           event_type: "pull_request.opened",
         })
@@ -818,8 +911,6 @@ describe("AutomationStore (D1 integration)", () => {
       await store.create(
         makeAutomation({
           id: "auto-ev2",
-          repo_owner: "acme",
-          repo_name: "api",
           trigger_type: "github_event",
           event_type: "issues.opened",
         })
@@ -843,8 +934,6 @@ describe("AutomationStore (D1 integration)", () => {
       await store.create(
         makeAutomation({
           id: "auto-ev3",
-          repo_owner: "acme",
-          repo_name: "api",
           trigger_type: "github_event",
           event_type: "pull_request.opened",
           enabled: 0,
@@ -897,7 +986,6 @@ describe("AutomationStore (D1 integration)", () => {
         makeRun("auto-ck3", {
           id: "run-ck3",
           status: "running",
-          concurrency_key: null,
           started_at: Date.now(),
         })
       );

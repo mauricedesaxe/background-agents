@@ -1,48 +1,107 @@
 import { describe, expect, it } from "vitest";
-import type { Automation, AutomationRepository } from "@open-inspect/shared/types/automations";
+import type { AutomationListItem } from "@open-inspect/shared/types/automations";
 import {
-  groupAutomationsByRepository,
   MULTIPLE_REPOSITORIES_GROUP_LABEL,
+  groupAutomationsByRepository,
 } from "./group-automations-by-repository";
 
-function repository(repoOwner: string, repoName: string): AutomationRepository {
-  return { repoOwner, repoName, repoId: 1, baseBranch: null };
+function makeAutomation(
+  id: string,
+  repositories: Array<{ repoOwner: string; repoName: string }>
+): AutomationListItem {
+  return {
+    id,
+    name: `Automation ${id}`,
+    instructions: "Do the thing.",
+    harness: "opencode",
+    triggerType: "schedule",
+    scheduleCron: "0 9 * * *",
+    scheduleTz: "UTC",
+    model: "openai/gpt-5.4",
+    reasoningEffort: null,
+    enabled: true,
+    nextRunAt: null,
+    consecutiveFailures: 0,
+    createdBy: "user-1",
+    userId: null,
+    createdAt: 1,
+    updatedAt: 1,
+    deletedAt: null,
+    eventType: null,
+    triggerConfig: null,
+    repositories: repositories.map((repository, index) => ({
+      ...repository,
+      repoId: index + 1,
+      baseBranch: "main",
+    })),
+    environmentIds: [],
+    providerSelections: {},
+    recentExecutions: [],
+  };
 }
 
-function automation(id: string, repositories: AutomationRepository[]): Automation {
-  return { id, repositories } as unknown as Automation;
-}
+const acmeWeb = { repoOwner: "acme", repoName: "web-app" };
+const acmeApi = { repoOwner: "acme", repoName: "api" };
+const zetaCli = { repoOwner: "zeta", repoName: "cli" };
 
 describe("groupAutomationsByRepository", () => {
-  it("groups single-repo automations under owner/name, sorted alphabetically", () => {
+  it("groups single-repository automations under alphabetically sorted owner/name keys", () => {
     const groups = groupAutomationsByRepository([
-      automation("z", [repository("acme", "web")]),
-      automation("a", [repository("acme", "api")]),
-      automation("b", [repository("acme", "api")]),
+      makeAutomation("a", [zetaCli]),
+      makeAutomation("b", [acmeWeb]),
+      makeAutomation("c", [acmeApi]),
     ]);
 
-    expect(groups.map((group) => group.label)).toEqual(["acme/api", "acme/web"]);
-    expect(groups[0].automations.map((entry) => entry.id)).toEqual(["a", "b"]);
-    expect(groups[1].automations.map((entry) => entry.id)).toEqual(["z"]);
+    expect(groups.map((group) => group.label)).toEqual(["acme/api", "acme/web-app", "zeta/cli"]);
+    expect(groups.map((group) => group.automations.map((a) => a.id))).toEqual([
+      ["c"],
+      ["b"],
+      ["a"],
+    ]);
   });
 
-  it("puts multi-repo and repo-less automations in one bucket, last", () => {
+  it("lands multi-repository and repository-less automations in one shared bucket sorted last", () => {
+    const multi = makeAutomation("multi", [acmeWeb, acmeApi]);
+    const repoLess = makeAutomation("repo-less", []);
+    const single = makeAutomation("single", [acmeWeb]);
+
+    const groups = groupAutomationsByRepository([multi, single, repoLess]);
+
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toEqual({ label: "acme/web-app", automations: [single] });
+    expect(groups[1]!.label).toBe(MULTIPLE_REPOSITORIES_GROUP_LABEL);
+    expect(groups[1]!.automations.map((automation) => automation.id)).toEqual([
+      "multi",
+      "repo-less",
+    ]);
+  });
+
+  it("omits the shared bucket when every automation targets exactly one repository", () => {
     const groups = groupAutomationsByRepository([
-      automation("multi", [repository("acme", "api"), repository("acme", "web")]),
-      automation("single", [repository("acme", "api")]),
-      automation("env-only", []),
+      makeAutomation("a", [acmeWeb]),
+      makeAutomation("b", [zetaCli]),
     ]);
 
-    expect(groups[0].label).toBe("acme/api");
-    const bucket = groups[groups.length - 1];
-    expect(bucket.label).toBe(MULTIPLE_REPOSITORIES_GROUP_LABEL);
-    expect(bucket.automations.map((entry) => entry.id)).toEqual(["multi", "env-only"]);
+    expect(groups.map((group) => group.label)).toEqual(["acme/web-app", "zeta/cli"]);
   });
 
-  it("omits the bucket when every automation targets exactly one repository", () => {
-    const groups = groupAutomationsByRepository([automation("only", [repository("acme", "api")])]);
+  it("preserves input order within each group", () => {
+    const groups = groupAutomationsByRepository([
+      makeAutomation("first", [acmeWeb]),
+      makeAutomation("second", [acmeApi]),
+      makeAutomation("third", [acmeWeb]),
+      makeAutomation("fourth", [acmeApi]),
+    ]);
 
-    expect(groups).toHaveLength(1);
-    expect(groups[0].label).toBe("acme/api");
+    const acmeWebGroup = groups.find((group) => group.label === "acme/web-app");
+    const acmeApiGroup = groups.find((group) => group.label === "acme/api");
+    expect(acmeWebGroup!.automations.map((automation) => automation.id)).toEqual([
+      "first",
+      "third",
+    ]);
+    expect(acmeApiGroup!.automations.map((automation) => automation.id)).toEqual([
+      "second",
+      "fourth",
+    ]);
   });
 });

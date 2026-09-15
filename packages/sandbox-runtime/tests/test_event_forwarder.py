@@ -85,6 +85,55 @@ async def settle() -> None:
         await asyncio.sleep(0)
 
 
+class TestBufferWhileDisconnected:
+    @pytest.mark.asyncio
+    async def test_send_buffers_when_never_bound(self):
+        forwarder = make_forwarder()
+
+        await forwarder.send({"type": "token", "content": "hello"})
+
+        assert len(forwarder._event_buffer) == 1
+        buffered = forwarder._event_buffer[0]
+        assert buffered["type"] == "token"
+        # Sandbox identity and timestamp are stamped even while buffering
+        assert buffered["sandboxId"] == "test-sandbox"
+        assert "timestamp" in buffered
+
+    @pytest.mark.asyncio
+    async def test_send_buffers_after_unbind(self):
+        forwarder = make_forwarder()
+        await forwarder.bind(open_ws())
+        forwarder.unbind()
+
+        await forwarder.send({"type": "token", "content": "hello"})
+
+        assert len(forwarder._event_buffer) == 1
+
+    @pytest.mark.asyncio
+    async def test_send_buffers_when_bound_ws_not_open(self):
+        forwarder = make_forwarder()
+        ws = open_ws()
+        ws.state = State.CLOSED
+        await forwarder.bind(ws)
+
+        await forwarder.send({"type": "token", "content": "hello"})
+
+        ws.send.assert_not_awaited()
+        assert len(forwarder._event_buffer) == 1
+
+    @pytest.mark.asyncio
+    async def test_send_failure_buffers_and_does_not_track_pending(self):
+        forwarder = make_forwarder()
+        ws = open_ws()
+        ws.send = AsyncMock(side_effect=ConnectionError("broken pipe"))
+        await forwarder.bind(ws)
+
+        await forwarder.send({"type": "execution_complete", "messageId": "msg-1"})
+
+        assert len(forwarder._event_buffer) == 1
+        assert len(forwarder._pending_acks) == 0
+
+
 class TestSendWhileConnected:
     @pytest.mark.asyncio
     async def test_critical_event_gets_ack_id_and_pends(self):
@@ -176,6 +225,19 @@ class TestBindRecovery:
         await forwarder.bind(ws)
 
         ws.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bind_flush_stops_on_send_failure_and_keeps_remainder(self):
+        forwarder = make_forwarder()
+        await forwarder.send({"type": "token", "content": "a"})
+        await forwarder.send({"type": "token", "content": "b"})
+
+        ws = open_ws()
+        ws.send = AsyncMock(side_effect=[None, ConnectionError("broken")])
+        await forwarder.bind(ws)
+
+        assert len(forwarder._event_buffer) == 1
+        assert forwarder._event_buffer[0]["content"] == "b"
 
     @pytest.mark.asyncio
     async def test_bind_does_not_double_send_buffered_criticals(self):
@@ -480,6 +542,31 @@ class TestConcurrentRecovery:
         assert [event["ackId"] for event in sent_events(replacement)] == [
             "execution_complete:msg-1"
         ]
+
+
+class TestOverflowEviction:
+    @pytest.mark.asyncio
+    async def test_overflow_evicts_oldest_non_critical_first(self):
+        forwarder = make_forwarder(max_buffer_size=3)
+        await forwarder.send({"type": "execution_complete", "messageId": "msg-1"})
+        await forwarder.send({"type": "token", "content": "a"})
+        await forwarder.send({"type": "error", "messageId": "msg-2"})
+
+        await forwarder.send({"type": "snapshot_ready"})
+
+        types = [event["type"] for event in forwarder._event_buffer]
+        assert types == ["execution_complete", "error", "snapshot_ready"]
+
+    @pytest.mark.asyncio
+    async def test_overflow_evicts_oldest_when_all_critical(self):
+        forwarder = make_forwarder(max_buffer_size=2)
+        await forwarder.send({"type": "execution_complete", "messageId": "msg-1"})
+        await forwarder.send({"type": "error", "messageId": "msg-2"})
+
+        await forwarder.send({"type": "push_complete", "branchName": "b"})
+
+        types = [event["type"] for event in forwarder._event_buffer]
+        assert types == ["error", "push_complete"]
 
 
 if __name__ == "__main__":

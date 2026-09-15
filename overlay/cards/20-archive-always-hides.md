@@ -53,14 +53,8 @@ archived" 409 reddens these tests.
 - The toast-reason improvement is a small **web** change in the archive client; it is not the
   load-bearing part of the card and carries no test of its own.
 
-## Dated evidence (2026-08-20, non-binding hints)
+## Provenance
 
-- `packages/control-plane/src/session/http/handlers/session-lifecycle.handler.ts`, method `archive`.
-  It now mirrors `archiveCascade` in the same file:
-  `if (!TERMINAL_STATUSES.has(session.status)) await deps.stopExecution({ suppressStatusReconcile: true })`,
-  then `deps.statusService.transition("archived")`.
-- Tests: `packages/control-plane/src/session/http/handlers/session-lifecycle.handler.test.ts`, cases
-  "stops wedged execution and archives a session with stuck queued work" and "archives a cancelled
-  session without stopping execution".
-- Toast reason: `packages/web/src/lib/archive-session.ts` reads `error` from the failed response
-  body.
+Fork-only since before the first blind sync; rebuilt on the 2026-09-11 preview branch. The as-built
+diff lives in the sync PR; this card carries only the requirement, the acceptance test, and the
+placement category.

@@ -12,19 +12,25 @@ import type {
   SessionListItem,
 } from "@open-inspect/shared/types/session-inbox";
 import {
+  applySessionInboxItemReadState,
+  applySessionInboxReadStateUpdate,
   buildSessionInboxKey,
   buildSessionInboxSnapshotKey,
+  isSessionInboxItemFullyRead,
   isSessionInboxKey,
+  isSessionInboxPaginationKey,
+  sessionInboxDestinationCategory,
 } from "@/lib/session-inbox-api";
 import {
   markLatestMessageRead,
-  markUnread,
   reconcileSessionReadState,
-  readStateFromResult,
+  subscribeSessionReadStateReconciliation,
+  type SessionReadStateReconciledDetail,
 } from "@/lib/session-read-state";
+import { readManualUnreadIds, writeManualUnreadId } from "@/lib/session-manual-unread";
 
 const VISIBLE_INBOX_POLL_MS = 30_000;
-export const SESSION_CREATOR_FILTER_STORAGE_KEY = "open-inspect-sidebar-session-creator-filter";
+const SESSION_CREATOR_FILTER_STORAGE_KEY = "open-inspect-sidebar-session-creator-filter";
 
 export type SessionItem = SessionListItem;
 type SessionCreatorFilter = "all" | "mine";
@@ -132,9 +138,9 @@ function useCategoryPagination(
     [error, paginationRequest, refreshSnapshot, retryPage]
   );
 
-  // Archive and read-state mutations revalidate the head snapshot, but pages
-  // loaded through `Load more` live only in this retained state — reconcile
-  // them in place or they keep rendering the pre-mutation rows.
+  // Mutations revalidate the head snapshot, but pages loaded through `Load
+  // more` live only in this retained state. Reconcile them in place or they
+  // keep rendering the pre-mutation rows.
   const updateRetainedItems = useCallback(
     (update: (item: SessionInboxItem) => SessionInboxItem | null) => {
       setAdditionalPagesState((state) => ({
@@ -153,6 +159,10 @@ function useCategoryPagination(
     },
     []
   );
+  const resetRetainedPages = useCallback(() => {
+    setAdditionalPagesState({ filterIdentity, pages: [] });
+    setPaginationRequest(null);
+  }, [filterIdentity]);
 
   return {
     firstPageItems: firstPage?.items ?? [],
@@ -164,11 +174,13 @@ function useCategoryPagination(
     loadMore,
     retry,
     updateRetainedItems,
+    resetRetainedPages,
   };
 }
 
 export function useSidebarSessions() {
   const { data: authSession } = useAuthSession();
+  const { mutate: mutateCache } = useSWRConfig();
   const [sessionCreatorFilter, setSessionCreatorFilterState] =
     useState<SessionCreatorFilter | null>(null);
 
@@ -326,9 +338,47 @@ export function useSidebarSessions() {
     return result;
   }, [inboxItems]);
 
+  const [manualUnreadIds, setManualUnreadIds] = useState<Set<string>>(() => new Set());
+
+  useEffect(() => {
+    setManualUnreadIds(userId ? readManualUnreadIds(userId) : new Set());
+  }, [userId]);
+
+  const overlayManualUnread = useCallback(
+    (session: SessionItem): SessionItem =>
+      manualUnreadIds.has(session.id) && session.readState.latestMessageId !== null
+        ? { ...session, readState: { ...session.readState, unread: true } }
+        : session,
+    [manualUnreadIds]
+  );
+  const overlaidChildrenMap = useMemo(() => {
+    const result = new Map<string, SessionItem[]>();
+    for (const [parentId, siblings] of childrenMap) {
+      result.set(parentId, siblings.map(overlayManualUnread));
+    }
+    return result;
+  }, [childrenMap, overlayManualUnread]);
+
+  const clearManualUnread = useCallback(
+    (sessionId: string) => {
+      if (!userId || !manualUnreadIds.has(sessionId)) return;
+      setManualUnreadIds(writeManualUnreadId(userId, sessionId, false));
+    },
+    [manualUnreadIds, userId]
+  );
+  const handleMarkUnread = useCallback(
+    (sessionId: string) => {
+      if (!userId) return;
+      setManualUnreadIds(writeManualUnreadId(userId, sessionId, true));
+    },
+    [userId]
+  );
+
   const updateAttentionRetained = attention.updateRetainedItems;
   const updateInProgressRetained = inProgress.updateRetainedItems;
   const updateFinishedRetained = finished.updateRetainedItems;
+  const resetInProgressRetained = inProgress.resetRetainedPages;
+  const resetFinishedRetained = finished.resetRetainedPages;
   const updateAllRetainedItems = useCallback(
     (update: (item: SessionInboxItem) => SessionInboxItem | null) => {
       updateAttentionRetained(update);
@@ -338,118 +388,126 @@ export function useSidebarSessions() {
     [updateAttentionRetained, updateFinishedRetained, updateInProgressRetained]
   );
 
-  const handleSessionsArchived = useCallback(
-    async (sessionIds: ReadonlySet<string>) => {
-      const removeArchivedItems = (page: SessionInboxPage): SessionInboxPage => ({
-        ...page,
-        items: page.items.flatMap((item) =>
-          sessionIds.has(item.rootSession.id)
-            ? []
-            : [
-                {
-                  ...item,
-                  descendantSessions: item.descendantSessions.filter(
-                    (session) => !sessionIds.has(session.id)
-                  ),
-                },
-              ]
+  // Every session open acknowledges its terminal message, read or not, so
+  // this runs far more often than read state actually changes. Retained pages
+  // are updated in place; only a hierarchy leaving attention restarts a chain.
+  const reconcileSidebarReadState = useCallback(
+    ({ sessionId, outcome, readState }: SessionReadStateReconciledDetail) => {
+      // Only a confirmed server-side read clears the local unread overlay.
+      // A failed or retried attempt keeps the flag, and a genuinely-read
+      // reconcile self-heals a stale one even from another client's mark-read.
+      const confirmedRead = outcome === "marked_read" || outcome === "already_read";
+      if (confirmedRead && !readState.unread) {
+        clearManualUnread(sessionId);
+      }
+      const applyReadState = (item: SessionInboxItem) =>
+        applySessionInboxItemReadState(item, sessionId, readState);
+      updateAttentionRetained((item) => {
+        const updated = applyReadState(item);
+        return isSessionInboxItemFullyRead(updated) ? null : updated;
+      });
+      updateInProgressRetained(applyReadState);
+      updateFinishedRetained(applyReadState);
+
+      // The destination chain was paged without the arriving hierarchy, so a
+      // rank between its head and retained tail would never render. Restart
+      // that one chain from the head.
+      const attentionItem = attentionItems.find(
+        (item) =>
+          item.rootSession.id === sessionId ||
+          item.descendantSessions.some((session) => session.id === sessionId)
+      );
+      if (
+        attentionItem &&
+        !readState.unread &&
+        isSessionInboxItemFullyRead(applyReadState(attentionItem))
+      ) {
+        if (sessionInboxDestinationCategory(attentionItem) === "in_progress") {
+          resetInProgressRetained();
+        } else {
+          resetFinishedRetained();
+        }
+      }
+
+      return Promise.all([
+        mutateCache<SessionInboxSnapshot | SessionInboxPage>(
+          isSessionInboxKey,
+          (current) => applySessionInboxReadStateUpdate(current, sessionId, readState),
+          // `already_read` confirms the cached state; any other outcome may
+          // carry a change the snapshot has not seen yet.
+          { populateCache: true, revalidate: outcome !== "already_read" }
         ),
-      });
-      updateAllRetainedItems((item) => {
-        const page = removeArchivedItems({ items: [item], hasMore: false, nextCursor: null });
-        return page.items[0] ?? null;
-      });
-      await refreshSnapshot(
-        (current) =>
-          current
-            ? {
-                ...current,
-                categories: {
-                  needs_attention: removeArchivedItems(current.categories.needs_attention),
-                  in_progress: removeArchivedItems(current.categories.in_progress),
-                  finished: removeArchivedItems(current.categories.finished),
-                },
-              }
-            : current,
-        { revalidate: false }
+        // Cached cursor pages would restore pre-acknowledgement rows on remount.
+        mutateCache<SessionInboxPage | undefined>(isSessionInboxPaginationKey, () => undefined, {
+          populateCache: true,
+          revalidate: false,
+        }),
+      ]);
+    },
+    [
+      attentionItems,
+      clearManualUnread,
+      mutateCache,
+      resetFinishedRetained,
+      resetInProgressRetained,
+      updateAttentionRetained,
+      updateFinishedRetained,
+      updateInProgressRetained,
+    ]
+  );
+
+  useEffect(() => {
+    return subscribeSessionReadStateReconciliation(reconcileSidebarReadState);
+  }, [reconcileSidebarReadState]);
+
+  const handleSessionArchived = useCallback(
+    async (sessionId: string) => {
+      updateAllRetainedItems((item) =>
+        item.rootSession.id === sessionId
+          ? null
+          : {
+              ...item,
+              descendantSessions: item.descendantSessions.filter(
+                (session) => session.id !== sessionId
+              ),
+            }
       );
       void refreshInbox().catch((error) => {
         console.error("Failed to refresh session inbox after archive", error);
       });
     },
-    [refreshInbox, refreshSnapshot, updateAllRetainedItems]
-  );
-
-  const handleSessionArchived = useCallback(
-    async (sessionId: string) => handleSessionsArchived(new Set([sessionId])),
-    [handleSessionsArchived]
+    [refreshInbox, updateAllRetainedItems]
   );
 
   const handleMarkLatestMessageRead = useCallback(
     async (sessionId: string) => {
       const result = await markLatestMessageRead(sessionId);
       await reconcileSessionReadState(result);
-      const readState = readStateFromResult(result);
-      const applyReadState = (item: SessionInboxItem): SessionInboxItem => ({
-        rootSession:
-          item.rootSession.id === sessionId ? { ...item.rootSession, readState } : item.rootSession,
-        descendantSessions: item.descendantSessions.map((session) =>
-          session.id === sessionId ? { ...session, readState } : session
-        ),
-      });
-      // Attention membership is unread-driven, so a hierarchy whose last unread
-      // session was just read no longer belongs in a retained attention page.
-      updateAttentionRetained((item) => {
-        const updated = applyReadState(item);
-        return updated.rootSession.readState.unread ||
-          updated.descendantSessions.some((session) => session.readState.unread)
-          ? updated
-          : null;
-      });
-      updateInProgressRetained(applyReadState);
-      updateFinishedRetained(applyReadState);
-      await refreshInbox();
+      clearManualUnread(sessionId);
     },
-    [refreshInbox, updateAttentionRetained, updateFinishedRetained, updateInProgressRetained]
-  );
-
-  const handleMarkUnread = useCallback(
-    async (sessionId: string) => {
-      const result = await markUnread(sessionId);
-      await reconcileSessionReadState(result);
-      const readState = readStateFromResult(result);
-      const applyReadState = (item: SessionInboxItem): SessionInboxItem => ({
-        rootSession:
-          item.rootSession.id === sessionId ? { ...item.rootSession, readState } : item.rootSession,
-        descendantSessions: item.descendantSessions.map((session) =>
-          session.id === sessionId ? { ...session, readState } : session
-        ),
-      });
-      updateAttentionRetained(applyReadState);
-      updateInProgressRetained(applyReadState);
-      updateFinishedRetained(applyReadState);
-      await refreshInbox();
-    },
-    [refreshInbox, updateAttentionRetained, updateFinishedRetained, updateInProgressRetained]
+    [clearManualUnread]
   );
 
   return {
-    needsAttention: attentionItems.map((item) => item.rootSession),
-    running: inProgressItems.map((item) => item.rootSession),
-    recent: finishedItems.map((item) => item.rootSession),
-    childrenMap,
+    needsAttention: attentionItems.map((item) => overlayManualUnread(item.rootSession)),
+    inProgress: inProgressItems.map((item) => overlayManualUnread(item.rootSession)),
+    finished: finishedItems.map((item) => overlayManualUnread(item.rootSession)),
+    childrenMap: overlaidChildrenMap,
     loading: sessionCreatorFilter === null || isLoading,
     sessionsError: snapshotError ?? categoryResults.find((result) => result.error)?.error,
     refreshSnapshot,
+    // Keyed by SessionInboxCategory, in camelCase. These used to be `running`
+    // and `recent` here and `in_progress`/`finished` everywhere else, so the
+    // render site had to translate between the two -- the same session and
+    // sandbox vocabularies getting mixed that this module now keeps apart.
     sectionPagination: {
       needsAttention: attention,
-      running: inProgress,
-      recent: finished,
+      inProgress,
+      finished,
     },
     sessionCreatorFilter,
     setSessionCreatorFilter,
     handleSessionArchived,
-    handleSessionsArchived,
     handleMarkLatestMessageRead,
     handleMarkUnread,
   };

@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
-from sandbox_runtime.opencode_client import (
+from sandbox_runtime.harness.opencode_client import (
     OpenCodeClient,
     SSEConnectionError,
     SSEInactivityTimeoutError,
@@ -153,18 +153,11 @@ class TestSessionExists:
         args, _ = http_client.get.await_args
         assert args[0] == f"{BASE_URL}/session/{SESSION_ID}"
 
-    async def test_false_on_404(self):
+    async def test_false_on_non_200(self):
         http_client = AsyncMock()
         http_client.get.return_value = MockResponse(404)
 
         assert await make_client(http_client).session_exists(SESSION_ID) is False
-
-    async def test_raises_on_transient_status(self):
-        http_client = AsyncMock()
-        http_client.get.return_value = MockResponse(503)
-
-        with pytest.raises(httpx.HTTPStatusError):
-            await make_client(http_client).session_exists(SESSION_ID)
 
 
 class MockSSEStream:

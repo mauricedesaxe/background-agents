@@ -6,8 +6,8 @@ import {
   openSandboxWs,
   queryDO,
   seedSandboxAuth,
-  waitForSandboxStatus,
 } from "./helpers";
+import { hostContract } from "../conformance/session-core-conformance";
 
 const SANDBOX_TOKEN = "prompt-order-sandbox-token";
 const SANDBOX_ID = "prompt-order-sandbox";
@@ -133,15 +133,6 @@ describe("POST /internal/prompt", () => {
     });
     expect(sandboxWs).not.toBeNull();
     sandboxWs!.accept();
-    sandboxWs!.send(
-      JSON.stringify({
-        type: "ready",
-        sandboxId: SANDBOX_ID,
-        timestamp: Date.now() / 1000,
-        contextStatus: "fresh",
-      })
-    );
-    await waitForSandboxStatus(stub, "ready");
 
     const enqueue = async (content: string) => {
       const response = await stub.fetch("http://internal/internal/prompt", {
@@ -195,7 +186,7 @@ describe("POST /internal/prompt", () => {
     sandboxWs!.close();
   });
 
-  it("dispatches exactly one of two concurrent prompts and leaves the other queued", async () => {
+  hostContract("host.concurrent-prompt-claim", async () => {
     const name = `prompt-concurrent-${Date.now()}`;
     const { stub } = await initNamedSession(name);
     await seedSandboxAuth(stub, { authToken: SANDBOX_TOKEN, sandboxId: SANDBOX_ID });
@@ -205,15 +196,6 @@ describe("POST /internal/prompt", () => {
     });
     expect(sandboxWs).not.toBeNull();
     sandboxWs!.accept();
-    sandboxWs!.send(
-      JSON.stringify({
-        type: "ready",
-        sandboxId: SANDBOX_ID,
-        timestamp: Date.now() / 1000,
-        contextStatus: "fresh",
-      })
-    );
-    await waitForSandboxStatus(stub, "ready");
 
     const sandboxMessages = collectMessages(sandboxWs!, { timeoutMs: 500 });
     const enqueue = (content: string) =>

@@ -45,3 +45,13 @@ instruction is concrete and blocking, never "verify it connects." The check live
 
 Start as the agent-run smoke step. Promote to an automated post-deploy smoke test later if the agent
 proves unreliable at it, or if a between-sync regression to the connect path ever bites.
+
+## Disposition (2026-09-11 audit vs upstream 0e9ecf98)
+
+The audit found the connect path's code covered upstream: there is nothing fork-side left to port,
+and this card is confirmed **runbook-only**. Gate 4's live bounds were updated in the runbook to
+match current upstream: connect within **240 s** (the upstream connect watchdog, replacing this
+card's original 90 s bound), first response within 180 s (unchanged), and idle-stop at the
+five-minute window plus the upstream client-connected grace (replacing the 4-7 minute band). The
+runbook carries the authoritative numbers; the bounds in the acceptance section above are the
+original 2026-08 values, kept as history.

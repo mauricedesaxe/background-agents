@@ -3,7 +3,10 @@ import type { Logger } from "../../../logger";
 import type { SessionRepositoryRow } from "../../types";
 import { buildSessionRepositories, type SessionRepositoryEntry } from "../../repository-target";
 import type { ArtifactRow, ParticipantRow, SessionRow } from "../../types";
-import { createPullRequestHandler } from "./pull-request.handler";
+import { PullRequestHandler } from "./pull-request.handler";
+import type { SessionCoreRepository } from "../../session-core-repository";
+import type { ArtifactRepository } from "../../artifact-repository";
+import type { ParticipantService } from "../../participant-service";
 
 function createRepositoryRow(
   position: number,
@@ -34,7 +37,8 @@ function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
     branch_name: "feature/test",
     base_sha: null,
     current_sha: null,
-    opencode_session_id: null,
+    agent_session_id: null,
+    harness: "opencode",
     model: "anthropic/claude-haiku-4-5",
     reasoning_effort: null,
     status: "active",
@@ -44,11 +48,15 @@ function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
     code_server_enabled: 0,
     vnc_enabled: 0,
     total_cost: 0,
+    max_cost_usd: null,
+    budget_exhausted: 0,
     sandbox_settings: null,
     environment_id: null,
     created_at: 1000,
     updated_at: 2000,
     ...overrides,
+    context_reset_pending: 0,
+    context_reset_hold_deadline: null,
   };
 }
 
@@ -103,25 +111,24 @@ function createHandler() {
     child: vi.fn(),
   } as unknown as Logger;
 
-  const pullRequestHandler = createPullRequestHandler({
-    getSession,
-    getSessionRepositories,
-    getPromptingParticipantForPR,
-    resolveAuthForPR,
+  const pullRequestHandler = new PullRequestHandler(
+    { getSession, getSessionRepositories } as unknown as SessionCoreRepository,
+    { getPromptingParticipantForPR, resolveAuthForPR } as unknown as ParticipantService,
+    { getArtifactById, updateArtifact } as unknown as ArtifactRepository,
+    messenger,
     getSessionUrl,
     createPullRequest,
-    getArtifactById,
-    updateArtifact,
-    messenger,
-    now,
     triggerPullRequestRefresh,
-  });
+    now
+  );
 
   // Bind the request-scoped log so call sites exercise the threading without
   // repeating it at every invocation.
   const handler = {
-    ...pullRequestHandler,
     createPr: (request: Request) => pullRequestHandler.createPr(request, log),
+    pullRequestArtifactSnapshot: (request: Request, url: URL) =>
+      pullRequestHandler.pullRequestArtifactSnapshot(request, url),
+    refreshPullRequests: () => pullRequestHandler.refreshPullRequests(),
   };
 
   return {
@@ -144,7 +151,7 @@ function createHandler() {
   };
 }
 
-describe("createPullRequestHandler", () => {
+describe("PullRequestHandler", () => {
   it("returns 404 when session is missing", async () => {
     const { handler, getSession } = createHandler();
     getSession.mockReturnValue(null);

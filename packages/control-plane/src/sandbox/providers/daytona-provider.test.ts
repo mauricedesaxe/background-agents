@@ -27,7 +27,7 @@ const defaultRestConfig: DaytonaRestConfig = {
   apiUrl: "https://daytona.test/api",
   apiKey: "test-api-key",
   baseSnapshot: "base-snapshot-v1",
-  autoStopIntervalMinutes: 0,
+  autoStopIntervalMinutes: 120,
   autoArchiveIntervalMinutes: 10080,
 };
 
@@ -86,6 +86,7 @@ const baseCreateConfig: CreateSandboxConfig = {
   repoName: "testrepo",
   controlPlaneUrl: "https://control-plane.test",
   sandboxAuthToken: "auth-token-abc",
+  harness: "opencode" as const,
   provider: "anthropic",
   model: "anthropic/claude-sonnet-4-5",
 };
@@ -132,14 +133,13 @@ describe("DaytonaSandboxProvider", () => {
 
       expect(result.sandboxId).toBe("sandbox-456");
       expect(result.providerObjectId).toBe("daytona-sandbox-id");
-      expect(result.status).toBe("started");
       expect(result.createdAt).toBeGreaterThan(0);
 
       // Verify create was called with correct params
       const createCall = (client.createSandbox as ReturnType<typeof vi.fn>).mock.calls[0][0];
       expect(createCall.name).toBe("sandbox-456");
       expect(createCall.snapshot).toBe("base-snapshot-v1");
-      expect(createCall.autoStopInterval).toBe(0);
+      expect(createCall.autoStopInterval).toBe(120);
       expect(createCall.autoArchiveInterval).toBe(10080);
       expect(createCall.public).toBe(false);
     });
@@ -169,6 +169,7 @@ describe("DaytonaSandboxProvider", () => {
       const sessionConfig = JSON.parse(envVars.SESSION_CONFIG);
       expect(sessionConfig).toEqual({
         session_id: "session-123",
+        harness: "opencode",
         repo_owner: "testowner",
         repo_name: "testrepo",
         provider: "anthropic",
@@ -510,7 +511,7 @@ describe("DaytonaSandboxProvider", () => {
       expect(client.recoverSandbox).not.toHaveBeenCalled();
     });
 
-    it("recycles an already-started sandbox whose bridge disconnected", async () => {
+    it("does not start or recover when already started", async () => {
       const client = createMockClient({
         getSandbox: async () => ({ id: "daytona-sandbox-id", state: "started" }),
       });
@@ -519,8 +520,7 @@ describe("DaytonaSandboxProvider", () => {
       const result = await provider.resumeSandbox(baseResumeConfig);
 
       expect(result.success).toBe(true);
-      expect(client.stopSandbox).toHaveBeenCalledWith("daytona-sandbox-id");
-      expect(client.startSandbox).toHaveBeenCalledWith("daytona-sandbox-id");
+      expect(client.startSandbox).not.toHaveBeenCalled();
       expect(client.recoverSandbox).not.toHaveBeenCalled();
     });
 

@@ -45,10 +45,8 @@ it.
   `automation_runs` tables.
 - Server-side only, for the pagination reason above.
 
-## Dated evidence (2026-08-20, non-binding hints)
+## Provenance
 
-- `packages/control-plane/src/db/automation-store.ts`: constant `HIDE_SETTLED_ONCE_SQL`, added to
-  the `conditions` array in `list()`. It reuses `DERIVED_INVOCATION_STATUS_SQL` and excludes a
-  `once` automation that has an invocation whose derived status is in `('completed', 'skipped')`.
-- Test: `packages/control-plane/test/integration/automation-store.test.ts`, case "hides a settled
-  one-shot but keeps a failed, pending, or non-once automation".
+Fork-only since before the first blind sync; rebuilt on the 2026-09-11 preview branch. The as-built
+diff lives in the sync PR; this card carries only the requirement, the acceptance test, and the
+placement category.

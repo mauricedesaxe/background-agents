@@ -9,10 +9,11 @@ import type { SessionInboxCursor } from "./session-inbox-cursor";
 import { readStateFromRow, unreadSql, type ViewerReadStateRow } from "./session-read-state";
 import type { SqlDatabase, SqlStatement } from "./sql-database";
 
+/** Viewer, filtering, and pagination inputs for an inbox query. */
 export interface ListSessionInboxOptions {
   category: SessionInboxCategory;
   createdByUserIds?: readonly string[];
-  excludeAutomationLineage?: boolean;
+  excludeAutomatedSessions?: boolean;
   viewerUserId: string;
   limit: number;
   cursor: SessionInboxCursor | null;
@@ -69,9 +70,11 @@ function toListItem(row: InboxSessionRow): SessionListItem {
   };
 }
 
+/** Builds viewer-specific session inbox pages from the D1 session index. */
 export class SessionInboxStore {
   constructor(private readonly db: SqlDatabase) {}
 
+  /** List one inbox category with viewer-specific read state. */
   async list(options: ListSessionInboxOptions): Promise<ListSessionInboxResult> {
     const result = await this.bindInboxQuery(options).all<InboxSessionRow>();
     const page = this.buildPageData(options.limit, result.results ?? []);
@@ -85,6 +88,7 @@ export class SessionInboxStore {
     );
   }
 
+  /** List every inbox category with viewer-specific read state. */
   async snapshot(
     options: Omit<ListSessionInboxOptions, "category" | "cursor">
   ): Promise<ListSessionInboxSnapshotResult> {
@@ -127,8 +131,10 @@ export class SessionInboxStore {
            LIMIT ?
          )
          SELECT effective_sessions.*, selected_roots.latest_updated_at, selected_roots.category
-         FROM selected_roots
-         JOIN effective_sessions USING (effective_root_session_id)
+         -- CROSS JOIN pins the join order: walk the viewer's sessions once and
+         -- probe the selected roots, instead of rescanning every session per root.
+         FROM effective_sessions
+         CROSS JOIN selected_roots USING (effective_root_session_id)
          ORDER BY selected_roots.latest_updated_at DESC,
                   selected_roots.effective_root_session_id DESC,
                   effective_sessions.updated_at DESC,
@@ -171,8 +177,10 @@ export class SessionInboxStore {
            WHERE category_rank <= ?
          )
          SELECT effective_sessions.*, selected_roots.latest_updated_at, selected_roots.category
-         FROM selected_roots
-         JOIN effective_sessions USING (effective_root_session_id)
+         -- CROSS JOIN pins the join order: walk the viewer's sessions once and
+         -- probe the selected roots, instead of rescanning every session per root.
+         FROM effective_sessions
+         CROSS JOIN selected_roots USING (effective_root_session_id)
          ORDER BY selected_roots.category,
                   selected_roots.latest_updated_at DESC,
                   selected_roots.effective_root_session_id DESC,
@@ -186,28 +194,23 @@ export class SessionInboxStore {
   private inboxCtes(
     options: Pick<
       ListSessionInboxOptions,
-      "createdByUserIds" | "excludeAutomationLineage" | "viewerUserId"
+      "createdByUserIds" | "excludeAutomatedSessions" | "viewerUserId"
     >
   ): { sql: string; params: unknown[] } {
     const { conditions, params } = this.eligibility(options);
-    const eligibilityConditions = [
-      ...conditions,
-      "sessions.id NOT IN (SELECT id FROM archived_lineage)",
-    ];
     return {
       sql: `WITH RECURSIVE
-            -- A session under an archived ancestor is an orphan the archive cascade
-            -- did not reach (the cascade is best-effort). Drop the whole subtree so it
-            -- never re-roots into the sidebar as a stray top-level sub-task.
+            -- Archiving a root means clearing its subtree. The cascade is
+            -- best-effort, so active descendants can outlive it in the data;
+            -- without this exclusion the re-rooting below would promote them
+            -- to standalone top-level rows. Recursive over raw sessions so an
+            -- archived-lineage descendant cannot become eligible itself.
             archived_lineage(id) AS (
-              SELECT child.id
-              FROM sessions child
-              JOIN sessions parent ON parent.id = child.parent_session_id
-              WHERE parent.status = 'archived'
+              SELECT id FROM sessions WHERE status = 'archived'
               UNION
-              SELECT descendant.id
-              FROM sessions descendant
-              JOIN archived_lineage ON archived_lineage.id = descendant.parent_session_id
+              SELECT child.id
+              FROM archived_lineage
+              JOIN sessions child ON child.parent_session_id = archived_lineage.id
             ),
             eligible_sessions AS (
               SELECT sessions.*, ${unreadSql("sessions")} AS unread
@@ -216,7 +219,7 @@ export class SessionInboxStore {
               LEFT JOIN session_read_states read_state
                 ON read_state.session_id = sessions.id
                AND read_state.user_id = viewer.id
-              WHERE ${eligibilityConditions.join(" AND ")}
+              WHERE ${conditions.join(" AND ")}
             ),
             -- Filtering can hide an ancestor. Re-root each resulting visible subtree
             -- while retaining the persisted root for uninterrupted lineages.
@@ -261,14 +264,16 @@ export class SessionInboxStore {
   }
 
   private eligibility(
-    options: Pick<ListSessionInboxOptions, "createdByUserIds" | "excludeAutomationLineage">
+    options: Pick<ListSessionInboxOptions, "createdByUserIds" | "excludeAutomatedSessions">
   ): { conditions: string[]; params: unknown[] } {
-    const conditions = ["sessions.status != 'archived'", "sessions.root_session_id IS NOT NULL"];
+    const conditions = [
+      "sessions.status != 'archived'",
+      "sessions.root_session_id IS NOT NULL",
+      "sessions.id NOT IN (SELECT id FROM archived_lineage)",
+    ];
     const params: unknown[] = [];
-    if (options.excludeAutomationLineage) {
-      conditions.push(
-        "sessions.automation_id IS NULL AND sessions.spawn_source NOT IN ('automation', 'github-bot')"
-      );
+    if (options.excludeAutomatedSessions) {
+      conditions.push("sessions.spawn_source NOT IN ('automation', 'github-bot')");
     }
     if (options.createdByUserIds?.length) {
       conditions.push(

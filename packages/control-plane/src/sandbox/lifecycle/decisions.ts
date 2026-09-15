@@ -10,6 +10,10 @@
  */
 
 import type { SandboxStatus } from "@open-inspect/shared/types/sessions";
+import {
+  MIN_COMPATIBLE_RUNTIME_VERSION,
+  parseRuntimeVersionNumber,
+} from "../../image-builds/model";
 
 // ==================== Dead-Sandbox Policy ====================
 
@@ -146,6 +150,12 @@ export interface SandboxState {
   providerObjectId?: string | null;
   /** Snapshot image ID if available for restore */
   snapshotImageId: string | null;
+  /**
+   * SANDBOX_VERSION of the runtime that produced `snapshotImageId`, or null
+   * when the snapshot predates version recording. Gates restore — see
+   * {@link isSnapshotRuntimeCompatible}.
+   */
+  snapshotRuntimeVersion: string | null;
   /** Whether an active WebSocket connection exists */
   hasActiveWebSocket: boolean;
 }
@@ -160,7 +170,8 @@ export interface SpawnConfig {
   readyWaitMs: number;
   /**
    * Max time a sandbox may remain in "spawning"/"connecting" before it is
-   * treated as dead and a fresh spawn is allowed (default: 120s).
+   * treated as dead and a fresh spawn is allowed. Defaults to
+   * CONNECT_WATCHDOG_MS — see the note there on why the two must agree.
    *
    * Guards against spawns interrupted before the sandbox connects (provider
    * crash, redeploy, cancelled provider call). Such a spawn can leave the
@@ -172,21 +183,66 @@ export interface SpawnConfig {
 }
 
 /**
+ * How long a sandbox may sit in "spawning"/"connecting" before it is treated as dead.
+ *
+ * Single source of truth for two decisions that must agree: the initial-connect watchdog
+ * (DEFAULT_CONNECTING_TIMEOUT_CONFIG) that fails the sandbox, and the staleness bound
+ * (DEFAULT_SPAWN_CONFIG.spawningTimeoutMs) that lets a replacement spawn. Stating the bound
+ * independently is what let them drift: whenever the staleness bound is the shorter of the two, a
+ * healthy sandbox still inside the watchdog window is judged dead and a second sandbox is spawned
+ * alongside it.
+ *
+ * The boot sequence (git clone → setup.sh → start.sh → opencode → bridge connect) typically takes
+ * 30–90 seconds, but large repos with real setup scripts run far longer, and overrunning the
+ * watchdog is not a soft failure: `clearSandboxAccessState` locks out the sandbox that does
+ * eventually come up, the queued prompt is never re-driven, and the documented recovery ("it will
+ * be retried on your next message") cannot fire for bot-triggered sessions, which only ever send
+ * one prompt. Boots that overran by a few seconds were stranding their sessions permanently, so
+ * the bound sits well clear of the observed boot spread rather than at its edge.
+ *
+ * Widening it is a mitigation, not the fix — see ColeMurray/background-agents#1363 for the
+ * underlying recovery gap.
+ */
+const CONNECT_WATCHDOG_MS = 240_000;
+
+/**
  * Default spawn configuration.
  */
 export const DEFAULT_SPAWN_CONFIG: SpawnConfig = {
   cooldownMs: 30000, // 30 seconds
   readyWaitMs: 60000, // 60 seconds
-  spawningTimeoutMs: 120000, // 2 minutes — matches the connecting-timeout watchdog
+  spawningTimeoutMs: CONNECT_WATCHDOG_MS,
 };
+
+/**
+ * Whether a filesystem snapshot may be booted again.
+ *
+ * A snapshot carries the whole sandbox filesystem, including the pinned agent
+ * binary, so restoring one silently resurrects the runtime that took it. A
+ * runtime fix therefore never reaches a session that keeps restoring — the
+ * failure mode that stranded every pre-existing session on the OpenCode
+ * message-ID wraparound. Bumping MIN_COMPATIBLE_RUNTIME_VERSION now retires
+ * those snapshots the same way it retires prebuilt images.
+ *
+ * Fails closed, matching image selection: a snapshot whose runtime version was
+ * never recorded (taken before this column existed) or does not parse is
+ * treated as below the floor. The cost is one fresh spawn — the sandbox's
+ * uncommitted filesystem state — after which the next snapshot records its
+ * version and restores resume as normal.
+ */
+export function isSnapshotRuntimeCompatible(snapshotRuntimeVersion: string | null): boolean {
+  if (!snapshotRuntimeVersion) return false;
+  const version = parseRuntimeVersionNumber(snapshotRuntimeVersion);
+  return version !== null && version >= MIN_COMPATIBLE_RUNTIME_VERSION;
+}
 
 /**
  * Possible spawn actions.
  */
 export type SpawnAction =
-  | { action: "spawn" }
+  | { action: "spawn"; reason?: string }
   | { action: "resume"; providerObjectId: string }
-  | { action: "restore"; snapshotImageId: string }
+  | { action: "restore"; snapshotImageId: string; snapshotRuntimeVersion: string }
   | { action: "skip"; reason: string }
   | { action: "wait"; reason: string };
 
@@ -194,7 +250,8 @@ export type SpawnAction =
  * Evaluate what spawn action to take.
  *
  * This function encapsulates the complex spawn decision logic:
- * - Restore from snapshot if available and sandbox is stopped/stale/failed
+ * - Restore from snapshot if available, compatible, and sandbox is
+ *   stopped/stale/failed
  * - Skip if already spawning/connecting
  * - Skip if ready with active WebSocket
  * - Wait if ready without WebSocket but recently spawned
@@ -211,7 +268,13 @@ export type SpawnAction =
  * @example
  * ```typescript
  * const decision = evaluateSpawnDecision(
- *   { status: "stopped", createdAt: ..., snapshotImageId: "img-123", hasActiveWebSocket: false },
+ *   {
+ *     status: "stopped",
+ *     createdAt: ...,
+ *     snapshotImageId: "img-123",
+ *     snapshotRuntimeVersion: "v59-runtime",
+ *     hasActiveWebSocket: false,
+ *   },
  *   { cooldownMs: 30000, readyWaitMs: 60000 },
  *   Date.now(),
  *   false
@@ -230,10 +293,10 @@ export function evaluateSpawnDecision(
 ): SpawnAction {
   const timeSinceLastSpawn = now - state.createdAt;
 
-  // In-memory flag first: it is set synchronously when a spawn/restore starts,
-  // but the persisted "spawning" status lands only after the first await. A
-  // second evaluation in that window must not pick resume/restore again, or
-  // concurrent prompts launch duplicate sandboxes.
+  // In-memory flag first: it is set synchronously when a spawn/restore starts
+  // and stays up until the provider call resolves. A second evaluation in
+  // that window must not pick resume/restore again, or concurrent prompts
+  // launch duplicate sandboxes.
   if (isSpawningInMemory) {
     return { action: "skip", reason: "spawn already in progress (in-memory flag)" };
   }
@@ -241,14 +304,7 @@ export function evaluateSpawnDecision(
   if (
     supportsPersistentResume &&
     state.providerObjectId &&
-    (state.status === "stopped" ||
-      state.status === "stale" ||
-      state.status === "failed" ||
-      ((state.status === "spawning" || state.status === "connecting") &&
-        timeSinceLastSpawn >= config.spawningTimeoutMs) ||
-      (state.status === "ready" &&
-        !state.hasActiveWebSocket &&
-        timeSinceLastSpawn >= config.readyWaitMs))
+    (state.status === "stopped" || state.status === "stale")
   ) {
     return { action: "resume", providerObjectId: state.providerObjectId };
   }
@@ -259,7 +315,19 @@ export function evaluateSpawnDecision(
     state.snapshotImageId &&
     (state.status === "stopped" || state.status === "stale" || state.status === "failed")
   ) {
-    return { action: "restore", snapshotImageId: state.snapshotImageId };
+    if (isSnapshotRuntimeCompatible(state.snapshotRuntimeVersion)) {
+      return {
+        action: "restore",
+        snapshotImageId: state.snapshotImageId,
+        // Non-null: the compatibility check above rejects a missing version.
+        snapshotRuntimeVersion: state.snapshotRuntimeVersion as string,
+      };
+    }
+    // Fall through to a fresh spawn rather than booting a retired runtime.
+    return {
+      action: "spawn",
+      reason: `snapshot runtime ${state.snapshotRuntimeVersion ?? "unknown"} is below the v${MIN_COMPATIBLE_RUNTIME_VERSION} floor`,
+    };
   }
 
   // Don't spawn if a spawn/connect is genuinely in progress (persisted status).
@@ -324,10 +392,10 @@ export interface InactivityState {
  * Inactivity timeout configuration.
  */
 export interface InactivityConfig {
-  /** Base idle window before a stop or connected-client grace period (default: 5 minutes) */
+  /** Time in ms before sandbox stops due to inactivity (default: 10 minutes) */
   timeoutMs: number;
-  /** Additional time granted when clients are connected (default: 2 minutes) */
-  connectedClientGraceMs: number;
+  /** Additional time granted when clients are connected (default: 5 minutes) */
+  extensionMs: number;
   /** Minimum interval between alarm checks (default: 30s) */
   minCheckIntervalMs: number;
 }
@@ -336,8 +404,8 @@ export interface InactivityConfig {
  * Default inactivity configuration.
  */
 export const DEFAULT_INACTIVITY_CONFIG: InactivityConfig = {
-  timeoutMs: 5 * 60 * 1000, // 5 minutes
-  connectedClientGraceMs: 2 * 60 * 1000,
+  timeoutMs: 10 * 60 * 1000, // 10 minutes
+  extensionMs: 5 * 60 * 1000, // 5 minutes
   minCheckIntervalMs: 30000, // 30 seconds
 };
 
@@ -346,13 +414,13 @@ export const DEFAULT_INACTIVITY_CONFIG: InactivityConfig = {
  */
 export type InactivityAction =
   | { action: "timeout"; shouldSnapshot: boolean }
-  | { action: "extend"; graceDeadlineMs: number; shouldWarn: boolean }
+  | { action: "extend"; extensionMs: number; shouldWarn: boolean }
   | { action: "schedule"; nextCheckMs: number };
 
 /**
  * Evaluate what action to take for inactivity timeout.
  *
- * The 5-minute default timeout balances cost efficiency with user experience:
+ * The 10-minute default timeout balances cost efficiency with user experience:
  * - Short enough to avoid wasting resources on abandoned sessions
  * - Long enough for users to read/think between prompts
  * - Snapshots preserve all state, so resume is instant
@@ -365,12 +433,13 @@ export type InactivityAction =
  * @example
  * ```typescript
  * const decision = evaluateInactivityTimeout(
- *   { lastActivity: now - 300001, status: "ready", connectedClientCount: 1 },
+ *   { lastActivity: now - 600001, status: "ready", connectedClientCount: 1 },
  *   DEFAULT_INACTIVITY_CONFIG,
  *   now
  * );
  * if (decision.action === "extend") {
- *   await alarmScheduler.schedule(decision.graceDeadlineMs);
+ *   // Warn user and schedule next check
+ *   await alarmScheduler.schedule(now + decision.extensionMs);
  * }
  * ```
  */
@@ -389,24 +458,27 @@ export function evaluateInactivityTimeout(
     return { action: "schedule", nextCheckMs: config.minCheckIntervalMs };
   }
 
-  // Only check inactivity for ready or running sandboxes
-  if (state.status !== "ready" && state.status !== "running") {
+  // Only check inactivity for a sandbox that is actually attached
+  if (state.status !== "ready") {
     return { action: "schedule", nextCheckMs: config.minCheckIntervalMs };
   }
 
   const inactiveTime = now - state.lastActivity;
 
+  // Check if inactivity threshold exceeded
   if (inactiveTime >= config.timeoutMs) {
-    const graceDeadlineMs = state.lastActivity + config.timeoutMs + config.connectedClientGraceMs;
-    if (now >= graceDeadlineMs || state.connectedClientCount === 0) {
-      return { action: "timeout", shouldSnapshot: true };
+    // If clients are still connected, they may be actively reviewing
+    // Grant an extension and warn them
+    if (state.connectedClientCount > 0) {
+      return {
+        action: "extend",
+        extensionMs: config.extensionMs,
+        shouldWarn: true,
+      };
     }
 
-    return {
-      action: "extend",
-      graceDeadlineMs,
-      shouldWarn: true,
-    };
+    // No clients connected - timeout and snapshot
+    return { action: "timeout", shouldSnapshot: true };
   }
 
   // Not yet timed out - schedule next check at remaining time (minimum interval)
@@ -499,12 +571,11 @@ export interface ConnectingTimeoutConfig {
 }
 
 /**
- * Default connecting timeout: 2 minutes.
- * Boot sequence (git clone → setup.sh → start.sh → opencode → bridge connect) typically
- * takes 30–90 seconds. Two minutes provides margin without leaving users waiting too long.
+ * Default connecting timeout for the initial-connect watchdog.
+ * Shares CONNECT_WATCHDOG_MS with DEFAULT_SPAWN_CONFIG.spawningTimeoutMs; see the rationale there.
  */
 export const DEFAULT_CONNECTING_TIMEOUT_CONFIG: ConnectingTimeoutConfig = {
-  timeoutMs: 120_000,
+  timeoutMs: CONNECT_WATCHDOG_MS,
 };
 
 /**

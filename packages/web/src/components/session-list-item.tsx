@@ -2,9 +2,7 @@
 
 import Link from "next/link";
 import { useState, useCallback, useEffect, useRef, type TouchEvent } from "react";
-import { toast } from "sonner";
 import { ArchiveSessionDialog } from "@/components/archive-session-dialog";
-import { Checkbox } from "@/components/ui/checkbox";
 import { archiveSession } from "@/lib/archive-session";
 import { pullRequestSummaryDisplay } from "@/lib/pr-summary";
 import { PullRequestStateIcon } from "@/components/pr-state-icon";
@@ -12,6 +10,7 @@ import { formatRelativeTime } from "@/lib/time";
 import { MoreIcon, ArchiveIcon, BranchIcon, BoxIcon } from "@/components/ui/icons";
 import { formatSessionRepositoriesLabel } from "@/lib/repo-label";
 import { useSessionRename } from "@/hooks/use-session-rename";
+import { useCurrentUserAuthorization } from "@/hooks/use-current-user-authorization";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -21,9 +20,12 @@ import {
 import type { SessionItem } from "@/hooks/use-sidebar-sessions";
 import { buildSessionHref } from "@/lib/session-list";
 
-export const MOBILE_LONG_PRESS_MS = 450;
+const MOBILE_LONG_PRESS_MS = 450;
 const MOBILE_LONG_PRESS_MOVE_THRESHOLD_PX = 10;
 
+/**
+ * Displays a session and derives lifecycle controls from the current user's workspace permissions.
+ */
 export function SessionListItem({
   session,
   environmentName,
@@ -33,7 +35,6 @@ export function SessionListItem({
   onSessionSelect,
   onMarkLatestMessageRead,
   onMarkUnread,
-  selection,
 }: {
   session: SessionItem;
   environmentName?: string;
@@ -42,9 +43,10 @@ export function SessionListItem({
   onArchive: (sessionId: string) => Promise<void>;
   onSessionSelect?: () => void;
   onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
-  onMarkUnread: (sessionId: string) => Promise<void>;
-  selection?: { selected: boolean; onSelectedChange: (selected: boolean) => void };
+  onMarkUnread: (sessionId: string) => void;
 }) {
+  const { hasPermission } = useCurrentUserAuthorization();
+  const canManageLifecycle = hasPermission("sessions.lifecycle");
   const timestamp = session.updatedAt || session.createdAt;
   const relativeTime = formatRelativeTime(timestamp);
   const repoInfo = formatSessionRepositoriesLabel(
@@ -65,7 +67,6 @@ export function SessionListItem({
   const [isArchiving, setIsArchiving] = useState(false);
   const [showArchiveDialog, setShowArchiveDialog] = useState(false);
   const [isMarkingLatestRead, setIsMarkingLatestRead] = useState(false);
-  const [isMarkingUnread, setIsMarkingUnread] = useState(false);
   const canMarkUnread = !session.readState.unread && session.readState.latestMessageId !== null;
   const [title, setTitle] = useState(displayTitle);
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -81,6 +82,7 @@ export function SessionListItem({
   }, [displayTitle, isRenaming]);
 
   const handleStartRename = () => {
+    if (!canManageLifecycle) return;
     isStartingRenameRef.current = true;
     setIsActionsOpen(false);
     setTitle(displayTitle);
@@ -104,6 +106,7 @@ export function SessionListItem({
   };
 
   const handleStartArchive = () => {
+    if (!canManageLifecycle) return;
     setIsActionsOpen(false);
     setShowArchiveDialog(true);
   };
@@ -121,17 +124,9 @@ export function SessionListItem({
     }
   };
 
-  const handleMarkUnread = async () => {
-    if (isMarkingUnread) return;
+  const handleMarkUnread = () => {
     setIsActionsOpen(false);
-    setIsMarkingUnread(true);
-    try {
-      await onMarkUnread(session.id);
-    } catch (error) {
-      console.error("Failed to mark session unread", error);
-    } finally {
-      setIsMarkingUnread(false);
-    }
+    onMarkUnread(session.id);
   };
 
   const handleConfirmArchive = async () => {
@@ -139,11 +134,9 @@ export function SessionListItem({
     setIsArchiving(true);
 
     try {
-      const outcome = await archiveSession(session.id);
-      if (outcome.kind === "archived") {
+      const didArchive = await archiveSession(session.id);
+      if (didArchive) {
         await onArchive(session.id);
-      } else {
-        toast.error(outcome.reason);
       }
     } finally {
       setIsArchiving(false);
@@ -184,11 +177,12 @@ export function SessionListItem({
       touchStartRef.current = { x: touch.clientX, y: touch.clientY };
       clearLongPressTimer();
       longPressTimerRef.current = window.setTimeout(() => {
+        if (!canManageLifecycle && !session.readState.unread) return;
         longPressTriggeredRef.current = true;
         setIsActionsOpen(true);
       }, MOBILE_LONG_PRESS_MS);
     },
-    [clearLongPressTimer, isMobile]
+    [canManageLifecycle, clearLongPressTimer, isMobile, session.readState.unread]
   );
 
   const handleTouchMove = useCallback(
@@ -253,94 +247,80 @@ export function SessionListItem({
             </div>
           </>
         ) : (
-          <div className="flex items-start gap-2">
-            {selection && (
-              <Checkbox
-                checked={selection.selected}
-                onCheckedChange={(checked) => selection.onSelectedChange(checked === true)}
-                aria-label={`Select ${displayTitle}`}
-                className="mt-0.5"
-              />
-            )}
-            <Link
-              href={buildSessionHref(session)}
-              onClick={(event) => {
-                if (selection) {
-                  event.preventDefault();
-                  return;
-                }
-                if (longPressTriggeredRef.current) {
-                  event.preventDefault();
-                  longPressTriggeredRef.current = false;
-                  return;
-                }
-                if (isMobile) {
-                  onSessionSelect?.();
-                }
-              }}
-              onContextMenu={(event) => {
-                if (isMobile) {
-                  event.preventDefault();
-                }
-              }}
-              onTouchStart={handleTouchStart}
-              onTouchMove={handleTouchMove}
-              onTouchEnd={handleTouchEnd}
-              onTouchCancel={handleTouchEnd}
-              className="block min-w-0 flex-1 pr-8"
-            >
-              <div className="flex items-center gap-1.5 text-sm text-foreground">
-                {session.readState.unread && (
-                  <>
-                    <span
-                      aria-hidden="true"
-                      className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
-                    />
-                    <span className="sr-only">Unread</span>
-                  </>
-                )}
-                {prDisplay && (
-                  <PullRequestStateIcon state={prDisplay.state} label={prDisplay.label} />
-                )}
-                <span
-                  className={`truncate ${session.readState.unread ? "font-semibold" : "font-medium"}`}
-                >
-                  {displayTitle}
-                </span>
-                {session.status === "failed" && (
-                  <span className="shrink-0 text-xs font-medium text-destructive">Failed</span>
-                )}
-              </div>
-              <div className="flex items-center gap-1 mt-0.5 text-xs text-muted-foreground">
-                <span>{relativeTime}</span>
-                <span>·</span>
-                <span className="truncate">{repoInfo}</span>
-                {environmentName && (
-                  <>
-                    <span>·</span>
-                    <BoxIcon className="w-3 h-3 flex-shrink-0" />
-                    <span className="truncate">{environmentName}</span>
-                  </>
-                )}
-                {isOrphanChild && (
-                  <>
-                    <span>·</span>
-                    <span className="text-accent">sub-task</span>
-                  </>
-                )}
-                {session.baseBranch && session.baseBranch !== "main" && (
-                  <>
-                    <span>·</span>
-                    <BranchIcon className="w-3 h-3 flex-shrink-0" />
-                    <span className="truncate">{session.baseBranch}</span>
-                  </>
-                )}
-              </div>
-            </Link>
-          </div>
+          <Link
+            href={buildSessionHref(session)}
+            onClick={(event) => {
+              if (longPressTriggeredRef.current) {
+                event.preventDefault();
+                longPressTriggeredRef.current = false;
+                return;
+              }
+              if (isMobile) {
+                onSessionSelect?.();
+              }
+            }}
+            onContextMenu={(event) => {
+              if (isMobile) {
+                event.preventDefault();
+              }
+            }}
+            onTouchStart={handleTouchStart}
+            onTouchMove={handleTouchMove}
+            onTouchEnd={handleTouchEnd}
+            onTouchCancel={handleTouchEnd}
+            className="block pr-8"
+          >
+            <div className="flex items-center gap-1.5 text-sm text-foreground">
+              {session.readState.unread && (
+                <>
+                  <span
+                    aria-hidden="true"
+                    className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
+                  />
+                  <span className="sr-only">Unread</span>
+                </>
+              )}
+              {prDisplay && (
+                <PullRequestStateIcon state={prDisplay.state} label={prDisplay.label} />
+              )}
+              <span
+                className={`truncate ${session.readState.unread ? "font-semibold" : "font-medium"}`}
+              >
+                {displayTitle}
+              </span>
+              {session.status === "failed" && (
+                <span className="shrink-0 text-xs font-medium text-destructive">Failed</span>
+              )}
+            </div>
+            <div className="flex items-center gap-1 mt-0.5 text-xs text-muted-foreground">
+              <span>{relativeTime}</span>
+              <span>·</span>
+              <span className="truncate">{repoInfo}</span>
+              {environmentName && (
+                <>
+                  <span>·</span>
+                  <BoxIcon className="w-3 h-3 flex-shrink-0" />
+                  <span className="truncate">{environmentName}</span>
+                </>
+              )}
+              {isOrphanChild && (
+                <>
+                  <span>·</span>
+                  <span className="text-accent">sub-task</span>
+                </>
+              )}
+              {session.baseBranch && session.baseBranch !== "main" && (
+                <>
+                  <span>·</span>
+                  <BranchIcon className="w-3 h-3 flex-shrink-0" />
+                  <span className="truncate">{session.baseBranch}</span>
+                </>
+              )}
+            </div>
+          </Link>
         )}
 
-        {!selection && (
+        {(canManageLifecycle || session.readState.unread || canMarkUnread) && (
           <div className="absolute inset-y-0 right-2 flex items-center">
             <DropdownMenu open={isActionsOpen} onOpenChange={setIsActionsOpen}>
               <DropdownMenuTrigger asChild>
@@ -369,7 +349,9 @@ export function SessionListItem({
                   }
                 }}
               >
-                <DropdownMenuItem onSelect={handleStartRename}>Rename</DropdownMenuItem>
+                {canManageLifecycle && (
+                  <DropdownMenuItem onSelect={handleStartRename}>Rename</DropdownMenuItem>
+                )}
                 {session.readState.unread && (
                   <DropdownMenuItem
                     onSelect={handleMarkLatestMessageRead}
@@ -379,25 +361,27 @@ export function SessionListItem({
                   </DropdownMenuItem>
                 )}
                 {canMarkUnread && (
-                  <DropdownMenuItem onSelect={handleMarkUnread} disabled={isMarkingUnread}>
-                    Mark as unread
+                  <DropdownMenuItem onSelect={handleMarkUnread}>Mark as unread</DropdownMenuItem>
+                )}
+                {canManageLifecycle && (
+                  <DropdownMenuItem onClick={handleStartArchive} disabled={isArchiving}>
+                    <ArchiveIcon className="w-4 h-4" />
+                    Archive
                   </DropdownMenuItem>
                 )}
-                <DropdownMenuItem onClick={handleStartArchive} disabled={isArchiving}>
-                  <ArchiveIcon className="w-4 h-4" />
-                  Archive
-                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
         )}
       </div>
 
-      <ArchiveSessionDialog
-        open={showArchiveDialog}
-        onOpenChange={setShowArchiveDialog}
-        onConfirm={handleConfirmArchive}
-      />
+      {canManageLifecycle && (
+        <ArchiveSessionDialog
+          open={showArchiveDialog}
+          onOpenChange={setShowArchiveDialog}
+          onConfirm={handleConfirmArchive}
+        />
+      )}
     </>
   );
 }
@@ -417,10 +401,9 @@ export function ChildSessionListItem({
   onSessionSelect?: () => void;
   depth: number;
   onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
-  onMarkUnread: (sessionId: string) => Promise<void>;
+  onMarkUnread: (sessionId: string) => void;
 }) {
   const [isMarkingLatestRead, setIsMarkingLatestRead] = useState(false);
-  const [isMarkingUnread, setIsMarkingUnread] = useState(false);
   const canMarkUnread = !session.readState.unread && session.readState.latestMessageId !== null;
   const timestamp = session.updatedAt || session.createdAt;
   const relativeTime = formatRelativeTime(timestamp);
@@ -438,16 +421,8 @@ export function ChildSessionListItem({
       setIsMarkingLatestRead(false);
     }
   };
-  const handleMarkUnread = async () => {
-    if (isMarkingUnread) return;
-    setIsMarkingUnread(true);
-    try {
-      await onMarkUnread(session.id);
-    } catch (error) {
-      console.error("Failed to mark session unread", error);
-    } finally {
-      setIsMarkingUnread(false);
-    }
+  const handleMarkUnread = () => {
+    onMarkUnread(session.id);
   };
   return (
     <div className="group relative">
@@ -489,7 +464,7 @@ export function ChildSessionListItem({
               className={`absolute right-0 top-0 h-10 w-10 items-center justify-center text-muted-foreground ${
                 isMobile
                   ? "flex"
-                  : "hidden opacity-0 group-hover:flex group-hover:opacity-100 group-focus-within:flex group-focus-within:opacity-100"
+                  : "invisible flex opacity-0 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100 data-[state=open]:visible data-[state=open]:opacity-100"
               }`}
             >
               <MoreIcon className="h-4 w-4" />
@@ -505,9 +480,7 @@ export function ChildSessionListItem({
               </DropdownMenuItem>
             )}
             {canMarkUnread && (
-              <DropdownMenuItem onSelect={handleMarkUnread} disabled={isMarkingUnread}>
-                Mark as unread
-              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={handleMarkUnread}>Mark as unread</DropdownMenuItem>
             )}
           </DropdownMenuContent>
         </DropdownMenu>

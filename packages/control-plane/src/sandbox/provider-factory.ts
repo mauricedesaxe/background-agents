@@ -31,7 +31,8 @@ function createModalProviderFromEnv(env: Env): ModalSandboxProvider {
   const client = createModalClient(
     env.MODAL_API_SECRET,
     env.MODAL_WORKSPACE,
-    env.MODAL_ENVIRONMENT_WEB_SUFFIX
+    env.MODAL_ENVIRONMENT_WEB_SUFFIX,
+    env.MODAL_API_URL
   );
 
   return createModalProvider(client);
@@ -109,7 +110,7 @@ function createDaytonaProviderFromEnv(env: Env): DaytonaSandboxProvider {
     autoStopIntervalMinutes: parseNumericEnv(
       "DAYTONA_AUTO_STOP_INTERVAL_MINUTES",
       env.DAYTONA_AUTO_STOP_INTERVAL_MINUTES,
-      0
+      120
     ),
     autoArchiveIntervalMinutes: parseNumericEnv(
       "DAYTONA_AUTO_ARCHIVE_INTERVAL_MINUTES",

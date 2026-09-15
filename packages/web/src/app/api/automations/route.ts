@@ -51,14 +51,16 @@ export async function POST(request: NextRequest) {
       triggerType: body.triggerType,
       scheduleCron: body.scheduleCron,
       scheduleTz: body.scheduleTz,
+      onceRunAt: body.onceRunAt,
       model: body.model,
       reasoningEffort: body.reasoningEffort,
+      harness: body.harness,
       eventType: body.eventType,
       triggerConfig: body.triggerConfig,
       sentryClientSecret: body.sentryClientSecret,
-      betterstackWebhookSecret: body.betterstackWebhookSecret,
       repositories: body.repositories,
       environmentIds: body.environmentIds,
+      providerSelections: body.providerSelections,
     };
 
     const response = await controlPlaneUserFetch("/automations", {

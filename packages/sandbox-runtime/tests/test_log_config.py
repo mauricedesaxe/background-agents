@@ -114,22 +114,25 @@ class TestJSONFormatter:
 
 
 class TestStructuredLogger:
+    def test_get_logger_factory(self):
+        log = get_logger("my-component", sandbox_id="sb-1")
+        assert isinstance(log, StructuredLogger)
+        assert log._component == "my-component"
+        assert log._context == {"sandbox_id": "sb-1"}
+
     def test_bind_mutates_context(self):
         log = get_logger("test")
         log.bind(session_id="ses-1")
         record = _capture_log(log)
         assert record["session_id"] == "ses-1"
 
-    def test_child_inherits_context_without_changing_parent(self):
+    def test_child_creates_new_logger(self):
         log = get_logger("parent", sandbox_id="sb-1")
         child = log.child(message_id="msg-1")
-        child_record = _capture_log(child)
-        parent_record = _capture_log(log)
-
-        assert child_record["sandbox_id"] == "sb-1"
-        assert child_record["message_id"] == "msg-1"
-        assert parent_record["sandbox_id"] == "sb-1"
-        assert "message_id" not in parent_record
+        # Child has merged context
+        assert child._context == {"sandbox_id": "sb-1", "message_id": "msg-1"}
+        # Parent is unchanged
+        assert "message_id" not in log._context
 
     def test_all_log_levels(self):
         for level in ("debug", "info", "warn", "error"):

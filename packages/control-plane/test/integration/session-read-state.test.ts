@@ -143,10 +143,12 @@ describe("session read state", () => {
     expect((await store.list({ viewerUserId: "user-a" })).sessions[0].readState).toEqual({
       unread: true,
       latestMessageId: "message-a",
+      version: 1_500,
     });
     expect((await store.list({ viewerUserId: "user-b" })).sessions[0].readState).toEqual({
       unread: true,
       latestMessageId: "message-a",
+      version: 1_500,
     });
 
     expect(
@@ -159,6 +161,7 @@ describe("session read state", () => {
       outcome: "marked_read",
       unread: false,
       latestMessageId: "message-a",
+      version: 1_500,
     });
     expect(
       await store.updateReadState("user-a", "shared-session", {
@@ -170,14 +173,17 @@ describe("session read state", () => {
       outcome: "already_read",
       unread: false,
       latestMessageId: "message-a",
+      version: 1_500,
     });
     expect((await store.list({ viewerUserId: "user-a" })).sessions[0].readState).toEqual({
       unread: false,
       latestMessageId: "message-a",
+      version: 1_500,
     });
     expect((await store.list({ viewerUserId: "user-b" })).sessions[0].readState).toEqual({
       unread: true,
       latestMessageId: "message-a",
+      version: 1_500,
     });
   });
 
@@ -202,6 +208,7 @@ describe("session read state", () => {
       outcome: "not_latest",
       unread: true,
       latestMessageId: "message-b",
+      version: 2_000,
     });
     expect(
       await store.updateReadState("user-a", "racing-session", {
@@ -212,87 +219,8 @@ describe("session read state", () => {
       outcome: "marked_read",
       unread: false,
       latestMessageId: "message-b",
+      version: 2_000,
     });
-  });
-
-  it("pins a read session as unread and keeps the pin until it is read again", async () => {
-    const store = new SessionIndexStore(env.DB);
-    await createUser("user-a", 1_000);
-    await createSession(store, "pinned-session");
-    await store.recordLatestTerminalMessage({
-      sessionId: "pinned-session",
-      messageId: "message-a",
-      messageCreatedAt: 1_500,
-      terminalMessageCompletedAt: 2_000,
-    });
-
-    expect(
-      await store.updateReadState("user-a", "pinned-session", {
-        action: "mark_latest_message_read",
-      })
-    ).toEqual({
-      sessionId: "pinned-session",
-      outcome: "marked_read",
-      unread: false,
-      latestMessageId: "message-a",
-    });
-    expect((await store.list({ viewerUserId: "user-a" })).sessions[0].readState).toEqual({
-      unread: false,
-      latestMessageId: "message-a",
-    });
-
-    expect(
-      await store.updateReadState("user-a", "pinned-session", { action: "mark_unread" })
-    ).toEqual({
-      sessionId: "pinned-session",
-      outcome: "marked_unread",
-      unread: true,
-      latestMessageId: "message-a",
-    });
-    expect((await store.list({ viewerUserId: "user-a" })).sessions[0].readState).toEqual({
-      unread: true,
-      latestMessageId: "message-a",
-    });
-
-    expect(
-      await store.updateReadState("user-a", "pinned-session", {
-        action: "mark_latest_message_read",
-      })
-    ).toEqual({
-      sessionId: "pinned-session",
-      outcome: "marked_read",
-      unread: false,
-      latestMessageId: "message-a",
-    });
-    expect((await store.list({ viewerUserId: "user-a" })).sessions[0].readState).toEqual({
-      unread: false,
-      latestMessageId: "message-a",
-    });
-  });
-
-  it("categorizes a manually-unread session into the needs-attention inbox", async () => {
-    const store = new SessionIndexStore(env.DB);
-    await createUser("user-a", 1_000);
-    await createSession(store, "attention-session");
-    await store.recordLatestTerminalMessage({
-      sessionId: "attention-session",
-      messageId: "message-a",
-      messageCreatedAt: 1_500,
-      terminalMessageCompletedAt: 2_000,
-    });
-    await store.updateReadState("user-a", "attention-session", {
-      action: "mark_latest_message_read",
-    });
-    await store.updateReadState("user-a", "attention-session", { action: "mark_unread" });
-
-    const snapshot = await store.listInboxSnapshot({
-      limit: 20,
-      createdByUserIds: [],
-      excludeAutomationLineage: false,
-      viewerUserId: "user-a",
-    });
-    const attentionIds = snapshot.needs_attention.items.map((item) => item.rootSession.id);
-    expect(attentionIds).toContain("attention-session");
   });
 
   it("does not surface outcomes completed before the user existed", async () => {
@@ -309,6 +237,7 @@ describe("session read state", () => {
     expect((await store.list({ viewerUserId: "new-user" })).sessions[0].readState).toEqual({
       unread: false,
       latestMessageId: "historical-message",
+      version: 1_000,
     });
   });
 
@@ -320,6 +249,7 @@ describe("session read state", () => {
     expect((await store.list({ viewerUserId: "viewer" })).sessions[0].readState).toEqual({
       unread: false,
       latestMessageId: null,
+      version: 0,
     });
     expect(
       await store.updateReadState("viewer", "lifecycle-session", {
@@ -330,6 +260,7 @@ describe("session read state", () => {
       outcome: "no_terminal_message",
       unread: false,
       latestMessageId: null,
+      version: 0,
     });
 
     await store.recordLatestTerminalMessage({
@@ -347,6 +278,7 @@ describe("session read state", () => {
     expect((await store.list({ viewerUserId: "viewer" })).sessions[0].readState).toEqual({
       unread: false,
       latestMessageId: "message-1",
+      version: 2_000,
     });
   });
 
@@ -364,6 +296,9 @@ describe("session read state", () => {
       action: "mark_latest_message_read",
     });
 
+    await env.DB.prepare("DELETE FROM user_role_assignments WHERE user_id = ?")
+      .bind("deleted-user")
+      .run();
     await env.DB.prepare("DELETE FROM users WHERE id = ?").bind("deleted-user").run();
     expect(await env.DB.prepare("SELECT * FROM session_read_states").all()).toMatchObject({
       results: [],
@@ -383,18 +318,21 @@ describe("session read state", () => {
     await serviceFetch("https://example.com/sessions");
     const store = new SessionIndexStore(env.DB);
     await createSession(store, "api-session");
+    const messageCreatedAt = Date.now();
     await store.recordLatestTerminalMessage({
       sessionId: "api-session",
       messageId: "message-a",
-      messageCreatedAt: Date.now(),
+      messageCreatedAt,
       terminalMessageCompletedAt: Date.now(),
     });
 
     const listResponse = await serviceFetch("https://example.com/sessions");
     expect(listResponse.headers.get("Cache-Control")).toBe("private, no-store");
-    expect((await listResponse.json()).sessions[0].readState).toEqual({
+    const listBody = await listResponse.json<{ sessions: Array<{ readState: unknown }> }>();
+    expect(listBody.sessions[0].readState).toEqual({
       unread: true,
       latestMessageId: "message-a",
+      version: messageCreatedAt,
     });
 
     const staleResponse = await serviceFetch(
@@ -414,6 +352,7 @@ describe("session read state", () => {
       outcome: "not_latest",
       unread: true,
       latestMessageId: "message-a",
+      version: messageCreatedAt,
     });
 
     const markedReadResponse = await serviceFetch(
@@ -431,6 +370,7 @@ describe("session read state", () => {
       outcome: "marked_read",
       unread: false,
       latestMessageId: "message-a",
+      version: messageCreatedAt,
     });
 
     const serviceResponse = await serviceFetch(

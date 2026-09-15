@@ -1,47 +1,53 @@
-import type { Automation, AutomationRepository } from "@open-inspect/shared/types/automations";
+import type { AutomationListItem } from "@open-inspect/shared/types/automations";
 
-const MULTIPLE_REPOSITORIES_GROUP_KEY = "__multiple__";
+/** Label for the bucket holding multi-repository and repository-less automations. */
 export const MULTIPLE_REPOSITORIES_GROUP_LABEL = "Multiple repositories";
 
-export interface AutomationRepositoryGroup {
-  key: string;
+export interface AutomationsRepositoryGroup {
   label: string;
-  automations: Automation[];
+  automations: AutomationListItem[];
 }
 
-function repositoryKey(repository: AutomationRepository): string {
+function repositoryLabel(automation: AutomationListItem): string | null {
+  if (automation.repositories.length !== 1) return null;
+  const repository = automation.repositories[0];
   return `${repository.repoOwner}/${repository.repoName}`;
 }
 
-/** A repository-less (environment-only) automation shares the "Multiple repositories" bucket with multi-repo ones, despite targeting zero. */
+/**
+ * Group automations by repository for the list view. Single-repository
+ * automations land under their `owner/name` heading; multi-repository and
+ * repository-less automations share one "Multiple repositories" bucket sorted
+ * last. Headings are alphabetical; order within a group preserves the input
+ * order the server returned. Pure presentation over the loaded page set — no
+ * server re-sort (card 22).
+ */
 export function groupAutomationsByRepository(
-  automations: Automation[]
-): AutomationRepositoryGroup[] {
-  const singles = new Map<string, Automation[]>();
-  const multiple: Automation[] = [];
+  automations: AutomationListItem[]
+): AutomationsRepositoryGroup[] {
+  const byLabel = new Map<string, AutomationListItem[]>();
+  const shared: AutomationListItem[] = [];
 
   for (const automation of automations) {
-    if (automation.repositories.length === 1) {
-      const key = repositoryKey(automation.repositories[0]);
-      const bucket = singles.get(key);
-      if (bucket) bucket.push(automation);
-      else singles.set(key, [automation]);
+    const label = repositoryLabel(automation);
+    if (label === null) {
+      shared.push(automation);
+      continue;
+    }
+    const bucket = byLabel.get(label);
+    if (bucket) {
+      bucket.push(automation);
     } else {
-      multiple.push(automation);
+      byLabel.set(label, [automation]);
     }
   }
 
-  const groups: AutomationRepositoryGroup[] = [...singles.entries()]
+  const groups: AutomationsRepositoryGroup[] = [...byLabel.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, group]) => ({ key, label: key, automations: group }));
+    .map(([label, groupAutomations]) => ({ label, automations: groupAutomations }));
 
-  if (multiple.length > 0) {
-    groups.push({
-      key: MULTIPLE_REPOSITORIES_GROUP_KEY,
-      label: MULTIPLE_REPOSITORIES_GROUP_LABEL,
-      automations: multiple,
-    });
+  if (shared.length > 0) {
+    groups.push({ label: MULTIPLE_REPOSITORIES_GROUP_LABEL, automations: shared });
   }
-
   return groups;
 }

@@ -6,7 +6,6 @@ import type {
   AutomationEvent,
   AutomationEventSource,
   SentryAutomationEvent,
-  BetterstackAutomationEvent,
   WebhookAutomationEvent,
   GitHubAutomationEvent,
   LinearAutomationEvent,
@@ -53,16 +52,6 @@ const defaults: Record<AutomationEventSource, () => AutomationEvent> = {
       sentryProject: "test-project",
       sentryLevel: "error",
     }) satisfies SentryAutomationEvent,
-  betterstack: () =>
-    ({
-      source: "betterstack",
-      automationId: "test-automation",
-      eventType: "incident.started",
-      triggerKey: "betterstack_incident:123",
-      concurrencyKey: "betterstack_incident:123",
-      contextBlock: "Test BetterStack context",
-      meta: {},
-    }) satisfies BetterstackAutomationEvent,
   webhook: () =>
     ({
       source: "webhook",

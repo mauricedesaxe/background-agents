@@ -1,6 +1,8 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { SELF, env, runInDurableObject } from "cloudflare:test";
-import type { SessionDO } from "../../src/session/durable-object";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { SELF, env } from "cloudflare:test";
+import type { SessionStatus } from "@open-inspect/shared/types/sessions";
+import { runInSessionDO } from "./session-do-access";
+import type { SessionDO } from "../../src/cloudflare/durable-object";
 import { SessionIndexStore } from "../../src/db/session-index";
 import { cleanD1Tables } from "./cleanup";
 import {
@@ -12,6 +14,7 @@ import {
   openClientWs,
   collectMessages,
   seedMessage,
+  TEST_SESSION_PROVIDER_AUTH,
 } from "./helpers";
 
 describe("Child session operations (list, get, cancel)", () => {
@@ -23,9 +26,43 @@ describe("Child session operations (list, get, cancel)", () => {
    * Helper to set up a parent+child pair.
    * Creates both DOs (via initNamedSession) and D1 rows.
    */
-  async function setupParentAndChild(opts?: { childStatus?: string }) {
+  async function setupParentAndChild(opts?: { childStatus?: SessionStatus }) {
     const pName = parentName();
     const childName = `child-ops-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+    // Seed D1 before initializing the DOs because sandbox warming reads provider auth from D1.
+    const store = new SessionIndexStore(env.DB);
+    const now = Date.now();
+    await store.create({
+      id: pName,
+      title: "Parent Session",
+      repoOwner: "acme",
+      repoName: "web-app",
+      model: "anthropic/claude-sonnet-4-6",
+      reasoningEffort: null,
+      baseBranch: null,
+      status: "active",
+      spawnDepth: 0,
+      providerAuth: TEST_SESSION_PROVIDER_AUTH,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await store.create({
+      id: childName,
+      title: "Child Session",
+      repoOwner: "acme",
+      repoName: "web-app",
+      model: "anthropic/claude-sonnet-4-6",
+      reasoningEffort: null,
+      baseBranch: null,
+      status: opts?.childStatus ?? "created",
+      parentSessionId: pName,
+      spawnSource: "agent",
+      spawnDepth: 1,
+      providerAuth: TEST_SESSION_PROVIDER_AUTH,
+      createdAt: now + 1,
+      updatedAt: now + 1,
+    });
 
     // Create parent DO
     const { stub: parentStub } = await initNamedSessionDO(pName, {
@@ -62,40 +99,6 @@ describe("Child session operations (list, get, cancel)", () => {
       parentSessionId: pName,
       spawnSource: "agent",
       spawnDepth: 1,
-    });
-
-    // Seed D1 rows for both parent and child
-    const store = new SessionIndexStore(env.DB);
-    const now = Date.now();
-
-    await store.create({
-      id: pName,
-      title: "Parent Session",
-      repoOwner: "acme",
-      repoName: "web-app",
-      model: "anthropic/claude-sonnet-4-6",
-      reasoningEffort: null,
-      baseBranch: null,
-      status: "active",
-      spawnDepth: 0,
-      createdAt: now,
-      updatedAt: now,
-    });
-
-    await store.create({
-      id: childName,
-      title: "Child Session",
-      repoOwner: "acme",
-      repoName: "web-app",
-      model: "anthropic/claude-sonnet-4-6",
-      reasoningEffort: null,
-      baseBranch: null,
-      status: opts?.childStatus ?? "created",
-      parentSessionId: pName,
-      spawnSource: "agent",
-      spawnDepth: 1,
-      createdAt: now + 1,
-      updatedAt: now + 1,
     });
 
     return { pName, childName, parentStub, childStub, sandboxToken, store };
@@ -543,8 +546,8 @@ describe("Child session operations (list, get, cancel)", () => {
         "SELECT id FROM messages WHERE status = 'processing'"
       );
       if (!processing) throw new Error("Expected processing parent prompt");
-      await runInDurableObject(parentStub, (instance: SessionDO) => {
-        instance.ctx.storage.sql.exec(
+      await runInSessionDO(parentStub, (instance: SessionDO, state) => {
+        state.storage.sql.exec(
           `INSERT INTO participants (
              id, user_id, canonical_user_id, scm_user_id, scm_login, scm_name, scm_email,
              role, joined_at
@@ -564,8 +567,8 @@ describe("Child session operations (list, get, cancel)", () => {
         "SELECT id FROM participants WHERE user_id = 'slack:U2'"
       );
       if (!secondUser) throw new Error("Expected second participant");
-      await runInDurableObject(parentStub, (instance: SessionDO) => {
-        instance.ctx.storage.sql.exec(
+      await runInSessionDO(parentStub, (instance: SessionDO, state) => {
+        state.storage.sql.exec(
           "UPDATE messages SET author_id = ? WHERE id = ?",
           secondUser.id,
           processing.id
@@ -849,6 +852,164 @@ describe("Child session operations (list, get, cancel)", () => {
       expect(res.status).toBe(400);
       const body = await res.json<{ error: string }>();
       expect(body.error).toContain("status");
+    });
+  });
+
+  describe("child result delivery", () => {
+    /** Seed a settled child: terminal message, its events, and its status. */
+    async function seedChildTerminalResult(childStub: DurableObjectStub): Promise<void> {
+      await queryDO(childStub, "UPDATE session SET status = 'completed'");
+      const [{ id: participantId }] = await queryDO<{ id: string }>(
+        childStub,
+        "SELECT id FROM participants LIMIT 1"
+      );
+      await queryDO(
+        childStub,
+        `INSERT INTO messages (id, author_id, content, source, status, created_at, started_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        "msg-child-final",
+        participantId,
+        "Do the subtask",
+        "agent",
+        "completed",
+        100,
+        110,
+        200
+      );
+      await seedEvents(childStub, [
+        {
+          id: "evt-child-token",
+          type: "token",
+          data: JSON.stringify({ content: "The subtask is done" }),
+          messageId: "msg-child-final",
+          createdAt: 180,
+        },
+        {
+          id: "evt-child-complete",
+          type: "execution_complete",
+          data: JSON.stringify({ success: true }),
+          messageId: "msg-child-final",
+          createdAt: 200,
+        },
+      ]);
+    }
+
+    function postChildUpdate(parentStub: DurableObjectStub, body: Record<string, unknown>) {
+      return parentStub.fetch("http://internal/internal/child-session-update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+
+    async function countAgentMessages(parentStub: DurableObjectStub): Promise<number> {
+      const rows = await queryDO<{ count: number }>(
+        parentStub,
+        "SELECT COUNT(*) AS count FROM messages WHERE source = 'agent'"
+      );
+      return rows[0]?.count ?? 0;
+    }
+
+    it("enqueues exactly one agent prompt when a child settles", async () => {
+      const { childName, parentStub, childStub } = await setupParentAndChild();
+      await seedChildTerminalResult(childStub);
+
+      const res = await postChildUpdate(parentStub, {
+        childSessionId: childName,
+        status: "completed",
+        title: "Child",
+      });
+      expect(res.status).toBe(200);
+
+      await vi.waitFor(async () => {
+        expect(await countAgentMessages(parentStub)).toBe(1);
+      });
+
+      const rows = await queryDO<{ content: string; source: string }>(
+        parentStub,
+        "SELECT content, source FROM messages WHERE source = 'agent'"
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].source).toBe("agent");
+      expect(rows[0].content).toContain("The subtask is done");
+      expect(rows[0].content).toContain("finished with status: completed");
+    });
+
+    it("does not re-enqueue on a repeated settled update", async () => {
+      const { childName, parentStub, childStub } = await setupParentAndChild();
+      await seedChildTerminalResult(childStub);
+      await postChildUpdate(parentStub, { childSessionId: childName, status: "completed" });
+      await vi.waitFor(async () => {
+        expect(await countAgentMessages(parentStub)).toBe(1);
+      });
+
+      const res = await postChildUpdate(parentStub, {
+        childSessionId: childName,
+        status: "completed",
+      });
+      expect(res.status).toBe(200);
+
+      expect(await countAgentMessages(parentStub)).toBe(1);
+    });
+
+    it("does not re-enqueue on a title-only update of a settled child", async () => {
+      const { childName, parentStub, childStub } = await setupParentAndChild();
+      await seedChildTerminalResult(childStub);
+      await postChildUpdate(parentStub, { childSessionId: childName, status: "completed" });
+      await vi.waitFor(async () => {
+        expect(await countAgentMessages(parentStub)).toBe(1);
+      });
+
+      const res = await postChildUpdate(parentStub, {
+        childSessionId: childName,
+        status: "completed",
+        title: "Renamed child",
+      });
+      expect(res.status).toBe(200);
+
+      expect(await countAgentMessages(parentStub)).toBe(1);
+    });
+
+    it("skips quietly when the parent is archived", async () => {
+      const { childName, parentStub, childStub } = await setupParentAndChild();
+      await seedChildTerminalResult(childStub);
+      await queryDO(parentStub, "UPDATE session SET status = 'archived'");
+
+      const res = await postChildUpdate(parentStub, {
+        childSessionId: childName,
+        status: "completed",
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json<{ ok: boolean }>();
+      expect(body.ok).toBe(true);
+
+      await vi.waitFor(
+        async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          expect(await countAgentMessages(parentStub)).toBe(0);
+        },
+        { timeout: 1000, interval: 100 }
+      );
+      expect(await countAgentMessages(parentStub)).toBe(0);
+    });
+
+    it("does not deliver for a child this parent does not track", async () => {
+      const { parentStub } = await setupParentAndChild();
+
+      const res = await postChildUpdate(parentStub, {
+        childSessionId: "child-does-not-exist",
+        status: "failed",
+      });
+      expect(res.status).toBe(200);
+
+      await vi.waitFor(
+        async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          expect(await countAgentMessages(parentStub)).toBe(0);
+        },
+        { timeout: 1000, interval: 100 }
+      );
+      expect(await countAgentMessages(parentStub)).toBe(0);
     });
   });
 });

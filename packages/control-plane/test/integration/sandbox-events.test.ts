@@ -1,5 +1,8 @@
-import { describe, it, expect } from "vitest";
-import { initSession, queryDO, seedMessage } from "./helpers";
+import { describe, it, expect, vi, type MockInstance } from "vitest";
+import { env } from "cloudflare:test";
+import { initSession, queryDO, seedMessage, waitForSandboxStatus } from "./helpers";
+import type { SessionDO } from "../../src/cloudflare/durable-object";
+import { componentsOf, runInSessionDO } from "./session-do-access";
 
 describe("POST /internal/sandbox-event", () => {
   it("stores token event", async () => {
@@ -166,10 +169,14 @@ describe("POST /internal/sandbox-event", () => {
     });
   });
 
-  it("heartbeat updates last_heartbeat without storing event", async () => {
+  it("heartbeat counts as activity only while a message is processing", async () => {
     const { stub } = await initSession();
+    const previousActivity = 123;
+    await runInSessionDO(stub, (_instance, state) => {
+      state.storage.sql.exec("UPDATE sandbox SET last_activity = ?", previousActivity);
+    });
 
-    const res = await stub.fetch("http://internal/internal/sandbox-event", {
+    const idleHeartbeat = await stub.fetch("http://internal/internal/sandbox-event", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -180,13 +187,47 @@ describe("POST /internal/sandbox-event", () => {
       }),
     });
 
-    expect(res.status).toBe(200);
+    expect(idleHeartbeat.status).toBe(200);
 
-    const sandbox = await queryDO<{ last_heartbeat: number }>(
+    const idleSandbox = await queryDO<{ last_heartbeat: number; last_activity: number }>(
       stub,
-      "SELECT last_heartbeat FROM sandbox"
+      "SELECT last_heartbeat, last_activity FROM sandbox"
     );
-    expect(sandbox[0].last_heartbeat).toEqual(expect.any(Number));
+    expect(idleSandbox[0].last_heartbeat).toEqual(expect.any(Number));
+    expect(idleSandbox[0].last_activity).toBe(previousActivity);
+
+    const participants = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    await seedMessage(stub, {
+      id: "msg-processing",
+      authorId: participants[0].id,
+      content: "Run a long build",
+      source: "web",
+      status: "processing",
+      createdAt: Date.now() - 1000,
+      startedAt: Date.now() - 500,
+    });
+
+    const processingHeartbeat = await stub.fetch("http://internal/internal/sandbox-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "heartbeat",
+        sandboxId: "sb-1",
+        status: "running",
+        timestamp: Date.now() / 1000,
+      }),
+    });
+
+    expect(processingHeartbeat.status).toBe(200);
+    const processingSandbox = await queryDO<{ last_heartbeat: number; last_activity: number }>(
+      stub,
+      "SELECT last_heartbeat, last_activity FROM sandbox"
+    );
+    expect(processingSandbox[0].last_activity).toBe(processingSandbox[0].last_heartbeat);
+    expect(processingSandbox[0].last_activity).toBeGreaterThan(previousActivity);
 
     // Heartbeats should NOT be stored as events
     const events = await queryDO<{ type: string }>(
@@ -447,5 +488,313 @@ describe("POST /internal/sandbox-event", () => {
     expect(events[0].id).toBe("token:msg-order");
     expect(events[0].messageId).toBe("msg-order");
     expect(events[0].data.content).toBe("token-2");
+  });
+
+  it("a divergent ready stores a context_reset and holds the queued prompt", async () => {
+    const { stub } = await initSession();
+    await queryDO(stub, `UPDATE session SET agent_session_id = 'ses-stored'`);
+
+    const participants = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    await seedMessage(stub, {
+      id: "msg-held-live",
+      authorId: participants[0].id,
+      content: "Next turn",
+      source: "web",
+      status: "pending",
+      createdAt: Date.now(),
+    });
+
+    const res = await stub.fetch("http://internal/internal/sandbox-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: null,
+        timestamp: Date.now() / 1000,
+      }),
+    });
+    expect(res.status).toBe(200);
+
+    const rows = await queryDO<{ context_reset_hold: number; status: string }>(
+      stub,
+      "SELECT context_reset_hold, status FROM messages WHERE id = 'msg-held-live'"
+    );
+    expect(rows[0]).toEqual({ context_reset_hold: 1, status: "pending" });
+
+    const resets = await queryDO<{ data: string }>(
+      stub,
+      "SELECT data FROM events WHERE type = 'context_reset'"
+    );
+    expect(JSON.parse(resets[0].data)).toMatchObject({ reason: "fresh_session" });
+
+    const acknowledge = await stub.fetch("http://internal/internal/acknowledge-context-reset", {
+      method: "POST",
+    });
+    expect(acknowledge.status).toBe(200);
+
+    const released = await queryDO<{ context_reset_hold: number }>(
+      stub,
+      "SELECT context_reset_hold FROM messages WHERE id = 'msg-held-live'"
+    );
+    expect(released[0].context_reset_hold).toBe(0);
+  });
+
+  it("a ready that resumed the stored session id does not hold the queued prompt", async () => {
+    const { stub } = await initSession();
+    await queryDO(stub, `UPDATE session SET agent_session_id = 'ses-stored'`);
+
+    const participants = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    await seedMessage(stub, {
+      id: "msg-clean-live",
+      authorId: participants[0].id,
+      content: "Next turn",
+      source: "web",
+      status: "pending",
+      createdAt: Date.now(),
+    });
+
+    const res = await stub.fetch("http://internal/internal/sandbox-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: "ses-stored",
+        resumed: true,
+        timestamp: Date.now() / 1000,
+      }),
+    });
+    expect(res.status).toBe(200);
+
+    const rows = await queryDO<{ context_reset_hold: number }>(
+      stub,
+      "SELECT context_reset_hold FROM messages WHERE id = 'msg-clean-live'"
+    );
+    expect(rows[0].context_reset_hold).toBe(0);
+  });
+
+  it("persists the vendor id a ready reports, and a later divergent ready holds through it", async () => {
+    const { stub } = await initSession();
+
+    const first = await stub.fetch("http://internal/internal/sandbox-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: "ses-live-1",
+        resumed: true,
+        timestamp: Date.now() / 1000,
+      }),
+    });
+    expect(first.status).toBe(200);
+
+    const stored = await queryDO<{ agent_session_id: string | null }>(
+      stub,
+      "SELECT agent_session_id FROM session LIMIT 1"
+    );
+    expect(stored[0].agent_session_id).toBe("ses-live-1");
+
+    const participants = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    await seedMessage(stub, {
+      id: "msg-held-by-write",
+      authorId: participants[0].id,
+      content: "Next turn",
+      source: "web",
+      status: "pending",
+      createdAt: Date.now(),
+    });
+
+    const divergent = await stub.fetch("http://internal/internal/sandbox-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: null,
+        timestamp: Date.now() / 1000,
+      }),
+    });
+    expect(divergent.status).toBe(200);
+
+    const rows = await queryDO<{ context_reset_hold: number; status: string }>(
+      stub,
+      "SELECT context_reset_hold, status FROM messages WHERE id = 'msg-held-by-write'"
+    );
+    expect(rows[0]).toEqual({ context_reset_hold: 1, status: "pending" });
+
+    const resets = await queryDO<{ data: string }>(
+      stub,
+      "SELECT data FROM events WHERE type = 'context_reset'"
+    );
+    expect(JSON.parse(resets[0].data)).toMatchObject({ reason: "fresh_session" });
+  });
+
+  it("holds a prompt enqueued after the reset until acknowledge", async () => {
+    const { stub } = await initSession();
+    await queryDO(stub, `UPDATE session SET agent_session_id = 'ses-stored'`);
+
+    const ready = await stub.fetch("http://internal/internal/sandbox-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: null,
+        timestamp: Date.now() / 1000,
+      }),
+    });
+    expect(ready.status).toBe(200);
+
+    const prompt = await stub.fetch("http://internal/internal/prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "After the reset", authorId: "user-1", source: "web" }),
+    });
+    expect(prompt.status).toBe(200);
+
+    const queued = await queryDO<{ status: string }>(
+      stub,
+      "SELECT status FROM messages WHERE content = 'After the reset'"
+    );
+    expect(queued[0].status).toBe("pending");
+    const flagged = await queryDO<{ context_reset_pending: number }>(
+      stub,
+      "SELECT context_reset_pending FROM session LIMIT 1"
+    );
+    expect(flagged[0].context_reset_pending).toBe(1);
+
+    const acknowledge = await stub.fetch("http://internal/internal/acknowledge-context-reset", {
+      method: "POST",
+    });
+    expect(acknowledge.status).toBe(200);
+
+    const flaggedAfter = await queryDO<{ context_reset_pending: number }>(
+      stub,
+      "SELECT context_reset_pending FROM session LIMIT 1"
+    );
+    expect(flaggedAfter[0].context_reset_pending).toBe(0);
+  });
+
+  it("auto-releases the context-reset hold when its deadline passes", async () => {
+    const { stub } = await initSession();
+    await queryDO(stub, `UPDATE session SET agent_session_id = 'ses-stored'`);
+
+    const participants = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    await seedMessage(stub, {
+      id: "msg-auto-release",
+      authorId: participants[0].id,
+      content: "Stuck behind the reset",
+      source: "web",
+      status: "pending",
+      createdAt: Date.now(),
+    });
+
+    const ready = await stub.fetch("http://internal/internal/sandbox-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: null,
+        timestamp: Date.now() / 1000,
+      }),
+    });
+    expect(ready.status).toBe(200);
+
+    const held = await queryDO<{
+      context_reset_pending: number;
+      context_reset_hold_deadline: number | null;
+    }>(stub, "SELECT context_reset_pending, context_reset_hold_deadline FROM session LIMIT 1");
+    expect(held[0].context_reset_pending).toBe(1);
+    expect(held[0].context_reset_hold_deadline).toEqual(expect.any(Number));
+
+    await queryDO(stub, `UPDATE session SET context_reset_hold_deadline = ?`, Date.now() - 1000);
+    await runInSessionDO(stub, (instance: SessionDO) => instance.alarm());
+
+    const released = await queryDO<{
+      context_reset_pending: number;
+      context_reset_hold_deadline: number | null;
+    }>(stub, "SELECT context_reset_pending, context_reset_hold_deadline FROM session LIMIT 1");
+    expect(released[0]).toEqual({ context_reset_pending: 0, context_reset_hold_deadline: null });
+
+    const warnings = await queryDO<{ data: string }>(
+      stub,
+      "SELECT data FROM events WHERE type = 'warning' ORDER BY created_at DESC LIMIT 1"
+    );
+    expect(JSON.parse(warnings[0].data)).toMatchObject({ scope: "context" });
+
+    const acknowledge = await stub.fetch("http://internal/internal/acknowledge-context-reset", {
+      method: "POST",
+    });
+    expect(acknowledge.status).toBe(409);
+  });
+
+  it("re-arms a hold whose alarm was lost, so activation releases it and drains the queue", async () => {
+    const sessionName = `hold-rehydrate-${Date.now()}`;
+    const { stub } = await initSession({ sessionName });
+    await waitForSandboxStatus(stub, "failed");
+
+    const participants = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    await seedMessage(stub, {
+      id: "msg-hold-rehydrate",
+      authorId: participants[0].id,
+      content: "Stuck behind a hold that lost its alarm",
+      source: "web",
+      status: "pending",
+      createdAt: Date.now(),
+    });
+    await queryDO(
+      stub,
+      "UPDATE session SET context_reset_pending = 1, context_reset_hold_deadline = ?",
+      Date.now() - 1000
+    );
+    await queryDO(
+      stub,
+      "UPDATE messages SET context_reset_hold = 1 WHERE id = 'msg-hold-rehydrate'"
+    );
+
+    await expect(
+      runInSessionDO(stub, (_instance: SessionDO, state) => {
+        state.abort("test: force eviction");
+      })
+    ).rejects.toThrow();
+    const restored = env.SESSION.get(env.SESSION.idFromName(sessionName));
+
+    let drain: MockInstance | undefined;
+    await runInSessionDO(restored, (instance: SessionDO) => {
+      drain = vi.spyOn(componentsOf(instance).messageQueue, "processMessageQueue");
+    });
+
+    await vi.waitFor(async () => {
+      const [released] = await queryDO<{ context_reset_pending: number }>(
+        restored,
+        "SELECT context_reset_pending FROM session LIMIT 1"
+      );
+      expect(released?.context_reset_pending).toBe(0);
+    });
+
+    const [message] = await queryDO<{ context_reset_hold: number }>(
+      restored,
+      "SELECT context_reset_hold FROM messages WHERE id = 'msg-hold-rehydrate'"
+    );
+    expect(message.context_reset_hold).toBe(0);
+    expect(drain).toHaveBeenCalled();
   });
 });

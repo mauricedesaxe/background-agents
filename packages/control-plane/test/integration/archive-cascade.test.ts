@@ -1,162 +1,271 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import { SessionIndexStore } from "../../src/db/session-index";
-import type { SessionStatus } from "@open-inspect/shared/types/sessions";
+import { runInSessionDO } from "./session-do-access";
+import type { SessionDO } from "../../src/cloudflare/durable-object";
 import { cleanD1Tables } from "./cleanup";
-import { initNamedSession, queryDO } from "./helpers";
+import {
+  initNamedSession,
+  initNamedSessionDO,
+  queryDO,
+  seedMessage,
+  TEST_SESSION_PROVIDER_AUTH,
+} from "./helpers";
 
-/**
- * Exercises the parent→child archive cascade end to end through real
- * SessionDO-to-SessionDO calls in workerd. Archiving a parent must archive its
- * child/sub-task sessions (recursively) so they leave the sidebar, which reads
- * archived status from the D1 session index.
- */
 describe("Archive cascade to child sessions", () => {
   beforeEach(cleanD1Tables);
 
-  const uniq = (prefix: string) =>
+  const unique = (prefix: string) =>
     `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-  async function seedSession(
-    id: string,
-    opts: {
-      status?: SessionStatus;
-      parentSessionId?: string;
-      spawnSource?: "user" | "agent";
-    } = {}
-  ) {
-    await initNamedSession(id, {
-      userId: "user-1",
-      scmLogin: "acmedev",
-      parentSessionId: opts.parentSessionId,
-      spawnSource: opts.spawnSource ?? (opts.parentSessionId ? "agent" : "user"),
-      spawnDepth: opts.parentSessionId ? 1 : 0,
-    });
-    if (opts.status && opts.status !== "created") {
-      await new SessionIndexStore(env.DB).updateStatus(id, opts.status, Date.now());
-    }
+  async function archiveParent(sessionName: string): Promise<Response> {
+    const id = env.SESSION.idFromName(sessionName);
+    const stub = env.SESSION.get(id);
+    return stub.fetch("http://internal/internal/archive", { method: "POST" });
   }
 
-  async function archiveParent(parentId: string) {
-    const stub = env.SESSION.get(env.SESSION.idFromName(parentId));
-    const res = await stub.fetch("http://internal/internal/archive", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: "user-1" }),
+  async function doStatus(sessionName: string): Promise<string | undefined> {
+    const id = env.SESSION.idFromName(sessionName);
+    const stub = env.SESSION.get(id);
+    const rows = await queryDO<{ status: string }>(stub, "SELECT status FROM session LIMIT 1");
+    return rows[0]?.status;
+  }
+
+  async function indexStatus(sessionName: string): Promise<string | undefined> {
+    return (await new SessionIndexStore(env.DB).get(sessionName))?.status;
+  }
+
+  it("archives an active child and grandchild when the parent is archived", async () => {
+    const parent = await initNamedSession(unique("cascade-parent"));
+    const child = await initNamedSession(unique("cascade-child"), {
+      parentSessionId: parent.sessionName,
     });
+    const grandchild = await initNamedSession(unique("cascade-grandchild"), {
+      parentSessionId: child.sessionName,
+    });
+
+    const res = await archiveParent(parent.sessionName);
+
     expect(res.status).toBe(200);
-  }
+    expect(await res.json()).toEqual({ status: "archived" });
 
-  async function waitForD1Status(
-    store: SessionIndexStore,
-    id: string,
-    expected: SessionStatus,
-    timeoutMs = 3000
-  ) {
-    const deadline = Date.now() + timeoutMs;
-    let last: string | undefined;
-    while (Date.now() < deadline) {
-      last = (await store.get(id))?.status;
-      if (last === expected) return;
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    throw new Error(`Timed out waiting for D1 status "${expected}" on ${id}; last was "${last}"`);
-  }
+    expect(await indexStatus(parent.sessionName)).toBe("archived");
+    expect(await indexStatus(child.sessionName)).toBe("archived");
+    expect(await indexStatus(grandchild.sessionName)).toBe("archived");
 
-  it("cascades archive to a child and grandchild", async () => {
-    const store = new SessionIndexStore(env.DB);
-    const parent = uniq("parent");
-    const child = uniq("child");
-    const grandchild = uniq("grandchild");
-
-    await seedSession(parent, { status: "active" });
-    await seedSession(child, { status: "active", parentSessionId: parent });
-    await seedSession(grandchild, { status: "active", parentSessionId: child });
-
-    await archiveParent(parent);
-
-    await waitForD1Status(store, parent, "archived");
-    await waitForD1Status(store, child, "archived");
-    await waitForD1Status(store, grandchild, "archived");
-
-    const childStub = env.SESSION.get(env.SESSION.idFromName(child));
-    const rows = await queryDO<{ status: string }>(childStub, "SELECT status FROM session");
-    expect(rows[0]?.status).toBe("archived");
+    expect(await doStatus(parent.sessionName)).toBe("archived");
+    expect(await doStatus(child.sessionName)).toBe("archived");
+    expect(await doStatus(grandchild.sessionName)).toBe("archived");
   });
 
-  it("archives children regardless of spawn source", async () => {
-    const store = new SessionIndexStore(env.DB);
-    const parent = uniq("parent");
-    const child = uniq("child");
-
-    await seedSession(parent, { status: "active" });
-    await seedSession(child, {
-      status: "completed",
-      parentSessionId: parent,
-      spawnSource: "user",
+  it("stops a running child's execution before archiving it", async () => {
+    const parent = await initNamedSession(unique("cascade-parent"));
+    const child = await initNamedSession(unique("cascade-child"), {
+      parentSessionId: parent.sessionName,
     });
 
-    await archiveParent(parent);
+    const participants = await queryDO<{ id: string }>(
+      child.stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    await seedMessage(child.stub, {
+      id: "msg-cascade-wedged",
+      authorId: participants[0].id,
+      content: "Wedged child prompt",
+      source: "web",
+      status: "processing",
+      createdAt: Date.now() - 1000,
+      startedAt: Date.now() - 500,
+    });
 
-    await waitForD1Status(store, child, "archived");
+    const res = await archiveParent(parent.sessionName);
+
+    expect(res.status).toBe(200);
+    expect(await indexStatus(child.sessionName)).toBe("archived");
+    const messages = await queryDO<{ status: string; error_message: string | null }>(
+      child.stub,
+      "SELECT status, error_message FROM messages WHERE id = ?",
+      "msg-cascade-wedged"
+    );
+    expect(messages[0].status).toBe("failed");
+    expect(messages[0].error_message).toBe("Session was archived");
   });
 
-  it("leaves unrelated top-level sessions untouched", async () => {
-    const store = new SessionIndexStore(env.DB);
-    const parent = uniq("parent");
-    const other = uniq("other");
+  it("clears a wedged child's stop fence on alarm recovery and dispatches nothing", async () => {
+    // Why: the child's suppressed stop times out only after the transition completes, so recovery must drop the fence without dispatching queued work.
+    const parent = await initNamedSession(unique("cascade-parent"));
+    const child = await initNamedSession(unique("cascade-child"), {
+      parentSessionId: parent.sessionName,
+    });
 
-    await seedSession(parent, { status: "active" });
-    await seedSession(other, { status: "active" });
+    const participants = await queryDO<{ id: string }>(
+      child.stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+    await seedMessage(child.stub, {
+      id: "msg-cascade-alarm-processing",
+      authorId: participants[0].id,
+      content: "Wedged child prompt",
+      source: "web",
+      status: "processing",
+      createdAt: Date.now() - 1000,
+      startedAt: Date.now() - 500,
+    });
+    await seedMessage(child.stub, {
+      id: "msg-cascade-alarm-queued",
+      authorId: participants[0].id,
+      content: "Queued child prompt",
+      source: "web",
+      status: "pending",
+      createdAt: Date.now() - 500,
+    });
 
-    await archiveParent(parent);
-    await waitForD1Status(store, parent, "archived");
+    const res = await archiveParent(parent.sessionName);
+    expect(res.status).toBe(200);
 
-    expect((await store.get(other))?.status).toBe("active");
+    await queryDO(
+      child.stub,
+      "UPDATE messages SET stop_confirmation_deadline = ? WHERE stop_confirmation_deadline IS NOT NULL",
+      Date.now() - 1000
+    );
+
+    await runInSessionDO(child.stub, (instance: SessionDO) => instance.alarm());
+
+    const fence = await queryDO<{ count: number }>(
+      child.stub,
+      "SELECT COUNT(*) as count FROM messages WHERE stop_confirmation_deadline IS NOT NULL"
+    );
+    expect(fence[0].count).toBe(0);
+
+    const statuses = await queryDO<{ id: string; status: string }>(
+      child.stub,
+      "SELECT id, status FROM messages WHERE id IN (?, ?)",
+      "msg-cascade-alarm-processing",
+      "msg-cascade-alarm-queued"
+    );
+    expect(statuses.find((m) => m.id === "msg-cascade-alarm-queued")?.status).toBe("failed");
+    expect(statuses.every((m) => m.status !== "processing")).toBe(true);
+    expect(await doStatus(child.sessionName)).toBe("archived");
   });
 
   it("skips an already-archived child without error", async () => {
-    const store = new SessionIndexStore(env.DB);
-    const parent = uniq("parent");
-    const child = uniq("child");
+    const parent = await initNamedSession(unique("cascade-parent"));
+    const child = await initNamedSession(unique("cascade-child"), {
+      parentSessionId: parent.sessionName,
+    });
+    await queryDO(child.stub, "UPDATE session SET status = 'archived'");
+    await new SessionIndexStore(env.DB).updateStatus(child.sessionName, "archived", Date.now());
 
-    await seedSession(parent, { status: "active" });
-    await seedSession(child, { status: "archived", parentSessionId: parent });
+    const res = await archiveParent(parent.sessionName);
 
-    await archiveParent(parent);
-    await waitForD1Status(store, parent, "archived");
-
-    expect((await store.get(child))?.status).toBe("archived");
+    expect(res.status).toBe(200);
+    expect(await indexStatus(parent.sessionName)).toBe("archived");
+    expect(await indexStatus(child.sessionName)).toBe("archived");
   });
 
-  it("archives a healthy sibling even when another child's DO was never created", async () => {
-    const store = new SessionIndexStore(env.DB);
-    const parent = uniq("parent");
-    const healthy = uniq("healthy");
-    const orphanRow = uniq("orphan-row");
+  it("leaves an unrelated top-level session untouched", async () => {
+    const parent = await initNamedSession(unique("cascade-parent"));
+    const bystander = await initNamedSession(unique("cascade-bystander"));
 
-    await seedSession(parent, { status: "active" });
-    await seedSession(healthy, { status: "active", parentSessionId: parent });
-    await store.create({
-      id: orphanRow,
-      title: orphanRow,
+    const res = await archiveParent(parent.sessionName);
+
+    expect(res.status).toBe(200);
+    expect(await indexStatus(bystander.sessionName)).toBe("created");
+    expect(await doStatus(bystander.sessionName)).toBe("created");
+  });
+
+  it("still archives a sibling when another child's DO was never created", async () => {
+    const parent = await initNamedSession(unique("cascade-parent"));
+    const ghost = unique("cascade-ghost");
+    const now = Date.now();
+    await new SessionIndexStore(env.DB).create({
+      id: ghost,
+      title: "Ghost child",
       repoOwner: "acme",
       repoName: "web-app",
       model: "anthropic/claude-haiku-4-5",
       reasoningEffort: null,
-      baseBranch: null,
+      baseBranch: "main",
       status: "active",
-      parentSessionId: parent,
+      parentSessionId: parent.sessionName,
       spawnSource: "agent",
       spawnDepth: 1,
-      userId: "user-1",
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
+      providerAuth: TEST_SESSION_PROVIDER_AUTH,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const sibling = await initNamedSession(unique("cascade-sibling"), {
+      parentSessionId: parent.sessionName,
     });
 
-    await archiveParent(parent);
+    const res = await archiveParent(parent.sessionName);
 
-    await waitForD1Status(store, parent, "archived");
-    await waitForD1Status(store, healthy, "archived");
+    expect(res.status).toBe(200);
+    expect(await indexStatus(sibling.sessionName)).toBe("archived");
+    expect(await doStatus(sibling.sessionName)).toBe("archived");
+  });
+
+  it("cascades from the expire-draft entrypoint as well", async () => {
+    const parent = await initNamedSession(unique("cascade-parent"));
+    const child = await initNamedSession(unique("cascade-child"), {
+      parentSessionId: parent.sessionName,
+    });
+
+    const id = env.SESSION.idFromName(parent.sessionName);
+    const res = await env.SESSION.get(id).fetch("http://internal/internal/expire-draft", {
+      method: "POST",
+    });
+
+    expect(res.status).toBe(200);
+    expect(await indexStatus(parent.sessionName)).toBe("archived");
+    expect(await indexStatus(child.sessionName)).toBe("archived");
+    expect(await doStatus(child.sessionName)).toBe("archived");
+  });
+
+  it("archives the parent when a descendant chain has an uninitialized middle DO", async () => {
+    const parent = await initNamedSession(unique("cascade-parent"));
+    const missing = unique("cascade-missing");
+    const leaf = await initNamedSessionDO(unique("cascade-leaf"), {
+      parentSessionId: missing,
+    });
+    const now = Date.now();
+    await new SessionIndexStore(env.DB).create({
+      id: missing,
+      title: "Missing middle",
+      repoOwner: "acme",
+      repoName: "web-app",
+      model: "anthropic/claude-haiku-4-5",
+      reasoningEffort: null,
+      baseBranch: "main",
+      status: "active",
+      parentSessionId: parent.sessionName,
+      spawnSource: "agent",
+      spawnDepth: 1,
+      providerAuth: TEST_SESSION_PROVIDER_AUTH,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await new SessionIndexStore(env.DB).create({
+      id: leaf.sessionName,
+      title: "Leaf",
+      repoOwner: "acme",
+      repoName: "web-app",
+      model: "anthropic/claude-haiku-4-5",
+      reasoningEffort: null,
+      baseBranch: "main",
+      status: "active",
+      parentSessionId: missing,
+      spawnSource: "agent",
+      spawnDepth: 2,
+      providerAuth: TEST_SESSION_PROVIDER_AUTH,
+      createdAt: now + 1,
+      updatedAt: now + 1,
+    });
+
+    const res = await archiveParent(parent.sessionName);
+
+    expect(res.status).toBe(200);
+    expect(await indexStatus(parent.sessionName)).toBe("archived");
+    expect(await doStatus(parent.sessionName)).toBe("archived");
   });
 });

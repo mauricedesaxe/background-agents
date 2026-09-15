@@ -21,11 +21,6 @@ const TRIGGER_OPTIONS: TriggerOption[] = [
     description: "Trigger on new errors or metric alerts",
   },
   {
-    type: "betterstack",
-    label: "BetterStack",
-    description: "Trigger on new uptime or log incidents",
-  },
-  {
     type: "webhook",
     label: "Inbound Webhook",
     description: "Trigger via HTTP POST from any system",

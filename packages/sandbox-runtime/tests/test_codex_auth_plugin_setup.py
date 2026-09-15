@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from sandbox_runtime.opencode_server import OpenCodeServer
 from tests.runtime_helpers import make_opencode_server
@@ -30,6 +30,47 @@ def _auth_file(tmp_path: Path) -> Path:
 
 class TestCodexAuthPluginSetup:
     """Cases for codex auth proxy plugin deployment."""
+
+    def test_oauth_proxy_allows_gpt_5_6_models(self):
+        """The OAuth model filter should retain all GPT-5.6 variants."""
+        plugin_source = (
+            Path(__file__).parents[1]
+            / "src"
+            / "sandbox_runtime"
+            / "plugins"
+            / "codex-auth-plugin.js"
+        ).read_text()
+
+        for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+            assert f'"{model}"' in plugin_source
+
+    def test_oauth_proxy_excludes_unsupported_gpt_5_2_models(self):
+        """The OAuth model filter should remove unsupported GPT-5.2 variants."""
+        plugin_source = (
+            Path(__file__).parents[1]
+            / "src"
+            / "sandbox_runtime"
+            / "plugins"
+            / "codex-auth-plugin.js"
+        ).read_text()
+
+        for model in ("gpt-5.2", "gpt-5.2-codex"):
+            assert f'"{model}"' not in plugin_source
+
+    def test_oauth_proxy_uses_generic_provider_broker_contract(self):
+        plugin_source = (
+            Path(__file__).parents[1]
+            / "src"
+            / "sandbox_runtime"
+            / "plugins"
+            / "codex-auth-plugin.js"
+        ).read_text()
+
+        assert 'provider: "openai"' in plugin_source
+        assert "/openai-token-refresh" not in plugin_source
+        assert "result.providerMetadata?.accountId" in plugin_source
+        assert "result.account_id" not in plugin_source
+        assert "result.externalAccountId" not in plugin_source
 
     def test_auth_json_uses_sentinel_token(self, tmp_path):
         """auth.json should contain the sentinel, not the real refresh token."""
@@ -82,6 +123,8 @@ class TestCodexAuthPluginSetup:
         plugin_source = tmp_path / "app" / "sandbox_runtime" / "plugins" / "codex-auth-plugin.js"
         plugin_source.parent.mkdir(parents=True)
         plugin_source.write_text("export const CodexAuthProxy = async () => ({});")
+        broker_source = plugin_source.parent / "provider-token-broker.js"
+        broker_source.write_text("export function createProviderTokenBroker() {}")
 
         fake_proc = MagicMock()
         fake_proc.stdout = None
@@ -101,25 +144,33 @@ class TestCodexAuthPluginSetup:
                 "sandbox_runtime.opencode_server.asyncio.create_task",
                 side_effect=lambda coro: coro.close(),
             ),
+            patch("sandbox_runtime.opencode_server.install_bin_scripts"),
         ):
-            mock_path.side_effect = lambda p: (
-                plugin_source
-                if p == "/app/sandbox_runtime/plugins/codex-auth-plugin.js"
-                else original_path(p)
-            )
+            mock_path.side_effect = lambda p: {
+                "/app/sandbox_runtime/plugins/codex-auth-plugin.js": plugin_source,
+                "/app/sandbox_runtime/plugins/provider-token-broker.js": broker_source,
+            }.get(p, original_path(p))
             sup._setup_managed_oauth = MagicMock()
             sup._install_tools = MagicMock()
             sup._install_skills = MagicMock()
-            sup._install_bin_scripts = MagicMock()
             sup._wait_for_health = AsyncMock()
 
             await sup.start((), sup.workspace_path)
 
-        mock_copy.assert_called_once_with(
-            plugin_source,
-            sup.workspace_path / ".opencode" / "plugins" / "codex-auth-plugin.js",
-        )
+        assert mock_copy.call_args_list == [
+            call(
+                broker_source,
+                sup.workspace_path / ".opencode" / "plugins" / "provider-token-broker.js",
+            ),
+            call(
+                plugin_source,
+                sup.workspace_path / ".opencode" / "plugins" / "codex-auth-plugin.js",
+            ),
+        ]
         mock_excludes.assert_called_once_with(
             sup.workspace_path,
-            {".opencode/plugins/codex-auth-plugin.js"},
+            {
+                ".opencode/plugins/codex-auth-plugin.js",
+                ".opencode/plugins/provider-token-broker.js",
+            },
         )

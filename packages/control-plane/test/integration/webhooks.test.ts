@@ -5,6 +5,7 @@ import { hashApiKey } from "../../src/auth/webhook-key";
 import { encryptToken } from "../../src/auth/crypto";
 import { cleanD1Tables } from "./cleanup";
 import { fetchRuns } from "./run-helpers";
+import { seedActiveUser } from "./helpers";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -26,21 +27,18 @@ function makeAutomation(overrides: Partial<AutomationRow> = {}): AutomationRow {
   return {
     id: `auto-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     name: "Test Automation",
-    repo_owner: "test-owner",
-    repo_name: "test-repo",
-    base_branch: "main",
-    repo_id: 1,
     instructions: "Test instructions",
     trigger_type: "schedule",
     schedule_cron: "0 9 * * *",
     schedule_tz: "UTC",
+    harness: "opencode",
     model: "anthropic/claude-sonnet-4-6",
     reasoning_effort: null,
     enabled: 1,
     next_run_at: null,
     consecutive_failures: 0,
     created_by: "test-user",
-    user_id: null,
+    user_id: "test-user",
     created_at: Date.now(),
     updated_at: Date.now(),
     deleted_at: null,
@@ -57,7 +55,7 @@ async function createSentryAutomation(
   overrides: Partial<AutomationRow> = {}
 ): Promise<AutomationRow> {
   const store = new AutomationStore(env.DB);
-  const encrypted = await encryptToken(SENTRY_TEST_SECRET, env.REPO_SECRETS_ENCRYPTION_KEY);
+  const encrypted = await encryptToken(SENTRY_TEST_SECRET, env.REPO_SECRETS_ENCRYPTION_KEY!);
   const automation = makeAutomation({
     trigger_type: "sentry",
     event_type: "issue.created",
@@ -138,7 +136,10 @@ const sentryMetricWarningPayload = {
 // ─── Sentry webhook tests (per-automation) ───────────────────────────────────
 
 describe("POST /webhooks/sentry/:id", () => {
-  beforeEach(cleanD1Tables);
+  beforeEach(async () => {
+    await cleanD1Tables();
+    await seedActiveUser("test-user");
+  });
 
   it("creates an automation run for a current Sentry issue.created webhook", async () => {
     const automation = await createSentryAutomation();
@@ -179,7 +180,7 @@ describe("POST /webhooks/sentry/:id", () => {
       body,
     });
 
-    // The handler passes auth and attempts to forward to SchedulerDO.
+    // The handler passes auth and attempts to process the scheduler event.
     // In the test env, the DO may throw a transient invalidation error (500).
     // The key assertion: signature verification succeeded (not 401).
     expect(response.status).not.toBe(401);
@@ -383,103 +384,13 @@ describe("POST /webhooks/sentry/:id", () => {
   });
 });
 
-const BETTERSTACK_TEST_SECRET = "test-betterstack-shared-secret";
-
-async function createBetterstackAutomation(
-  overrides: Partial<AutomationRow> = {}
-): Promise<AutomationRow> {
-  const store = new AutomationStore(env.DB);
-  const encrypted = await encryptToken(BETTERSTACK_TEST_SECRET, env.REPO_SECRETS_ENCRYPTION_KEY);
-  const automation = makeAutomation({
-    trigger_type: "betterstack",
-    event_type: "incident.started",
-    schedule_cron: null,
-    next_run_at: null,
-    trigger_auth_data: encrypted,
-    ...overrides,
-  });
-  await store.create(automation);
-  return automation;
-}
-
-const betterstackIncidentPayload = {
-  data: {
-    id: "incident-123",
-    type: "Incident",
-    attributes: {
-      name: "API is down",
-      url: "https://uptime.betterstack.com/incidents/123",
-      cause: "HTTP 500 for 3 checks in a row",
-      started_at: "2026-08-19T12:00:00Z",
-      status: "started",
-    },
-  },
-};
-
-describe("POST /webhooks/betterstack/:id", () => {
-  beforeEach(cleanD1Tables);
-
-  it("launches a run for an incident with the correct shared secret", async () => {
-    const automation = await createBetterstackAutomation();
-    const body = JSON.stringify(betterstackIncidentPayload);
-
-    const response = await SELF.fetch(`https://test.local/webhooks/betterstack/${automation.id}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-betterstack-secret": BETTERSTACK_TEST_SECRET,
-      },
-      body,
-    });
-
-    expect(response.status).toBe(200);
-    const result = await response.json<{ ok: boolean; skipped?: boolean; triggered?: number }>();
-    expect(result.ok).toBe(true);
-    expect(result.skipped).not.toBe(true);
-    expect(result.triggered).toBeGreaterThanOrEqual(1);
-
-    const runs = await fetchRuns(automation.id);
-    expect(runs).toHaveLength(1);
-  });
-
-  it("rejects a request with a wrong shared secret", async () => {
-    const automation = await createBetterstackAutomation();
-    const body = JSON.stringify(betterstackIncidentPayload);
-
-    const response = await SELF.fetch(`https://test.local/webhooks/betterstack/${automation.id}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-betterstack-secret": "wrong-secret",
-      },
-      body,
-    });
-
-    expect(response.status).toBe(401);
-    const runs = await fetchRuns(automation.id);
-    expect(runs).toHaveLength(0);
-  });
-
-  it("rejects a request with no shared secret header", async () => {
-    const automation = await createBetterstackAutomation();
-    const body = JSON.stringify(betterstackIncidentPayload);
-
-    const response = await SELF.fetch(`https://test.local/webhooks/betterstack/${automation.id}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
-    });
-
-    expect(response.status).toBe(401);
-    const runs = await fetchRuns(automation.id);
-    expect(runs).toHaveLength(0);
-  });
-});
-
 // ─── Automation webhook tests ─────────────────────────────────────────────────
 
 describe("POST /webhooks/automation/:id", () => {
-  beforeEach(cleanD1Tables);
+  beforeEach(async () => {
+    await cleanD1Tables();
+    await seedActiveUser("test-user");
+  });
 
   const TEST_API_KEY = "test-webhook-api-key-abc123";
 

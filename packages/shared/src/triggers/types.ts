@@ -12,7 +12,6 @@ export const automationTriggerTypeSchema = z.enum([
   "github_event",
   "linear_event",
   "sentry",
-  "betterstack",
   "webhook",
   "slack_event",
 ]);
@@ -66,7 +65,17 @@ const triggerConditionSchema = z.discriminatedUnion("type", [
     value: stringArrayConditionValueSchema,
   }),
   z.object({
+    type: z.literal("conclusion"),
+    operator: z.literal("eq"),
+    value: z.string(),
+  }),
+  z.object({
     type: z.literal("check_conclusion"),
+    operator: z.literal("eq"),
+    value: z.string(),
+  }),
+  z.object({
+    type: z.literal("workflow_name"),
     operator: z.literal("eq"),
     value: z.string(),
   }),
@@ -149,7 +158,10 @@ export const githubAutomationEventSchema = z.object({
   labels: z.array(z.string()).optional(),
   actor: z.string().optional(),
   changedFiles: z.array(z.string()).optional(),
+  conclusion: z.string().optional(),
+  /** Compatibility field for independently deployed pre-conclusion producers and consumers. */
   checkConclusion: z.string().optional(),
+  workflowName: z.string().optional(),
   /** Present only on pull_request events. */
   pullRequest: z
     .object({
@@ -189,12 +201,6 @@ export const sentryAutomationEventSchema = z.object({
   culpritFile: z.string().optional(),
 });
 
-export const betterstackAutomationEventSchema = z.object({
-  ...baseAutomationEventSchema,
-  source: z.literal("betterstack"),
-  automationId: z.string().min(1),
-});
-
 export const webhookAutomationEventSchema = z.object({
   ...baseAutomationEventSchema,
   source: z.literal("webhook"),
@@ -222,7 +228,6 @@ export const automationEventSchema = z.discriminatedUnion("source", [
   githubAutomationEventSchema,
   linearAutomationEventSchema,
   sentryAutomationEventSchema,
-  betterstackAutomationEventSchema,
   webhookAutomationEventSchema,
   slackAutomationEventSchema,
 ]);
@@ -233,7 +238,6 @@ export type GitHubAutomationEvent = z.infer<typeof githubAutomationEventSchema>;
 export type GitHubPullRequestEventFacts = NonNullable<GitHubAutomationEvent["pullRequest"]>;
 export type LinearAutomationEvent = z.infer<typeof linearAutomationEventSchema>;
 export type SentryAutomationEvent = z.infer<typeof sentryAutomationEventSchema>;
-export type BetterstackAutomationEvent = z.infer<typeof betterstackAutomationEventSchema>;
 export type WebhookAutomationEvent = z.infer<typeof webhookAutomationEventSchema>;
 export type SlackAutomationEvent = z.infer<typeof slackAutomationEventSchema>;
 
@@ -246,7 +250,6 @@ export const TRIGGER_TYPE_TO_SOURCE: Partial<Record<AutomationTriggerType, Autom
     github_event: "github",
     linear_event: "linear",
     sentry: "sentry",
-    betterstack: "betterstack",
     webhook: "webhook",
     slack_event: "slack",
   };
