@@ -64,7 +64,7 @@
   },
   "harness": {
     "repo": "https://github.com/mauricedesaxe/lazar-harness.git",
-    "ref": "42aa3e015a66109b05b8cf2f88c5e4a09ce4ae68",
-    "archiveSha256": "8f7130e26d03b1c7131fe4795f621665d082bf3fa1cde57598ae09f26d9e18f2"
+    "ref": "0ce364f9aa88b9e729d1083df1fc0c6997444b0f",
+    "archiveSha256": "2fcf93af258ad96f28f3eda3c920e0f32f09bd50287c4dc480a64e5ed28e18c5"
   }
 }

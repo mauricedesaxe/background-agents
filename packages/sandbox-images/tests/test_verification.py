@@ -173,3 +173,25 @@ def test_desktop_requires_websocket_rfb_exchange(monkeypatch, banner, security, 
     else:
         with pytest.raises(RuntimeError, match="RFB"):
             verification["verify_rfb_proxy"](12345)
+
+
+def test_harness_pin_is_a_full_sha_used_for_clone_and_stamp():
+    """The image build installs the harness through a content-pinned ref.
+
+    What this repo owns is the wiring: the pin is a full commit sha, and the
+    same ref drives both the fetch and the stamp, so the smoke assertion
+    (stamped == pinned) can never pass on a drift. Read, not restated.
+    """
+    import json
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    harness = json.loads((root / "toolchain.json").read_text())["harness"]
+    assert re.fullmatch(r"[0-9a-f]{40}", harness["ref"]), "harness pin must be a full 40-char sha"
+
+    installer = (root / "install" / "harness.sh").read_text()
+    assert installer.count("OI_HARNESS_REF") >= 3, (
+        "the pinned ref must drive both the fetch and the stamp; a drift between "
+        "them lets the smoke assertion pass on the wrong build"
+    )
