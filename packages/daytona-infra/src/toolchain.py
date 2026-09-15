@@ -28,6 +28,11 @@ SANDBOX_VERSION = (
     "daytona-v14-8gb-jj-bd-vnc-opencode-1-18-18"  # bump to invalidate the Daytona snapshot
 )
 
+# The lazar-harness pin for the sandbox image. A commit sha, so builds are reproducible; bump deliberately.
+HARNESS_REPO_OWNER = "mauricedesaxe"
+HARNESS_REPO_NAME = "lazar-harness"
+HARNESS_PIN = "0ce364f9aa88b9e729d1083df1fc0c6997444b0f"
+
 
 def build_base_image(repo_root: Path) -> Image:
     """Build the Open-Inspect Daytona base image."""
@@ -110,7 +115,20 @@ def build_base_image(repo_root: Path) -> Image:
             }
         )
         .add_local_dir(str(sandbox_runtime_dir), "/app/sandbox_runtime")
-        .run_commands("HOME=/root bash /app/sandbox_runtime/scripts/install-harness.sh --install")
+        .run_commands(
+            # The pinned one-liner, inlined: script and source resolve to the
+            # same sha, so image builds stay reproducible without the wrapper
+            # this replaces. install.sh's own smoke suite owns its behavior.
+            "HOME=/root curl -fsSL "
+            f"https://raw.githubusercontent.com/{HARNESS_REPO_OWNER}/{HARNESS_REPO_NAME}/{HARNESS_PIN}/install.sh"
+            " | HARNESS_REF=$HARNESS_PIN HARNESS_SURFACE=sandbox bash -s -- --install",
+            # managed_skills.py renames the skills dir aside each session; a
+            # copy baked into the image layer makes that rename fail with
+            # EXDEV before OpenCode starts. The runtime owns this directory.
+            "rm -rf /root/.config/opencode/skills"
+            " /root/.config/opencode/.managed-skills-backup"
+            " /root/.config/opencode/.managed-skills-swap",
+        )
         .workdir("/workspace")
     )
 
