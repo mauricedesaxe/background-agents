@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createTestEnv } from "../router.test-support";
 import type { Env } from "../types";
 import { createSandboxProviderFromEnv } from "./provider-factory";
+import type { DaytonaRestConfig } from "./daytona-rest-client";
 
 function createEnv(overrides: Partial<Env>): Env {
   return createTestEnv({ TOKEN_ENCRYPTION_KEY: "test-token-key", ...overrides });
@@ -45,6 +46,21 @@ describe("createSandboxProviderFromEnv", () => {
     expect(() => createSandboxProviderFromEnv(env, "daytona")).toThrow(
       "DAYTONA_AUTO_ARCHIVE_INTERVAL_MINUTES must be a valid number"
     );
+  });
+
+  it("archives a stopped Daytona sandbox after a day when the env sets no interval", () => {
+    const env = createEnv({
+      DAYTONA_API_URL: "https://daytona.test",
+      DAYTONA_API_KEY: "daytona-key",
+      DAYTONA_BASE_SNAPSHOT: "base",
+    });
+
+    const provider = createSandboxProviderFromEnv(env, "daytona");
+    const { config } = (provider as unknown as { client: { config: DaytonaRestConfig } }).client;
+
+    // A week of stopped sandboxes exhausts the provider's org-wide disk quota
+    // and blocks every session from spawning, so the default has to stay a day.
+    expect(config.autoArchiveIntervalMinutes).toBe(1440);
   });
 
   it("rejects malformed E2B auto-pause configuration", () => {
