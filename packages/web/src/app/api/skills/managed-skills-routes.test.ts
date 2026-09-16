@@ -142,10 +142,16 @@ describe("managed skills BFF routes", () => {
     const response = await BULK_IMPORT_PREVIEW(request, { params: Promise.resolve(undefined) });
 
     expect(response.status).toBe(200);
-    expect(controlPlaneUserFetch).toHaveBeenCalledWith("/skills/import/bulk/preview", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    expect(controlPlaneUserFetch).toHaveBeenCalledWith(
+      "/skills/import/bulk/preview",
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+      {
+        timeoutMs: 120_000,
+      }
+    );
   });
 
   it("forwards bulk import confirmations unchanged", async () => {
@@ -178,10 +184,16 @@ describe("managed skills BFF routes", () => {
     const response = await BULK_IMPORT(request, { params: Promise.resolve(undefined) });
 
     expect(response.status).toBe(201);
-    expect(controlPlaneUserFetch).toHaveBeenCalledWith("/skills/import/bulk", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    expect(controlPlaneUserFetch).toHaveBeenCalledWith(
+      "/skills/import/bulk",
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+      {
+        timeoutMs: 120_000,
+      }
+    );
   });
 
   it("forwards re-import previews with encoded IDs and preview parameters", async () => {

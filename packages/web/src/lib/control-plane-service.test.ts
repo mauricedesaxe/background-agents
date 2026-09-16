@@ -46,6 +46,7 @@ describe("dispatchWebServiceRequest", () => {
         redirect: "manual",
         cache: "no-store",
       },
+      transportTimeoutMs: 120_000,
     });
 
     const [url, init] = mocks.dispatchControlPlaneFetch.mock.calls[0] ?? [];
@@ -56,6 +57,7 @@ describe("dispatchWebServiceRequest", () => {
       cache: "no-store",
       body: expect.objectContaining({ byteLength: body.byteLength }),
     });
+    expect(mocks.dispatchControlPlaneFetch).toHaveBeenCalledWith(url, init, {}, 120_000);
 
     const sentHeaders = new Headers(init?.headers);
     expect(sentHeaders.get("Authorization")).toBeNull();
