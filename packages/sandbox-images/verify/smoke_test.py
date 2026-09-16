@@ -275,12 +275,6 @@ def inspect_image(plan: dict[str, Any], tools: dict[str, Any], *, services: bool
     probe.run(["gh", "--version"])
     if probe.run(["git", "config", "--system", "credential.useHttpPath"]) != "true":
         raise RuntimeError("SCM credential helper is not repository-path scoped")
-    harness_stamp = json.loads(Path("/app/openinspect-harness.json").read_text())
-    if harness_stamp.get("ref") != tools["harness"]["ref"]:
-        raise RuntimeError("Installed harness ref does not match the pinned toolchain")
-    skills = Path(plan["target"]["home"]) / ".claude/skills"
-    if not any(skills.glob("lazar-*/SKILL.md")):
-        raise RuntimeError("No lazar-* skill installed for the runtime user")
     probe.run(
         [
             "node",

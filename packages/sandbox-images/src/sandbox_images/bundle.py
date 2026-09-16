@@ -60,11 +60,6 @@ def validate_toolchain(tools: dict[str, Any]) -> None:
         version(tools[name])
     if not re.fullmatch(r"[a-f0-9]{64}", tools.get("agentBrowserSha256", "")):
         raise ValueError("agent-browser native binary must have a SHA-256 pin")
-    harness = tools["harness"]
-    if not re.fullmatch(r"[a-f0-9]{40}", harness.get("ref", "")):
-        raise ValueError("Harness pin must have an exact commit ref")
-    if not re.fullmatch(r"[a-f0-9]{64}", harness.get("archiveSha256", "")):
-        raise ValueError("Harness pin must have a tree SHA-256")
     archives = [
         tools[name]
         for name in (
@@ -181,9 +176,6 @@ def pack_bundle(root: Path, provider: str, output_root: Path) -> Path:
             "PYTHON_VERSION": toolchain["python"],
             "AGENT_BROWSER_VERSION": toolchain["agentBrowser"],
             "AGENT_BROWSER_SHA256": toolchain["agentBrowserSha256"],
-            "OI_HARNESS_REPO": toolchain["harness"]["repo"],
-            "OI_HARNESS_REF": toolchain["harness"]["ref"],
-            "OI_HARNESS_ARCHIVE_SHA": toolchain["harness"]["archiveSha256"],
         }
         for name, key in (
             ("NODE", "node"),
