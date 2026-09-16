@@ -22,6 +22,10 @@ type RouteHandler<P> = (
 
 type ProxyHandlers<P> = Record<ProxyMethod, RouteHandler<P>>;
 
+interface SettingsProxyOptions {
+  timeoutMs?: number;
+}
+
 /** JSON mutation budget kept below portable web-function request limits. */
 export const SETTINGS_PROXY_MAX_BODY_BYTES = 4 * 1024 * 1024;
 
@@ -35,7 +39,8 @@ async function relaySettingsResource(
   request: NextRequest,
   buildPath: () => string | Promise<string>,
   label: string,
-  method: ProxyMethod
+  method: ProxyMethod,
+  options?: SettingsProxyOptions
 ): Promise<NextResponse> {
   try {
     // The revision ID is an opaque CAS token; forwarding it unchanged keeps
@@ -63,7 +68,10 @@ async function relaySettingsResource(
       }
       if (ifMatch) init.headers = { "If-Match": ifMatch };
     }
-    const response = await controlPlaneUserFetch(await buildPath(), init);
+    const path = await buildPath();
+    const response = options
+      ? await controlPlaneUserFetch(path, init, { timeoutMs: options.timeoutMs })
+      : await controlPlaneUserFetch(path, init);
     return relayJsonResponse(response);
   } catch (error) {
     console.error(`Failed to ${METHOD_VERBS[method]} ${label}:`, error);
@@ -77,7 +85,8 @@ async function relaySettingsResource(
 /** Creates the requested BFF route handlers for an authenticated control-plane resource. */
 export function settingsProxy<P>(
   buildPath: (params: P, request: NextRequest) => string,
-  label: string
+  label: string,
+  options?: SettingsProxyOptions
 ): ProxyHandlers<P> {
   const handler =
     (method: ProxyMethod): RouteHandler<P> =>
@@ -86,7 +95,8 @@ export function settingsProxy<P>(
         request,
         async () => buildPath(await context.params, request),
         label,
-        method
+        method,
+        options
       );
 
   return {

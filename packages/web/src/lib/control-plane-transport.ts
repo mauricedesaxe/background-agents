@@ -85,9 +85,10 @@ async function getServiceBinding(
 export async function dispatchControlPlaneFetch(
   url: string,
   fetchOptions: RequestInit,
-  correlationFields: Record<string, string>
+  correlationFields: Record<string, string>,
+  timeoutMs = CONTROL_PLANE_FETCH_TIMEOUT_MS
 ): Promise<Response> {
-  const timeoutSignal = AbortSignal.timeout(CONTROL_PLANE_FETCH_TIMEOUT_MS);
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const signal = fetchOptions.signal
     ? AbortSignal.any([fetchOptions.signal, timeoutSignal])
     : timeoutSignal;
