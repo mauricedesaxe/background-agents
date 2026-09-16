@@ -61,10 +61,5 @@
   "novnc": {
     "version": "1.6.0",
     "sha256": "5066103959ef4e9b10f37e5a148627360dd8414e4cf8a7db92bdbd022e728aaa"
-  },
-  "harness": {
-    "repo": "https://github.com/mauricedesaxe/lazar-harness.git",
-    "ref": "0ce364f9aa88b9e729d1083df1fc0c6997444b0f",
-    "archiveSha256": "2fcf93af258ad96f28f3eda3c920e0f32f09bd50287c4dc480a64e5ed28e18c5"
   }
 }

@@ -10,7 +10,7 @@ if [[ "$(id -u)" != 0 || "$(uname -m)" != x86_64 ]]; then
   exit 1
 fi
 trap 'echo "Image installation failed in phase ${OI_PHASE:-initialization}" >&2' ERR
-phases=("os/$OI_OS" languages tools runtime filesystem harness)
+phases=("os/$OI_OS" languages tools runtime filesystem)
 if (( $# )); then phases=("$@"); fi
 for OI_PHASE in "${phases[@]}"; do
   if [[ "$OI_PHASE" == os ]]; then OI_PHASE="os/$OI_OS"; fi
