@@ -32,9 +32,9 @@ does not report a managed/local collision for the imported names.
 
 - The generic import, profile, resolution, and materialization mechanisms stay in the upstream-owned
   managed-skills implementation.
-- The canonical sandbox-ready source belongs in the external `lazar-harness` repository. Local
-  installs apply sparse overlays in a temporary staging tree; there is no second generated skill
-  collection to import or keep synchronized.
+- The single authored source belongs in the external `lazar-harness` repository under
+  `skills/<name>`. Imports may warn when they omit host-specific frontmatter; there is no second
+  generated skill collection or frontmatter overlay to keep synchronized.
 - Catalog entries record the source commit and content digests. Updating the harness is an explicit
   preview-and-reimport operation; image rebuilds are unrelated.
 - Managed skills install skills only. Harness rules, hooks, agents, binaries, and OpenCode command
