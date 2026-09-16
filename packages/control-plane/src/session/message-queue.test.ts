@@ -1946,6 +1946,28 @@ describe("SessionMessageQueue", () => {
     expect(h.sandboxLifecycle.spawnSandbox).toHaveBeenCalledOnce();
   });
 
+  it("does not respawn when the supervisor reports the failure as fatal", async () => {
+    const h = buildQueue();
+    h.sandboxLifecycle.terminateFailedSandbox.mockResolvedValue(true);
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "msg-pending" }));
+    h.repository.listPendingMessagesWithCreatedAt.mockReturnValue([
+      { id: "msg-pending", created_at: 800 },
+    ]);
+
+    await h.queue.handleFatalSandboxFailure("Anthropic credential was denied", true);
+    await h.backgroundTasks.settle();
+
+    expect(h.sandboxLifecycle.spawnSandbox).not.toHaveBeenCalled();
+    expect(h.repository.recordMessageCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: "msg-pending",
+        error: "Anthropic credential was denied",
+      }),
+      expect.any(Number),
+      "pending"
+    );
+  });
+
   describe("enqueuePromptFromApi", () => {
     it("rejects exhaustion before capacity checks or participant mutations", async () => {
       const h = buildQueue();

@@ -29,7 +29,7 @@ function createHandler() {
   const refreshXaiToken = vi.fn();
   const getScmCredentials = vi.fn();
   const broadcast = vi.fn();
-  const failSandbox = vi.fn(async (_reason: string) => {});
+  const failSandbox = vi.fn(async (_reason: string, _fatal: boolean) => {});
   const messenger = { broadcast, sendToSandbox: vi.fn(async () => {}) };
   const generateId = vi.fn(() => "participant-1");
   const now = vi.fn(() => 1234);
@@ -139,7 +139,33 @@ describe("SandboxHandler", () => {
 
     expect(response.status).toBe(200);
     expect(isValidSandboxToken).toHaveBeenCalledWith("sandbox-token", sandbox);
-    expect(failSandbox).toHaveBeenCalledWith("OpenCode repeatedly crashed");
+    expect(failSandbox).toHaveBeenCalledWith("OpenCode repeatedly crashed", true);
+  });
+
+  it("defaults a sandbox error without a fatal flag to retryable", async () => {
+    const { handler, getSandbox, isValidSandboxToken, failSandbox } = createHandler();
+    getSandbox.mockReturnValue({
+      id: "sandbox-row-1",
+      modal_sandbox_id: "sandbox-1",
+      auth_token_hash: "token-hash-1",
+      auth_token: null,
+    } as SandboxRow);
+    isValidSandboxToken.mockResolvedValue(true);
+
+    const response = await handler.sandboxError(
+      new Request("http://internal/internal/sandbox-error", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          Authorization: "Bearer sandbox-token",
+          "X-Sandbox-ID": "sandbox-1",
+        },
+        body: JSON.stringify({ error: "Bridge exited" }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(failSandbox).toHaveBeenCalledWith("Bridge exited", false);
   });
 
   it("rejects an empty sandbox error", async () => {
