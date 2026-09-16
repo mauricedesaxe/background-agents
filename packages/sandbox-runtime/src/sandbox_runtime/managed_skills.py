@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import os
@@ -560,13 +561,31 @@ class ManagedSkillsMaterializer:
         parent = self.destination.parent
         self._write_journal(journal)
         if self.destination.exists():
-            self.destination.rename(backup)
+            self._displace(self.destination, backup)
             self._fsync_directory(parent)
         staging.rename(self.destination)
         self._fsync_directory(parent)
         self._remove_path(backup)
         journal.unlink(missing_ok=True)
         self._fsync_directory(parent)
+
+    @staticmethod
+    def _displace(source: Path, target: Path) -> None:
+        """Move an installed tree aside, by copy when the kernel will not rename it.
+
+        The image bakes a skills directory into a lower overlay layer, and
+        overlayfs answers EXDEV rather than rename a directory out of one. The
+        copy costs this step its atomicity, which the swap journal already
+        covers, and the removal below lands as a whiteout in the upper layer.
+        """
+        try:
+            source.rename(target)
+            return
+        except OSError as error:
+            if error.errno != errno.EXDEV:
+                raise
+        shutil.copytree(source, target, symlinks=True)
+        shutil.rmtree(source)
 
     def _abort_staging(self, staging: Path, backup: Path, journal: Path) -> None:
         if not self.destination.exists() and backup.exists():
