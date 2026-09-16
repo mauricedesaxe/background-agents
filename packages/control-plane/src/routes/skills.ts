@@ -1,6 +1,8 @@
 import { parseBody } from "./body";
 import { Hono } from "hono";
 import {
+  bulkImportSkillsInputSchema,
+  bulkSkillImportPreviewInputSchema,
   createSkillInputSchema,
   createSkillProfileInputSchema,
   importSkillInputSchema,
@@ -31,7 +33,12 @@ import {
   buildValidatedSkillRevision,
   SkillRevisionValidationError,
 } from "../skills/content-addressing";
-import { fetchSkillImport, SkillImportError, type SkillImportResult } from "../skills/git-import";
+import {
+  fetchBulkSkillImport,
+  fetchSkillImport,
+  SkillImportError,
+  type SkillImportResult,
+} from "../skills/git-import";
 import { admit, dispatch } from "../routing/admit";
 import type { ControlPlaneHonoEnv } from "../routing/hono-env";
 import { z } from "zod";
@@ -188,7 +195,8 @@ async function handlePreviewSkill(
 async function importPreviewResponse(
   ctx: RequestContext,
   result: SkillImportResult,
-  heldByName?: string
+  heldByName?: string,
+  nameAvailable?: boolean
 ): Promise<SkillImportPreviewResponse> {
   return {
     name: result.name,
@@ -203,7 +211,8 @@ async function importPreviewResponse(
     files: result.files,
     warnings: result.warnings,
     nameAvailable:
-      result.name === heldByName || (await new SkillStore(ctx.db).nameAvailable(result.name)),
+      nameAvailable ??
+      (result.name === heldByName || (await new SkillStore(ctx.db).nameAvailable(result.name))),
   };
 }
 
@@ -290,6 +299,113 @@ async function handleImportSkill(
       ...sourceAuditFields(result.source),
     });
     return json({ skill }, 201);
+  } catch (e) {
+    return skillImportWriteError(e);
+  }
+}
+
+async function handlePreviewBulkSkillImport(
+  request: Request,
+  env: Env,
+  _params: object,
+  ctx: RequestContext
+): Promise<Response> {
+  const parsed = await parseBody(
+    request,
+    bulkSkillImportPreviewInputSchema,
+    "Invalid bulk skill import source"
+  );
+  if (parsed instanceof Response) return parsed;
+  try {
+    const result = await fetchBulkSkillImport(createRouteSourceControlProvider(env), parsed.source);
+    const nameCounts = new Map<string, number>();
+    for (const skill of result.skills) {
+      nameCounts.set(skill.name, (nameCounts.get(skill.name) ?? 0) + 1);
+    }
+    const unavailableNames = await new SkillStore(ctx.db).unavailableNames(
+      result.skills.map((skill) => skill.name)
+    );
+    const skills = await Promise.all(
+      result.skills.map((skill) =>
+        importPreviewResponse(
+          ctx,
+          skill,
+          undefined,
+          nameCounts.get(skill.name) === 1 && !unavailableNames.has(skill.name.toLowerCase())
+        )
+      )
+    );
+    return json({ skills, totalFiles: result.totalFiles, totalBytes: result.totalBytes });
+  } catch (e) {
+    return skillImportWriteError(e);
+  }
+}
+
+async function handleBulkSkillImport(
+  request: Request,
+  env: Env,
+  _params: object,
+  ctx: RequestContext
+): Promise<Response> {
+  const userId = canonicalUserId(ctx);
+  if (!userId) return error("Canonical user required", 403);
+  const parsed = await parseBody(request, bulkImportSkillsInputSchema, "Invalid bulk skill import");
+  if (parsed instanceof Response) return parsed;
+  try {
+    const result = await fetchBulkSkillImport(createRouteSourceControlProvider(env), parsed.source);
+    if (result.commitSha !== parsed.expectedCommitSha) {
+      return error(
+        `The source moved to commit ${result.commitSha} since it was previewed. Preview the import again.`,
+        409
+      );
+    }
+
+    const fetchedByRoot = new Map(
+      result.skills.map((skill) => [skill.source.subdirectory, skill] as const)
+    );
+    const selected: SkillImportResult[] = [];
+    for (const reviewed of parsed.skills) {
+      const fetched = fetchedByRoot.get(reviewed.subdirectory);
+      if (!fetched) {
+        return error(
+          `The reviewed skill at ${reviewed.subdirectory ?? "repository root"} is no longer in the collection. Preview again.`,
+          409
+        );
+      }
+      if (fetched.name !== reviewed.name) {
+        return error(
+          `The reviewed skill at ${reviewed.subdirectory ?? "repository root"} is now named ${fetched.name}. Preview again.`,
+          409
+        );
+      }
+      const stale = confirmedImport(fetched, {
+        expectedCommitSha: parsed.expectedCommitSha,
+        expectedSourceSha256: reviewed.expectedSourceSha256,
+        expectedRevisionSha256: reviewed.expectedRevisionSha256,
+      });
+      if (stale) return stale;
+      selected.push(fetched);
+    }
+
+    const skills = await new SkillStore(ctx.db).createImportedSkills(
+      selected.map((skill) => ({
+        name: skill.name,
+        content: skill.content,
+        source: skill.source,
+      })),
+      parsed.assignments,
+      userId
+    );
+    for (const [index, skill] of skills.entries()) {
+      audit(ctx, {
+        action: "skill.imported",
+        skill_id: skill.id,
+        revision_id: skill.currentRevisionId,
+        revision_created: true,
+        ...sourceAuditFields(selected[index].source),
+      });
+    }
+    return json({ skills }, 201);
   } catch (e) {
     return skillImportWriteError(e);
   }
@@ -640,6 +756,10 @@ skillRoutes.post("/skills/resolve-preview", SKILLS_READ, (c) => dispatch(c, hand
 skillRoutes.get("/skills/:id", SKILLS_READ, (c) => dispatch(c, handleGetSkill));
 
 skillRoutes.post("/skills", SKILLS_MANAGE, (c) => dispatch(c, handleCreateSkill));
+skillRoutes.post("/skills/import/bulk/preview", SKILLS_MANAGE, (c) =>
+  dispatch(c, handlePreviewBulkSkillImport)
+);
+skillRoutes.post("/skills/import/bulk", SKILLS_MANAGE, (c) => dispatch(c, handleBulkSkillImport));
 skillRoutes.post("/skills/import/preview", SKILLS_MANAGE, (c) =>
   dispatch(c, handlePreviewSkillImport)
 );

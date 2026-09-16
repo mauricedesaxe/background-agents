@@ -3,6 +3,7 @@ import {
   skillImportSourceSchema,
   skillMetadataSchema,
   type CreateSkillInput,
+  type ImportedSkillIdentity,
   type ReplaceSkillContentAndAssignmentsInput,
   type SetSkillEnabledInput,
   type Skill,
@@ -16,7 +17,8 @@ import {
 } from "@open-inspect/shared/types/skills";
 import { generateId } from "../auth/crypto";
 import { buildValidatedSkillRevision } from "../skills/content-addressing";
-import { isUniqueConstraintError } from "./errors";
+import { bulkInsertStatements } from "./bulk-insert";
+import { isForeignKeyConstraintError, isUniqueConstraintError } from "./errors";
 import { MAX_D1_QUERY_PARAMETERS } from "./query-limits";
 import type { SqlDatabase, SqlStatement } from "./sql-database";
 
@@ -93,6 +95,11 @@ interface CurrentSkillRevisionRow {
 
 export class SkillConflictError extends Error {}
 export class SkillValidationError extends Error {}
+export interface ImportedSkillCreateInput {
+  name: string;
+  content: SkillContentInput;
+  source: SkillImportSource;
+}
 interface ApplicableSkill {
   id: string;
   name: string;
@@ -219,6 +226,156 @@ export class SkillStore {
       throw error;
     }
     return (await this.get(id))!;
+  }
+
+  /** Persist a reviewed collection import as one all-or-nothing catalog write. */
+  async createImportedSkills(
+    inputs: ImportedSkillCreateInput[],
+    assignments: SkillAssignmentInput[],
+    actorUserId: string
+  ): Promise<ImportedSkillIdentity[]> {
+    if (inputs.length === 0) {
+      throw new SkillValidationError("At least one imported skill is required");
+    }
+    const duplicateNames = new Set<string>();
+    const seenNames = new Set<string>();
+    for (const input of inputs) {
+      const name = input.name.toLowerCase();
+      if (seenNames.has(name)) duplicateNames.add(name);
+      seenNames.add(name);
+      if (RESERVED_SKILL_NAMES.has(name)) {
+        throw new SkillConflictError(`Skill name ${input.name} is reserved by the sandbox runtime`);
+      }
+    }
+    if (duplicateNames.size > 0) {
+      throw new SkillConflictError(
+        `Duplicate skill name in import: ${[...duplicateNames].sort().join(", ")}`
+      );
+    }
+
+    await this.validateAssignments(assignments);
+    const unavailableNames = await this.unavailableNames(inputs.map((input) => input.name));
+    const existingName = inputs.find((input) =>
+      unavailableNames.has(input.name.toLowerCase())
+    )?.name;
+    if (existingName) {
+      throw new SkillConflictError(`A skill with the name ${existingName} already exists`);
+    }
+
+    const revisions = await Promise.all(
+      inputs.map((input) => buildValidatedSkillRevision(input.name, input.content))
+    );
+    const now = Date.now();
+    const records = inputs.map((input, index) => ({
+      input,
+      revision: revisions[index],
+      id: `skill_${generateId()}`,
+      revisionId: `skillrev_${generateId()}`,
+    }));
+    const statements: SqlStatement[] = [
+      ...bulkInsertStatements(
+        this.db,
+        "skills",
+        records.map((record) => ({
+          id: record.id,
+          name: record.input.name,
+          current_revision_id: null,
+          enabled: 1,
+          deleted_at: null,
+          created_by: actorUserId,
+          updated_by: actorUserId,
+          created_at: now,
+          updated_at: now,
+        }))
+      ),
+      ...bulkInsertStatements(
+        this.db,
+        "skill_revisions",
+        records.map((record) => ({
+          id: record.revisionId,
+          skill_id: record.id,
+          revision_number: 1,
+          revision_sha256: record.revision.revisionSha256,
+          description: record.input.content.description,
+          body: record.input.content.body,
+          license: record.input.content.license ?? null,
+          compatibility: record.input.content.compatibility ?? null,
+          metadata_json: JSON.stringify(record.input.content.metadata),
+          total_bytes: record.revision.totalBytes,
+          created_by: actorUserId,
+          created_at: now,
+        }))
+      ),
+      ...bulkInsertStatements(
+        this.db,
+        "skill_revision_files",
+        records.flatMap((record) =>
+          record.revision.files.map((file) => ({
+            revision_id: record.revisionId,
+            path: file.path,
+            content: file.content,
+            content_sha256: file.sha256,
+            size_bytes: file.sizeBytes,
+            executable: file.executable ? 1 : 0,
+          }))
+        )
+      ),
+      ...this.currentRevisionUpdates(records),
+      ...bulkInsertStatements(
+        this.db,
+        "skill_assignments",
+        records.flatMap((record) =>
+          assignments.map((assignment) => ({
+            id: `skillassign_${generateId()}`,
+            skill_id: record.id,
+            scope_type: assignment.type,
+            repo_owner: assignment.type === "repository" ? assignment.repository.repoOwner : null,
+            repo_name: assignment.type === "repository" ? assignment.repository.repoName : null,
+            environment_id: assignment.type === "environment" ? assignment.environmentId : null,
+            created_by: actorUserId,
+            created_at: now,
+          }))
+        )
+      ),
+      ...bulkInsertStatements(
+        this.db,
+        "skill_import_sources",
+        records.map((record) => {
+          const source = skillImportSourceSchema.parse(record.input.source);
+          return {
+            revision_id: record.revisionId,
+            skill_id: record.id,
+            provider: source.provider,
+            repo_owner: source.repoOwner,
+            repo_name: source.repoName,
+            requested_ref: source.requestedRef,
+            resolved_ref: source.resolvedRef,
+            commit_sha: source.commitSha,
+            subdirectory: source.subdirectory,
+            source_sha256: source.sourceSha256,
+            imported_at: now,
+          };
+        })
+      ),
+    ];
+    statements.push(this.bumpGeneration());
+
+    try {
+      await this.db.batch(statements);
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        throw new SkillConflictError("One or more skill names already exist");
+      }
+      if (isForeignKeyConstraintError(error)) {
+        throw new SkillValidationError("One or more assigned environments no longer exist");
+      }
+      throw error;
+    }
+    return records.map((record) => ({
+      id: record.id,
+      name: record.input.name,
+      currentRevisionId: record.revisionId,
+    }));
   }
 
   async setEnabled(
@@ -415,12 +572,23 @@ export class SkillStore {
    * enforces: reserved names and names held by deleted skills stay taken.
    */
   async nameAvailable(name: string): Promise<boolean> {
-    if (RESERVED_SKILL_NAMES.has(name)) return false;
-    const existing = await this.db
-      .prepare("SELECT id FROM skills WHERE lower(name) = lower(?)")
-      .bind(name)
-      .first<{ id: string }>();
-    return existing === null;
+    return !(await this.unavailableNames([name])).has(name.toLowerCase());
+  }
+
+  /** Return requested canonical names held by the runtime or any catalog row, including deleted rows. */
+  async unavailableNames(names: readonly string[]): Promise<Set<string>> {
+    const normalized = [...new Set(names.map((name) => name.toLowerCase()))];
+    const unavailable = new Set(normalized.filter((name) => RESERVED_SKILL_NAMES.has(name)));
+    for (let start = 0; start < normalized.length; start += MAX_D1_QUERY_PARAMETERS) {
+      const chunk = normalized.slice(start, start + MAX_D1_QUERY_PARAMETERS);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const result = await this.db
+        .prepare(`SELECT lower(name) AS name FROM skills WHERE lower(name) IN (${placeholders})`)
+        .bind(...chunk)
+        .all<{ name: string }>();
+      for (const row of result.results ?? []) unavailable.add(row.name);
+    }
+    return unavailable;
   }
 
   /**
@@ -828,6 +996,30 @@ export class SkillStore {
         skillId,
         expectedCurrentRevisionId
       );
+  }
+
+  private currentRevisionUpdates(
+    records: readonly { id: string; revisionId: string }[]
+  ): SqlStatement[] {
+    const recordsPerStatement = Math.floor(MAX_D1_QUERY_PARAMETERS / 3);
+    const statements: SqlStatement[] = [];
+    for (let start = 0; start < records.length; start += recordsPerStatement) {
+      const chunk = records.slice(start, start + recordsPerStatement);
+      const cases = chunk.map(() => "WHEN ? THEN ?").join(" ");
+      const placeholders = chunk.map(() => "?").join(", ");
+      statements.push(
+        this.db
+          .prepare(
+            `UPDATE skills SET current_revision_id = CASE id ${cases} END
+             WHERE id IN (${placeholders})`
+          )
+          .bind(
+            ...chunk.flatMap((record) => [record.id, record.revisionId]),
+            ...chunk.map((record) => record.id)
+          )
+      );
+    }
+    return statements;
   }
 
   private fileInserts(revisionId: string, files: SkillFile[]): SqlStatement[] {

@@ -3,6 +3,8 @@ import { z } from "zod";
 import { useAuthSession } from "@/lib/auth-session";
 import { browserApiFetch, type BrowserApiPath } from "@/lib/browser-api-fetch";
 import {
+  bulkImportSkillsResponseSchema,
+  bulkSkillImportPreviewResponseSchema,
   listSkillProfilesResponseSchema,
   listSkillsResponseSchema,
   reimportSkillResponseSchema,
@@ -13,6 +15,10 @@ import {
   skillResponseSchema,
 } from "@open-inspect/shared/types/skills";
 import type {
+  BulkImportSkillsInput,
+  ImportedSkillIdentity,
+  BulkSkillImportPreviewInput,
+  BulkSkillImportPreviewResponse,
   CreateSkillInput,
   ImportSkillInput,
   ReimportSkillInput,
@@ -41,7 +47,6 @@ type SkillContentPreview = z.infer<typeof skillContentPreviewSchema>;
 
 const okResponseSchema = z.strictObject({ ok: z.literal(true) });
 const errorResponseSchema = z.object({ error: z.string() });
-
 const SKILLS_KEY = "/api/skills";
 const SKILL_PROFILES_KEY = "/api/skill-profiles";
 export const SKILL_CATALOG_PAGE_SIZE = 25;
@@ -212,6 +217,26 @@ export async function importSkill(input: ImportSkillInput): Promise<Skill> {
       body: JSON.stringify(input),
     })
   ).skill;
+}
+
+export async function previewBulkSkillImport(
+  input: BulkSkillImportPreviewInput
+): Promise<BulkSkillImportPreviewResponse> {
+  return apiRequest(`${SKILLS_KEY}/import/bulk/preview`, bulkSkillImportPreviewResponseSchema, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function bulkImportSkills(
+  input: BulkImportSkillsInput
+): Promise<ImportedSkillIdentity[]> {
+  return (
+    await apiRequest(`${SKILLS_KEY}/import/bulk`, bulkImportSkillsResponseSchema, {
+      method: "POST",
+      body: JSON.stringify(input),
+    })
+  ).skills;
 }
 
 export async function previewSkillReimport(

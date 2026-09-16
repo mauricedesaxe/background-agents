@@ -129,8 +129,23 @@ instead of retyping it.
 | **Name**         | Optional canonical name. Defaults to the `name` in `SKILL.md`, then to the last segment of the source path.  |
 
 To import one skill from a repository that holds several, name its subdirectory. If the path you
-chose has no `SKILL.md`, the error lists the subdirectories that do. Importing several skills at
-once is not supported; repeat the import for each.
+chose has no `SKILL.md`, the error lists the subdirectories that do.
+
+### Skill collection mode
+
+Select **Skill collection** to discover every directory containing `SKILL.md` at or below an
+optional repository prefix. The collection is read from one resolved commit. A skill root cannot
+contain another skill root; nested roots reject the collection.
+
+The preview shows every discovered skill's name, description, files, and mapping warnings. Skills
+whose names conflict with the catalog, reserved names, or another skill in the collection are
+unavailable; all other skills are selected by default. Choose assignments once to apply the same
+assignments to every selected shared skill. Confirming is atomic: either every selected skill is
+imported or none are.
+
+A collection can contain at most 100 skills, 500 files, 8 MiB of source content, and 25 shared
+assignments. Collection imports create independent shared skills, do not create or change personal
+profiles, and do not sync automatically with the repository.
 
 ### How `SKILL.md` maps onto a managed skill
 
@@ -290,6 +305,10 @@ the same revisions; it does not pick up newer edits. Start a new session to use 
 | Individual file                    |               256 KiB |
 | Complete skill revision            |                 1 MiB |
 | Managed skill content in a session |                 5 MiB |
+| Skills in a collection import      |                   100 |
+| Files in a collection import       |                   500 |
+| Source content in a collection     |                 8 MiB |
+| Assignments in a collection import |                    25 |
 
 Supporting-file paths must:
 
