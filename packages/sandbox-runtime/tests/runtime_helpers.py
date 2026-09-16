@@ -98,6 +98,7 @@ def make_supervisor(
         None,
         shutdown_event,
         log,
+        BootWarningSink(log),
     )
     supervisor._repository_boot_result = RepositoryBootResult(
         git_sync_success=True,

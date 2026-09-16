@@ -55,6 +55,7 @@ def _supervisor(tmp_path, events):
         managed_skills,
         asyncio.Event(),
         MagicMock(),
+        MagicMock(),
     )
     supervisor.monitor_processes = AsyncMock()
     return supervisor, repository, opencode_server, agent_bridge, code_server, terminal, desktop
@@ -78,6 +79,30 @@ async def test_regular_boot_phase_order(tmp_path, monkeypatch):
         "opencode",
         "bridge",
     ]
+
+
+async def test_managed_skills_failure_warns_and_keeps_booting(tmp_path, monkeypatch):
+    events = []
+    supervisor, *_ = _supervisor(tmp_path, events)
+    monkeypatch.delenv("IMAGE_BUILD_MODE", raising=False)
+    monkeypatch.delenv("RESTORED_FROM_SNAPSHOT", raising=False)
+    monkeypatch.delenv("FROM_REPO_IMAGE", raising=False)
+    supervisor.managed_skills.materialize = AsyncMock(
+        side_effect=OSError(18, "Invalid cross-device link")
+    )
+
+    assert await supervisor.run() is True
+    assert events == [
+        "desktop",
+        "repository:fresh",
+        "code_server",
+        "terminal",
+        "opencode",
+        "bridge",
+    ]
+    scope, message = supervisor.warnings.record.call_args.args
+    assert scope == "managed_skills"
+    assert "Invalid cross-device link" in message
 
 
 async def test_regular_boot_passes_repository_workspace_to_services(tmp_path, monkeypatch):
