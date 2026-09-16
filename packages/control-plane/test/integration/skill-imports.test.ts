@@ -210,6 +210,118 @@ describe("managed skill import provenance", () => {
     expect(await skills.nameAvailable("agent-browser")).toBe(false);
     expect(await skills.nameAvailable("free-name")).toBe(true);
   });
+
+  it("persists a reviewed collection atomically with shared assignments and provenance", async () => {
+    const store = new SkillStore(env.DB);
+    const imported = await store.createImportedSkills(
+      [
+        { name: "deploy-api", content, source },
+        {
+          name: "deploy-worker",
+          content: { ...content, description: "Imported worker deployment instructions" },
+          source: {
+            ...source,
+            subdirectory: "skills/deploy-worker",
+            sourceSha256: "c".repeat(64),
+          },
+        },
+      ],
+      [
+        { type: "global" },
+        {
+          type: "repository",
+          repository: { repoOwner: "Acme", repoName: "API", baseBranch: null },
+        },
+      ],
+      "user_1"
+    );
+
+    expect(imported.map((skill) => skill.name)).toEqual(["deploy-api", "deploy-worker"]);
+    const stored = await Promise.all(imported.map((skill) => store.get(skill.id)));
+    expect(stored.every((skill) => skill?.assignments.length === 2)).toBe(true);
+    expect(stored.map((skill) => skill?.source?.subdirectory)).toEqual([
+      "skills/deploy-service",
+      "skills/deploy-worker",
+    ]);
+    expect(stored.every((skill) => skill?.source?.revisionId === skill?.currentRevisionId)).toBe(
+      true
+    );
+    expect(await store.catalogGeneration()).toBeGreaterThan(0);
+  });
+
+  it("stores none of a collection when any selected name conflicts", async () => {
+    const store = new SkillStore(env.DB);
+    await importedSkill(store, "already-there");
+
+    await expect(
+      store.createImportedSkills(
+        [
+          { name: "would-be-created", content, source },
+          {
+            name: "already-there",
+            content,
+            source: { ...source, subdirectory: "skills/already-there" },
+          },
+        ],
+        [{ type: "global" }],
+        "user_1"
+      )
+    ).rejects.toThrow(SkillConflictError);
+
+    expect(await store.nameAvailable("would-be-created")).toBe(true);
+    expect((await store.list({ limit: SKILL_LIST_PAGE_SIZE, cursor: null })).skills).toHaveLength(
+      1
+    );
+  });
+
+  it("rolls back the whole collection when a later write fails", async () => {
+    const store = new SkillStore(env.DB);
+    await env.DB.prepare(
+      `CREATE TRIGGER reject_bulk_skill_write
+       BEFORE INSERT ON skills WHEN NEW.name = 'write-conflict'
+       BEGIN SELECT RAISE(ABORT, 'forced write conflict'); END;`
+    ).run();
+    try {
+      await expect(
+        store.createImportedSkills(
+          [
+            { name: "would-be-created", content, source },
+            {
+              name: "write-conflict",
+              content,
+              source: { ...source, subdirectory: "skills/write-conflict" },
+            },
+          ],
+          [{ type: "global" }],
+          "user_1"
+        )
+      ).rejects.toThrow(/forced write conflict/);
+    } finally {
+      await env.DB.prepare("DROP TRIGGER reject_bulk_skill_write").run();
+    }
+
+    expect((await store.list({ limit: SKILL_LIST_PAGE_SIZE, cursor: null })).skills).toEqual([]);
+    expect(await store.catalogGeneration()).toBe(0);
+  });
+
+  it("rejects duplicate and reserved collection names before storing any skill", async () => {
+    const store = new SkillStore(env.DB);
+    await expect(
+      store.createImportedSkills(
+        [
+          { name: "duplicate", content, source },
+          { name: "duplicate", content, source: { ...source, subdirectory: "skills/other" } },
+        ],
+        [],
+        "user_1"
+      )
+    ).rejects.toThrow(/Duplicate skill name/);
+    await expect(
+      store.createImportedSkills([{ name: "agent-browser", content, source }], [], "user_1")
+    ).rejects.toThrow(/reserved/);
+
+    expect((await store.list({ limit: SKILL_LIST_PAGE_SIZE, cursor: null })).skills).toEqual([]);
+  });
 });
 
 describe("managed skill import routes", () => {
@@ -218,6 +330,11 @@ describe("managed skill import routes", () => {
   it.each([
     ["/skills/import/preview", { source: { repository: { repoOwner: "acme" } } }],
     ["/skills/import", { source: { repository: { repoOwner: "acme", repoName: "skills" } } }],
+    ["/skills/import/bulk/preview", { source: { repository: { repoOwner: "acme" } } }],
+    [
+      "/skills/import/bulk",
+      { source: { repository: { repoOwner: "acme", repoName: "skills" } }, skills: [] },
+    ],
     [
       "/skills/import/preview",
       { source: { repository: { repoOwner: "acme", repoName: "skills" }, subdirectory: "../etc" } },

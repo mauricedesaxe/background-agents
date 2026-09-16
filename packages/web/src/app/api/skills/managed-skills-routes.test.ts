@@ -7,6 +7,8 @@ import { POST as REIMPORT_PREVIEW } from "./[id]/reimport/preview/route";
 import { POST as REIMPORT } from "./[id]/reimport/route";
 import { POST as IMPORT_PREVIEW } from "./import/preview/route";
 import { POST as IMPORT } from "./import/route";
+import { POST as BULK_IMPORT_PREVIEW } from "./import/bulk/preview/route";
+import { POST as BULK_IMPORT } from "./import/bulk/route";
 import { GET } from "./route";
 
 vi.mock("@/lib/control-plane", () => ({ controlPlaneUserFetch: vi.fn() }));
@@ -115,6 +117,68 @@ describe("managed skills BFF routes", () => {
 
     expect(response.status).toBe(201);
     expect(controlPlaneUserFetch).toHaveBeenCalledWith("/skills/import", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  });
+
+  it("forwards bulk preview requests to the collection endpoint", async () => {
+    vi.mocked(controlPlaneUserFetch).mockResolvedValue(
+      Response.json({ skills: [], totalFiles: 0, totalBytes: 0 })
+    );
+    const body = {
+      source: {
+        repository: { repoOwner: "acme", repoName: "skills" },
+        ref: "main",
+        subdirectory: "catalog",
+      },
+    };
+    const request = new NextRequest("http://localhost/api/skills/import/bulk/preview", {
+      method: "POST",
+      headers: { Cookie: "__Secure-openinspect.session_token=session.signature" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await BULK_IMPORT_PREVIEW(request, { params: Promise.resolve(undefined) });
+
+    expect(response.status).toBe(200);
+    expect(controlPlaneUserFetch).toHaveBeenCalledWith("/skills/import/bulk/preview", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  });
+
+  it("forwards bulk import confirmations unchanged", async () => {
+    vi.mocked(controlPlaneUserFetch).mockResolvedValue(
+      Response.json({ skills: [] }, { status: 201 })
+    );
+    const body = {
+      source: {
+        repository: { repoOwner: "acme", repoName: "skills" },
+        ref: null,
+        subdirectory: "catalog",
+      },
+      expectedCommitSha: "a".repeat(40),
+      skills: [
+        {
+          subdirectory: "catalog/deploy",
+          name: "deploy",
+          expectedSourceSha256: "b".repeat(64),
+          expectedRevisionSha256: "c".repeat(64),
+        },
+      ],
+      assignments: [{ type: "global" }],
+    };
+    const request = new NextRequest("http://localhost/api/skills/import/bulk", {
+      method: "POST",
+      headers: { Cookie: "__Secure-openinspect.session_token=session.signature" },
+      body: JSON.stringify(body),
+    });
+
+    const response = await BULK_IMPORT(request, { params: Promise.resolve(undefined) });
+
+    expect(response.status).toBe(201);
+    expect(controlPlaneUserFetch).toHaveBeenCalledWith("/skills/import/bulk", {
       method: "POST",
       body: JSON.stringify(body),
     });
