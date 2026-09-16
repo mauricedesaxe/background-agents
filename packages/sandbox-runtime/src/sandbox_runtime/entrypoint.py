@@ -139,6 +139,7 @@ def build_supervisor(shutdown_event: asyncio.Event) -> SandboxSupervisor:
         managed_skills,
         shutdown_event,
         log,
+        warnings,
     )
 
 

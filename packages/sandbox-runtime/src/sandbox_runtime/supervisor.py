@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from .agent_bridge_process import AgentBridgeProcess
+    from .boot_warnings import BootWarningSink
     from .browser_desktop import BrowserDesktop
     from .code_server import CodeServer
     from .harness.base import HarnessProcessOwner
@@ -63,6 +64,7 @@ class SandboxSupervisor:
         managed_skills: ManagedSkillsMaterializer | None,
         shutdown_event: asyncio.Event,
         log: Any,
+        warnings: BootWarningSink,
     ) -> None:
         self.config = config
         self.repository_boot = repository_boot
@@ -76,6 +78,7 @@ class SandboxSupervisor:
         self.managed_skills = managed_skills
         self.shutdown_event = shutdown_event
         self.log = log
+        self.warnings = warnings
         self.boot_mode = BootMode.FRESH
         self._desktop_restart_task: asyncio.Task[bool] | None = None
         self._repository_boot_result: RepositoryBootResult | None = None
@@ -444,7 +447,16 @@ class SandboxSupervisor:
             # Materialization is sandbox-boot work; OpenCode process restarts
             # reuse this tree and must not depend on control-plane availability.
             if self.managed_skills is not None:
-                await self.managed_skills.materialize(boot_result.repositories, boot_result.workdir)
+                try:
+                    await self.managed_skills.materialize(
+                        boot_result.repositories, boot_result.workdir
+                    )
+                except Exception as error:
+                    # A sandbox without its managed skills is degraded, not dead.
+                    # Every neighbouring boot step already warns and carries on,
+                    # and killing the boot here costs the whole session.
+                    self.log.warn("managed_skills.install_failed", exc=error)
+                    self.warnings.record("managed_skills", str(error))
 
             try:
                 await self.code_server.start(boot_result.workdir)
