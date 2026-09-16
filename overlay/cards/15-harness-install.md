@@ -12,10 +12,10 @@ discussion: https://github.com/mauricedesaxe/background-agents/issues/328#issuec
 ## Requirement
 
 The sandbox coding agent receives lazar-harness skills through the control plane's managed-skills
-catalog. The harness repository exposes a sandbox-rendered, portable directory for every skill; each
-directory is imported as its own catalog entry so OpenCode can discover the canonical names. The
-entries are globally assigned so they apply across repositories, and the complete set can be
-selected with a personal profile.
+catalog. The harness repository's canonical `skills/<name>` directories are sandbox-ready and
+portable; each directory is imported as its own catalog entry so OpenCode can discover the canonical
+names. The entries are globally assigned so they apply across repositories, and the complete set can
+be selected with a personal profile.
 
 Do **not** run the harness installer while building a sandbox image and do not bake either managed
 skills destination into a snapshot. `ManagedSkillsMaterializer` owns that complete directory and
@@ -32,8 +32,9 @@ does not report a managed/local collision for the imported names.
 
 - The generic import, profile, resolution, and materialization mechanisms stay in the upstream-owned
   managed-skills implementation.
-- The sandbox-rendered source collection belongs in the external `lazar-harness` repository, where
-  its surface transform and vendored skill pins are maintained.
+- The canonical sandbox-ready source belongs in the external `lazar-harness` repository. Local
+  installs apply sparse overlays in a temporary staging tree; there is no second generated skill
+  collection to import or keep synchronized.
 - Catalog entries record the source commit and content digests. Updating the harness is an explicit
   preview-and-reimport operation; image rebuilds are unrelated.
 - Managed skills install skills only. Harness rules, hooks, agents, binaries, and OpenCode command
