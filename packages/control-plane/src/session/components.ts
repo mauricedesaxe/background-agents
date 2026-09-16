@@ -651,7 +651,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     refreshXaiToken,
     getScmCredentials,
     isValidSandboxToken,
-    (reason) => messageQueue.handleFatalSandboxFailure(reason),
+    (reason, fatal) => messageQueue.handleFatalSandboxFailure(reason, fatal),
     generateId
   );
 

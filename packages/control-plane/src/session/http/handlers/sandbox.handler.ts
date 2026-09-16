@@ -29,6 +29,8 @@ import { z } from "zod";
 
 const sandboxErrorRequestSchema = z.object({
   error: z.string().trim().min(1).max(1000),
+  // The supervisor raises this for a failure it already decided not to retry.
+  fatal: z.boolean().optional().default(false),
 });
 
 /**
@@ -56,7 +58,7 @@ export class SandboxHandler {
       token: string | null,
       sandbox: SandboxRow | null
     ) => Promise<boolean>,
-    private readonly failSandbox: (reason: string) => Promise<void>,
+    private readonly failSandbox: (reason: string, fatal: boolean) => Promise<void>,
     private readonly generateId: () => string,
     private readonly now: () => number = Date.now
   ) {}
@@ -118,7 +120,7 @@ export class SandboxHandler {
       return Response.json({ status: "ignored" });
     }
 
-    await this.failSandbox(result.data.error);
+    await this.failSandbox(result.data.error, result.data.fatal);
     return Response.json({ status: "ok" });
   }
 

@@ -562,10 +562,37 @@ export class SessionMessageQueue {
     });
   }
 
-  async handleFatalSandboxFailure(reason: string): Promise<void> {
+  /**
+   * Handle a sandbox failure report.
+   *
+   * `fatal` is the supervisor's "retrying is futile" signal, raised for a
+   * deterministic boot failure such as a denied credential. Resuming the queue
+   * on one spawns a replacement that fails the same way, and the leftover
+   * sandbox holds provider disk until it auto-archives, so the queue is
+   * terminalized instead of pumped.
+   */
+  async handleFatalSandboxFailure(reason: string, fatal = false): Promise<void> {
     const termination = this.sandboxLifecycle.terminateFailedSandbox(reason);
     await this.failStuckProcessingMessage(reason);
+    if (fatal) {
+      await termination;
+      this.failQueuedPrompts(reason);
+      await this.sessionStatus.reconcileAfterExecution(false);
+      return;
+    }
     if (await termination) await this.executionStop.resumeAfterSandboxTermination();
+  }
+
+  /** Terminalize prompts still waiting on a sandbox that will never come up. */
+  private failQueuedPrompts(reason: string): void {
+    const now = Date.now();
+    let failed = false;
+    for (const message of this.messageRepository.listPendingMessagesWithCreatedAt()) {
+      if (this.failMessage(message, reason, now, "pending")) failed = true;
+    }
+    if (!failed) return;
+    this.messenger.broadcast({ type: "processing_status", isProcessing: false });
+    this.broadcastPromptQueue();
   }
 
   /** Close every unfinished message synchronously; status projection happens afterwards. */
