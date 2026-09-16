@@ -1,6 +1,8 @@
 import asyncio
+import errno
 import hashlib
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -157,6 +159,37 @@ async def test_materializer_replaces_destination(tmp_path):
     assert not (destination / "stale.txt").exists()
     assert "name: managed" in (destination / "managed" / "SKILL.md").read_text()
     assert (destination / "managed" / "SKILL.md").stat().st_mode & 0o777 == 0o400
+
+
+async def test_materializer_installs_over_a_destination_that_cannot_be_renamed(tmp_path):
+    """The image bakes the skills tree into a lower overlay layer, which answers EXDEV."""
+    document = _installation()
+    client = MagicMock()
+    client.fetch_installation = AsyncMock(return_value=json.dumps(document).encode())
+    destination = tmp_path / "config" / "opencode" / "skills"
+    destination.mkdir(parents=True)
+    (destination / "stale.txt").write_text("stale")
+    real_rename = Path.rename
+
+    def rename(self, target):
+        if self == destination:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_rename(self, target)
+
+    materializer = ManagedSkillsMaterializer(
+        client,
+        destination,
+        MagicMock(),
+        bundled_skills_path=tmp_path / "missing-bundled",
+    )
+
+    with patch.object(Path, "rename", rename):
+        await materializer.materialize((), tmp_path / "workspace")
+
+    assert not (destination / "stale.txt").exists()
+    assert "name: managed" in (destination / "managed" / "SKILL.md").read_text()
+    assert not (destination.parent / ".managed-skills-backup").exists()
+    assert not (destination.parent / ".managed-skills-swap").exists()
 
 
 async def test_materializer_drops_only_managed_skills_that_collide_with_discovered_skills(tmp_path):
