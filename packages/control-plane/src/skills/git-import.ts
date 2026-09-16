@@ -199,7 +199,10 @@ function mapFrontmatter(
   }
   const metadataValue = parsed.frontmatter.get("metadata");
   if (metadataValue !== undefined && metadataValue.kind !== "map") {
-    throw new SkillImportError('SKILL.md frontmatter "metadata" must be a map of strings', 400);
+    warnings.push({
+      code: "unmapped-frontmatter",
+      message: 'SKILL.md frontmatter "metadata" is not a map of strings and was not imported',
+    });
   }
   const candidate = {
     description,

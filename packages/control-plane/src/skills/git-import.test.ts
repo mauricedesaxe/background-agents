@@ -256,6 +256,25 @@ describe("fetchSkillImport", () => {
     expect(result.content.metadata).toEqual({ "team owner": "platform" });
   });
 
+  it("warns and drops nested ecosystem metadata", async () => {
+    const provider = fakeProvider({
+      "SKILL.md": {
+        content:
+          "---\nname: deploy-service\ndescription: Deploys\nmetadata: {openclaw: {requires: {bins: [tool]}}}\n---\nbody\n",
+      },
+    });
+
+    const result = await fetchSkillImport(provider, source());
+
+    expect(result.content.metadata).toEqual({});
+    expect(result.warnings).toEqual([
+      {
+        code: "unmapped-frontmatter",
+        message: 'SKILL.md frontmatter "metadata" is not a map of strings and was not imported',
+      },
+    ]);
+  });
+
   it.each([
     [
       "an inaccessible repository",
