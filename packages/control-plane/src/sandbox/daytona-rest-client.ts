@@ -25,7 +25,7 @@ export interface DaytonaRestConfig {
   baseSnapshot: string;
   /** Minutes before Daytona auto-stops an idle sandbox (default 120) */
   autoStopIntervalMinutes: number;
-  /** Minutes before Daytona auto-archives a stopped sandbox (default 10080) */
+  /** Minutes before Daytona auto-archives a stopped sandbox */
   autoArchiveIntervalMinutes: number;
 }
 
