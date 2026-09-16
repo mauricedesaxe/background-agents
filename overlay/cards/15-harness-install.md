@@ -1,6 +1,6 @@
 ---
 id: 15-harness-install
-title: lazar-harness install into the sandbox image
+title: lazar-harness skills through managed skills
 type: rebuild
 priority: high
 placement: upstream-code + lazar-harness
@@ -11,35 +11,43 @@ discussion: https://github.com/mauricedesaxe/background-agents/issues/328#issuec
 
 ## Requirement
 
-The sandbox coding agent runs with lazar-harness installed (skills, agents, rules, hooks — the
-sandbox surface), pinned to a specific version and env-overridable via `HARNESS_REF` /
-`HARNESS_REPO`. This is what makes the sandbox agent behave like the user's harness (`lazar-commit`,
-`lazar-ship`, `lazar-qa`), which card `11-jj-pr-helper` hard-depends on. **Foundational** — item 11
-and the whole "sandbox agent uses my harness" premise depend on it. Rebuild early; sequence before
-card 11.
+The sandbox coding agent receives lazar-harness skills through the control plane's managed-skills
+catalog. The harness repository exposes a sandbox-rendered, portable directory for every skill; each
+directory is imported as its own catalog entry so OpenCode can discover the canonical names. The
+entries are globally assigned so they apply across repositories, and the complete set can be
+selected with a personal profile.
+
+Do **not** run the harness installer while building a sandbox image and do not bake either managed
+skills destination into a snapshot. `ManagedSkillsMaterializer` owns that complete directory and
+replaces it on every boot. A baked directory both loses to that replacement and can make overlayfs
+reject the boot-time directory swap.
 
 ## Acceptance test (the contract)
 
-A built sandbox image has the harness installed at the pinned ref (the resolved install matches the
-requested `HARNESS_REF`), AND the sandbox agent can invoke a `lazar-*` skill. Behavior, not files.
+A session selecting the Lazar Harness profile materializes the pinned managed revisions and can
+invoke a `lazar-*` skill. A session selecting no managed skills contains none of them. Sandbox boot
+does not report a managed/local collision for the imported names.
 
 ## Placement decision (durable)
 
-- The install **mechanism** is code in the upstream-owned tree, reapplied each sync. Upstream has
-  none of this — 100% fork-local. The mechanism is small and low-friction to reapply.
-- lazar-harness itself is the **external repo**, and this card is the **config-ward escape hatch**:
-  anything pushed INTO lazar-harness survives a blind sync untouched, because the upstream tree
-  never sees it. The more fork behavior that lives in lazar-harness, the less gets reapplied in the
-  upstream tree each sync.
+- The generic import, profile, resolution, and materialization mechanisms stay in the upstream-owned
+  managed-skills implementation.
+- The sandbox-rendered source collection belongs in the external `lazar-harness` repository, where
+  its surface transform and vendored skill pins are maintained.
+- Catalog entries record the source commit and content digests. Updating the harness is an explicit
+  preview-and-reimport operation; image rebuilds are unrelated.
+- Managed skills install skills only. Harness rules, hooks, agents, binaries, and OpenCode command
+  adapters require separate product decisions and must not be smuggled back into the image bake.
 
 ## Gotcha (same as cards 01, 11)
 
-Editing `HARNESS_REF` used to be a `.sh` change that did NOT bump the Daytona `source_hash`, which
-tracked `.py/.js/.ts` only, so a ref bump reached no sandbox on its own. Fixed in #94: the Daytona
-and Vercel hashes now cover `*.sh` too, matching what the Modal and OpenComputer hashes already did.
-A pin bump rebuilds the snapshot by itself.
+The former build-time installer created the exact destination that managed skills replace. In an
+overlay lower layer that directory cannot necessarily be renamed; the resulting `EXDEV` killed
+sandbox boot. PR #383 retained a copy fallback for restored snapshots, and PR #384 removed the
+installer, image phase, pin, wiring, and smoke assertions. Do not reconstruct them during a blind
+sync. The managed source ref changes through re-import and does not participate in the Daytona image
+hash.
 
 ## Provenance
 
-Fork-only since the first Daytona bake. File-level notes were dropped when the card contract went
-requirements-first — locate the install mechanism on current upstream yourself.
+Fork-only. The image-baked implementation was retired by PR #384 after the managed-skills rollout.

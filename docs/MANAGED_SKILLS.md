@@ -227,7 +227,7 @@ your account and do not affect other users.
 1. Go to **Settings > Skills > My profiles**.
 2. Click **New profile**.
 3. Enter a unique profile name.
-4. Select up to 20 shared skills.
+4. Select the shared skills to include.
 5. Click **Save profile**.
 
 A profile is a filter, not an override. At session creation, Open-Inspect includes only profile
@@ -289,7 +289,6 @@ the same revisions; it does not pick up newer edits. Start a new session to use 
 | Supporting files                   | 99 per skill revision |
 | Individual file                    |               256 KiB |
 | Complete skill revision            |                 1 MiB |
-| Skills in a profile or session     |                    20 |
 | Managed skill content in a session |                 5 MiB |
 
 Supporting-file paths must:
