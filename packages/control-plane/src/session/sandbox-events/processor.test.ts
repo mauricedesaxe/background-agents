@@ -4,7 +4,7 @@ import { SessionSandboxEventProcessor } from "./processor";
 import { SandboxArtifactEventHandler } from "./artifact.handler";
 import { SandboxExecutionEventHandler } from "./execution.handler";
 import { SandboxRuntimeEventHandler, type QueuedPromptHold } from "./runtime.handler";
-import { ContextResetPromptHold, CONTEXT_RESET_HOLD_TIMEOUT_MS } from "../prompt-hold-service";
+import { ContextResetPromptHold } from "../prompt-hold-service";
 import { SandboxPushService } from "../sandbox-push-service";
 import { SandboxStreamingEventHandler } from "./streaming.handler";
 import type { GitPushSpec } from "../../source-control";
@@ -477,28 +477,21 @@ describe("SessionSandboxEventProcessor", () => {
       expect(h.promptHold.holdQueuedPrompt).not.toHaveBeenCalled();
     });
 
-    it("arms the auto-release deadline one hold timeout out", async () => {
-      vi.useFakeTimers();
-      try {
-        const holdHarness = createHoldHarness();
-        const h = createProcessor(holdHarness.hold);
-        h.repository.getSession.mockReturnValue(seededSession);
+    it("keeps a context-reset hold until explicit acknowledgement", async () => {
+      const holdHarness = createHoldHarness();
+      const h = createProcessor(holdHarness.hold);
+      h.repository.getSession.mockReturnValue(seededSession);
 
-        await h.processor.processSandboxEvent({
-          type: "ready",
-          sandboxId: "sb-1",
-          opencodeSessionId: null,
-          timestamp: 1000,
-        });
+      await h.processor.processSandboxEvent({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: null,
+        timestamp: 1000,
+      });
 
-        const expectedDeadline = Date.now() + CONTEXT_RESET_HOLD_TIMEOUT_MS;
-        expect(CONTEXT_RESET_HOLD_TIMEOUT_MS).toBe(600_000);
-        expect(holdHarness.schedule).toHaveBeenCalledOnce();
-        expect(holdHarness.schedule).toHaveBeenCalledWith(expectedDeadline);
-        expect(holdHarness.heldDeadline()).toBe(expectedDeadline);
-      } finally {
-        vi.useRealTimers();
-      }
+      expect(holdHarness.schedule).not.toHaveBeenCalled();
+      expect(holdHarness.heldDeadline()).toBeNull();
+      expect(holdHarness.messages[0].context_reset_hold).toBe(1);
     });
 
     it("marks the queued message held, and acknowledging releases it to dispatch", async () => {
