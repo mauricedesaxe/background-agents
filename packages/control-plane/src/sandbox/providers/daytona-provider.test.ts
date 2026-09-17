@@ -524,6 +524,40 @@ describe("DaytonaSandboxProvider", () => {
       expect(client.recoverSandbox).not.toHaveBeenCalled();
     });
 
+    it("reconciles a Daytona state-transition conflict instead of failing resume", async () => {
+      vi.useFakeTimers();
+      try {
+        const states = ["stopped", "starting", "started"];
+        const client = createMockClient({
+          getSandbox: async () => ({
+            id: "daytona-sandbox-id",
+            state: states.shift() ?? "started",
+          }),
+          startSandbox: async () => {
+            throw new DaytonaApiError("Sandbox state change in progress", 409);
+          },
+        });
+        const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+        const resume = provider.resumeSandbox(baseResumeConfig).then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error })
+        );
+        await vi.runAllTimersAsync();
+        await expect(resume).resolves.toEqual({
+          value: expect.objectContaining({
+            success: true,
+            providerObjectId: "daytona-sandbox-id",
+          }),
+        });
+
+        expect(client.startSandbox).toHaveBeenCalledOnce();
+        expect(client.getSandbox).toHaveBeenCalledTimes(3);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("returns VNC access after resume", async () => {
       const client = createMockClient({
         getSignedPreviewUrl: async (_id, port) => ({ url: `https://preview.test/${port}` }),
