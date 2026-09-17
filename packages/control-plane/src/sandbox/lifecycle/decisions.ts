@@ -250,8 +250,8 @@ export type SpawnAction =
  * Evaluate what spawn action to take.
  *
  * This function encapsulates the complex spawn decision logic:
- * - Restore from snapshot if available, compatible, and sandbox is
- *   stopped/stale/failed
+ * - Reconcile a persistent provider sandbox before considering replacement
+ * - Restore from snapshot if available, compatible, and sandbox is stopped/stale/failed
  * - Skip if already spawning/connecting
  * - Skip if ready with active WebSocket
  * - Wait if ready without WebSocket but recently spawned
@@ -301,35 +301,6 @@ export function evaluateSpawnDecision(
     return { action: "skip", reason: "spawn already in progress (in-memory flag)" };
   }
 
-  if (
-    supportsPersistentResume &&
-    state.providerObjectId &&
-    (state.status === "stopped" || state.status === "stale")
-  ) {
-    return { action: "resume", providerObjectId: state.providerObjectId };
-  }
-
-  // Check if we have a snapshot to restore from
-  // This implements the Ramp spec: restore if sandbox has exited and user sends a follow-up
-  if (
-    state.snapshotImageId &&
-    (state.status === "stopped" || state.status === "stale" || state.status === "failed")
-  ) {
-    if (isSnapshotRuntimeCompatible(state.snapshotRuntimeVersion)) {
-      return {
-        action: "restore",
-        snapshotImageId: state.snapshotImageId,
-        // Non-null: the compatibility check above rejects a missing version.
-        snapshotRuntimeVersion: state.snapshotRuntimeVersion as string,
-      };
-    }
-    // Fall through to a fresh spawn rather than booting a retired runtime.
-    return {
-      action: "spawn",
-      reason: `snapshot runtime ${state.snapshotRuntimeVersion ?? "unknown"} is below the v${MIN_COMPATIBLE_RUNTIME_VERSION} floor`,
-    };
-  }
-
   // Don't spawn if a spawn/connect is genuinely in progress (persisted status).
   // But a spawn interrupted before the sandbox connects (provider crash,
   // redeploy, cancelled provider call) can pin the status at "spawning"/
@@ -355,6 +326,31 @@ export function evaluateSpawnDecision(
         reason: `status ready but no WebSocket, last spawn was ${Math.round(timeSinceLastSpawn / 1000)}s ago`,
       };
     }
+  }
+
+  // A persisted provider handle can be replaced only after provider
+  // reconciliation explicitly authorizes it. Local status may delay this call,
+  // but cannot prove that the remote sandbox is gone.
+  if (supportsPersistentResume && state.providerObjectId) {
+    return { action: "resume", providerObjectId: state.providerObjectId };
+  }
+
+  if (
+    state.snapshotImageId &&
+    (state.status === "stopped" || state.status === "stale" || state.status === "failed")
+  ) {
+    if (isSnapshotRuntimeCompatible(state.snapshotRuntimeVersion)) {
+      return {
+        action: "restore",
+        snapshotImageId: state.snapshotImageId,
+        // Non-null: the compatibility check above rejects a missing version.
+        snapshotRuntimeVersion: state.snapshotRuntimeVersion as string,
+      };
+    }
+    return {
+      action: "spawn",
+      reason: `snapshot runtime ${state.snapshotRuntimeVersion ?? "unknown"} is below the v${MIN_COMPATIBLE_RUNTIME_VERSION} floor`,
+    };
   }
 
   // Cooldown: don't spawn if last spawn was within cooldown period

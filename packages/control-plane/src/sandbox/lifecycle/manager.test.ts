@@ -468,9 +468,9 @@ async function expectEarlyBridgeStartup(kind: ProviderStartupKind): Promise<void
       connectBridge();
       return { success: true, sandboxId: config.sandboxId, ...access };
     }),
-    resumeSandbox: vi.fn(async () => {
+    resumeSandbox: vi.fn(async (): Promise<ResumeResult> => {
       connectBridge();
-      return { success: true, ...access };
+      return { outcome: "resumed", providerObjectId: "modal-obj-123", ...access };
     }),
   });
   const manager = new SandboxLifecycleManager(
@@ -1408,10 +1408,12 @@ describe("SandboxLifecycleManager", () => {
       const broadcaster = createMockBroadcaster();
       const provider = createMockProvider({
         capabilities: { supportsPersistentResume: true },
-        resumeSandbox: vi.fn(async () => ({
-          success: true,
-          providerObjectId: "new-provider-obj",
-        })),
+        resumeSandbox: vi.fn(
+          async (): Promise<ResumeResult> => ({
+            outcome: "resumed",
+            providerObjectId: "new-provider-obj",
+          })
+        ),
       });
       const config = {
         ...createTestConfig(),
@@ -1450,10 +1452,12 @@ describe("SandboxLifecycleManager", () => {
       const broadcaster = createMockBroadcaster();
       const provider = createMockProvider({
         capabilities: { supportsPersistentResume: true },
-        resumeSandbox: vi.fn(async () => ({
-          success: true,
-          providerObjectId: "same-provider-obj",
-        })),
+        resumeSandbox: vi.fn(
+          async (): Promise<ResumeResult> => ({
+            outcome: "resumed",
+            providerObjectId: "same-provider-obj",
+          })
+        ),
       });
       const config = {
         ...createTestConfig(),
@@ -1480,6 +1484,155 @@ describe("SandboxLifecycleManager", () => {
           (m) => (m as { type: string }).type === "sandbox_access_changed"
         )
       ).toContainEqual({ type: "sandbox_access_changed" });
+    });
+
+    it("keeps the provider sandbox when resume asks to retry", async () => {
+      const sandbox = createMockSandbox({
+        status: "failed",
+        modal_object_id: "provider-obj",
+        snapshot_image_id: null,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const stopSandbox = vi.fn(async () => ({ success: true }));
+      const provider = createMockProvider({
+        capabilities: { supportsPersistentResume: true, supportsExplicitStop: true },
+        resumeSandbox: vi.fn(
+          async (): Promise<ResumeResult> => ({
+            outcome: "retry",
+            reason: "provider transition timed out",
+          })
+        ),
+        stopSandbox,
+      });
+
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(provider.resumeSandbox).toHaveBeenCalledOnce();
+      expect(provider.createSandbox).not.toHaveBeenCalled();
+      expect(stopSandbox).not.toHaveBeenCalled();
+      expect(sandbox.modal_object_id).toBe("provider-obj");
+      expect(sandbox.status).toBe("failed");
+    });
+
+    it("keeps the provider sandbox when resume throws", async () => {
+      const sandbox = createMockSandbox({
+        status: "failed",
+        modal_object_id: "provider-obj",
+        snapshot_image_id: null,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const stopSandbox = vi.fn(async () => ({ success: true }));
+      const provider = createMockProvider({
+        capabilities: { supportsPersistentResume: true, supportsExplicitStop: true },
+        resumeSandbox: vi.fn(async () => {
+          throw new SandboxProviderError("provider unavailable", "transient");
+        }),
+        stopSandbox,
+      });
+
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(provider.createSandbox).not.toHaveBeenCalled();
+      expect(stopSandbox).not.toHaveBeenCalled();
+      expect(sandbox.modal_object_id).toBe("provider-obj");
+      expect(sandbox.status).toBe("failed");
+    });
+
+    it("reconciles an existing provider sandbox while the spawn circuit breaker is open", async () => {
+      const sandbox = createMockSandbox({
+        status: "failed",
+        modal_object_id: "provider-obj",
+        snapshot_image_id: null,
+        spawn_failure_count: 3,
+        last_spawn_failure: Date.now() - 60_000,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const provider = createMockProvider({
+        capabilities: { supportsPersistentResume: true },
+        resumeSandbox: vi.fn(
+          async (): Promise<ResumeResult> => ({
+            outcome: "resumed",
+            providerObjectId: "provider-obj",
+          })
+        ),
+      });
+
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(provider.resumeSandbox).toHaveBeenCalledOnce();
+      expect(provider.createSandbox).not.toHaveBeenCalled();
+    });
+
+    it("deletes and replaces only when resume authorizes replacement", async () => {
+      const sandbox = createMockSandbox({
+        status: "failed",
+        modal_object_id: "provider-obj",
+        snapshot_image_id: null,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const stopSandbox = vi.fn(async () => ({ success: true }));
+      const provider = createMockProvider({
+        capabilities: { supportsPersistentResume: true, supportsExplicitStop: true },
+        resumeSandbox: vi.fn(
+          async (): Promise<ResumeResult> => ({
+            outcome: "replace",
+            providerObjectId: "provider-obj",
+            reason: "not_found",
+          })
+        ),
+        stopSandbox,
+      });
+
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(stopSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({ providerObjectId: "provider-obj", reason: "respawn" })
+      );
+      expect(provider.createSandbox).toHaveBeenCalledOnce();
     });
 
     it("does not carry a predecessor's runtime version onto a replacement's snapshot", async () => {
@@ -3384,7 +3537,12 @@ describe("SandboxLifecycleManager", () => {
       });
       const provider = createMockProvider({
         capabilities: { supportsPersistentResume: true },
-        resumeSandbox: vi.fn(async () => ({ success: true })),
+        resumeSandbox: vi.fn(
+          async (): Promise<ResumeResult> => ({
+            outcome: "resumed",
+            providerObjectId: "provider-obj",
+          })
+        ),
       });
       const mockStorage = createMockStorage(session, sandbox);
       const manager = new SandboxLifecycleManager(

@@ -20,7 +20,6 @@ import type { MessageRepository } from "../message-repository";
 import type { SessionStatusService } from "../session-status-service";
 import type { SessionWebSocketManager } from "../websocket-manager";
 import type { SessionBudgetService } from "../budget-service";
-import type { AlarmScheduler } from "../../platform-ports";
 import type { Logger } from "../../logger";
 
 function createPushSpec(repoOwner: string, repoName: string, targetBranch: string): GitPushSpec {
@@ -319,7 +318,7 @@ describe("SessionSandboxEventProcessor", () => {
      */
     function createHoldHarness() {
       const messages = [{ id: "msg-queued", status: "pending" as const, context_reset_hold: 0 }];
-      let resetPending: number | null = null;
+      let resetPending = false;
       const messageRepository = {
         holdPendingMessages(): number {
           let written = 0;
@@ -341,21 +340,17 @@ describe("SessionSandboxEventProcessor", () => {
           }
           return written;
         },
-        setContextResetPending(deadline: number): void {
-          resetPending = deadline;
+        setContextResetPending(): void {
+          resetPending = true;
         },
         clearContextResetPending(): void {
-          resetPending = null;
+          resetPending = false;
         },
         isContextResetPending(): boolean {
-          return resetPending !== null;
-        },
-        getContextResetHoldDeadline(): number | null {
           return resetPending;
         },
       };
       const drainQueue = vi.fn(async () => {});
-      const schedule = vi.fn(async () => {});
       const log = {
         debug: vi.fn(),
         info: vi.fn(),
@@ -365,15 +360,10 @@ describe("SessionSandboxEventProcessor", () => {
       } as unknown as Logger;
       const hold = new ContextResetPromptHold(
         messageRepository as unknown as MessageRepository,
-        {
-          createEvent: vi.fn(),
-        } as unknown as EventRepository,
         drainQueue,
-        vi.fn(),
-        { schedule } as unknown as AlarmScheduler,
         log
       );
-      return { hold, messages, drainQueue, schedule, heldDeadline: () => resetPending };
+      return { hold, messages, drainQueue, heldDeadline: () => null };
     }
 
     it("synthesizes a context_reset timeline event and holds the queued prompt on a fresh session", async () => {
@@ -489,7 +479,6 @@ describe("SessionSandboxEventProcessor", () => {
         timestamp: 1000,
       });
 
-      expect(holdHarness.schedule).not.toHaveBeenCalled();
       expect(holdHarness.heldDeadline()).toBeNull();
       expect(holdHarness.messages[0].context_reset_hold).toBe(1);
     });

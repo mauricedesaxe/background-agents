@@ -200,6 +200,7 @@ describe("OpenComputerSandboxProvider", () => {
         },
         tunnelUrls: { "5173": expect.stringContaining("5173") },
       });
+      if (!("tunnelUrls" in result)) expect.unreachable("resume should return access fields");
       expect(result.tunnelUrls).not.toHaveProperty("6099");
     }
     const createEnv = vi.mocked(client.createSandbox).mock.calls[0][0].env;
@@ -895,7 +896,7 @@ describe("OpenComputerSandboxProvider", () => {
       codeServerEnabled: false,
     });
 
-    expect(result).toMatchObject({ success: true, providerObjectId: "oc-sandbox-1" });
+    expect(result).toMatchObject({ outcome: "resumed", providerObjectId: "oc-sandbox-1" });
     expect(client.getSandbox).toHaveBeenCalledWith("oc-sandbox-1");
     expect(client.wakeSandbox).toHaveBeenCalledWith("oc-sandbox-1");
     expect(client.setSandboxTimeout).not.toHaveBeenCalled();

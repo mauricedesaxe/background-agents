@@ -279,7 +279,7 @@ export interface SnapshotResult {
 }
 
 /**
- * Configuration for resuming a previously stopped sandbox.
+ * Configuration for reconciling an existing provider sandbox.
  */
 export interface ResumeConfig {
   /** Provider's internal object ID (e.g., Daytona sandbox ID) */
@@ -300,27 +300,21 @@ export interface ResumeConfig {
   correlation?: CorrelationContext;
 }
 
-/**
- * Result of resuming a previously stopped sandbox.
- */
-export interface ResumeResult {
-  /** Whether the resume succeeded */
-  success: boolean;
-  /** Provider's internal object ID, if it changed during recovery */
-  providerObjectId?: string;
-  /** Error message if resume failed */
-  error?: string;
-  /** Whether the caller should fall back to a fresh create */
-  shouldSpawnFresh?: boolean;
-  /** Code-server tunnel URL (if available) */
-  codeServerUrl?: string;
-  /** Code-server password (if available) */
-  codeServerPassword?: string;
-  /** Complete browser-based VNC credential (if available) */
-  vncAccess?: VncAccess;
-  /** Tunnel URLs for extra ports (port -> URL mapping) */
-  tunnelUrls?: Record<string, string>;
-}
+export type ResumeResult =
+  | {
+      outcome: "resumed";
+      providerObjectId: string;
+      codeServerUrl?: string;
+      codeServerPassword?: string;
+      vncAccess?: VncAccess;
+      tunnelUrls?: Record<string, string>;
+    }
+  | { outcome: "retry"; reason: string }
+  | {
+      outcome: "replace";
+      providerObjectId: string;
+      reason: "not_found" | "unrecoverable";
+    };
 
 /**
  * Configuration for explicitly stopping a sandbox.

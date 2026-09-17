@@ -214,7 +214,7 @@ describe("E2BSandboxProvider", () => {
       sessionId: "sess",
       sandboxId: "sandbox-logical",
     });
-    expect(result.success).toBe(true);
+    expect(result.outcome).toBe("resumed");
     expect(client.connectSandbox).toHaveBeenCalledWith("e2b-id", 1800);
     // Resume thaws the frozen supervisor (memory-preserving pause); starting a
     // second one would duel it.
@@ -229,8 +229,13 @@ describe("E2BSandboxProvider", () => {
       vncEnabled: true,
     });
 
-    expect(result.vncAccess?.url).toBe("https://6080-e2b-id.e2b.app");
-    expect(result.vncAccess?.password).toMatch(/^[A-Za-z0-9]{8}$/);
+    expect(result).toMatchObject({
+      outcome: "resumed",
+      vncAccess: {
+        url: "https://6080-e2b-id.e2b.app",
+        password: expect.stringMatching(/^[A-Za-z0-9]{8}$/),
+      },
+    });
   });
 
   it("resumeSandbox running uses setSandboxTimeout only", async () => {
@@ -251,7 +256,7 @@ describe("E2BSandboxProvider", () => {
     expect(client.connectSandbox).not.toHaveBeenCalled();
   });
 
-  it("resumeSandbox 404 returns shouldSpawnFresh", async () => {
+  it("resumeSandbox 404 returns replace", async () => {
     const client = mockClient({
       getSandbox: vi.fn(async () => {
         throw new E2BNotFoundError("gone");
@@ -263,7 +268,11 @@ describe("E2BSandboxProvider", () => {
       sessionId: "sess",
       sandboxId: "sandbox-logical",
     });
-    expect(result.shouldSpawnFresh).toBe(true);
+    expect(result).toEqual({
+      outcome: "replace",
+      providerObjectId: "e2b-id",
+      reason: "not_found",
+    });
   });
 
   it("stopSandbox pauses (resumable), not kills, and treats 404/409 as success", async () => {
@@ -324,7 +333,7 @@ describe("E2BSandboxProvider", () => {
     expect(client.killSandbox).toHaveBeenCalledWith("x", signal);
   });
 
-  it("resumeSandbox: 404 during connect (post-GET race) returns shouldSpawnFresh", async () => {
+  it("resumeSandbox: 404 during connect (post-GET race) returns replace", async () => {
     const client = mockClient({
       getSandbox: vi.fn(async () => ({ sandboxID: "e2b-id", templateID: "tmpl", state: "paused" })),
       connectSandbox: vi.fn(async () => {
@@ -336,8 +345,11 @@ describe("E2BSandboxProvider", () => {
       sessionId: "sess",
       sandboxId: "sandbox-logical",
     });
-    expect(result.success).toBe(false);
-    expect(result.shouldSpawnFresh).toBe(true);
+    expect(result).toEqual({
+      outcome: "replace",
+      providerObjectId: "e2b-id",
+      reason: "not_found",
+    });
   });
 
   it("honors config.timeoutSeconds on create and resume (child sandboxes)", async () => {

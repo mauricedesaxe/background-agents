@@ -610,6 +610,63 @@ describe("evaluateSpawnDecision", () => {
       expect(decision.providerObjectId).toBe("daytona-abc123");
     }
   });
+
+  it.each(["pending", "warming", "snapshotting"] as const)(
+    'returns "resume" for a persistent sandbox left in %s',
+    (status) => {
+      const now = Date.now();
+      const state: SandboxState = {
+        status,
+        createdAt: now - 120000,
+        providerObjectId: "daytona-abc123",
+        snapshotImageId: null,
+        snapshotRuntimeVersion: null,
+        hasActiveWebSocket: false,
+      };
+
+      expect(evaluateSpawnDecision(state, config, now, false, true)).toEqual({
+        action: "resume",
+        providerObjectId: "daytona-abc123",
+      });
+    }
+  );
+
+  it.each(["spawning", "connecting"] as const)(
+    'returns "resume" for a persistent sandbox stuck in %s past the timeout',
+    (status) => {
+      const now = Date.now();
+      const state: SandboxState = {
+        status,
+        createdAt: now - config.spawningTimeoutMs - 1,
+        providerObjectId: "daytona-abc123",
+        snapshotImageId: null,
+        snapshotRuntimeVersion: null,
+        hasActiveWebSocket: false,
+      };
+
+      expect(evaluateSpawnDecision(state, config, now, false, true)).toEqual({
+        action: "resume",
+        providerObjectId: "daytona-abc123",
+      });
+    }
+  );
+
+  it('returns "resume" for an old ready persistent sandbox without a WebSocket', () => {
+    const now = Date.now();
+    const state: SandboxState = {
+      status: "ready",
+      createdAt: now - config.readyWaitMs - 1,
+      providerObjectId: "daytona-abc123",
+      snapshotImageId: null,
+      snapshotRuntimeVersion: null,
+      hasActiveWebSocket: false,
+    };
+
+    expect(evaluateSpawnDecision(state, config, now, false, true)).toEqual({
+      action: "resume",
+      providerObjectId: "daytona-abc123",
+    });
+  });
 });
 
 // ==================== Inactivity Timeout Tests ====================

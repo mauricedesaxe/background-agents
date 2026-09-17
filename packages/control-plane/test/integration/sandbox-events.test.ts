@@ -1,8 +1,8 @@
-import { describe, it, expect, vi, type MockInstance } from "vitest";
+import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:test";
-import { initSession, queryDO, seedMessage, waitForSandboxStatus } from "./helpers";
+import { initSession, queryDO, seedMessage } from "./helpers";
 import type { SessionDO } from "../../src/cloudflare/durable-object";
-import { componentsOf, runInSessionDO } from "./session-do-access";
+import { runInSessionDO } from "./session-do-access";
 
 describe("POST /internal/sandbox-event", () => {
   it("stores token event", async () => {
@@ -686,8 +686,9 @@ describe("POST /internal/sandbox-event", () => {
     expect(flaggedAfter[0].context_reset_pending).toBe(0);
   });
 
-  it("auto-releases the context-reset hold when its deadline passes", async () => {
-    const { stub } = await initSession();
+  it("keeps the context-reset hold through alarms until explicit acknowledgement", async () => {
+    const sessionName = `hold-explicit-ack-${Date.now()}`;
+    const { stub } = await initSession({ sessionName });
     await queryDO(stub, `UPDATE session SET agent_session_id = 'ses-stored'`);
 
     const participants = await queryDO<{ id: string }>(
@@ -720,55 +721,24 @@ describe("POST /internal/sandbox-event", () => {
       context_reset_hold_deadline: number | null;
     }>(stub, "SELECT context_reset_pending, context_reset_hold_deadline FROM session LIMIT 1");
     expect(held[0].context_reset_pending).toBe(1);
-    expect(held[0].context_reset_hold_deadline).toEqual(expect.any(Number));
+    expect(held[0].context_reset_hold_deadline).toBeNull();
 
-    await queryDO(stub, `UPDATE session SET context_reset_hold_deadline = ?`, Date.now() - 1000);
     await runInSessionDO(stub, (instance: SessionDO) => instance.alarm());
 
-    const released = await queryDO<{
+    const stillHeld = await queryDO<{
       context_reset_pending: number;
       context_reset_hold_deadline: number | null;
     }>(stub, "SELECT context_reset_pending, context_reset_hold_deadline FROM session LIMIT 1");
-    expect(released[0]).toEqual({ context_reset_pending: 0, context_reset_hold_deadline: null });
+    expect(stillHeld[0]).toEqual({
+      context_reset_pending: 1,
+      context_reset_hold_deadline: null,
+    });
 
     const warnings = await queryDO<{ data: string }>(
       stub,
       "SELECT data FROM events WHERE type = 'warning' ORDER BY created_at DESC LIMIT 1"
     );
-    expect(JSON.parse(warnings[0].data)).toMatchObject({ scope: "context" });
-
-    const acknowledge = await stub.fetch("http://internal/internal/acknowledge-context-reset", {
-      method: "POST",
-    });
-    expect(acknowledge.status).toBe(409);
-  });
-
-  it("re-arms a hold whose alarm was lost, so activation releases it and drains the queue", async () => {
-    const sessionName = `hold-rehydrate-${Date.now()}`;
-    const { stub } = await initSession({ sessionName });
-    await waitForSandboxStatus(stub, "failed");
-
-    const participants = await queryDO<{ id: string }>(
-      stub,
-      "SELECT id FROM participants WHERE user_id = 'user-1'"
-    );
-    await seedMessage(stub, {
-      id: "msg-hold-rehydrate",
-      authorId: participants[0].id,
-      content: "Stuck behind a hold that lost its alarm",
-      source: "web",
-      status: "pending",
-      createdAt: Date.now(),
-    });
-    await queryDO(
-      stub,
-      "UPDATE session SET context_reset_pending = 1, context_reset_hold_deadline = ?",
-      Date.now() - 1000
-    );
-    await queryDO(
-      stub,
-      "UPDATE messages SET context_reset_hold = 1 WHERE id = 'msg-hold-rehydrate'"
-    );
+    expect(warnings).toHaveLength(0);
 
     await expect(
       runInSessionDO(stub, (_instance: SessionDO, state) => {
@@ -777,24 +747,18 @@ describe("POST /internal/sandbox-event", () => {
     ).rejects.toThrow();
     const restored = env.SESSION.get(env.SESSION.idFromName(sessionName));
 
-    let drain: MockInstance | undefined;
-    await runInSessionDO(restored, (instance: SessionDO) => {
-      drain = vi.spyOn(componentsOf(instance).messageQueue, "processMessageQueue");
+    const rehydrated = await queryDO<{
+      context_reset_pending: number;
+      context_reset_hold_deadline: number | null;
+    }>(restored, "SELECT context_reset_pending, context_reset_hold_deadline FROM session LIMIT 1");
+    expect(rehydrated[0]).toEqual({
+      context_reset_pending: 1,
+      context_reset_hold_deadline: null,
     });
 
-    await vi.waitFor(async () => {
-      const [released] = await queryDO<{ context_reset_pending: number }>(
-        restored,
-        "SELECT context_reset_pending FROM session LIMIT 1"
-      );
-      expect(released?.context_reset_pending).toBe(0);
+    const acknowledge = await restored.fetch("http://internal/internal/acknowledge-context-reset", {
+      method: "POST",
     });
-
-    const [message] = await queryDO<{ context_reset_hold: number }>(
-      restored,
-      "SELECT context_reset_hold FROM messages WHERE id = 'msg-hold-rehydrate'"
-    );
-    expect(message.context_reset_hold).toBe(0);
-    expect(drain).toHaveBeenCalled();
+    expect(acknowledge.status).toBe(200);
   });
 });

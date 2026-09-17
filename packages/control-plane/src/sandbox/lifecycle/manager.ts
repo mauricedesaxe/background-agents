@@ -417,33 +417,6 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
     const sandboxState = this.storage.getSandboxWithCircuitBreaker();
     const now = Date.now();
 
-    // Extract circuit breaker state
-    const circuitBreakerState = {
-      failureCount: sandboxState?.spawn_failure_count || 0,
-      lastFailureTime: sandboxState?.last_spawn_failure || 0,
-    };
-
-    // Check circuit breaker
-    const cbDecision = evaluateCircuitBreaker(circuitBreakerState, this.config.circuitBreaker, now);
-
-    if (cbDecision.shouldReset) {
-      this.log.info("Circuit breaker reset");
-      this.storage.resetCircuitBreaker();
-    }
-
-    if (!cbDecision.shouldProceed) {
-      this.log.warn("Circuit breaker open", {
-        event: "sandbox.circuit_breaker_open",
-        failure_count: circuitBreakerState.failureCount,
-        wait_time_ms: cbDecision.waitTimeMs || 0,
-      });
-      this.reportSandboxError(
-        `Sandbox spawning temporarily disabled after ${circuitBreakerState.failureCount} failures. Try again in ${Math.ceil((cbDecision.waitTimeMs || 0) / 1000)} seconds.`
-      );
-      return;
-    }
-
-    // Evaluate spawn decision
     const spawnState = {
       status: sandboxState?.status ?? DEFAULT_SANDBOX_STATUS,
       createdAt: sandboxState?.created_at || 0,
@@ -460,6 +433,32 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       this.isSpawningSandbox || this.isTerminatingSandbox,
       !!this.provider.capabilities.supportsPersistentResume
     );
+
+    // Extract circuit breaker state
+    const circuitBreakerState = {
+      failureCount: sandboxState?.spawn_failure_count || 0,
+      lastFailureTime: sandboxState?.last_spawn_failure || 0,
+    };
+
+    // Check circuit breaker
+    const cbDecision = evaluateCircuitBreaker(circuitBreakerState, this.config.circuitBreaker, now);
+
+    if (cbDecision.shouldReset) {
+      this.log.info("Circuit breaker reset");
+      this.storage.resetCircuitBreaker();
+    }
+
+    if (!cbDecision.shouldProceed && spawnDecision.action !== "resume") {
+      this.log.warn("Circuit breaker open", {
+        event: "sandbox.circuit_breaker_open",
+        failure_count: circuitBreakerState.failureCount,
+        wait_time_ms: cbDecision.waitTimeMs || 0,
+      });
+      this.reportSandboxError(
+        `Sandbox spawning temporarily disabled after ${circuitBreakerState.failureCount} failures. Try again in ${Math.ceil((cbDecision.waitTimeMs || 0) / 1000)} seconds.`
+      );
+      return;
+    }
 
     switch (spawnDecision.action) {
       case "skip":
@@ -1060,11 +1059,6 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
    * Resume a provider-managed sandbox in place without rotating the logical sandbox ID.
    */
   private async resumeSandbox(providerObjectId: string): Promise<void> {
-    if (!this.provider.resumeSandbox) {
-      await this.doSpawn();
-      return;
-    }
-
     this.isSpawningSandbox = true;
     this.providerStartupPending = true;
     let generation: SandboxGeneration | null = null;
@@ -1079,6 +1073,9 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
 
       const now = Date.now();
       generation = { sandboxId: sandbox.modal_sandbox_id, createdAt: now };
+      if (!this.provider.resumeSandbox) {
+        throw new Error("Provider does not implement persistent resume");
+      }
       this.storage.setLastSpawnError(null, null);
       await this.enterProviderStartup("connecting", now, () =>
         this.storage.updateSandboxForResume({
@@ -1100,35 +1097,43 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         sandboxSettings,
       });
 
-      if (!result.success) {
-        if (result.shouldSpawnFresh) {
-          this.log.info("Resume fell back to fresh spawn", {
-            provider_object_id: providerObjectId,
-            error: result.error,
+      switch (result.outcome) {
+        case "resumed":
+          if (result.providerObjectId !== providerObjectId) {
+            this.storeProviderObjectId(result.providerObjectId);
+          }
+          this.broadcastSandboxDashboardUrl(result.providerObjectId);
+          if (result.codeServerUrl && result.codeServerPassword) {
+            await this.storeCodeServer(result.codeServerUrl, result.codeServerPassword);
+          }
+          if (result.vncAccess) {
+            await this.storeVnc(result.vncAccess.url, result.vncAccess.password);
+          }
+          await this.storeAndBroadcastTunnelUrls(result.tunnelUrls);
+          await this.finishProviderStartup(generation);
+          this.storage.resetCircuitBreaker();
+          return;
+
+        case "retry":
+          this.failAttempt(generation, "connecting", result.reason);
+          return;
+
+        case "replace":
+          this.log.info("Resume authorized fresh spawn", {
+            provider_object_id: result.providerObjectId,
+            reason: result.reason,
           });
+          if (result.providerObjectId !== providerObjectId) {
+            this.storeProviderObjectId(result.providerObjectId);
+          }
           await this.doSpawn();
           return;
+
+        default: {
+          const exhaustive: never = result;
+          return exhaustive;
         }
-
-        throw new Error(result.error || "Failed to resume sandbox");
       }
-
-      const finalProviderObjectId = result.providerObjectId ?? providerObjectId;
-      if (result.providerObjectId && result.providerObjectId !== providerObjectId) {
-        this.storeProviderObjectId(result.providerObjectId);
-      }
-      this.broadcastSandboxDashboardUrl(finalProviderObjectId);
-
-      if (result.codeServerUrl && result.codeServerPassword) {
-        await this.storeCodeServer(result.codeServerUrl, result.codeServerPassword);
-      }
-      if (result.vncAccess) {
-        await this.storeVnc(result.vncAccess.url, result.vncAccess.password);
-      }
-
-      await this.storeAndBroadcastTunnelUrls(result.tunnelUrls);
-      await this.finishProviderStartup(generation);
-      this.storage.resetCircuitBreaker();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Failed to resume sandbox";
       this.failAttempt(generation, "connecting", errorMessage);

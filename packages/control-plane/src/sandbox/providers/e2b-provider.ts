@@ -178,8 +178,8 @@ export class E2BSandboxProvider implements SandboxProvider {
    *
    * Adding one would be a second, losing mechanism. `evaluateSpawnDecision`
    * consults `supportsPersistentResume` before `snapshotImageId`, so a
-   * stopped/stale E2B sandbox always resumes; and when resume gives up
-   * (`shouldSpawnFresh`) the manager spawns fresh rather than consulting a
+   * stopped, stale, or failed E2B sandbox always resumes; and when resume gives up
+   * (`replace`) the manager spawns fresh rather than consulting a
    * snapshot. On top of that, every E2B snapshot is a durable template in the
    * team account with no TTL — unlike Vercel's expiring snapshots — so a
    * per-execution `takeSnapshot` would leak one template per turn.
@@ -373,9 +373,9 @@ export class E2BSandboxProvider implements SandboxProvider {
       } catch (error) {
         if (error instanceof E2BNotFoundError) {
           return {
-            success: false,
-            error: "Sandbox no longer exists in E2B",
-            shouldSpawnFresh: true,
+            outcome: "replace",
+            providerObjectId: config.providerObjectId,
+            reason: "not_found",
           };
         }
         throw error;
@@ -389,9 +389,9 @@ export class E2BSandboxProvider implements SandboxProvider {
           await this.client.setSandboxTimeout(config.providerObjectId, timeoutSeconds);
         } else {
           return {
-            success: false,
-            error: `Sandbox in non-resumable state: ${sandbox.state}`,
-            shouldSpawnFresh: true,
+            outcome: "replace",
+            providerObjectId: config.providerObjectId,
+            reason: "unrecoverable",
           };
         }
       } catch (error) {
@@ -399,9 +399,9 @@ export class E2BSandboxProvider implements SandboxProvider {
         // late 404 the same as an initial one so the manager spawns fresh.
         if (error instanceof E2BNotFoundError) {
           return {
-            success: false,
-            error: "Sandbox no longer exists in E2B",
-            shouldSpawnFresh: true,
+            outcome: "replace",
+            providerObjectId: config.providerObjectId,
+            reason: "not_found",
           };
         }
         throw error;
@@ -425,7 +425,7 @@ export class E2BSandboxProvider implements SandboxProvider {
       );
 
       return {
-        success: true,
+        outcome: "resumed",
         providerObjectId: sandbox.sandboxID,
         codeServerUrl,
         codeServerPassword,

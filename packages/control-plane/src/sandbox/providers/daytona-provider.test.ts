@@ -438,19 +438,25 @@ describe("DaytonaSandboxProvider", () => {
 
   describe("resumeSandbox", () => {
     it("happy path: resumes a stopped sandbox", async () => {
+      let state = "stopped";
       const client = createMockClient({
-        getSandbox: async () => ({ id: "daytona-sandbox-id", state: "stopped" }),
+        getSandbox: async () => ({ id: "daytona-sandbox-id", state }),
+        startSandbox: vi.fn(async () => {
+          state = "started";
+        }),
       });
       const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
 
       const result = await provider.resumeSandbox(baseResumeConfig);
 
-      expect(result.success).toBe(true);
-      expect(result.providerObjectId).toBe("daytona-sandbox-id");
+      expect(result).toMatchObject({
+        outcome: "resumed",
+        providerObjectId: "daytona-sandbox-id",
+      });
       expect(client.startSandbox).toHaveBeenCalledWith("daytona-sandbox-id");
     });
 
-    it("returns shouldSpawnFresh when sandbox not found", async () => {
+    it("returns replace when sandbox not found", async () => {
       const client = createMockClient({
         getSandbox: async () => {
           throw new DaytonaNotFoundError("not found");
@@ -460,16 +466,39 @@ describe("DaytonaSandboxProvider", () => {
 
       const result = await provider.resumeSandbox(baseResumeConfig);
 
-      expect(result.success).toBe(false);
-      expect(result.shouldSpawnFresh).toBe(true);
+      expect(result).toEqual({
+        outcome: "replace",
+        providerObjectId: "daytona-sandbox-id",
+        reason: "not_found",
+      });
+    });
+
+    it("returns replace when the sandbox disappears during start", async () => {
+      const client = createMockClient({
+        getSandbox: async () => ({ id: "daytona-sandbox-id", state: "stopped" }),
+        startSandbox: async () => {
+          throw new DaytonaNotFoundError("gone during start");
+        },
+      });
+      const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+      await expect(provider.resumeSandbox(baseResumeConfig)).resolves.toEqual({
+        outcome: "replace",
+        providerObjectId: "daytona-sandbox-id",
+        reason: "not_found",
+      });
     });
 
     it("recovers sandbox in error state when recoverable", async () => {
+      let state = "error";
       const client = createMockClient({
         getSandbox: async () => ({
           id: "daytona-sandbox-id",
-          state: "error",
+          state,
           recoverable: true,
+        }),
+        recoverSandbox: vi.fn(async () => {
+          state = "started";
         }),
       });
       const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
@@ -481,11 +510,15 @@ describe("DaytonaSandboxProvider", () => {
     });
 
     it("recovers sandbox in build_failed state when recoverable", async () => {
+      let state = "build_failed";
       const client = createMockClient({
         getSandbox: async () => ({
           id: "daytona-sandbox-id",
-          state: "build_failed",
+          state,
           recoverable: true,
+        }),
+        recoverSandbox: vi.fn(async () => {
+          state = "started";
         }),
       });
       const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
@@ -496,11 +529,15 @@ describe("DaytonaSandboxProvider", () => {
     });
 
     it("starts sandbox in error state when not recoverable", async () => {
+      let state = "error";
       const client = createMockClient({
         getSandbox: async () => ({
           id: "daytona-sandbox-id",
-          state: "error",
+          state,
           recoverable: false,
+        }),
+        startSandbox: vi.fn(async () => {
+          state = "started";
         }),
       });
       const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
@@ -519,7 +556,7 @@ describe("DaytonaSandboxProvider", () => {
 
       const result = await provider.resumeSandbox(baseResumeConfig);
 
-      expect(result.success).toBe(true);
+      expect(result.outcome).toBe("resumed");
       expect(client.startSandbox).not.toHaveBeenCalled();
       expect(client.recoverSandbox).not.toHaveBeenCalled();
     });
@@ -529,13 +566,13 @@ describe("DaytonaSandboxProvider", () => {
       try {
         const states = ["stopped", "starting", "started"];
         const client = createMockClient({
-          getSandbox: async () => ({
+          getSandbox: vi.fn(async () => ({
             id: "daytona-sandbox-id",
             state: states.shift() ?? "started",
-          }),
-          startSandbox: async () => {
+          })),
+          startSandbox: vi.fn(async () => {
             throw new DaytonaApiError("Sandbox state change in progress", 409);
-          },
+          }),
         });
         const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
 
@@ -546,13 +583,59 @@ describe("DaytonaSandboxProvider", () => {
         await vi.runAllTimersAsync();
         await expect(resume).resolves.toEqual({
           value: expect.objectContaining({
-            success: true,
+            outcome: "resumed",
             providerObjectId: "daytona-sandbox-id",
           }),
         });
 
         expect(client.startSandbox).toHaveBeenCalledOnce();
         expect(client.getSandbox).toHaveBeenCalledTimes(3);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("returns retry when a Daytona state transition does not finish before the deadline", async () => {
+      vi.useFakeTimers();
+      try {
+        const client = createMockClient({
+          getSandbox: vi.fn(async () => ({ id: "daytona-sandbox-id", state: "starting" })),
+          startSandbox: vi.fn(async () => {
+            throw new DaytonaApiError("conflict", 409);
+          }),
+        });
+        const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+        const resume = provider.resumeSandbox(baseResumeConfig);
+        await vi.runAllTimersAsync();
+
+        await expect(resume).resolves.toEqual({
+          outcome: "retry",
+          reason: "Timed out waiting for Daytona sandbox state transition",
+        });
+        expect(client.startSandbox).toHaveBeenCalledOnce();
+        expect(client.getSandbox).toHaveBeenCalledTimes(31);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("returns retry when an accepted start does not reach started before the deadline", async () => {
+      vi.useFakeTimers();
+      try {
+        const client = createMockClient({
+          getSandbox: vi.fn(async () => ({ id: "daytona-sandbox-id", state: "starting" })),
+        });
+        const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+        const resume = provider.resumeSandbox(baseResumeConfig);
+        await vi.runAllTimersAsync();
+
+        await expect(resume).resolves.toEqual({
+          outcome: "retry",
+          reason: "Timed out waiting for Daytona sandbox state transition",
+        });
+        expect(client.startSandbox).toHaveBeenCalledOnce();
       } finally {
         vi.useRealTimers();
       }
@@ -566,13 +649,22 @@ describe("DaytonaSandboxProvider", () => {
 
       const result = await provider.resumeSandbox({ ...baseResumeConfig, vncEnabled: true });
 
-      expect(result.vncAccess?.url).toBe("https://preview.test/6080");
-      expect(result.vncAccess?.password).toMatch(/^[A-Za-z0-9]{8}$/);
+      expect(result).toMatchObject({
+        outcome: "resumed",
+        vncAccess: {
+          url: "https://preview.test/6080",
+          password: expect.stringMatching(/^[A-Za-z0-9]{8}$/),
+        },
+      });
     });
 
     it("tunnel URL failure does not fail the resume", async () => {
+      let state = "stopped";
       const client = createMockClient({
-        getSandbox: async () => ({ id: "daytona-sandbox-id", state: "stopped" }),
+        getSandbox: async () => ({ id: "daytona-sandbox-id", state }),
+        startSandbox: vi.fn(async () => {
+          state = "started";
+        }),
         getSignedPreviewUrl: async () => {
           throw new Error("tunnel service down");
         },
@@ -584,8 +676,7 @@ describe("DaytonaSandboxProvider", () => {
         codeServerEnabled: true,
       });
 
-      expect(result.success).toBe(true);
-      expect(result.codeServerUrl).toBeUndefined();
+      expect(result).toMatchObject({ outcome: "resumed", codeServerUrl: undefined });
     });
   });
 
