@@ -22,10 +22,6 @@ function createHandler() {
   const terminalMessageProjection = {
     flushPending: vi.fn<() => Promise<void>>().mockResolvedValue(),
   };
-  const contextResetHold = {
-    autoReleaseIfDue: vi.fn<() => Promise<boolean>>().mockResolvedValue(false),
-    rearmIfHeld: vi.fn<() => Promise<number | null>>().mockResolvedValue(null),
-  };
   const alarmScheduler = {
     schedule: vi.fn<(timestamp: number) => Promise<void>>().mockResolvedValue(),
     cancel: vi.fn<() => Promise<void>>().mockResolvedValue(),
@@ -47,7 +43,6 @@ function createHandler() {
     lifecycleManager,
     terminalMessageProjection,
     alarmScheduler,
-    contextResetHold,
     getExecutionTimeoutMs: () => 1000,
     now,
     log,
@@ -61,7 +56,6 @@ function createHandler() {
     lifecycleManager,
     terminalMessageProjection,
     alarmScheduler,
-    contextResetHold,
     now,
     log,
   };
@@ -191,10 +185,6 @@ describe("createAlarmHandler", () => {
       lifecycleManager,
       terminalMessageProjection: { flushPending: vi.fn(async () => {}) },
       alarmScheduler,
-      contextResetHold: {
-        autoReleaseIfDue: vi.fn(async () => false),
-        rearmIfHeld: vi.fn(async () => null),
-      },
       getExecutionTimeoutMs: () => 1000,
       now: () => 2000,
       log: createHandler().log,

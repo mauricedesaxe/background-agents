@@ -37,6 +37,8 @@ const log = createLogger("daytona-provider");
 // ---------------------------------------------------------------------------
 
 const DEFAULT_PREVIEW_EXPIRY_SECONDS = 3900;
+const RESUME_RECONCILE_INTERVAL_MS = 1_000;
+const RESUME_RECONCILE_DEADLINE_MS = 30_000;
 
 // ---------------------------------------------------------------------------
 // Provider config
@@ -125,21 +127,58 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       } catch (error) {
         if (error instanceof DaytonaNotFoundError) {
           return {
-            success: false,
-            error: "Sandbox no longer exists in Daytona",
-            shouldSpawnFresh: true,
+            outcome: "replace",
+            providerObjectId: config.providerObjectId,
+            reason: "not_found",
           };
         }
         throw error;
       }
 
-      const state = sandbox.state;
-      if ((state === "error" || state === "build_failed") && sandbox.recoverable) {
-        await this.client.recoverSandbox(config.providerObjectId);
-      } else if (state !== "started") {
-        // Covers stopped, archived, and non-recoverable error states —
-        // Daytona's start endpoint handles the state transition internally.
-        await this.client.startSandbox(config.providerObjectId);
+      if (sandbox.state !== "started") {
+        try {
+          if (
+            (sandbox.state === "error" || sandbox.state === "build_failed") &&
+            sandbox.recoverable
+          ) {
+            await this.client.recoverSandbox(config.providerObjectId);
+          } else {
+            await this.client.startSandbox(config.providerObjectId);
+          }
+        } catch (error) {
+          if (error instanceof DaytonaNotFoundError) {
+            return {
+              outcome: "replace",
+              providerObjectId: config.providerObjectId,
+              reason: "not_found",
+            };
+          }
+          if (!(error instanceof DaytonaApiError) || error.status !== 409) throw error;
+        }
+
+        const deadline = Date.now() + RESUME_RECONCILE_DEADLINE_MS;
+        while (Date.now() < deadline) {
+          try {
+            sandbox = await this.client.getSandbox(config.providerObjectId);
+          } catch (pollError) {
+            if (pollError instanceof DaytonaNotFoundError) {
+              return {
+                outcome: "replace",
+                providerObjectId: config.providerObjectId,
+                reason: "not_found",
+              };
+            }
+            throw pollError;
+          }
+          if (sandbox.state === "started") break;
+          await new Promise((resolve) => setTimeout(resolve, RESUME_RECONCILE_INTERVAL_MS));
+        }
+        if (sandbox.state !== "started") {
+          return {
+            outcome: "retry",
+            reason: "Timed out waiting for Daytona sandbox state transition",
+          };
+        }
       }
 
       // Tunnel URL generation runs after start so a preview-URL failure
@@ -169,7 +208,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       }
 
       return {
-        success: true,
+        outcome: "resumed",
         providerObjectId: sandbox.id,
         codeServerUrl,
         codeServerPassword,

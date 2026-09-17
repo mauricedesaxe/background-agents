@@ -7,12 +7,6 @@ import type { ExecutionStopCoordinator } from "../execution-stop-coordinator";
 import type { MessageRepository } from "../message-repository";
 import type { SessionTerminalMessageProjection } from "../terminal-message-projection";
 
-/** The context-reset hold slice the alarm handler needs. */
-export interface ContextResetHoldAlarmPort {
-  autoReleaseIfDue(): Promise<boolean>;
-  rearmIfHeld(): Promise<number | null>;
-}
-
 export interface AlarmHandlerDeps {
   repository: MessageRepository;
   messageQueue: Pick<SessionMessageQueue, "failStuckProcessingMessage">;
@@ -23,8 +17,6 @@ export interface AlarmHandlerDeps {
   lifecycleManager: Pick<SandboxLifecycleManager, "handleAlarm">;
   terminalMessageProjection: Pick<SessionTerminalMessageProjection, "flushPending">;
   alarmScheduler: AlarmScheduler;
-  /** Releases a context-reset hold that outlived its deadline; re-arms it otherwise. */
-  contextResetHold: ContextResetHoldAlarmPort;
   /** Resolved per use so it honors settings persisted after construction. */
   getExecutionTimeoutMs: () => number;
   now: () => number;
@@ -55,8 +47,6 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
         projectionFailure = { error };
       }
       await deps.executionStop.recoverStopConfirmationTimeout();
-      await deps.contextResetHold.rearmIfHeld();
-      await deps.contextResetHold.autoReleaseIfDue();
       // Execution timeout check: if a message has been in 'processing' longer than
       // the configured timeout, fail it. This is idempotent - if the message was
       // already failed (by lifecycle recovery or a prior alarm),

@@ -252,9 +252,9 @@ export class OpenComputerSandboxProvider implements SandboxProvider {
       } catch (error) {
         if (error instanceof OpenComputerNotFoundError) {
           return {
-            success: false,
-            error: "Sandbox no longer exists in OpenComputer",
-            shouldSpawnFresh: true,
+            outcome: "replace",
+            providerObjectId: config.providerObjectId,
+            reason: "not_found",
           };
         }
         throw error;
@@ -301,7 +301,7 @@ export class OpenComputerSandboxProvider implements SandboxProvider {
       }
 
       return {
-        success: true,
+        outcome: "resumed",
         providerObjectId: sandbox.id || config.providerObjectId,
         codeServerUrl,
         codeServerPassword,

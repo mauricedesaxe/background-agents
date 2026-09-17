@@ -177,7 +177,6 @@ function buildQueue() {
     ),
     getNextPendingMessage: vi.fn(() => null as MessageRow | null),
     isContextResetPending: vi.fn(() => false),
-    getContextResetHoldDeadline: vi.fn(() => null as number | null),
     startMessageProcessing: vi.fn<MessageRepository["startMessageProcessing"]>(() => true),
     updateMessageToProcessing: vi.fn(),
     updateMessageToPending: vi.fn(),

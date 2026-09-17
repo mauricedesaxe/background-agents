@@ -185,19 +185,16 @@ export class MessageRepository {
 
   /**
    * Arm the session-wide context-reset hold: dispatch blocks for every prompt
-   * — queued now or enqueued later — until the reset is acknowledged or the
-   * auto-release deadline passes. The per-message marker alone cannot cover
-   * prompts that arrive after the divergence.
+   * — queued now or enqueued later — until the reset is acknowledged. The
+   * per-message marker alone cannot cover prompts that arrive later.
    */
-  setContextResetPending(deadline: number): void {
+  setContextResetPending(): void {
     this.sql.exec(
-      `UPDATE session SET context_reset_pending = 1, context_reset_hold_deadline = ?
-       WHERE id = (SELECT id FROM session LIMIT 1)`,
-      deadline
+      `UPDATE session SET context_reset_pending = 1, context_reset_hold_deadline = NULL
+       WHERE id = (SELECT id FROM session LIMIT 1)`
     );
   }
 
-  /** Clear the session-wide hold once it is acknowledged or auto-released. */
   clearContextResetPending(): void {
     this.sql.exec(
       `UPDATE session SET context_reset_pending = 0, context_reset_hold_deadline = NULL
@@ -210,13 +207,6 @@ export class MessageRepository {
       .exec(`SELECT context_reset_pending FROM session LIMIT 1`)
       .toArray() as Array<{ context_reset_pending: number }>;
     return rows[0]?.context_reset_pending === 1;
-  }
-
-  getContextResetHoldDeadline(): number | null {
-    const rows = this.sql
-      .exec(`SELECT context_reset_hold_deadline FROM session LIMIT 1`)
-      .toArray() as Array<{ context_reset_hold_deadline: number | null }>;
-    return rows[0]?.context_reset_hold_deadline ?? null;
   }
 
   getProcessingMessageWithCreatedAt(): { id: string; created_at: number } | null {

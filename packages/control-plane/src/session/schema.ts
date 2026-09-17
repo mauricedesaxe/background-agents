@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS session (
   budget_exhausted INTEGER NOT NULL DEFAULT 0,      -- Pauses prompt admission and dispatch
   environment_id TEXT,                              -- Launch environment provenance; NULL for repo-launched/ad-hoc sessions
   context_reset_pending INTEGER NOT NULL DEFAULT 0, -- Blocks dispatch of EVERY prompt until the reset is acknowledged
-  context_reset_hold_deadline INTEGER,              -- When the pending context reset auto-releases
+  context_reset_hold_deadline INTEGER,              -- Preserved for schema compatibility; unused by current code
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   CHECK (
