@@ -106,6 +106,14 @@ window itself.
 - This is a real CI gate now, not a manual grep, so a dropped reapply blocks the merge on its own.
   Run the same grep by hand as a backstop if reapplying outside CI.
 
+## Gate 7 — Persistent-resume Git safety (card 28)
+
+- Run `PYTHONPATH=src uv run --extra dev pytest -q tests/test_restore_integrity.py` from
+  `packages/sandbox-runtime`.
+- The cross-seam restart test must move the remote branch, select persistent resume from the
+  supervisor's boot marker, and preserve the local branch, HEAD, index, dirty file, and untracked
+  file. A mocked boot mode or mocked fetch does not satisfy this gate.
+
 ## Note
 
 The connect path (snapshot sizing, the bridge SSE loop, the handshake, the jj PR helper) changes

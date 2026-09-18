@@ -16,8 +16,11 @@ def _git(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+@pytest.mark.parametrize("boot_mode", [BootMode.SNAPSHOT_RESTORE, BootMode.PERSISTENT_RESUME])
 @pytest.mark.asyncio
-async def test_snapshot_restore_preserves_head_index_and_worktree(tmp_path: Path) -> None:
+async def test_restore_preserves_head_index_and_worktree(
+    tmp_path: Path, boot_mode: BootMode
+) -> None:
     repo = tmp_path / "viewer"
     repo.mkdir()
     _git(repo, "init", "-b", "main")
@@ -64,7 +67,7 @@ async def test_snapshot_restore_preserves_head_index_and_worktree(tmp_path: Path
     supervisor.synchronizer._ensure_plain_origin = AsyncMock(return_value=True)
     supervisor.synchronizer._fetch_branch = AsyncMock(return_value=True)
 
-    result = await supervisor.synchronizer.sync(supervisor.repositories, BootMode.SNAPSHOT_RESTORE)
+    result = await supervisor.synchronizer.sync(supervisor.repositories, boot_mode)
 
     assert result.failures == ()
     assert _git(repo, "rev-parse", "HEAD") == feature_sha
@@ -72,3 +75,84 @@ async def test_snapshot_restore_preserves_head_index_and_worktree(tmp_path: Path
     assert "staged.txt" in _git(repo, "diff", "--cached", "--name-only")
     assert "tracked.txt" in _git(repo, "diff", "--name-only")
     assert (repo / "untracked.txt").read_text() == "untracked\n"
+
+
+@pytest.mark.asyncio
+async def test_pre_prompt_restart_preserves_repository_after_remote_moves(
+    tmp_path: Path,
+) -> None:
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", remote], check=True, capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", remote, seed], check=True, capture_output=True)
+    _git(seed, "config", "user.name", "Restart Test")
+    _git(seed, "config", "user.email", "restart@example.com")
+    (seed / "tracked.txt").write_text("baseline\n")
+    _git(seed, "add", "tracked.txt")
+    _git(seed, "commit", "-m", "baseline")
+    _git(seed, "branch", "-M", "main")
+    _git(seed, "push", "-u", "origin", "main")
+
+    repo = tmp_path / "viewer"
+    subprocess.run(
+        ["git", "clone", "--branch", "main", remote, repo], check=True, capture_output=True
+    )
+    _git(repo, "config", "user.name", "Restart Test")
+    _git(repo, "config", "user.email", "restart@example.com")
+
+    environment = {
+        "SANDBOX_ID": "sandbox-1",
+        "REPO_OWNER": "open-inspect",
+        "REPO_NAME": "viewer",
+        "SESSION_CONFIG": json.dumps(
+            {
+                "session_id": "session-1",
+                "repositories": [
+                    {
+                        "repo_owner": "open-inspect",
+                        "repo_name": "viewer",
+                        "branch": "main",
+                    }
+                ],
+            }
+        ),
+    }
+    with patch.dict(os.environ, environment, clear=False):
+        from tests.runtime_helpers import make_repository_boot
+
+        repository_boot = make_repository_boot()
+    repository_boot.repositories = [replace(repository_boot.repositories[0], path=repo)]
+    repository_boot.synchronizer._ensure_plain_origin = AsyncMock(return_value=True)
+    repository_boot.synchronizer.ensure_credentials_configured = AsyncMock()
+    repository_boot.hooks.run_setup = AsyncMock(return_value=True)
+    repository_boot.hooks.run_start = AsyncMock(return_value=True)
+    repository_boot.tunnel_environment.wait_until_ready = AsyncMock()
+
+    await repository_boot.boot(BootMode.REPO_IMAGE, [])
+
+    _git(repo, "checkout", "-b", "feature/session-work")
+    (repo / "committed.txt").write_text("committed\n")
+    _git(repo, "add", "committed.txt")
+    _git(repo, "commit", "-m", "session commit")
+    feature_sha = _git(repo, "rev-parse", "HEAD")
+    (repo / "staged.txt").write_text("staged\n")
+    _git(repo, "add", "staged.txt")
+    (repo / "tracked.txt").write_text("dirty\n")
+    (repo / "untracked.txt").write_text("untracked\n")
+
+    (seed / "remote.txt").write_text("remote moved\n")
+    _git(seed, "add", "remote.txt")
+    _git(seed, "commit", "-m", "move remote")
+    _git(seed, "push", "origin", "main")
+
+    boot_mode = BootMode.from_env({**environment, "FROM_REPO_IMAGE": "true"})
+    assert boot_mode is BootMode.PERSISTENT_RESUME
+    await repository_boot.boot(boot_mode, [])
+
+    assert _git(repo, "rev-parse", "HEAD") == feature_sha
+    assert _git(repo, "branch", "--show-current") == "feature/session-work"
+    assert "staged.txt" in _git(repo, "diff", "--cached", "--name-only")
+    assert "tracked.txt" in _git(repo, "diff", "--name-only")
+    assert (repo / "untracked.txt").read_text() == "untracked\n"
+    repository_boot.hooks.run_setup.assert_not_awaited()
+    assert repository_boot.hooks.run_start.await_args_list[-1].args[1] is BootMode.PERSISTENT_RESUME

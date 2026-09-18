@@ -225,7 +225,11 @@ class TestSyncRepositories:
             await sup.boot(BootMode.FRESH, [])
 
     @pytest.mark.asyncio
-    async def test_snapshot_boot_member_failure_warns_and_continues(self, tmp_path):
+    @pytest.mark.parametrize(
+        "boot_mode",
+        [BootMode.SNAPSHOT_RESTORE, BootMode.PERSISTENT_RESUME, BootMode.REPO_IMAGE],
+    )
+    async def test_non_fresh_boot_member_failure_warns_and_continues(self, tmp_path, boot_mode):
         sup = _make_repository_boot(tmp_path)
         _mock_repository_boot(sup)
         sup.synchronizer.sync = AsyncMock(
@@ -242,7 +246,7 @@ class TestSyncRepositories:
                 str(tmp_path / "warnings.jsonl"),
             ),
         ):
-            await sup.boot(BootMode.SNAPSHOT_RESTORE, [])
+            await sup.boot(boot_mode, [])
         warning = json.loads((tmp_path / "warnings.jsonl").read_text().splitlines()[0])
         assert warning["scope"] == "sync"
         assert warning["repoName"] == "backend"
@@ -262,7 +266,10 @@ class TestSyncRepositories:
         with pytest.raises(RuntimeError, match="git sync timed out for acme/backend"):
             await sup.boot(boot_mode, [])
 
-    @pytest.mark.parametrize("boot_mode", [BootMode.SNAPSHOT_RESTORE, BootMode.REPO_IMAGE])
+    @pytest.mark.parametrize(
+        "boot_mode",
+        [BootMode.SNAPSHOT_RESTORE, BootMode.PERSISTENT_RESUME, BootMode.REPO_IMAGE],
+    )
     @pytest.mark.asyncio
     async def test_restore_and_repo_image_timeouts_warn_and_continue(self, tmp_path, boot_mode):
         sup = _make_repository_boot(tmp_path)
