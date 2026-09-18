@@ -88,6 +88,7 @@ function createProcessor(promptHoldOverride?: QueuedPromptHold) {
   const statusService = { reconcileAfterExecution: vi.fn(async (_success: boolean) => {}) };
   const scheduleInactivityCheck = vi.fn(async () => {});
   const processMessageQueue = vi.fn(async () => {});
+  const onRuntimeReady = vi.fn(async () => {});
   const broadcastPromptQueue = vi.fn();
   const updateLastActivity = vi.fn();
   const applySessionTitleUpdate = vi.fn((title: string) => ({ ok: true as const, title }));
@@ -157,7 +158,8 @@ function createProcessor(promptHoldOverride?: QueuedPromptHold) {
       applySessionTitleUpdate,
       updateLastActivity,
       log,
-      promptHoldOverride ?? promptHold
+      promptHoldOverride ?? promptHold,
+      onRuntimeReady
     ),
     pushService
   );
@@ -179,6 +181,7 @@ function createProcessor(promptHoldOverride?: QueuedPromptHold) {
     statusService,
     scheduleInactivityCheck,
     processMessageQueue,
+    onRuntimeReady,
     broadcastPromptQueue,
     updateLastActivity,
     applySessionTitleUpdate,
@@ -434,6 +437,7 @@ describe("SessionSandboxEventProcessor", () => {
       expect(contextResetCalls(h)).toHaveLength(0);
       expect(h.repository.updateSessionAgentSessionId).not.toHaveBeenCalled();
       expect(h.promptHold.holdQueuedPrompt).not.toHaveBeenCalled();
+      expect(h.onRuntimeReady).toHaveBeenCalledOnce();
     });
 
     it("does nothing when the same agent session reconnects without a resumed marker", async () => {

@@ -15,7 +15,7 @@ import { persistSandboxEvent, type SandboxEventContext } from "./context";
  * acknowledge route that releases it.
  */
 export interface QueuedPromptHold {
-  holdQueuedPrompt(): Promise<void>;
+  holdQueuedPrompt(): void;
   releaseQueuedPromptHold(): Promise<{ released: number; acknowledged: boolean }>;
 }
 
@@ -42,7 +42,8 @@ export class SandboxRuntimeEventHandler {
     ) => SessionTitleUpdateResult,
     private readonly updateLastActivity: (timestamp: number) => void,
     private readonly log: Logger,
-    private readonly promptHold: QueuedPromptHold
+    private readonly promptHold: QueuedPromptHold,
+    private readonly onRuntimeReady: () => void
   ) {}
 
   handleHeartbeat(context: SandboxEventContext): void {
@@ -81,6 +82,7 @@ export class SandboxRuntimeEventHandler {
     persistSandboxEvent(this.eventRepository, event, context);
     this.messenger.broadcast({ type: "sandbox_event", event });
     this.handleContextRecovery(event, context);
+    this.onRuntimeReady();
   }
 
   handleContextReset(
@@ -118,10 +120,10 @@ export class SandboxRuntimeEventHandler {
    * while the timeline still shows every prior turn. Surface the reset and
    * hold the queued prompt until the user acknowledges it.
    */
-  private async handleContextRecovery(
+  private handleContextRecovery(
     event: Extract<SandboxEvent, { type: "ready" }>,
     context: SandboxEventContext
-  ): Promise<void> {
+  ): void {
     const persistedSessionId = this.repository.getSession()?.agent_session_id ?? null;
     const reportedSessionId = event.opencodeSessionId ?? null;
     if (reportedSessionId && reportedSessionId !== persistedSessionId) {
@@ -151,6 +153,6 @@ export class SandboxRuntimeEventHandler {
       persisted_session_id: persistedSessionId,
       reported_session_id: reportedSessionId,
     });
-    await this.promptHold.holdQueuedPrompt();
+    this.promptHold.holdQueuedPrompt();
   }
 }

@@ -20,7 +20,7 @@ export class ContextResetPromptHold implements QueuedPromptHold {
     private readonly log: Logger
   ) {}
 
-  async holdQueuedPrompt(): Promise<void> {
+  holdQueuedPrompt(): void {
     const held = this.messageRepository.holdPendingMessages();
     this.messageRepository.setContextResetPending();
     if (held === 0) {

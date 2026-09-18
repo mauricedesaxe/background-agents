@@ -4,6 +4,22 @@ import { initSession, queryDO, seedMessage } from "./helpers";
 import type { SessionDO } from "../../src/cloudflare/durable-object";
 import { runInSessionDO } from "./session-do-access";
 
+async function currentSandboxId(stub: DurableObjectStub): Promise<string> {
+  const rows = await queryDO<{ sandbox_id: string }>(
+    stub,
+    "SELECT COALESCE(modal_sandbox_id, id) AS sandbox_id FROM sandbox"
+  );
+  return rows[0].sandbox_id;
+}
+
+async function readyHeaders(stub: DurableObjectStub): Promise<Record<string, string>> {
+  const rows = await queryDO<{ created_at: number }>(stub, "SELECT created_at FROM sandbox");
+  return {
+    "Content-Type": "application/json",
+    "X-Sandbox-Generation": String(rows[0].created_at),
+  };
+}
+
 describe("POST /internal/sandbox-event", () => {
   it("stores token event", async () => {
     const { stub } = await initSession();
@@ -492,6 +508,7 @@ describe("POST /internal/sandbox-event", () => {
 
   it("a divergent ready stores a context_reset and holds the queued prompt", async () => {
     const { stub } = await initSession();
+    const sandboxId = await currentSandboxId(stub);
     await queryDO(stub, `UPDATE session SET agent_session_id = 'ses-stored'`);
 
     const participants = await queryDO<{ id: string }>(
@@ -509,10 +526,10 @@ describe("POST /internal/sandbox-event", () => {
 
     const res = await stub.fetch("http://internal/internal/sandbox-event", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await readyHeaders(stub),
       body: JSON.stringify({
         type: "ready",
-        sandboxId: "sb-1",
+        sandboxId,
         opencodeSessionId: null,
         timestamp: Date.now() / 1000,
       }),
@@ -545,6 +562,7 @@ describe("POST /internal/sandbox-event", () => {
 
   it("a reconnect with the stored session id does not hold the queued prompt", async () => {
     const { stub } = await initSession();
+    const sandboxId = await currentSandboxId(stub);
     await queryDO(stub, `UPDATE session SET agent_session_id = 'ses-stored'`);
 
     const participants = await queryDO<{ id: string }>(
@@ -562,10 +580,10 @@ describe("POST /internal/sandbox-event", () => {
 
     const res = await stub.fetch("http://internal/internal/sandbox-event", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await readyHeaders(stub),
       body: JSON.stringify({
         type: "ready",
-        sandboxId: "sb-1",
+        sandboxId,
         opencodeSessionId: "ses-stored",
         timestamp: Date.now() / 1000,
       }),
@@ -581,13 +599,14 @@ describe("POST /internal/sandbox-event", () => {
 
   it("persists the vendor id a ready reports, and a later divergent ready holds through it", async () => {
     const { stub } = await initSession();
+    const sandboxId = await currentSandboxId(stub);
 
     const first = await stub.fetch("http://internal/internal/sandbox-event", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await readyHeaders(stub),
       body: JSON.stringify({
         type: "ready",
-        sandboxId: "sb-1",
+        sandboxId,
         opencodeSessionId: "ses-live-1",
         resumed: true,
         timestamp: Date.now() / 1000,
@@ -616,10 +635,10 @@ describe("POST /internal/sandbox-event", () => {
 
     const divergent = await stub.fetch("http://internal/internal/sandbox-event", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await readyHeaders(stub),
       body: JSON.stringify({
         type: "ready",
-        sandboxId: "sb-1",
+        sandboxId,
         opencodeSessionId: null,
         timestamp: Date.now() / 1000,
       }),
@@ -641,14 +660,15 @@ describe("POST /internal/sandbox-event", () => {
 
   it("holds a prompt enqueued after the reset until acknowledge", async () => {
     const { stub } = await initSession();
+    const sandboxId = await currentSandboxId(stub);
     await queryDO(stub, `UPDATE session SET agent_session_id = 'ses-stored'`);
 
     const ready = await stub.fetch("http://internal/internal/sandbox-event", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await readyHeaders(stub),
       body: JSON.stringify({
         type: "ready",
-        sandboxId: "sb-1",
+        sandboxId,
         opencodeSessionId: null,
         timestamp: Date.now() / 1000,
       }),
@@ -688,6 +708,7 @@ describe("POST /internal/sandbox-event", () => {
   it("keeps the context-reset hold through alarms until explicit acknowledgement", async () => {
     const sessionName = `hold-explicit-ack-${Date.now()}`;
     const { stub } = await initSession({ sessionName });
+    const sandboxId = await currentSandboxId(stub);
     await queryDO(stub, `UPDATE session SET agent_session_id = 'ses-stored'`);
 
     const participants = await queryDO<{ id: string }>(
@@ -705,10 +726,10 @@ describe("POST /internal/sandbox-event", () => {
 
     const ready = await stub.fetch("http://internal/internal/sandbox-event", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await readyHeaders(stub),
       body: JSON.stringify({
         type: "ready",
-        sandboxId: "sb-1",
+        sandboxId,
         opencodeSessionId: null,
         timestamp: Date.now() / 1000,
       }),

@@ -22,6 +22,16 @@ function openSandboxSockets(state: DurableObjectState): WebSocket[] {
   return state.getWebSockets("sandbox").filter((socket) => socket.readyState === WebSocket.OPEN);
 }
 
+function reportRuntimeReady(ws: WebSocket): void {
+  ws.send(
+    JSON.stringify({
+      type: "ready",
+      sandboxId: SANDBOX_ID,
+      timestamp: Date.now() / 1000,
+    })
+  );
+}
+
 describe("Sandbox WebSocket (via SELF.fetch)", () => {
   it("upgrade with valid auth returns 101", async () => {
     const name = `ws-sandbox-ok-${Date.now()}`;
@@ -132,6 +142,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
       expect(response.status).toBe(101);
       expect(ws).not.toBeNull();
       ws!.accept();
+      reportRuntimeReady(ws!);
       await waitForSandboxStatus(stub, "ready");
       ws!.close();
     }
@@ -435,7 +446,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     expect(events).toHaveLength(0);
   });
 
-  it("sandbox connect sets status to ready", async () => {
+  it("sandbox remains connecting until the runtime reports ready", async () => {
     const name = `ws-sandbox-ready-${Date.now()}`;
     const { stub } = await initNamedSession(name);
     // Model the production boot sequence: the sandbox connects while the
@@ -452,6 +463,9 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     });
     expect(ws).not.toBeNull();
     ws!.accept();
+
+    await waitForSandboxStatus(stub, "connecting");
+    reportRuntimeReady(ws!);
     await waitForSandboxStatus(stub, "ready");
 
     const stateRes = await stub.fetch("http://internal/internal/state");
@@ -498,6 +512,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     });
     expect(sandboxWs).not.toBeNull();
     sandboxWs!.accept();
+    reportRuntimeReady(sandboxWs!);
 
     const messages = await collector;
     expect(messages.slice(-2).map((message) => message.type)).toEqual([
@@ -541,6 +556,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     });
     expect(firstSandboxWs).not.toBeNull();
     firstSandboxWs!.accept();
+    reportRuntimeReady(firstSandboxWs!);
 
     const { ws: replacementSandboxWs } = await openSandboxWs(name, {
       authToken: SANDBOX_TOKEN,
@@ -548,6 +564,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     });
     expect(replacementSandboxWs).not.toBeNull();
     replacementSandboxWs!.accept();
+    reportRuntimeReady(replacementSandboxWs!);
 
     const messages = await collector;
     expect(
@@ -576,6 +593,8 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
       });
       expect(firstWs).not.toBeNull();
       firstWs!.accept();
+      reportRuntimeReady(firstWs!);
+      await waitForSandboxStatus(stub, "ready");
 
       const closed = new Promise<void>((resolve) => {
         firstWs!.addEventListener("close", () => resolve());
@@ -594,6 +613,8 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
       expect(response.status).toBe(101);
       expect(reconnectedWs).not.toBeNull();
       reconnectedWs!.accept();
+      reportRuntimeReady(reconnectedWs!);
+      await waitForSandboxStatus(stub, "ready");
       reconnectedWs!.close();
     }
   );
@@ -613,6 +634,8 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     });
     expect(firstWs).not.toBeNull();
     firstWs!.accept();
+    reportRuntimeReady(firstWs!);
+    await waitForSandboxStatus(stub, "ready");
 
     const closed = new Promise<void>((resolve) => {
       firstWs!.addEventListener("close", () => resolve());
@@ -632,6 +655,8 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     expect(response.status).toBe(101);
     expect(reconnectedWs).not.toBeNull();
     reconnectedWs!.accept();
+    reportRuntimeReady(reconnectedWs!);
+    await waitForSandboxStatus(stub, "ready");
 
     const sandboxAfterReconnect = await queryDO<{ last_heartbeat: number; status: string }>(
       stub,
@@ -665,6 +690,7 @@ describe("Sandbox WebSocket (via SELF.fetch)", () => {
     });
     expect(ws).not.toBeNull();
     ws!.accept();
+    reportRuntimeReady(ws!);
     await waitForSandboxStatus(stub, "ready");
     ws!.close();
   });

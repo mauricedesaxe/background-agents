@@ -8,6 +8,7 @@ import {
   openSandboxWs,
   seedSandboxAuth,
   collectMessages,
+  waitForSandboxStatus,
 } from "./helpers";
 
 describe("POST /internal/stop", () => {
@@ -157,7 +158,7 @@ describe("POST /internal/stop", () => {
       timeoutMs: 2000,
     });
 
-    // Send a token event (stale, but should still broadcast)
+    // Send a late token event from the same sandbox generation.
     await stub.fetch("http://internal/internal/sandbox-event", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -165,7 +166,7 @@ describe("POST /internal/stop", () => {
         type: "token",
         content: "stale token",
         messageId: msgId,
-        sandboxId: "sb-1",
+        sandboxId: sandboxAuth.sandboxId,
         timestamp: Date.now() / 1000,
       }),
     });
@@ -296,9 +297,18 @@ describe("POST /internal/stop", () => {
       createdAt: Date.now() - 1000,
     });
 
-    // Connect sandbox WS so queue drain can dispatch
+    // Connect the sandbox and complete the runtime handshake so queue drain can dispatch.
     const { ws: sandboxWs } = await openSandboxWs(name, sandboxAuth);
-    if (sandboxWs) sandboxWs.accept();
+    expect(sandboxWs).not.toBeNull();
+    sandboxWs!.accept();
+    sandboxWs!.send(
+      JSON.stringify({
+        type: "ready",
+        sandboxId: sandboxAuth.sandboxId,
+        timestamp: Date.now() / 1000,
+      })
+    );
+    await waitForSandboxStatus(stub, "ready");
     // Stop execution - marks A as failed
     await stub.fetch("http://internal/internal/stop", { method: "POST" });
 

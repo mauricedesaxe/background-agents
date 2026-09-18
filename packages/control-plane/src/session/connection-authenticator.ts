@@ -21,7 +21,6 @@ import { requestLogger } from "./request-logger";
 import { resolveParticipantName } from "./participant-name";
 import { getAvatarUrl, type ParticipantService } from "./participant-service";
 import type { PresenceService } from "./presence-service";
-import type { SessionMessageQueue } from "./message-queue";
 import type { SessionMessenger } from "./messenger";
 import type { SandboxRepository } from "./sandbox-repository";
 import type { SessionCoreRepository } from "./session-core-repository";
@@ -45,7 +44,6 @@ export interface SessionConnectionAuthenticatorDeps {
   lifecycleManager: SandboxLifecycleManager;
   messenger: SessionMessenger;
   backgroundTasks: BackgroundTasks;
-  messageQueue: Pick<SessionMessageQueue, "processMessageQueue">;
   participantService: ParticipantService;
   presenceService: PresenceService;
   snapshotReader: SessionSnapshotReader;
@@ -214,31 +212,19 @@ export class SessionConnectionAuthenticator implements SessionUpgradeAdmission {
     sandboxId: string | null,
     log: Logger
   ): Promise<void> {
-    const {
-      wsManager,
-      sandboxRepository,
-      lifecycleManager,
-      messenger,
-      backgroundTasks,
-      messageQueue,
-    } = this.deps;
+    const { wsManager, sandboxRepository, lifecycleManager, messenger } = this.deps;
 
     const now = Date.now();
     lifecycleManager.updateLastActivity(now);
     sandboxRepository.updateSandboxHeartbeat(now);
     await lifecycleManager.scheduleInactivityCheck();
 
-    // The lifecycle manager publishes access after any pending provider
-    // startup has persisted its URLs and credentials.
-    const accessIsPersisted = !lifecycleManager.isProviderStartupPending();
     const { replaced } = wsManager.acceptAndSetSandboxSocket(ws, sandboxId ?? undefined);
-    // Notify manager that sandbox connected so it can reset the spawning flag
+    // Transport attachment is not runtime readiness. The bridge's ready event
+    // verifies conversation identity before opening prompt dispatch.
     lifecycleManager.onSandboxConnected();
-    sandboxRepository.updateSandboxStatus("ready");
-    messenger.broadcast({ type: "sandbox_status", status: "ready" });
-    if (accessIsPersisted) {
-      messenger.broadcast({ type: "sandbox_access_changed" });
-    }
+    sandboxRepository.updateSandboxStatus("connecting");
+    messenger.broadcast({ type: "sandbox_status", status: "connecting" });
 
     log.info("ws.connect", {
       event: "ws.connect",
@@ -247,11 +233,6 @@ export class SessionConnectionAuthenticator implements SessionUpgradeAdmission {
       sandbox_id: sandboxId,
       replaced_existing: replaced,
       duration_ms: Date.now() - now,
-    });
-
-    // Process any pending messages now that sandbox is connected
-    backgroundTasks.submit(() => messageQueue.processMessageQueue(), {
-      name: "message_queue.process",
     });
   }
 

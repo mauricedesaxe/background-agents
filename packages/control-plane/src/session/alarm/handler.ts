@@ -12,7 +12,7 @@ export interface AlarmHandlerDeps {
   messageQueue: Pick<SessionMessageQueue, "failStuckProcessingMessage">;
   executionStop: Pick<
     ExecutionStopCoordinator,
-    "recoverStopConfirmationTimeout" | "resumeAfterSandboxTermination"
+    "stop" | "recoverStopConfirmationTimeout" | "resumeAfterSandboxTermination"
   >;
   lifecycleManager: Pick<SandboxLifecycleManager, "handleAlarm">;
   terminalMessageProjection: Pick<SessionTerminalMessageProjection, "flushPending">;
@@ -67,7 +67,7 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
             elapsed_ms: result.elapsedMs,
             timeout_ms: executionTimeoutMs,
           });
-          await deps.messageQueue.failStuckProcessingMessage();
+          await deps.executionStop.stop("Execution timed out (stuck processing)");
         } else {
           // An earlier lifecycle alarm has consumed the Durable Object's single
           // alarm slot. Reassert this message's deadline before lifecycle handling

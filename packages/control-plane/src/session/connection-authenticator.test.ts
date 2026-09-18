@@ -124,7 +124,6 @@ function createHarness(opts: {
     lifecycleManager,
     messenger: { broadcast },
     backgroundTasks,
-    messageQueue: { processMessageQueue },
     log,
   } as unknown as SessionConnectionAuthenticatorDeps;
   return {
@@ -293,21 +292,18 @@ describe("UpgradeDecision.attach", () => {
     expect(h.broadcast).not.toHaveBeenCalled();
   });
 
-  it("marks the sandbox ready, publishes access, arms the inactivity check, and drains the queue", async () => {
+  it("keeps the sandbox connecting until runtime readiness is verified", async () => {
     const h = createHarness({ sandbox: await sandboxRow() });
 
     await (await accepted(h, sandboxUpgrade())).attach(socket);
 
     expect(h.wsManager.acceptAndSetSandboxSocket).toHaveBeenCalledWith(socket, SANDBOX_ID);
     expect(h.lifecycleManager.onSandboxConnected).toHaveBeenCalledOnce();
-    expect(h.sandboxRepository.updateSandboxStatus).toHaveBeenCalledWith("ready");
-    expect(h.broadcast.mock.calls.map(([message]) => message.type)).toEqual([
-      "sandbox_status",
-      "sandbox_access_changed",
-    ]);
+    expect(h.sandboxRepository.updateSandboxStatus).toHaveBeenCalledWith("connecting");
+    expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_status", status: "connecting" });
     expect(h.lifecycleManager.scheduleInactivityCheck).toHaveBeenCalledOnce();
-    expect(h.submitted).toEqual(["message_queue.process"]);
-    expect(h.processMessageQueue).toHaveBeenCalledOnce();
+    expect(h.submitted).toEqual([]);
+    expect(h.processMessageQueue).not.toHaveBeenCalled();
     expect(h.log.info).toHaveBeenCalledWith(
       "ws.connect",
       expect.objectContaining({ outcome: "success", sandbox_id: SANDBOX_ID })

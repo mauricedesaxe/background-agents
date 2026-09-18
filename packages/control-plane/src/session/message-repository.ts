@@ -425,6 +425,8 @@ export class MessageRepository {
       const claimed = this.sql.exec(
         `UPDATE messages SET status = 'processing', started_at = ?
          WHERE id = ? AND status = 'pending'
+           AND context_reset_hold = 0
+           AND NOT EXISTS (SELECT 1 FROM session WHERE context_reset_pending = 1)
            AND NOT EXISTS (SELECT 1 FROM messages WHERE status = 'processing')
          RETURNING id`,
         startedAt,
