@@ -26,6 +26,7 @@ import type { SourceControlProviderName } from "../source-control";
 import type { SandboxLifecycle } from "../sandbox/lifecycle/manager";
 import type { ParticipantRow, PromptGitIdentity, SandboxCommand, SessionRow } from "./types";
 import type { SessionCoreRepository } from "./session-core-repository";
+import type { SandboxRepository } from "./sandbox-repository";
 import type { ParticipantRepository } from "./participant-repository";
 import type { MessageRepository } from "./message-repository";
 import {
@@ -162,7 +163,8 @@ export class SessionMessageQueue {
     private readonly alarmScheduler: AlarmScheduler,
     private readonly executionStop: ExecutionStopCoordinator,
     /** Resolved per use so it honors settings persisted after construction. */
-    private readonly getExecutionTimeoutMs: () => number
+    private readonly getExecutionTimeoutMs: () => number,
+    private readonly sandboxRepository: Pick<SandboxRepository, "getSandbox">
   ) {}
 
   async enqueueAutofix(
@@ -474,6 +476,13 @@ export class SessionMessageQueue {
           context: { message_id: message.id },
         }
       );
+      return;
+    }
+    const sandboxStatus = this.sandboxRepository.getSandbox()?.status;
+    if (sandboxStatus !== "ready" && sandboxStatus !== "snapshotting") {
+      this.log.debug("processMessageQueue: bridge has not reported ready", {
+        sandbox_status: sandboxStatus ?? null,
+      });
       return;
     }
 

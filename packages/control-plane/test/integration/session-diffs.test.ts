@@ -20,12 +20,19 @@ async function reportReady(
     baseSha: string;
   }>
 ): Promise<void> {
+  const [{ sandbox_id: sandboxId, created_at: createdAt }] = await queryDO<{
+    sandbox_id: string;
+    created_at: number;
+  }>(stub, "SELECT COALESCE(modal_sandbox_id, id) AS sandbox_id, created_at FROM sandbox");
   const response = await stub.fetch("http://internal/internal/sandbox-event", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Sandbox-Generation": String(createdAt),
+    },
     body: JSON.stringify({
       type: "ready",
-      sandboxId: "sandbox-diff",
+      sandboxId,
       timestamp: 100,
       repositories,
     }),

@@ -453,7 +453,8 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     scmProviderName,
     alarmScheduler,
     executionStop,
-    getExecutionTimeoutMs
+    getExecutionTimeoutMs,
+    sandboxRepository
   );
 
   // Tier 7 — services over the queue and lifecycle.
@@ -534,7 +535,17 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     (title, options) => titleService.applySessionTitleUpdate(title, options),
     updateLastActivity,
     log,
-    promptHold
+    promptHold,
+    () => {
+      sandboxRepository.updateSandboxStatus("ready");
+      messenger.broadcast({ type: "sandbox_status", status: "ready" });
+      if (!lifecycleManager.isProviderStartupPending()) {
+        messenger.broadcast({ type: "sandbox_access_changed" });
+      }
+      backgroundTasks.submit(() => messageQueue.processMessageQueue(), {
+        name: "message_queue.process",
+      });
+    }
   );
   const pushService = new SandboxPushService(log, wsManager);
   const sandboxEventProcessor = new SessionSandboxEventProcessor(
@@ -750,7 +761,6 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     lifecycleManager,
     messenger,
     backgroundTasks,
-    messageQueue,
     participantService,
     presenceService,
     snapshotReader,

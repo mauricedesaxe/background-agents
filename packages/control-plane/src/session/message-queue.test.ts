@@ -3,6 +3,7 @@ import { createTestBackgroundTasks } from "../background-tasks.test-support";
 import { fingerprintWebPrompt, SessionMessageQueue } from "./message-queue";
 import { AttachmentClaimConflictError } from "./session-attachment-repository";
 import type { SessionAttachmentRepository } from "./session-attachment-repository";
+import type { SandboxRepository } from "./sandbox-repository";
 import {
   serverMessageSchema,
   type ServerMessage,
@@ -199,6 +200,9 @@ function buildQueue() {
   const attachmentRepository = {
     getUnreferenced: vi.fn((): SessionAttachmentRow[] => []),
   };
+  const sandboxRepository = {
+    getSandbox: vi.fn(() => ({ status: "ready" })),
+  };
 
   const wsManager = {
     getSandboxSocket: vi.fn(() => null as WebSocket | null),
@@ -292,7 +296,8 @@ function buildQueue() {
     "github",
     alarmScheduler,
     executionStop,
-    () => executionTimeoutMs
+    () => executionTimeoutMs,
+    sandboxRepository as unknown as Pick<SandboxRepository, "getSandbox">
   );
 
   return {
@@ -300,6 +305,7 @@ function buildQueue() {
     executionStop,
     repository,
     attachmentRepository,
+    sandboxRepository,
     wsManager,
     participantService,
     broadcast,
@@ -1089,6 +1095,19 @@ describe("SessionMessageQueue", () => {
     expect(event).not.toHaveProperty("attachments");
     expect(event.timestamp * 1000).toBe(h.repository.startMessageProcessing.mock.calls[0][1]);
     expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
+  });
+
+  it("does not dispatch through a bridge that has not reported runtime readiness", async () => {
+    const h = buildQueue();
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage());
+    h.wsManager.getSandboxSocket.mockReturnValue({ readyState: 1 } as WebSocket);
+    h.sandboxRepository.getSandbox.mockReturnValue({ status: "connecting" });
+
+    await h.queue.processMessageQueue();
+
+    expect(h.repository.startMessageProcessing).not.toHaveBeenCalled();
+    expect(h.wsManager.send).not.toHaveBeenCalled();
+    expect(h.sandboxLifecycle.spawnSandbox).not.toHaveBeenCalled();
   });
 
   it.each([

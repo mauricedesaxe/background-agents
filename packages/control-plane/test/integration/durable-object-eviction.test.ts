@@ -178,6 +178,13 @@ describe("SessionDO eviction and hibernation restore", () => {
     });
     expect(ws).not.toBeNull();
     ws!.accept();
+    ws!.send(
+      JSON.stringify({
+        type: "ready",
+        sandboxId,
+        timestamp: Date.now() / 1000,
+      })
+    );
     await waitForSandboxStatus(stub, "ready");
     const [{ active_socket_id: activeSocketId }] = await queryDO<{
       active_socket_id: string | null;

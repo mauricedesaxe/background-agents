@@ -93,7 +93,11 @@ function createHandler() {
 
 describe("SandboxHandler", () => {
   it("processes sandbox event and returns ok response", async () => {
-    const { handler, processSandboxEvent } = createHandler();
+    const { handler, processSandboxEvent, getSandbox } = createHandler();
+    getSandbox.mockReturnValue({
+      id: "sandbox-row-1",
+      modal_sandbox_id: "sandbox-1",
+    } as SandboxRow);
     const event = {
       type: "heartbeat",
       sandboxId: "sandbox-1",
@@ -112,6 +116,58 @@ describe("SandboxHandler", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: "ok" });
     expect(processSandboxEvent).toHaveBeenCalledWith(event);
+  });
+
+  it("ignores events from a replaced sandbox generation", async () => {
+    const { handler, processSandboxEvent, getSandbox } = createHandler();
+    getSandbox.mockReturnValue({
+      id: "sandbox-row-2",
+      modal_sandbox_id: "sandbox-2",
+    } as SandboxRow);
+
+    const response = await handler.sandboxEvent(
+      new Request("http://internal/internal/sandbox/event", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "ready",
+          sandboxId: "sandbox-1",
+          timestamp: 123,
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "ignored" });
+    expect(processSandboxEvent).not.toHaveBeenCalled();
+  });
+
+  it("ignores ready events from an earlier generation with the same sandbox id", async () => {
+    const { handler, processSandboxEvent, getSandbox } = createHandler();
+    getSandbox.mockReturnValue({
+      id: "sandbox-row-1",
+      modal_sandbox_id: "sandbox-1",
+      created_at: 200,
+    } as SandboxRow);
+
+    const response = await handler.sandboxEvent(
+      new Request("http://internal/internal/sandbox/event", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "X-Sandbox-Generation": "100",
+        },
+        body: JSON.stringify({
+          type: "ready",
+          sandboxId: "sandbox-1",
+          timestamp: 123,
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "ignored" });
+    expect(processSandboxEvent).not.toHaveBeenCalled();
   });
 
   it("authenticates the current sandbox generation and coordinates a fatal runtime error", async () => {

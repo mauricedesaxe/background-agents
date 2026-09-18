@@ -77,6 +77,18 @@ export class SandboxHandler {
     }
 
     const event: SandboxEvent = result.data;
+    if (event.type === "ready") {
+      const sandbox = this.sandboxRepository.getSandbox();
+      if (!sandbox) {
+        return Response.json({ error: "No active sandbox" }, { status: 409 });
+      }
+      if (event.sandboxId !== (sandbox.modal_sandbox_id ?? sandbox.id)) {
+        return Response.json({ status: "ignored" });
+      }
+      if (request.headers.get("X-Sandbox-Generation") !== String(sandbox.created_at)) {
+        return Response.json({ status: "ignored" });
+      }
+    }
     await this.sandboxEventProcessor.processSandboxEvent(event);
     return Response.json({ status: "ok" });
   }

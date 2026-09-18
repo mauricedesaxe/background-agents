@@ -473,6 +473,8 @@ describe("MessageRepository", () => {
     expect(transactionSyncCalls).toBe(1);
     expect(mock.calls[0].query).toContain("status = 'processing'");
     expect(mock.calls[0].query).toContain("status = 'pending'");
+    expect(mock.calls[0].query).toContain("context_reset_hold = 0");
+    expect(mock.calls[0].query).toContain("context_reset_pending = 1");
     expect(mock.calls[0].query).toContain("NOT EXISTS");
     expect(mock.calls[1].params[0]).toBe("user_message:msg-1");
   });
