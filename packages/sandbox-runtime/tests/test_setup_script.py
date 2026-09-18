@@ -314,3 +314,78 @@ class TestSetupInRepositoryBoot:
 
         sup.hooks.run_setup.assert_not_called()
         sup.hooks.run_start.assert_called_once_with(sup.repositories[0], BootMode.SNAPSHOT_RESTORE)
+
+    async def test_boot_marker_exists_before_setup_runs(self, tmp_path, monkeypatch):
+        marker = tmp_path / "boot-completed"
+        monkeypatch.setattr("sandbox_runtime.repository_boot.BOOT_COMPLETED_FILE_PATH", str(marker))
+        sup = _make_repository_boot(tmp_path)
+        sup._write_repo_manifest = MagicMock()
+        sup._write_workspace_manifest = MagicMock()
+        sup.synchronizer.ensure_credentials_configured = AsyncMock()
+        from sandbox_runtime.repository_sync import RepositorySyncResult
+
+        sup.synchronizer.sync = AsyncMock(
+            return_value=RepositorySyncResult(tuple(sup.repositories), ())
+        )
+
+        async def assert_marker_exists(*_args):
+            assert marker.read_text() == "fresh\n"
+            return True
+
+        sup.hooks.run_setup = AsyncMock(side_effect=assert_marker_exists)
+        sup.hooks.run_start = AsyncMock(return_value=True)
+
+        await sup.boot(BootMode.FRESH, [])
+
+        sup.hooks.run_setup.assert_awaited_once()
+
+    async def test_existing_boot_marker_is_not_rewritten(self, tmp_path, monkeypatch):
+        marker = tmp_path / "boot-completed"
+        marker.write_text("fresh\n")
+        monkeypatch.setattr("sandbox_runtime.repository_boot.BOOT_COMPLETED_FILE_PATH", str(marker))
+        mkstemp = MagicMock(side_effect=AssertionError("existing marker must not be rewritten"))
+        monkeypatch.setattr("sandbox_runtime.repository_boot.tempfile.mkstemp", mkstemp)
+        sup = _make_repository_boot(tmp_path)
+        sup._write_repo_manifest = MagicMock()
+        sup._write_workspace_manifest = MagicMock()
+        sup.synchronizer.ensure_credentials_configured = AsyncMock()
+        from sandbox_runtime.repository_sync import RepositorySyncResult
+
+        sup.synchronizer.sync = AsyncMock(
+            return_value=RepositorySyncResult(tuple(sup.repositories), ())
+        )
+        sup.hooks.run_start = AsyncMock(return_value=True)
+
+        await sup.boot(BootMode.PERSISTENT_RESUME, [])
+
+        assert marker.read_text() == "fresh\n"
+        mkstemp.assert_not_called()
+
+    async def test_run_skips_setup_on_persistent_resume(self, tmp_path):
+        sup = _make_repository_boot(tmp_path)
+
+        sup._write_repo_manifest = MagicMock()
+        sup._write_workspace_manifest = MagicMock()
+        sup.synchronizer.ensure_credentials_configured = AsyncMock()
+        from sandbox_runtime.repository_sync import (
+            RepositorySyncOutcome,
+            RepositorySyncResult,
+            RepositorySyncStatus,
+        )
+
+        sup.synchronizer.sync = AsyncMock(
+            return_value=RepositorySyncResult(
+                tuple(sup.repositories),
+                tuple(
+                    RepositorySyncOutcome(repo, RepositorySyncStatus.SUCCEEDED)
+                    for repo in sup.repositories
+                ),
+            )
+        )
+        sup.hooks.run_setup = AsyncMock(return_value=True)
+        sup.hooks.run_start = AsyncMock(return_value=True)
+
+        await sup.boot(BootMode.PERSISTENT_RESUME, [])
+
+        sup.hooks.run_setup.assert_not_called()
+        sup.hooks.run_start.assert_called_once_with(sup.repositories[0], BootMode.PERSISTENT_RESUME)

@@ -19,7 +19,6 @@ import json
 import math
 import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -33,9 +32,11 @@ from .attachment_processor import (
     parse_session_image_attachments,
 )
 from .constants import (
+    AGENT_SESSION_ID_FILE_PATH,
     BOOT_WARNINGS_FILE_PATH,
     BRIDGE_FATAL_ERROR_FILE_PATH,
     DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+    LEGACY_OPENCODE_SESSION_ID_FILE_PATH,
     MAX_SNAPSHOT_RESERVE_SECONDS,
     REPO_MANIFEST_FILE_PATH,
     SANDBOX_TIMEOUT_ENV_VAR,
@@ -186,9 +187,8 @@ class AgentBridge:
 
         # Vendor session id persistence. The legacy file name is still read so
         # snapshots taken before the rename keep their conversation history.
-        temp_dir = Path(tempfile.gettempdir())
-        self.session_id_file = temp_dir / "agent-session-id"
-        self.legacy_session_id_file = temp_dir / "opencode-session-id"
+        self.session_id_file = Path(AGENT_SESSION_ID_FILE_PATH)
+        self.legacy_session_id_file = Path(LEGACY_OPENCODE_SESSION_ID_FILE_PATH)
         self.repo_path = Path("/workspace")
         # Supervisor-written canonical repo manifest; push targeting resolves
         # member checkout paths through it rather than joining spec-supplied
@@ -874,7 +874,7 @@ class AgentBridge:
             await self._save_session_id()
 
     async def _save_session_id(self) -> None:
-        """Persist the vendor session id so a snapshot restore can resume it."""
+        """Persist the vendor session id across sandbox restarts."""
         session_id = self.agent_session_id
         if session_id:
             try:

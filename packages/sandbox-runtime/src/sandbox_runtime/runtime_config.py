@@ -11,24 +11,47 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlsplit
 
+from .constants import (
+    AGENT_SESSION_ID_FILE_PATH,
+    BOOT_COMPLETED_FILE_PATH,
+    LEGACY_OPENCODE_SESSION_ID_FILE_PATH,
+)
 from .harness.base import HarnessId, parse_harness_id
 
 
 class BootMode(StrEnum):
     FRESH = "fresh"
+    PERSISTENT_RESUME = "persistent_resume"
     SNAPSHOT_RESTORE = "snapshot_restore"
     REPO_IMAGE = "repo_image"
     BUILD = "build"
 
     @classmethod
-    def from_env(cls, environment: Mapping[str, str]) -> BootMode:
+    def from_env(
+        cls,
+        environment: Mapping[str, str],
+        *,
+        resume_marker_files: tuple[Path, ...] | None = None,
+    ) -> BootMode:
         if environment.get("IMAGE_BUILD_MODE") == "true":
             return cls.BUILD
         if environment.get("RESTORED_FROM_SNAPSHOT") == "true":
             return cls.SNAPSHOT_RESTORE
+        if resume_marker_files is None:
+            resume_marker_files = (
+                Path(BOOT_COMPLETED_FILE_PATH),
+                Path(AGENT_SESSION_ID_FILE_PATH),
+                Path(LEGACY_OPENCODE_SESSION_ID_FILE_PATH),
+            )
+        if any(path.is_file() and path.read_text().strip() for path in resume_marker_files):
+            return cls.PERSISTENT_RESUME
         if environment.get("FROM_REPO_IMAGE") == "true":
             return cls.REPO_IMAGE
         return cls.FRESH
+
+    @property
+    def preserves_repository_checkout(self) -> bool:
+        return self in (self.PERSISTENT_RESUME, self.SNAPSHOT_RESTORE)
 
 
 def _freeze_json(value: Any) -> Any:

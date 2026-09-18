@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .constants import REPO_MANIFEST_FILE_PATH
+from .constants import BOOT_COMPLETED_FILE_PATH, REPO_MANIFEST_FILE_PATH
 from .repo_config import RepoConfigError, RepoEntry, dump_repo_manifest, parse_repositories
 from .repository_sync import RepositorySyncStatus
 from .runtime_config import BootMode, RepositoryConfig
@@ -87,6 +89,24 @@ class RepositoryBoot:
             Path(REPO_MANIFEST_FILE_PATH).write_text(dump_repo_manifest(self.repositories))
         except Exception as error:
             self.log.warn("supervisor.repo_manifest_write_failed", exc=error)
+
+    def _mark_boot_completed(self, boot_mode: BootMode) -> None:
+        if boot_mode is BootMode.BUILD:
+            return
+        marker = Path(BOOT_COMPLETED_FILE_PATH)
+        if marker.is_file() and marker.read_text().strip():
+            return
+
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{marker.name}.", dir=marker.parent)
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w") as temporary_file:
+                temporary_file.write(f"{boot_mode.value}\n")
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            temporary_path.replace(marker)
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
     def _write_workspace_manifest(self) -> None:
         if not self.is_multi_repo:
@@ -188,6 +208,8 @@ class RepositoryBoot:
                         )
                     self.warnings.record("sync", message, repo)
         self._write_repo_manifest()
+
+        self._mark_boot_completed(boot_mode)
 
         repository_shas: list[dict[str, str]] = []
         if boot_mode is BootMode.BUILD and git_sync_success and self.repositories:

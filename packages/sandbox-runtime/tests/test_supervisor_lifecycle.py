@@ -81,6 +81,25 @@ async def test_regular_boot_phase_order(tmp_path, monkeypatch):
     ]
 
 
+async def test_persisted_agent_session_selects_non_destructive_repository_boot(
+    tmp_path, monkeypatch
+):
+    from sandbox_runtime import runtime_config
+
+    Path(runtime_config.AGENT_SESSION_ID_FILE_PATH).write_text("agent-session-1\n")
+    events = []
+    supervisor, *_ = _supervisor(tmp_path, events)
+    monkeypatch.delenv("IMAGE_BUILD_MODE", raising=False)
+    monkeypatch.delenv("RESTORED_FROM_SNAPSHOT", raising=False)
+    monkeypatch.delenv("FROM_REPO_IMAGE", raising=False)
+
+    assert await supervisor.run() is True
+    supervisor.repository_boot.prepare_tunnel_environment.assert_called_once_with(
+        BootMode.PERSISTENT_RESUME
+    )
+    assert "repository:persistent_resume" in events
+
+
 async def test_managed_skills_failure_warns_and_keeps_booting(tmp_path, monkeypatch):
     events = []
     supervisor, *_ = _supervisor(tmp_path, events)

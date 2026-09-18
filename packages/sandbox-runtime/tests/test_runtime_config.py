@@ -19,7 +19,52 @@ from sandbox_runtime.runtime_config import BootMode, RuntimeConfig
     ],
 )
 def test_boot_mode_precedence(environment, expected):
-    assert BootMode.from_env(environment) is expected
+    assert BootMode.from_env(environment, resume_marker_files=()) is expected
+
+
+@pytest.mark.parametrize("marker_name", ["agent-session-id", "opencode-session-id"])
+def test_persisted_agent_session_selects_persistent_resume(tmp_path, marker_name):
+    marker = tmp_path / marker_name
+    marker.write_text("agent-session-1\n")
+
+    assert BootMode.from_env({}, resume_marker_files=(marker,)) is BootMode.PERSISTENT_RESUME
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    [
+        ({"RESTORED_FROM_SNAPSHOT": "true"}, BootMode.SNAPSHOT_RESTORE),
+        (
+            {"IMAGE_BUILD_MODE": "true", "RESTORED_FROM_SNAPSHOT": "true"},
+            BootMode.BUILD,
+        ),
+    ],
+)
+def test_explicit_boot_mode_takes_precedence_over_persisted_agent_session(
+    tmp_path, environment, expected
+):
+    marker = tmp_path / "agent-session-id"
+    marker.write_text("agent-session-1\n")
+
+    assert BootMode.from_env(environment, resume_marker_files=(marker,)) is expected
+
+
+def test_persisted_agent_session_overrides_repo_image_first_boot(tmp_path):
+    marker = tmp_path / "agent-session-id"
+    marker.write_text("agent-session-1\n")
+
+    assert (
+        BootMode.from_env({"FROM_REPO_IMAGE": "true"}, resume_marker_files=(marker,))
+        is BootMode.PERSISTENT_RESUME
+    )
+
+
+@pytest.mark.parametrize("marker_contents", ["", "  \n"])
+def test_empty_agent_session_marker_remains_fresh(tmp_path, marker_contents):
+    marker = tmp_path / "agent-session-id"
+    marker.write_text(marker_contents)
+
+    assert BootMode.from_env({}, resume_marker_files=(marker,)) is BootMode.FRESH
 
 
 def test_runtime_config_parses_frozen_values_without_environment_patching(tmp_path):
