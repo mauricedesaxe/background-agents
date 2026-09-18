@@ -436,6 +436,22 @@ describe("SessionSandboxEventProcessor", () => {
       expect(h.promptHold.holdQueuedPrompt).not.toHaveBeenCalled();
     });
 
+    it("does nothing when the same agent session reconnects without a resumed marker", async () => {
+      const h = createProcessor();
+      h.repository.getSession.mockReturnValue(seededSession);
+
+      await h.processor.processSandboxEvent({
+        type: "ready",
+        sandboxId: "sb-1",
+        opencodeSessionId: "ses-stored",
+        timestamp: 1000,
+      });
+
+      expect(contextResetCalls(h)).toHaveLength(0);
+      expect(h.repository.updateSessionAgentSessionId).not.toHaveBeenCalled();
+      expect(h.promptHold.holdQueuedPrompt).not.toHaveBeenCalled();
+    });
+
     it("does nothing when the session has no stored agent session id", async () => {
       const h = createProcessor();
       h.repository.getSession.mockReturnValue({ harness: "opencode", agent_session_id: null });
