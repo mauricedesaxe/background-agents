@@ -1,0 +1,150 @@
+name: Session Recovery Export (temp)
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_id:
+        description: Session ID to export
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      SESSION_ID: ${{ inputs.session_id }}
+      CONTROL_PLANE_SCRIPT: open-inspect-control-plane-openinspect-leetsoftware
+      MEDIA_BUCKET: open-inspect-media-openinspect-leetsoftware
+      D1_DATABASE_ID: 62c10db2-38f5-4665-aee0-efccef19cf43
+      READER_NAME: tmp-session-recovery-reader
+    steps:
+      - name: Install wrangler
+        run: npm install -g wrangler@4
+
+      - name: Generate read token
+        id: token
+        run: echo "value=$(openssl rand -hex 16)" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy temporary reader
+        id: deploy
+        working-directory: /tmp
+        run: |
+          mkdir -p reader && cd reader
+          cat > worker.js <<'WORKER_EOF'
+          export default {
+            async fetch(request, env) {
+              const url = new URL(request.url);
+              if (url.pathname !== "/read" || url.searchParams.get("t") !== env.READ_TOKEN) {
+                return new Response("not found", { status: 404 });
+              }
+              const kind = url.searchParams.get("kind") || "messages";
+              const query = new URLSearchParams({ limit: url.searchParams.get("limit") || "200" });
+              const cursor = url.searchParams.get("cursor");
+              if (cursor) query.set("cursor", cursor);
+              const sessionId = url.searchParams.get("session");
+              const stub = env.SESSION.get(env.SESSION.idFromName(sessionId));
+              const response = await stub.fetch(`https://internal.do/internal/${kind}?${query}`);
+              return new Response(response.body, {
+                status: response.status,
+                headers: { "content-type": "application/json" },
+              });
+            },
+          };
+          WORKER_EOF
+          cat > wrangler.jsonc <<'CFG_EOF'
+          {
+            "name": "tmp-session-recovery-reader",
+            "main": "worker.js",
+            "compatibility_date": "2024-09-23",
+            "durable_objects": {
+              "bindings": [
+                {
+                  "name": "SESSION",
+                  "class_name": "SessionDO",
+                  "script_name": "open-inspect-control-plane-openinspect-leetsoftware"
+                }
+              ]
+            }
+          }
+          CFG_EOF
+          npx wrangler deploy --var "READ_TOKEN:${{ steps.token.outputs.value }}" 2>&1 | tee deploy.log
+          URL=$(grep -o 'https://tmp-session-recovery-reader\.[-a-z0-9.]*\.workers\.dev' deploy.log | head -1)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Export Durable Object data
+        working-directory: /tmp
+        env:
+          READER_URL: ${{ steps.deploy.outputs.url }}
+          READ_TOKEN: ${{ steps.token.outputs.value }}
+        run: |
+          mkdir -p /tmp/out
+          cat > fetch.mjs <<'FETCH_EOF'
+          import { appendFileSync } from "node:fs";
+          async function fetchPage(kind, cursor) {
+            const url = new URL(process.env.READER_URL + "/read");
+            url.searchParams.set("t", process.env.READ_TOKEN);
+            url.searchParams.set("session", process.env.SESSION_ID);
+            url.searchParams.set("kind", kind);
+            url.searchParams.set("limit", "200");
+            if (cursor) url.searchParams.set("cursor", cursor);
+            for (let attempt = 1; attempt <= 12; attempt++) {
+              const response = await fetch(url);
+              const text = await response.text();
+              const routePending = response.status === 404 && text.includes("workers.cloudflare");
+              if (response.status === 200 || (response.status >= 400 && response.status < 500 && !routePending)) {
+                return { status: response.status, text };
+              }
+              await new Promise((resolve) => setTimeout(resolve, 10000));
+            }
+            return { status: 0, text: "gave up waiting for worker route" };
+          }
+          for (const kind of ["messages", "events", "snapshot", "state"]) {
+            let cursor;
+            for (let page = 0; page < 100; page++) {
+              const { status, text } = await fetchPage(kind, cursor);
+              appendFileSync(`/tmp/out/${kind}.jsonl`, JSON.stringify({ page, status, body: text }) + "\n");
+              if (status !== 200) break;
+              const parsed = JSON.parse(text);
+              cursor = parsed.cursor;
+              if (!cursor) break;
+            }
+          }
+          FETCH_EOF
+          node fetch.mjs
+
+      - name: Export D1 session index
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data "{\"sql\":\"SELECT * FROM sessions WHERE id = ?\",\"params\":[\"$SESSION_ID\"]}" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/d1/database/$D1_DATABASE_ID/query" \
+            > /tmp/out/d1-session.json
+
+      - name: Download session media
+        run: |
+          mkdir -p /tmp/out/media
+          jq -r '.body | fromjson | .artifacts[] | [.metadata.objectKey, (.url | split("/")[-1])] | @tsv' \
+            /tmp/out/snapshot.jsonl | while IFS=$'\t' read -r key name; do
+              npx wrangler r2 object get "$MEDIA_BUCKET/$key" --file="/tmp/out/media/$name" --remote
+            done
+          sha256sum /tmp/out/media/* > /tmp/out/media-sha256.txt
+
+      - name: Upload recovery artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: session-recovery-${{ inputs.session_id }}
+          path: /tmp/out/
+          compression-level: 0
+
+      - name: Delete temporary reader
+        if: always()
+        working-directory: /tmp
+        run: npx wrangler delete --name "$READER_NAME" --force || true
