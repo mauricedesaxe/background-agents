@@ -543,7 +543,7 @@ describe("POST /internal/sandbox-event", () => {
     expect(released[0].context_reset_hold).toBe(0);
   });
 
-  it("a ready that resumed the stored session id does not hold the queued prompt", async () => {
+  it("a reconnect with the stored session id does not hold the queued prompt", async () => {
     const { stub } = await initSession();
     await queryDO(stub, `UPDATE session SET agent_session_id = 'ses-stored'`);
 
@@ -567,7 +567,6 @@ describe("POST /internal/sandbox-event", () => {
         type: "ready",
         sandboxId: "sb-1",
         opencodeSessionId: "ses-stored",
-        resumed: true,
         timestamp: Date.now() / 1000,
       }),
     });

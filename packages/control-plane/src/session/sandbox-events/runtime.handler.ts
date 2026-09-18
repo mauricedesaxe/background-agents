@@ -26,8 +26,8 @@ export interface QueuedPromptHold {
  * Heartbeat and title are pure side effects; ready and git_sync also land
  * on the timeline. Ready additionally owns the context-recovery decision:
  * when the session holds a vendor conversation id but the sandbox reports
- * it did not resume one, the divergence is surfaced on the timeline and the
- * queued prompt is held until acknowledged.
+ * a missing or different id, the divergence is surfaced on the timeline and
+ * the queued prompt is held until acknowledged.
  */
 export class SandboxRuntimeEventHandler {
   constructor(
@@ -130,11 +130,11 @@ export class SandboxRuntimeEventHandler {
     if (!persistedSessionId) return;
 
     const reason =
-      event.resumed !== true
-        ? ("fresh_session" as const)
-        : reportedSessionId !== persistedSessionId
-          ? ("session_id_mismatch" as const)
-          : null;
+      reportedSessionId === persistedSessionId
+        ? null
+        : reportedSessionId === null
+          ? ("fresh_session" as const)
+          : ("session_id_mismatch" as const);
     if (!reason) return;
 
     const resetEvent: Extract<SandboxEvent, { type: "context_reset" }> = {
