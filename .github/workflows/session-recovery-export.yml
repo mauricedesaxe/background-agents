@@ -131,13 +131,18 @@ jobs:
       - name: Download session media
         run: |
           mkdir -p /tmp/out/media
-          jq -r '.body | fromjson | .artifacts[] | [.metadata.objectKey, (.url | split("/")[-1])] | @tsv' \
+          jq -r '.body | fromjson | .artifacts[] | select(.metadata.objectKey) | [.metadata.objectKey, ((.url // .id // .metadata.objectKey) | tostring | split("/")[-1])] | @tsv' \
             /tmp/out/snapshot.jsonl | while IFS=$'\t' read -r key name; do
               npx wrangler r2 object get "$MEDIA_BUCKET/$key" --file="/tmp/out/media/$name" --remote
             done
-          sha256sum /tmp/out/media/* > /tmp/out/media-sha256.txt
+          if compgen -G "/tmp/out/media/*" > /dev/null; then
+            sha256sum /tmp/out/media/* > /tmp/out/media-sha256.txt
+          else
+            : > /tmp/out/media-sha256.txt
+          fi
 
       - name: Upload recovery artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: session-recovery-${{ inputs.session_id }}
