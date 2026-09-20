@@ -197,6 +197,7 @@ CREATE TABLE IF NOT EXISTS sandbox (
   ttyd_url TEXT,                                    -- ttyd proxy tunnel URL
   ttyd_token TEXT,                                  -- Encrypted JWT token for ttyd auth
   active_socket_id TEXT,                            -- Bridge socket the session dispatches to (socket:<id> tag)
+  recovery_operation TEXT,                          -- Encrypted-token Daytona cold recovery operation (JSON)
   created_at INTEGER NOT NULL
 );
 
@@ -706,6 +707,11 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
       );
       runMigration(sql, `ALTER TABLE session ADD COLUMN context_reset_hold_deadline INTEGER`);
     },
+  },
+  {
+    id: 9000,
+    description: "Persist Daytona cold recovery operations",
+    run: `ALTER TABLE sandbox ADD COLUMN recovery_operation TEXT`,
   },
 ];
 

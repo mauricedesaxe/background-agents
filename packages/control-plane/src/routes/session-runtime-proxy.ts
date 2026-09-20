@@ -8,6 +8,10 @@ import type {
 } from "@open-inspect/shared/types/sessions";
 import { sessionBudgetUpdateSchema } from "@open-inspect/shared/types/session-api";
 import {
+  GIT_SYNC_REPORT_MAX_BYTES,
+  sandboxErrorRequestSchema,
+} from "@open-inspect/shared/types/sandbox-events";
+import {
   redactSessionSnapshotSandboxAccess,
   sessionSnapshotSchema,
 } from "@open-inspect/shared/types/server-messages";
@@ -43,7 +47,7 @@ const participantsResponseSchema = z.object({
   ),
 });
 
-const SANDBOX_ERROR_BODY_MAX_BYTES = 2 * 1024;
+const SANDBOX_ERROR_BODY_MAX_BYTES = GIT_SYNC_REPORT_MAX_BYTES + 2 * 1024;
 
 type SessionParams = { id: string };
 type ProxyHandler = (
@@ -113,6 +117,14 @@ async function handleSandboxError(
   const body = await readBodyCapped(request.body, SANDBOX_ERROR_BODY_MAX_BYTES);
   if (body === null) return error("Sandbox error body is too large", 413);
   if (body.byteLength === 0) return error("Sandbox error body is required", 400);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(new TextDecoder().decode(body));
+  } catch {
+    return error("Invalid sandbox error", 400);
+  }
+  const parsed = sandboxErrorRequestSchema.safeParse(raw);
+  if (!parsed.success) return error("Invalid sandbox error", 400);
 
   return ctx.sessionRuntime.fetch(sessionId, SessionInternalPaths.sandboxError, {
     method: "POST",
@@ -121,7 +133,7 @@ async function handleSandboxError(
       Authorization: authorization,
       "X-Sandbox-ID": sandboxId,
     },
-    body,
+    body: JSON.stringify(parsed.data),
   });
 }
 

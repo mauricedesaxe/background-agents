@@ -57,6 +57,7 @@ IMAGE_BUILD_EXECUTION_TIMEOUT_ENV_VAR = "OI_IMAGE_BUILD_EXECUTION_TIMEOUT_SECOND
 # channel) and drained by the bridge as `warning` sandbox events after its
 # WebSocket handshake. JSONL: one {scope, message, repoOwner?, repoName?} per line.
 BOOT_WARNINGS_FILE_PATH = "/tmp/oi-boot-warnings.jsonl"
+GIT_SYNC_REPORT_FILE_PATH = "/tmp/oi-git-sync-report.json"
 # Written by the bridge before it exits with DETERMINISTIC_FAILURE_EXIT_CODE;
 # the supervisor reports its contents instead of restarting the bridge.
 BRIDGE_FATAL_ERROR_FILE_PATH = "/tmp/oi-bridge-fatal-error.txt"

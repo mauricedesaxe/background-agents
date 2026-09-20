@@ -83,7 +83,9 @@ class SandboxSupervisor:
         self._desktop_restart_task: asyncio.Task[bool] | None = None
         self._repository_boot_result: RepositoryBootResult | None = None
 
-    async def _report_fatal_error(self, message: str) -> None:
+    async def _report_fatal_error(
+        self, message: str, git_sync_report: dict[str, Any] | None = None
+    ) -> None:
         self.log.error("supervisor.fatal", error_message=message)
         if not self.config.control_plane_url or not self.config.session_id:
             return
@@ -95,7 +97,15 @@ class SandboxSupervisor:
                     try:
                         response = await client.post(
                             f"{self.config.control_plane_url.rstrip('/')}/sessions/{session_id}/sandbox-error",
-                            json={"error": reported_message, "fatal": True},
+                            json={
+                                "error": reported_message,
+                                "fatal": True,
+                                **(
+                                    {"gitSyncReport": git_sync_report}
+                                    if git_sync_report is not None
+                                    else {}
+                                ),
+                            },
                             headers={
                                 "Authorization": f"Bearer {self.config.sandbox_token}",
                                 "X-Sandbox-ID": self.config.sandbox_id,
@@ -505,7 +515,7 @@ class SandboxSupervisor:
                 except ImageBuildExecutionCancelled:
                     self.log.info("image_build.cancelled", reason="shutdown_requested")
                     return True
-            await self._report_fatal_error(str(error))
+            await self._report_fatal_error(str(error), getattr(error, "git_sync_report", None))
             return False
         finally:
             await self.shutdown()

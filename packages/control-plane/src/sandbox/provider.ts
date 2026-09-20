@@ -180,6 +180,13 @@ export interface CreateSandboxResult {
   tunnelUrls?: Record<string, string>;
 }
 
+export interface ColdRecoveryConfig extends CreateSandboxConfig {
+  operationId: string;
+  sourceProviderObjectId: string;
+  snapshotName: string;
+  replacementName: string;
+}
+
 /**
  * Configuration for restoring a sandbox from a snapshot.
  */
@@ -487,6 +494,9 @@ export interface SandboxProvider {
    * Only available if `capabilities.supportsPersistentResume` is true.
    */
   resumeSandbox?(config: ResumeConfig): Promise<ResumeResult>;
+
+  /** Replace a stopped legacy sandbox through a provider-side cold snapshot. */
+  recoverColdSandbox?(config: ColdRecoveryConfig): Promise<CreateSandboxResult>;
 
   /**
    * Take a filesystem snapshot of the sandbox.

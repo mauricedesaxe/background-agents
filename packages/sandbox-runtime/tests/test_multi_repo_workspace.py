@@ -15,6 +15,7 @@ import pytest
 from sandbox_runtime.opencode_server import OpenCodeServer
 from sandbox_runtime.repository_boot import RepositoryBoot
 from sandbox_runtime.repository_sync import (
+    GitOperationResult,
     RepositorySyncOutcome,
     RepositorySyncResult,
     RepositorySyncStatus,
@@ -60,7 +61,14 @@ def _sync_result(
     return RepositorySyncResult(
         repositories,
         tuple(
-            RepositorySyncOutcome(repo, status)
+            RepositorySyncOutcome(
+                repo,
+                status,
+                diagnostic="repository not found"
+                if status is not RepositorySyncStatus.SUCCEEDED
+                else None,
+                exit_code=128 if status is RepositorySyncStatus.FAILED else None,
+            )
             for repo, status in zip(repositories, statuses, strict=True)
         ),
     )
@@ -181,7 +189,12 @@ class TestSyncRepositories:
     @pytest.mark.asyncio
     async def test_returns_failed_members_in_order(self, tmp_path):
         sup = _make_repository_boot(tmp_path)
-        sup.synchronizer._sync_repo = AsyncMock(side_effect=[True, False])
+        sup.synchronizer._sync_repo = AsyncMock(
+            side_effect=[
+                GitOperationResult(RepositorySyncStatus.SUCCEEDED),
+                GitOperationResult(RepositorySyncStatus.FAILED, "fetch failed", 1),
+            ]
+        )
 
         result = await sup.synchronizer.sync(sup.repositories, BootMode.FRESH)
 
@@ -220,7 +233,7 @@ class TestSyncRepositories:
                 "sandbox_runtime.boot_warnings.BOOT_WARNINGS_FILE_PATH",
                 str(tmp_path / "warnings.jsonl"),
             ),
-            pytest.raises(RuntimeError, match="acme/backend"),
+            pytest.raises(RuntimeError, match=r"acme/backend.*repository not found"),
         ):
             await sup.boot(BootMode.FRESH, [])
 
@@ -250,6 +263,8 @@ class TestSyncRepositories:
         warning = json.loads((tmp_path / "warnings.jsonl").read_text().splitlines()[0])
         assert warning["scope"] == "sync"
         assert warning["repoName"] == "backend"
+        assert "repository not found" in warning["message"]
+        assert "exit code 128" in warning["message"]
 
     @pytest.mark.parametrize("boot_mode", [BootMode.FRESH, BootMode.BUILD])
     @pytest.mark.asyncio
@@ -263,7 +278,7 @@ class TestSyncRepositories:
             )
         )
 
-        with pytest.raises(RuntimeError, match="git sync timed out for acme/backend"):
+        with pytest.raises(RuntimeError, match="git refresh timed_out for acme/backend"):
             await sup.boot(boot_mode, [])
 
     @pytest.mark.parametrize(

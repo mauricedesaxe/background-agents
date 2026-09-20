@@ -311,7 +311,7 @@ describe("session runtime proxy routes", () => {
       new Request("https://test.local/sessions/session-1/sandbox-error", {
         method: "POST",
         headers: SANDBOX_HEADERS,
-        body: "x".repeat(2049),
+        body: "x".repeat(37 * 1024),
       }),
       createEnv(fetch)
     );

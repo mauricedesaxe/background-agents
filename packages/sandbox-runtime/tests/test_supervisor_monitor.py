@@ -91,6 +91,30 @@ class TestFatalErrorHttpReporting:
         )
         response.raise_for_status.assert_called_once_with()
 
+    async def test_includes_git_sync_report_in_fatal_error(self):
+        supervisor = _make_reporting_supervisor()
+        report = {
+            "status": "failed",
+            "repositories": [
+                {
+                    "repoOwner": "acme",
+                    "repoName": "app",
+                    "operation": "clone",
+                    "status": "failed",
+                    "diagnostic": "repository not found",
+                }
+            ],
+        }
+        client = AsyncMock()
+        client.post.return_value = MagicMock(spec=httpx.Response)
+        client_context = AsyncMock()
+        client_context.__aenter__.return_value = client
+
+        with patch("sandbox_runtime.supervisor.httpx.AsyncClient", return_value=client_context):
+            await supervisor._report_fatal_error("git sync failed", report)
+
+        assert client.post.await_args.kwargs["json"]["gitSyncReport"] == report
+
     async def test_logs_non_successful_report_response(self, caplog):
         supervisor = _make_reporting_supervisor()
         client = AsyncMock()

@@ -23,6 +23,8 @@ function createHandler() {
   const artifactRepository = { createArtifact: vi.fn() } as unknown as ArtifactRepository;
   const processSandboxEvent = vi.fn();
   const getSandbox = vi.fn<() => SandboxRow | null>();
+  const updateSandboxGitSyncStatus = vi.fn();
+  const completeSandboxGitSync = vi.fn(() => true);
   const isValidSandboxToken = vi.fn();
   const getSession = vi.fn<() => SessionRow | null>();
   const refreshOpenAIToken = vi.fn();
@@ -47,7 +49,11 @@ function createHandler() {
     repository as unknown as EventRepository,
     artifactRepository,
     { getSession } as unknown as SessionCoreRepository,
-    { getSandbox } as unknown as SandboxRepository,
+    {
+      getSandbox,
+      updateSandboxGitSyncStatus,
+      completeSandboxGitSync,
+    } as unknown as SandboxRepository,
     { processSandboxEvent } as unknown as SessionSandboxEventProcessor,
     messenger,
     refreshOpenAIToken,
@@ -78,6 +84,8 @@ function createHandler() {
     artifactRepository,
     processSandboxEvent,
     getSandbox,
+    updateSandboxGitSyncStatus,
+    completeSandboxGitSync,
     isValidSandboxToken,
     getSession,
     refreshOpenAIToken,
@@ -222,6 +230,159 @@ describe("SandboxHandler", () => {
 
     expect(response.status).toBe(200);
     expect(failSandbox).toHaveBeenCalledWith("Bridge exited", false);
+  });
+
+  it("surfaces typed git diagnostics on a fatal boot failure", async () => {
+    const {
+      handler,
+      repository,
+      getSandbox,
+      isValidSandboxToken,
+      completeSandboxGitSync,
+      broadcast,
+      failSandbox,
+    } = createHandler();
+    getSandbox.mockReturnValue({
+      id: "sandbox-row-1",
+      modal_sandbox_id: "sandbox-1",
+      auth_token_hash: "token-hash-1",
+      auth_token: null,
+    } as SandboxRow);
+    isValidSandboxToken.mockResolvedValue(true);
+
+    const response = await handler.sandboxError(
+      new Request("http://internal/internal/sandbox-error", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          Authorization: "Bearer sandbox-token",
+          "X-Sandbox-ID": "sandbox-1",
+        },
+        body: JSON.stringify({
+          error: "git sync failed",
+          fatal: true,
+          gitSyncReport: {
+            status: "failed",
+            repositories: [
+              {
+                repoOwner: "acme",
+                repoName: "app",
+                operation: "clone",
+                status: "failed",
+                diagnostic: "repository not found",
+              },
+            ],
+          },
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(failSandbox).toHaveBeenCalledWith(
+      "git sync failed\nacme/app clone failed: repository not found",
+      true
+    );
+    expect(completeSandboxGitSync).toHaveBeenCalledWith("failed");
+    expect(repository.createEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "git_sync",
+        data: JSON.stringify({
+          type: "git_sync",
+          sandboxId: "sandbox-1",
+          timestamp: 1,
+          status: "failed",
+        }),
+      })
+    );
+    expect(broadcast).toHaveBeenCalledWith({
+      type: "sandbox_event",
+      event: {
+        type: "git_sync",
+        sandboxId: "sandbox-1",
+        timestamp: 1,
+        status: "failed",
+      },
+    });
+    expect(completeSandboxGitSync.mock.invocationCallOrder[0]).toBeLessThan(
+      failSandbox.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("persists completed git sync before reporting a later fatal boot failure", async () => {
+    const { handler, getSandbox, isValidSandboxToken, completeSandboxGitSync, failSandbox } =
+      createHandler();
+    getSandbox.mockReturnValue({
+      id: "sandbox-row-1",
+      modal_sandbox_id: "sandbox-1",
+      auth_token_hash: "token-hash-1",
+      auth_token: null,
+    } as SandboxRow);
+    isValidSandboxToken.mockResolvedValue(true);
+
+    const response = await handler.sandboxError(
+      new Request("http://internal/internal/sandbox-error", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          Authorization: "Bearer sandbox-token",
+          "X-Sandbox-ID": "sandbox-1",
+        },
+        body: JSON.stringify({
+          error: "start hook failed",
+          fatal: true,
+          gitSyncReport: {
+            status: "succeeded",
+            repositories: [
+              {
+                repoOwner: "acme",
+                repoName: "app",
+                operation: "refresh",
+                status: "succeeded",
+              },
+            ],
+          },
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(completeSandboxGitSync).toHaveBeenCalledWith("completed");
+    expect(completeSandboxGitSync.mock.invocationCallOrder[0]).toBeLessThan(
+      failSandbox.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("does not persist duplicate git sync events for fatal report retries", async () => {
+    const { handler, repository, getSandbox, isValidSandboxToken, completeSandboxGitSync } =
+      createHandler();
+    getSandbox.mockReturnValue({
+      id: "sandbox-row-1",
+      modal_sandbox_id: "sandbox-1",
+      auth_token_hash: "token-hash-1",
+      auth_token: null,
+    } as SandboxRow);
+    isValidSandboxToken.mockResolvedValue(true);
+    completeSandboxGitSync.mockReturnValueOnce(true).mockReturnValueOnce(false);
+    const request = () =>
+      new Request("http://internal/internal/sandbox-error", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          Authorization: "Bearer sandbox-token",
+          "X-Sandbox-ID": "sandbox-1",
+        },
+        body: JSON.stringify({
+          error: "start hook failed",
+          fatal: true,
+          gitSyncReport: { status: "succeeded", repositories: [] },
+        }),
+      });
+
+    await handler.sandboxError(request());
+    await handler.sandboxError(request());
+
+    expect(completeSandboxGitSync).toHaveBeenCalledTimes(2);
+    expect(repository.createEvent).toHaveBeenCalledOnce();
   });
 
   it("rejects an empty sandbox error", async () => {

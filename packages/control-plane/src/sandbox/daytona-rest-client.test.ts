@@ -147,6 +147,102 @@ describe("DaytonaRestClient", () => {
     });
   });
 
+  describe("cold recovery", () => {
+    const snapshot = {
+      id: "snapshot-1",
+      name: "recovery-snapshot",
+      state: "active",
+      sourceSandboxId: "source-1",
+      errorReason: null,
+    } as const;
+
+    it("creates a cold snapshot without memory", async () => {
+      const client = new DaytonaRestClient(defaultConfig);
+      const sourceSandbox = { id: "source-1", state: "stopped" };
+      fetchSpy.mockResolvedValue(jsonResponse(sourceSandbox));
+
+      await expect(client.createSandboxSnapshot("source/1", "recovery-snapshot")).resolves.toEqual(
+        sourceSandbox
+      );
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "https://daytona.test/api/sandbox/source%2F1/snapshot",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ name: "recovery-snapshot", includeMemory: false }),
+        })
+      );
+    });
+
+    it("lists snapshots by deterministic name and source", async () => {
+      const client = new DaytonaRestClient(defaultConfig);
+      fetchSpy.mockResolvedValue(
+        jsonResponse({ items: [snapshot], total: 1, page: 1, totalPages: 1 })
+      );
+
+      await expect(
+        client.listSnapshots({ name: "recovery-snapshot", sourceSandboxId: "source-1" })
+      ).resolves.toEqual([snapshot]);
+
+      const url = new URL(fetchSpy.mock.calls[0][0]);
+      expect(url.pathname).toBe("/api/snapshots");
+      expect(url.searchParams.get("name")).toBe("recovery-snapshot");
+      expect(url.searchParams.get("sourceSandboxId")).toBe("source-1");
+    });
+
+    it("lists replacement sandboxes by deterministic labels", async () => {
+      const client = new DaytonaRestClient(defaultConfig);
+      fetchSpy.mockResolvedValue(
+        jsonResponse({
+          items: [
+            {
+              id: "replacement-1",
+              name: "replacement",
+              state: "started",
+              labels: { operation: "recovery-1" },
+            },
+          ],
+          nextCursor: null,
+        })
+      );
+
+      await expect(
+        client.listSandboxes({ name: "replacement", labels: { operation: "recovery-1" } })
+      ).resolves.toHaveLength(1);
+
+      const url = new URL(fetchSpy.mock.calls[0][0]);
+      expect(url.pathname).toBe("/api/sandbox");
+      expect(JSON.parse(url.searchParams.get("labels") || "{}")).toEqual({
+        operation: "recovery-1",
+      });
+    });
+
+    it("follows sandbox-list cursors until the deterministic replacement is found", async () => {
+      const client = new DaytonaRestClient(defaultConfig);
+      fetchSpy
+        .mockResolvedValueOnce(jsonResponse({ items: [], nextCursor: "page-2" }))
+        .mockResolvedValueOnce(
+          jsonResponse({
+            items: [
+              {
+                id: "replacement-1",
+                name: "replacement",
+                state: "started",
+                labels: { operation: "recovery-1" },
+              },
+            ],
+            nextCursor: null,
+          })
+        );
+
+      await expect(
+        client.listSandboxes({ name: "replacement", labels: { operation: "recovery-1" } })
+      ).resolves.toHaveLength(1);
+
+      expect(new URL(fetchSpy.mock.calls[1][0]).searchParams.get("cursor")).toBe("page-2");
+    });
+  });
+
   describe("startSandbox", () => {
     it("sends POST /sandbox/{id}/start", async () => {
       const client = new DaytonaRestClient(defaultConfig);

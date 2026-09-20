@@ -25,6 +25,7 @@ import type { SessionMessenger } from "./messenger";
 import type { SandboxRepository } from "./sandbox-repository";
 import type { SessionCoreRepository } from "./session-core-repository";
 import type { SessionSnapshotReader } from "./snapshot-reader";
+import type { SandboxRow } from "./types";
 import type { SessionWebSocketManager } from "./websocket-manager";
 import { WS_AUTHORIZATION_LEASE_MS } from "./authorization-lease";
 import { canManageSessionBudget } from "./budget-authorization";
@@ -189,7 +190,7 @@ export class SessionConnectionAuthenticator implements SessionUpgradeAdmission {
     }
 
     // The success ws.connect event is emitted once the socket is attached.
-    return accept("sandbox", (ws) => this.attachSandbox(ws, sandboxId, log));
+    return accept("sandbox", (ws) => this.attachSandbox(ws, sandboxId, currentSandbox, log));
   }
 
   private attachClient(ws: SessionWebSocket, wsId: string): void {
@@ -210,15 +211,29 @@ export class SessionConnectionAuthenticator implements SessionUpgradeAdmission {
   private async attachSandbox(
     ws: SessionWebSocket,
     sandboxId: string | null,
+    authorizedSandbox: Pick<
+      SandboxRow,
+      "modal_sandbox_id" | "auth_token_hash" | "auth_token"
+    > | null,
     log: Logger
   ): Promise<void> {
     const { wsManager, sandboxRepository, lifecycleManager, messenger } = this.deps;
 
     const now = Date.now();
-    lifecycleManager.updateLastActivity(now);
-    sandboxRepository.updateSandboxHeartbeat(now);
     await lifecycleManager.scheduleInactivityCheck();
 
+    const currentSandbox = sandboxRepository.getSandbox();
+    if (
+      currentSandbox?.modal_sandbox_id !== authorizedSandbox?.modal_sandbox_id ||
+      currentSandbox?.auth_token_hash !== authorizedSandbox?.auth_token_hash ||
+      currentSandbox?.auth_token !== authorizedSandbox?.auth_token
+    ) {
+      wsManager.close(ws, WS_CLOSE_AUTHORIZATION_REVOKED, WS_AUTHORIZATION_REVOKED_REASON);
+      return;
+    }
+
+    lifecycleManager.updateLastActivity(now);
+    sandboxRepository.updateSandboxHeartbeat(now);
     const { replaced } = wsManager.acceptAndSetSandboxSocket(ws, sandboxId ?? undefined);
     // Transport attachment is not runtime readiness. The bridge's ready event
     // verifies conversation identity before opening prompt dispatch.
