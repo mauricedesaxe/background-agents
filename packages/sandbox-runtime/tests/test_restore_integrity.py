@@ -7,7 +7,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from sandbox_runtime.repository_sync import GitOperationResult, RepositorySyncStatus
 from sandbox_runtime.runtime_config import BootMode
+
+SUCCESSFUL_GIT_OPERATION = GitOperationResult(RepositorySyncStatus.SUCCEEDED)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -64,8 +67,8 @@ async def test_restore_preserves_head_index_and_worktree(
 
         supervisor = make_repository_boot()
     supervisor.repositories = [replace(supervisor.repositories[0], path=repo)]
-    supervisor.synchronizer._ensure_plain_origin = AsyncMock(return_value=True)
-    supervisor.synchronizer._fetch_branch = AsyncMock(return_value=True)
+    supervisor.synchronizer._ensure_plain_origin = AsyncMock(return_value=SUCCESSFUL_GIT_OPERATION)
+    supervisor.synchronizer._fetch_branch = AsyncMock(return_value=SUCCESSFUL_GIT_OPERATION)
 
     result = await supervisor.synchronizer.sync(supervisor.repositories, boot_mode)
 
@@ -122,7 +125,9 @@ async def test_pre_prompt_restart_preserves_repository_after_remote_moves(
 
         repository_boot = make_repository_boot()
     repository_boot.repositories = [replace(repository_boot.repositories[0], path=repo)]
-    repository_boot.synchronizer._ensure_plain_origin = AsyncMock(return_value=True)
+    repository_boot.synchronizer._ensure_plain_origin = AsyncMock(
+        return_value=SUCCESSFUL_GIT_OPERATION
+    )
     repository_boot.synchronizer.ensure_credentials_configured = AsyncMock()
     repository_boot.hooks.run_setup = AsyncMock(return_value=True)
     repository_boot.hooks.run_start = AsyncMock(return_value=True)

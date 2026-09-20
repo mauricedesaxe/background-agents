@@ -2,6 +2,7 @@
 
 import asyncio
 import signal
+import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from sandbox_runtime.repository_boot import RepositoryBoot
@@ -343,7 +344,14 @@ class TestSetupInRepositoryBoot:
         marker = tmp_path / "boot-completed"
         marker.write_text("fresh\n")
         monkeypatch.setattr("sandbox_runtime.repository_boot.BOOT_COMPLETED_FILE_PATH", str(marker))
-        mkstemp = MagicMock(side_effect=AssertionError("existing marker must not be rewritten"))
+        real_mkstemp = tempfile.mkstemp
+
+        def reject_boot_marker_rewrite(*args, **kwargs):
+            if kwargs.get("prefix") == ".boot-completed.":
+                raise AssertionError("existing marker must not be rewritten")
+            return real_mkstemp(*args, **kwargs)
+
+        mkstemp = MagicMock(side_effect=reject_boot_marker_rewrite)
         monkeypatch.setattr("sandbox_runtime.repository_boot.tempfile.mkstemp", mkstemp)
         sup = _make_repository_boot(tmp_path)
         sup._write_repo_manifest = MagicMock()
@@ -359,7 +367,7 @@ class TestSetupInRepositoryBoot:
         await sup.boot(BootMode.PERSISTENT_RESUME, [])
 
         assert marker.read_text() == "fresh\n"
-        mkstemp.assert_not_called()
+        mkstemp.assert_called_once()
 
     async def test_run_skips_setup_on_persistent_resume(self, tmp_path):
         sup = _make_repository_boot(tmp_path)

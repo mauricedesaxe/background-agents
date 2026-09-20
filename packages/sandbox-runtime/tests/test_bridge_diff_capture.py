@@ -18,12 +18,14 @@ from sandbox_runtime.repo_config import RepoEntry, dump_repo_manifest
 
 
 def _bridge() -> AgentBridge:
-    return AgentBridge(
+    bridge = AgentBridge(
         sandbox_id="sandbox-1",
         session_id="session-1",
         control_plane_url="https://control.example.com",
         auth_token="sandbox-token",
     )
+    bridge.git_sync_report_path = Path("/nonexistent/oi-git-sync-report.json")
+    return bridge
 
 
 def _manifest(tmp_path: Path) -> Path:
@@ -96,6 +98,27 @@ def test_ready_event_reports_fixed_baselines_without_a_capability_gate(tmp_path:
             }
         ],
     }
+
+
+def test_ready_event_includes_git_sync_report(tmp_path: Path) -> None:
+    bridge = _bridge()
+    bridge.repo_manifest_path = _manifest(tmp_path)
+    bridge.git_sync_report_path = tmp_path / "git-sync-report.json"
+    report = {
+        "status": "failed",
+        "repositories": [
+            {
+                "repoOwner": "open-inspect",
+                "repoName": "viewer",
+                "operation": "refresh",
+                "status": "failed",
+                "diagnostic": "repository not found",
+            }
+        ],
+    }
+    bridge.git_sync_report_path.write_text(json.dumps(report))
+
+    assert bridge._build_ready_event()["gitSyncReport"] == report
 
 
 def test_ready_event_reports_the_image_runtime_version(tmp_path: Path) -> None:

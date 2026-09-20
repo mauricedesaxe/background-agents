@@ -40,6 +40,7 @@ const TIMEOUT_STOP_MS = 30_000;
 const TIMEOUT_DELETE_MS = 30_000;
 const TIMEOUT_GET_MS = 15_000;
 const TIMEOUT_PREVIEW_URL_MS = 15_000;
+const TIMEOUT_SNAPSHOT_MS = 120_000;
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -52,6 +53,44 @@ export const daytonaSandboxResponseSchema = z.object({
 });
 
 export type DaytonaSandboxResponse = z.infer<typeof daytonaSandboxResponseSchema>;
+
+export const daytonaSnapshotResponseSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  state: z.enum([
+    "building",
+    "pending",
+    "pulling",
+    "snapshotting",
+    "active",
+    "inactive",
+    "error",
+    "build_failed",
+    "removing",
+  ]),
+  sourceSandboxId: z.string().nullable(),
+  ref: z.string().optional(),
+  errorReason: z.string().nullable().optional(),
+});
+export type DaytonaSnapshotResponse = z.infer<typeof daytonaSnapshotResponseSchema>;
+
+const daytonaSnapshotListResponseSchema = z.object({
+  items: z.array(daytonaSnapshotResponseSchema),
+  total: z.number(),
+  page: z.number(),
+  totalPages: z.number(),
+});
+
+const daytonaSandboxListItemSchema = daytonaSandboxResponseSchema.extend({
+  name: z.string(),
+  labels: z.record(z.string(), z.string()),
+});
+
+const daytonaSandboxListResponseSchema = z.object({
+  items: z.array(daytonaSandboxListItemSchema),
+  nextCursor: z.string().nullable().optional(),
+});
+export type DaytonaSandboxListItem = z.infer<typeof daytonaSandboxListItemSchema>;
 
 export const daytonaSignedPreviewUrlResponseSchema = z.object({
   url: z.string(),
@@ -141,7 +180,80 @@ export class DaytonaRestClient {
   }
 
   async getSandbox(id: string): Promise<DaytonaSandboxResponse> {
-    return this.requestJson("GET", `/sandbox/${id}`, TIMEOUT_GET_MS, daytonaSandboxResponseSchema);
+    return this.requestJson(
+      "GET",
+      `/sandbox/${encodeURIComponent(id)}`,
+      TIMEOUT_GET_MS,
+      daytonaSandboxResponseSchema
+    );
+  }
+
+  async listSandboxes(filters: {
+    name: string;
+    labels: Record<string, string>;
+  }): Promise<DaytonaSandboxListItem[]> {
+    const sandboxes: DaytonaSandboxListItem[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      const query = new URLSearchParams({
+        name: filters.name,
+        labels: JSON.stringify(filters.labels),
+        limit: "200",
+        includeErroredDeleted: "true",
+      });
+      if (cursor) query.set("cursor", cursor);
+      const response = await this.requestJson(
+        "GET",
+        `/sandbox?${query.toString()}`,
+        TIMEOUT_GET_MS,
+        daytonaSandboxListResponseSchema
+      );
+      sandboxes.push(...response.items);
+      cursor = response.nextCursor ?? null;
+      if (cursor && seenCursors.has(cursor)) {
+        throw new Error("Daytona sandbox listing returned a repeated cursor");
+      }
+      if (cursor) seenCursors.add(cursor);
+    } while (cursor);
+    return sandboxes;
+  }
+
+  async createSandboxSnapshot(id: string, name: string): Promise<DaytonaSandboxResponse> {
+    return this.requestJson(
+      "POST",
+      `/sandbox/${encodeURIComponent(id)}/snapshot`,
+      TIMEOUT_SNAPSHOT_MS,
+      daytonaSandboxResponseSchema,
+      { body: { name, includeMemory: false } }
+    );
+  }
+
+  async getSnapshot(id: string): Promise<DaytonaSnapshotResponse> {
+    return this.requestJson(
+      "GET",
+      `/snapshots/${encodeURIComponent(id)}`,
+      TIMEOUT_GET_MS,
+      daytonaSnapshotResponseSchema
+    );
+  }
+
+  async listSnapshots(filters: {
+    name: string;
+    sourceSandboxId: string;
+  }): Promise<DaytonaSnapshotResponse[]> {
+    const query = new URLSearchParams({
+      name: filters.name,
+      sourceSandboxId: filters.sourceSandboxId,
+      limit: "200",
+    });
+    const response = await this.requestJson(
+      "GET",
+      `/snapshots?${query.toString()}`,
+      TIMEOUT_GET_MS,
+      daytonaSnapshotListResponseSchema
+    );
+    return response.items;
   }
 
   async startSandbox(id: string): Promise<void> {

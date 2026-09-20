@@ -9,7 +9,13 @@ import type { SandboxSettings } from "@open-inspect/shared/types/integrations";
 import { resolveServicePorts, resolveTunnelPorts } from "./port-resolution";
 import { createLogger } from "../../logger";
 import type { SourceControlProviderName } from "../../source-control";
-import type { DaytonaRestClient, DaytonaCreateSandboxParams } from "../daytona-rest-client";
+import type {
+  DaytonaRestClient,
+  DaytonaCreateSandboxParams,
+  DaytonaSandboxListItem,
+  DaytonaSandboxResponse,
+  DaytonaSnapshotResponse,
+} from "../daytona-rest-client";
 import { DaytonaApiError, DaytonaNotFoundError } from "../daytona-rest-client";
 import {
   buildSandboxEnvVars,
@@ -21,6 +27,7 @@ import {
   SandboxProviderError,
   type CreateSandboxConfig,
   type CreateSandboxResult,
+  type ColdRecoveryConfig,
   type ResumeConfig,
   type ResumeResult,
   type SandboxProvider,
@@ -39,6 +46,8 @@ const log = createLogger("daytona-provider");
 const DEFAULT_PREVIEW_EXPIRY_SECONDS = 3900;
 const RESUME_RECONCILE_INTERVAL_MS = 1_000;
 const RESUME_RECONCILE_DEADLINE_MS = 30_000;
+const COLD_RECOVERY_RECONCILE_INTERVAL_MS = 1_000;
+const COLD_RECOVERY_RECONCILE_DEADLINE_MS = 120_000;
 
 // ---------------------------------------------------------------------------
 // Provider config
@@ -117,6 +126,161 @@ export class DaytonaSandboxProvider implements SandboxProvider {
     } catch (error) {
       throw this.classifyError("Failed to create Daytona sandbox", error);
     }
+  }
+
+  async recoverColdSandbox(config: ColdRecoveryConfig): Promise<CreateSandboxResult> {
+    try {
+      const labels = {
+        ...this.buildLabels(config),
+        openinspect_recovery_operation_id: config.operationId,
+        openinspect_recovery_source_id: config.sourceProviderObjectId,
+      };
+      let replacement: DaytonaSandboxResponse | undefined = await this.findRecoveryReplacement(
+        config,
+        labels
+      );
+      if (!replacement) {
+        const snapshot = await this.reconcileRecoverySnapshot(config);
+        const params: DaytonaCreateSandboxParams = {
+          name: config.replacementName,
+          snapshot: snapshot.name,
+          env: {
+            ...(await this.buildEnvVars(config)),
+            RESTORED_FROM_SNAPSHOT: "true",
+          },
+          labels,
+          autoStopInterval: this.client.config.autoStopIntervalMinutes,
+          autoArchiveInterval: this.client.config.autoArchiveIntervalMinutes,
+          public: false,
+          ...(this.client.config.target ? { target: this.client.config.target } : {}),
+        };
+        try {
+          replacement = await this.client.createSandbox(params);
+        } catch (error) {
+          if (!(error instanceof DaytonaApiError) || error.status !== 409) throw error;
+          replacement = await this.findRecoveryReplacement(config, labels);
+          if (!replacement) throw error;
+        }
+      }
+      if (!replacement) throw new Error("Daytona recovery replacement was not created");
+
+      replacement = await this.ensureRecoveryReplacementStarted(replacement, config);
+      return {
+        sandboxId: config.sandboxId,
+        providerObjectId: replacement.id,
+        createdAt: Date.now(),
+      };
+    } catch (error) {
+      if (error instanceof SandboxProviderError) throw error;
+      throw this.classifyError("Failed to cold-recover Daytona sandbox", error);
+    }
+  }
+
+  private async reconcileRecoverySnapshot(
+    config: ColdRecoveryConfig
+  ): Promise<DaytonaSnapshotResponse> {
+    let snapshot = await this.findRecoverySnapshot(config);
+    if (!snapshot) {
+      await this.ensureRecoverySourceStopped(config.sourceProviderObjectId);
+      try {
+        await this.client.createSandboxSnapshot(config.sourceProviderObjectId, config.snapshotName);
+      } catch (error) {
+        if (!(error instanceof DaytonaApiError) || error.status !== 409) throw error;
+      }
+      snapshot = await this.waitForRecoverySnapshot(config);
+    }
+    const deadline = Date.now() + COLD_RECOVERY_RECONCILE_DEADLINE_MS;
+    while (snapshot.state !== "active" && Date.now() < deadline) {
+      if (["inactive", "error", "build_failed", "removing"].includes(snapshot.state)) {
+        throw new Error(
+          snapshot.errorReason || `Daytona recovery snapshot entered ${snapshot.state}`
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, COLD_RECOVERY_RECONCILE_INTERVAL_MS));
+      snapshot = await this.client.getSnapshot(snapshot.id);
+    }
+    if (snapshot.state !== "active") {
+      throw new Error("Timed out waiting for Daytona recovery snapshot");
+    }
+    if (snapshot.sourceSandboxId !== config.sourceProviderObjectId) {
+      throw new Error("Daytona recovery snapshot source does not match the recovery operation");
+    }
+    return snapshot;
+  }
+
+  private async ensureRecoverySourceStopped(sourceProviderObjectId: string): Promise<void> {
+    const source = await this.client.getSandbox(sourceProviderObjectId);
+    if (source.state !== "stopped") {
+      throw new Error("Daytona recovery source must already be stopped");
+    }
+  }
+
+  private async waitForRecoverySnapshot(
+    config: ColdRecoveryConfig
+  ): Promise<DaytonaSnapshotResponse> {
+    const deadline = Date.now() + COLD_RECOVERY_RECONCILE_DEADLINE_MS;
+    let snapshot = await this.findRecoverySnapshot(config);
+    while (!snapshot && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, COLD_RECOVERY_RECONCILE_INTERVAL_MS));
+      snapshot = await this.findRecoverySnapshot(config);
+    }
+    if (!snapshot) throw new Error("Timed out discovering Daytona recovery snapshot");
+    return snapshot;
+  }
+
+  private async findRecoverySnapshot(
+    config: ColdRecoveryConfig
+  ): Promise<DaytonaSnapshotResponse | undefined> {
+    const snapshots = await this.client.listSnapshots({
+      name: config.snapshotName,
+      sourceSandboxId: config.sourceProviderObjectId,
+    });
+    return snapshots.find(
+      (snapshot) =>
+        snapshot.name === config.snapshotName &&
+        snapshot.sourceSandboxId === config.sourceProviderObjectId
+    );
+  }
+
+  private async findRecoveryReplacement(
+    config: ColdRecoveryConfig,
+    labels: Record<string, string>
+  ): Promise<DaytonaSandboxListItem | undefined> {
+    const candidates = await this.client.listSandboxes({
+      name: config.replacementName,
+      labels,
+    });
+    const exactName = candidates.filter((candidate) => candidate.name === config.replacementName);
+    const replacement = exactName.find((candidate) =>
+      Object.entries(labels).every(([key, value]) => candidate.labels[key] === value)
+    );
+    if (!replacement && exactName.length > 0) {
+      throw new Error("Daytona recovery replacement name is owned by another operation");
+    }
+    return replacement;
+  }
+
+  private async ensureRecoveryReplacementStarted(
+    replacement: DaytonaSandboxResponse,
+    config: ColdRecoveryConfig
+  ): Promise<DaytonaSandboxResponse> {
+    if (replacement.state === "started") return replacement;
+    try {
+      await this.client.startSandbox(replacement.id);
+    } catch (error) {
+      if (!(error instanceof DaytonaApiError) || error.status !== 409) throw error;
+    }
+    const deadline = Date.now() + RESUME_RECONCILE_DEADLINE_MS;
+    let current: DaytonaSandboxResponse = replacement;
+    while (current.state !== "started" && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, RESUME_RECONCILE_INTERVAL_MS));
+      const sandbox = await this.client.getSandbox(replacement.id);
+      current = sandbox;
+    }
+    if (current.state !== "started") {
+      throw new Error(`Timed out starting Daytona recovery replacement ${config.replacementName}`);
+    }
+    return current;
   }
 
   async resumeSandbox(config: ResumeConfig): Promise<ResumeResult> {
@@ -364,7 +528,10 @@ export class DaytonaSandboxProvider implements SandboxProvider {
         error.status
       );
     }
-    return SandboxProviderError.fromFetchError(message, error);
+    return SandboxProviderError.fromFetchError(
+      error instanceof Error ? `${message}: ${error.message}` : message,
+      error
+    );
   }
 }
 

@@ -1,10 +1,19 @@
 import type { GitSyncStatus } from "@open-inspect/shared/types/sandbox-events";
 import type { SandboxStatus } from "@open-inspect/shared/types/sessions";
 import type { SqlResult, SqlStorage } from "./sql-storage";
-import type { SandboxAccessKind, SandboxRow } from "./types";
+import {
+  sandboxColdRecoveryCommittedSchema,
+  sandboxColdRecoveryFailedSchema,
+  sandboxColdRecoveryRecoveringSchema,
+  sandboxColdRecoveryStateSchema,
+  type SandboxColdRecoveryState,
+  type SandboxAccessKind,
+  type SandboxColdRecoveryOperation,
+  type SandboxRow,
+} from "./types";
 import type { Logger } from "../logger";
 import { coerceSandboxStatus } from "../sandbox/sandbox-status";
-import { encryptToken } from "../auth/crypto";
+import { decryptToken, encryptToken, hashToken } from "../auth/crypto";
 
 /** A sandbox row exactly as SQLite returns it, before the status is validated. */
 type RawSandboxRow = Omit<SandboxRow, "status"> & { status: string };
@@ -28,6 +37,38 @@ export interface SandboxCircuitBreakerState {
   snapshot_runtime_version: string | null;
   spawn_failure_count: number | null;
   last_spawn_failure: number | null;
+  runtime_version: string | null;
+  recovery_operation?: string | null;
+}
+
+export interface BeginColdRecoveryData {
+  operationId: string;
+  sourceProviderObjectId: string;
+  sourceSandboxId: string;
+  sourceCreatedAt: number;
+  sourceRuntimeVersion: string | null;
+  snapshotName: string;
+  replacementName: string;
+  replacementSandboxId: string;
+  replacementAuthToken: string;
+  targetCreatedAt: number;
+}
+
+export interface CompleteColdRecoveryData {
+  operationId: string;
+  providerObjectId: string;
+  committedAt: number;
+  codeServerUrl?: string;
+  codeServerPassword?: string;
+  vncUrl?: string;
+  vncPassword?: string;
+  tunnelUrls?: Record<string, string>;
+}
+
+export interface FailColdRecoveryData {
+  operationId: string;
+  failureReason: string;
+  failedAt: number;
 }
 
 /** Data for creating a sandbox. */
@@ -91,11 +132,157 @@ export class SandboxRepository {
 
   getSandboxWithCircuitBreaker(): SandboxCircuitBreakerState | null {
     const result = this.sql.exec(
-      `SELECT status, created_at, modal_object_id, snapshot_image_id, snapshot_runtime_version, spawn_failure_count, last_spawn_failure FROM sandbox LIMIT 1`
+      `SELECT status, created_at, modal_object_id, snapshot_image_id, snapshot_runtime_version, spawn_failure_count, last_spawn_failure, runtime_version, recovery_operation FROM sandbox LIMIT 1`
     );
     const rows = this.rows<Omit<SandboxCircuitBreakerState, "status"> & { status: string }>(result);
     const row = rows[0];
     return row ? { ...row, status: coerceSandboxStatus(row.status, this.log) } : null;
+  }
+
+  async getColdRecoveryOperation(): Promise<SandboxColdRecoveryOperation | null> {
+    const state = await this.getColdRecoveryState();
+    if (state?.kind !== "daytona_cold_recovery_recovering") return null;
+    const { replacementAuthTokenEncrypted, ...operation } = state;
+    return {
+      ...operation,
+      replacementAuthToken: await decryptToken(replacementAuthTokenEncrypted, this.encryptionKey),
+    };
+  }
+
+  async getColdRecoveryState(): Promise<SandboxColdRecoveryState | null> {
+    const row = this.getSandbox();
+    if (!row?.recovery_operation) return null;
+    const parsed = sandboxColdRecoveryStateSchema.safeParse(
+      this.parseRecoveryJson(row.recovery_operation)
+    );
+    if (!parsed.success) {
+      throw new Error("Invalid persisted sandbox recovery operation");
+    }
+    return parsed.data;
+  }
+
+  async beginColdRecovery(data: BeginColdRecoveryData): Promise<SandboxColdRecoveryOperation> {
+    const replacementAuthTokenEncrypted = await encryptToken(
+      data.replacementAuthToken,
+      this.encryptionKey
+    );
+    const persisted = sandboxColdRecoveryRecoveringSchema.parse({
+      kind: "daytona_cold_recovery_recovering",
+      operationId: data.operationId,
+      sourceProviderObjectId: data.sourceProviderObjectId,
+      sourceSandboxId: data.sourceSandboxId,
+      sourceCreatedAt: data.sourceCreatedAt,
+      sourceRuntimeVersion: data.sourceRuntimeVersion,
+      snapshotName: data.snapshotName,
+      replacementName: data.replacementName,
+      replacementSandboxId: data.replacementSandboxId,
+      replacementAuthTokenEncrypted,
+      targetCreatedAt: data.targetCreatedAt,
+    });
+    const result = this.sql.exec(
+      `UPDATE sandbox SET recovery_operation = ?, auth_token_hash = '', auth_token = NULL,
+           active_socket_id = '', status = 'connecting'
+         WHERE id = (SELECT id FROM sandbox LIMIT 1)
+           AND modal_object_id = ?
+           AND modal_sandbox_id = ?
+           AND created_at = ?
+           AND (recovery_operation IS NULL OR json_extract(recovery_operation, '$.kind') IN
+             ('daytona_cold_recovery_committed', 'daytona_cold_recovery_failed'))`,
+      JSON.stringify(persisted),
+      data.sourceProviderObjectId,
+      data.sourceSandboxId,
+      data.sourceCreatedAt
+    );
+    result.toArray();
+    const applied = (result.rowsWritten ?? 0) > 0;
+    if (!applied) {
+      const existing = await this.getColdRecoveryOperation();
+      if (existing) return existing;
+      throw new Error("Could not persist sandbox recovery operation");
+    }
+    return { kind: "daytona_cold_recovery_recovering", ...data };
+  }
+
+  async completeColdRecovery(data: CompleteColdRecoveryData): Promise<boolean> {
+    const operation = await this.getColdRecoveryOperation();
+    if (!operation || operation.operationId !== data.operationId) return false;
+    const authTokenHash = await hashToken(operation.replacementAuthToken);
+    const encryptedCodeServerPassword = data.codeServerPassword
+      ? await this.encrypt(data.codeServerPassword)
+      : null;
+    const encryptedVncPassword = data.vncPassword ? await this.encrypt(data.vncPassword) : null;
+    const {
+      replacementAuthToken: _replacementAuthToken,
+      kind: _recoveringKind,
+      ...recoveryIdentity
+    } = operation;
+    const committed = sandboxColdRecoveryCommittedSchema.parse({
+      ...recoveryIdentity,
+      kind: "daytona_cold_recovery_committed",
+      targetCreatedAt: data.committedAt,
+      replacementProviderObjectId: data.providerObjectId,
+      committedAt: data.committedAt,
+    });
+    const result = this.sql.exec(
+      `UPDATE sandbox SET
+           modal_sandbox_id = ?, modal_object_id = ?, auth_token_hash = ?, auth_token = NULL,
+           status = 'connecting', created_at = ?, last_heartbeat = NULL,
+           code_server_url = ?, code_server_password = ?, vnc_url = ?, vnc_password = ?,
+           tunnel_urls = ?, ttyd_url = NULL, ttyd_token = NULL, runtime_version = NULL,
+           active_socket_id = '', git_sync_status = 'in_progress', recovery_operation = ?
+          WHERE id = (SELECT id FROM sandbox LIMIT 1)
+            AND json_extract(recovery_operation, '$.kind') = 'daytona_cold_recovery_recovering'
+            AND json_extract(recovery_operation, '$.operationId') = ?`,
+      operation.replacementSandboxId,
+      data.providerObjectId,
+      authTokenHash,
+      data.committedAt,
+      data.codeServerUrl ?? null,
+      encryptedCodeServerPassword,
+      data.vncUrl ?? null,
+      encryptedVncPassword,
+      data.tunnelUrls ? JSON.stringify(data.tunnelUrls) : null,
+      JSON.stringify(committed),
+      operation.operationId
+    );
+    result.toArray();
+    return (result.rowsWritten ?? 0) > 0;
+  }
+
+  async failColdRecovery(data: FailColdRecoveryData): Promise<boolean> {
+    const operation = await this.getColdRecoveryOperation();
+    if (!operation || operation.operationId !== data.operationId) return false;
+    const {
+      replacementAuthToken: _replacementAuthToken,
+      kind: _recoveringKind,
+      ...recoveryIdentity
+    } = operation;
+    const failed = sandboxColdRecoveryFailedSchema.parse({
+      ...recoveryIdentity,
+      kind: "daytona_cold_recovery_failed",
+      failureClass: "permanent_provider_error",
+      failureReason: data.failureReason,
+      failedAt: data.failedAt,
+      retryPolicy: "supersede",
+    });
+    const result = this.sql.exec(
+      `UPDATE sandbox SET recovery_operation = ?, status = 'failed'
+       WHERE id = (SELECT id FROM sandbox LIMIT 1)
+         AND json_extract(recovery_operation, '$.kind') = 'daytona_cold_recovery_recovering'
+         AND json_extract(recovery_operation, '$.operationId') = ?`,
+      JSON.stringify(failed),
+      operation.operationId
+    );
+    result.toArray();
+    return (result.rowsWritten ?? 0) > 0;
+  }
+
+  private parseRecoveryJson(value: string): unknown {
+    try {
+      return JSON.parse(value);
+    } catch {
+      throw new Error("Invalid persisted sandbox recovery operation");
+    }
   }
 
   createSandbox(data: CreateSandboxData): void {
@@ -168,7 +355,8 @@ export class SandboxRepository {
          ttyd_url = NULL,
          ttyd_token = NULL,
          runtime_version = NULL,
-         active_socket_id = ''
+         active_socket_id = '',
+         git_sync_status = 'in_progress'
        WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
       data.status,
       data.createdAt,
@@ -220,7 +408,8 @@ export class SandboxRepository {
       `UPDATE sandbox SET
          status = ?,
          created_at = ?,
-         last_heartbeat = NULL
+         last_heartbeat = NULL,
+         git_sync_status = 'in_progress'
        WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
       data.status,
       data.createdAt
@@ -307,6 +496,16 @@ export class SandboxRepository {
       `UPDATE sandbox SET git_sync_status = ? WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
       status
     );
+  }
+
+  completeSandboxGitSync(status: Extract<GitSyncStatus, "completed" | "failed">): boolean {
+    const result = this.sql.exec(
+      `UPDATE sandbox SET git_sync_status = ?
+       WHERE id = (SELECT id FROM sandbox LIMIT 1) AND git_sync_status = 'in_progress'`,
+      status
+    );
+    result.toArray();
+    return (result.rowsWritten ?? 0) > 0;
   }
 
   setLastSpawnError(error: string | null, timestamp: number | null): void {

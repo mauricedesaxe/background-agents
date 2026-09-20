@@ -13,6 +13,10 @@ import {
   type SessionConnectionAuthenticatorDeps,
 } from "./connection-authenticator";
 import type { SandboxRow, SessionRow } from "./types";
+import {
+  WS_AUTHORIZATION_REVOKED_REASON,
+  WS_CLOSE_AUTHORIZATION_REVOKED,
+} from "@open-inspect/shared/types/websocket";
 
 const TOKEN = "sandbox-token";
 const SANDBOX_ID = "sb-1";
@@ -68,6 +72,7 @@ interface Harness {
     acceptClientSocket: ReturnType<typeof vi.fn>;
     acceptAndSetSandboxSocket: ReturnType<typeof vi.fn>;
     enforceAuthTimeout: ReturnType<typeof vi.fn>;
+    close: ReturnType<typeof vi.fn>;
   };
   lifecycleManager: {
     isProviderStartupPending: ReturnType<typeof vi.fn>;
@@ -101,6 +106,7 @@ function createHarness(opts: {
     acceptClientSocket: vi.fn(),
     acceptAndSetSandboxSocket: vi.fn(() => ({ replaced: false })),
     enforceAuthTimeout: vi.fn(async () => undefined),
+    close: vi.fn(),
   };
   const lifecycleManager = {
     isProviderStartupPending: vi.fn(() => false),
@@ -339,6 +345,27 @@ describe("UpgradeDecision.attach", () => {
     expect(h.sandboxRepository.updateSandboxStatus).not.toHaveBeenCalled();
     expect(h.broadcast).not.toHaveBeenCalled();
     expect(h.submitted).toEqual([]);
+  });
+
+  it("revokes a socket when credentials rotate while the inactivity alarm is armed", async () => {
+    const row = await sandboxRow();
+    const h = createHarness({ sandbox: row });
+    h.lifecycleManager.scheduleInactivityCheck.mockImplementation(async () => {
+      h.sandboxRepository.getSandbox.mockReturnValue({ ...row, auth_token_hash: "rotated" });
+    });
+
+    await (await accepted(h, sandboxUpgrade())).attach(socket);
+
+    expect(h.wsManager.close).toHaveBeenCalledWith(
+      socket,
+      WS_CLOSE_AUTHORIZATION_REVOKED,
+      WS_AUTHORIZATION_REVOKED_REASON
+    );
+    expect(h.wsManager.acceptAndSetSandboxSocket).not.toHaveBeenCalled();
+    expect(h.lifecycleManager.updateLastActivity).not.toHaveBeenCalled();
+    expect(h.sandboxRepository.updateSandboxHeartbeat).not.toHaveBeenCalled();
+    expect(h.sandboxRepository.updateSandboxStatus).not.toHaveBeenCalled();
+    expect(h.broadcast).not.toHaveBeenCalled();
   });
 
   it("withholds the access broadcast while provider startup is still persisting", async () => {

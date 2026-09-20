@@ -25,6 +25,7 @@ import { computeRepositoriesFingerprint } from "../../image-builds/fingerprint";
 import { COMPATIBLE_RUNTIME_VERSION } from "../../image-builds/test-helpers";
 import {
   SandboxProviderError,
+  type ColdRecoveryConfig,
   type SandboxProvider,
   type CreateSandboxConfig,
   type CreateSandboxResult,
@@ -38,7 +39,12 @@ import {
   type StopConfig,
   type StopResult,
 } from "../provider";
-import type { SandboxAccessKind, SandboxRow, SessionRow } from "../../session/types";
+import type {
+  SandboxAccessKind,
+  SandboxColdRecoveryOperation,
+  SandboxRow,
+  SessionRow,
+} from "../../session/types";
 import type { SandboxStatus } from "@open-inspect/shared/types/sessions";
 import { hashToken } from "../../auth/crypto";
 import type * as AuthCrypto from "../../auth/crypto";
@@ -150,6 +156,7 @@ function createMockStorage(
   sessionRepositories: SessionRepositoryInfo[] = []
 ): SandboxStorage & SessionContextReader & { calls: string[] } {
   const calls: string[] = [];
+  let recovery: SandboxColdRecoveryOperation | null = null;
 
   return {
     calls,
@@ -160,6 +167,61 @@ function createMockStorage(
     getSandboxWithCircuitBreaker: vi.fn(() => {
       calls.push("getSandboxWithCircuitBreaker");
       return sandbox;
+    }),
+    getColdRecoveryOperation: vi.fn(async () => recovery),
+    beginColdRecovery: vi.fn(async (data) => {
+      calls.push("beginColdRecovery");
+      const created: SandboxColdRecoveryOperation = {
+        kind: "daytona_cold_recovery_recovering",
+        ...data,
+      };
+      recovery = created;
+      if (sandbox) {
+        sandbox.recovery_operation = JSON.stringify({ operationId: data.operationId });
+        sandbox.status = "connecting";
+        sandbox.auth_token = null;
+        sandbox.auth_token_hash = "";
+        sandbox.active_socket_id = "";
+      }
+      return created;
+    }),
+    completeColdRecovery: vi.fn(async (data) => {
+      calls.push("completeColdRecovery");
+      const currentRecovery = recovery;
+      if (!sandbox || !currentRecovery || currentRecovery.operationId !== data.operationId) {
+        return false;
+      }
+      const replacementSandboxId = currentRecovery.replacementSandboxId;
+      sandbox.modal_sandbox_id = replacementSandboxId;
+      sandbox.modal_object_id = data.providerObjectId;
+      sandbox.created_at = currentRecovery.targetCreatedAt;
+      sandbox.status = "connecting";
+      sandbox.git_sync_status = "in_progress";
+      sandbox.recovery_operation = JSON.stringify({
+        kind: "daytona_cold_recovery_committed",
+        operationId: currentRecovery.operationId,
+        sourceProviderObjectId: currentRecovery.sourceProviderObjectId,
+        sourceSandboxId: currentRecovery.sourceSandboxId,
+        sourceCreatedAt: currentRecovery.sourceCreatedAt,
+        targetCreatedAt: currentRecovery.targetCreatedAt,
+        replacementProviderObjectId: data.providerObjectId,
+      });
+      recovery = null;
+      return true;
+    }),
+    failColdRecovery: vi.fn(async (data) => {
+      calls.push("failColdRecovery");
+      if (!sandbox || !recovery || recovery.operationId !== data.operationId) return false;
+      sandbox.status = "failed";
+      sandbox.recovery_operation = JSON.stringify({
+        kind: "daytona_cold_recovery_failed",
+        operationId: recovery.operationId,
+        failureClass: "permanent_provider_error",
+        failureReason: data.failureReason,
+        retryPolicy: "supersede",
+      });
+      recovery = null;
+      return true;
     }),
     getSession: vi.fn(() => {
       calls.push("getSession");
@@ -356,6 +418,7 @@ function createMockProvider(
     createSandbox: (config: CreateSandboxConfig) => Promise<CreateSandboxResult>;
     restoreFromSnapshot: (config: RestoreConfig) => Promise<RestoreResult>;
     resumeSandbox: (config: ResumeConfig) => Promise<ResumeResult>;
+    recoverColdSandbox: (config: ColdRecoveryConfig) => Promise<CreateSandboxResult>;
     takeSnapshot: (config: SnapshotConfig) => Promise<SnapshotResult>;
     stopSandbox: (config: StopConfig) => Promise<StopResult>;
     capabilities: Partial<SandboxProvider["capabilities"]>;
@@ -392,6 +455,9 @@ function createMockProvider(
   };
   if (overrides.resumeSandbox) {
     provider.resumeSandbox = overrides.resumeSandbox;
+  }
+  if (overrides.recoverColdSandbox) {
+    provider.recoverColdSandbox = overrides.recoverColdSandbox;
   }
   if (overrides.stopSandbox) {
     provider.stopSandbox = overrides.stopSandbox;
@@ -1485,6 +1551,487 @@ describe("SandboxLifecycleManager", () => {
         )
       ).toContainEqual({ type: "sandbox_access_changed" });
     });
+
+    it("cold-recovers an incompatible stopped sandbox instead of resuming it", async () => {
+      const sandbox = createMockSandbox({
+        status: "stopped",
+        modal_object_id: "legacy-provider-id",
+        runtime_version: "1",
+        snapshot_image_id: null,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const wsManager = createMockWebSocketManager(true);
+      const resumeSandbox = vi.fn(
+        async (): Promise<ResumeResult> => ({
+          outcome: "resumed",
+          providerObjectId: "legacy-provider-id",
+        })
+      );
+      const recoverColdSandbox = vi.fn(async (config: ColdRecoveryConfig) => {
+        expect(sandbox.modal_object_id).toBe("legacy-provider-id");
+        expect(sandbox.auth_token_hash).toBe("");
+        expect(config.sourceProviderObjectId).toBe("legacy-provider-id");
+        return {
+          sandboxId: config.sandboxId,
+          providerObjectId: "replacement-provider-id",
+          createdAt: Date.now(),
+          codeServerUrl: "https://code.test",
+          codeServerPassword: "code-secret",
+        };
+      });
+      const provider = createMockProvider({
+        capabilities: { supportsPersistentResume: true, supportsExplicitStop: true },
+        resumeSandbox,
+        recoverColdSandbox,
+        stopSandbox: vi.fn(async () => ({ success: true })),
+      });
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        storage,
+        createMockBroadcaster(),
+        wsManager,
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(recoverColdSandbox).toHaveBeenCalledOnce();
+      expect(resumeSandbox).not.toHaveBeenCalled();
+      expect(provider.stopSandbox).not.toHaveBeenCalled();
+      expect(storage.calls).toContain("beginColdRecovery");
+      expect(storage.calls).toContain("completeColdRecovery");
+      expect(sandbox.modal_object_id).toBe("replacement-provider-id");
+      expect(sandbox.git_sync_status).toBe("in_progress");
+      expect(JSON.parse(sandbox.recovery_operation ?? "{}")).toEqual(
+        expect.objectContaining({
+          kind: "daytona_cold_recovery_committed",
+          sourceProviderObjectId: "legacy-provider-id",
+          sourceCreatedAt: expect.any(Number),
+          replacementProviderObjectId: "replacement-provider-id",
+        })
+      );
+      expect(wsManager.detachSandboxWebSocket).toHaveBeenCalledWith(
+        1012,
+        "Sandbox recovery started"
+      );
+    });
+
+    it("continues a persisted cold recovery without creating a second operation", async () => {
+      const sandbox = createMockSandbox({
+        status: "failed",
+        recovery_operation: '{"operationId":"recovery-1"}',
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const operation: SandboxColdRecoveryOperation = {
+        kind: "daytona_cold_recovery_recovering",
+        operationId: "recovery-1",
+        sourceProviderObjectId: "legacy-provider-id",
+        sourceSandboxId: "legacy-logical-id",
+        sourceCreatedAt: 500,
+        sourceRuntimeVersion: "1",
+        snapshotName: "recovery-snapshot",
+        replacementName: "recovery-replacement",
+        replacementSandboxId: "replacement-logical-id",
+        replacementAuthToken: "replacement-token",
+        targetCreatedAt: 1000,
+      };
+      vi.mocked(storage.getColdRecoveryOperation).mockResolvedValue(operation);
+      vi.mocked(storage.completeColdRecovery).mockResolvedValue(true);
+      const recoverColdSandbox = vi.fn(async (config: ColdRecoveryConfig) => ({
+        sandboxId: config.sandboxId,
+        providerObjectId: "replacement-provider-id",
+        createdAt: Date.now(),
+      }));
+      const provider = createMockProvider({ recoverColdSandbox });
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(storage.beginColdRecovery).not.toHaveBeenCalled();
+      expect(recoverColdSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operationId: "recovery-1",
+          sandboxId: "replacement-logical-id",
+          sandboxAuthToken: "replacement-token",
+        })
+      );
+      expect(storage.completeColdRecovery).toHaveBeenCalledOnce();
+    });
+
+    it("arms the durable recovery retry before persisting the operation", async () => {
+      const sandbox = createMockSandbox({
+        status: "stopped",
+        modal_object_id: "legacy-provider-id",
+        runtime_version: "1",
+        snapshot_image_id: null,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const alarmScheduler = createMockAlarmScheduler();
+      const provider = createMockProvider({
+        capabilities: { supportsPersistentResume: true },
+        recoverColdSandbox: vi.fn(async (config) => ({
+          sandboxId: config.sandboxId,
+          providerObjectId: "replacement-provider-id",
+          createdAt: Date.now(),
+        })),
+      });
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false),
+        alarmScheduler,
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(vi.mocked(alarmScheduler.schedule).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(storage.beginColdRecovery).mock.invocationCallOrder[0]
+      );
+    });
+
+    it("re-arms a durable retry when an alarm fires while recovery is running", async () => {
+      const sandbox = createMockSandbox({
+        status: "stopped",
+        modal_object_id: "legacy-provider-id",
+        runtime_version: "1",
+        snapshot_image_id: null,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const alarmScheduler = createMockAlarmScheduler();
+      let releaseRecovery!: () => void;
+      let signalRecoveryStarted!: () => void;
+      const recoveryStarted = new Promise<void>((resolve) => {
+        signalRecoveryStarted = resolve;
+      });
+      const recoveryBlocked = new Promise<void>((resolve) => {
+        releaseRecovery = resolve;
+      });
+      const recoverColdSandbox = vi.fn(async (config: ColdRecoveryConfig) => {
+        signalRecoveryStarted();
+        await recoveryBlocked;
+        return {
+          sandboxId: config.sandboxId,
+          providerObjectId: "replacement-provider-id",
+          createdAt: Date.now(),
+        };
+      });
+      const manager = new SandboxLifecycleManager(
+        createMockProvider({
+          capabilities: { supportsPersistentResume: true },
+          recoverColdSandbox,
+        }),
+        storage,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false),
+        alarmScheduler,
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      const recovery = manager.spawnSandbox();
+      await recoveryStarted;
+      await expect(manager.handleAlarm()).resolves.toBe("no_action");
+
+      expect(alarmScheduler.schedule).toHaveBeenCalledTimes(2);
+      expect(recoverColdSandbox).toHaveBeenCalledOnce();
+      releaseRecovery();
+      await recovery;
+    });
+
+    it("schedules another durable retry after a transient provider failure", async () => {
+      const sandbox = createMockSandbox({
+        status: "stopped",
+        modal_object_id: "legacy-provider-id",
+        runtime_version: "1",
+        snapshot_image_id: null,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const alarmScheduler = createMockAlarmScheduler();
+      const manager = new SandboxLifecycleManager(
+        createMockProvider({
+          capabilities: { supportsPersistentResume: true },
+          recoverColdSandbox: vi.fn(async () => {
+            throw new SandboxProviderError("provider unavailable", "transient");
+          }),
+        }),
+        storage,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false),
+        alarmScheduler,
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(alarmScheduler.schedule).toHaveBeenCalledTimes(2);
+      expect(storage.failColdRecovery).not.toHaveBeenCalled();
+      expect(await storage.getColdRecoveryOperation()).not.toBeNull();
+    });
+
+    it("allows only one concurrent caller to start cold recovery", async () => {
+      const sandbox = createMockSandbox({
+        status: "stopped",
+        modal_object_id: "legacy-provider-id",
+        runtime_version: "1",
+        snapshot_image_id: null,
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const alarmScheduler = createMockAlarmScheduler();
+      let releaseFirstAlarm!: () => void;
+      const firstAlarmBlocked = new Promise<void>((resolve) => {
+        releaseFirstAlarm = resolve;
+      });
+      vi.mocked(alarmScheduler.schedule).mockImplementationOnce(async (timestamp) => {
+        alarmScheduler.alarms.push(timestamp);
+        await firstAlarmBlocked;
+      });
+      const recoverColdSandbox = vi.fn(async (config: ColdRecoveryConfig) => ({
+        sandboxId: config.sandboxId,
+        providerObjectId: "replacement-provider-id",
+        createdAt: Date.now(),
+      }));
+      const manager = new SandboxLifecycleManager(
+        createMockProvider({
+          capabilities: { supportsPersistentResume: true },
+          recoverColdSandbox,
+        }),
+        storage,
+        storage,
+        createMockBroadcaster(),
+        createMockWebSocketManager(false),
+        alarmScheduler,
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      const first = manager.spawnSandbox();
+      await vi.waitFor(() => expect(alarmScheduler.schedule).toHaveBeenCalledOnce());
+      await manager.spawnSandbox();
+      releaseFirstAlarm();
+      await first;
+
+      expect(storage.beginColdRecovery).toHaveBeenCalledOnce();
+      expect(recoverColdSandbox).toHaveBeenCalledOnce();
+    });
+
+    it("fails a persisted recovery when the active provider cannot continue it", async () => {
+      const sandbox = createMockSandbox({
+        status: "connecting",
+        recovery_operation: '{"kind":"daytona_cold_recovery_recovering"}',
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      await storage.beginColdRecovery({
+        operationId: "recovery-1",
+        sourceProviderObjectId: "source-provider",
+        sourceSandboxId: "source-logical",
+        sourceCreatedAt: 500,
+        sourceRuntimeVersion: "1",
+        snapshotName: "recovery-snapshot",
+        replacementName: "recovery-replacement",
+        replacementSandboxId: "replacement-logical",
+        replacementAuthToken: "replacement-token",
+        targetCreatedAt: 1000,
+      });
+      const broadcaster = createMockBroadcaster();
+      const manager = new SandboxLifecycleManager(
+        createMockProvider(),
+        storage,
+        storage,
+        broadcaster,
+        createMockWebSocketManager(false),
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.spawnSandbox();
+
+      expect(storage.failColdRecovery).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operationId: "recovery-1",
+          failureReason: expect.stringContaining("cannot continue"),
+        })
+      );
+      expect(sandbox.status).toBe("failed");
+      expect(broadcaster.messages).toContainEqual({ type: "sandbox_status", status: "failed" });
+    });
+
+    it.each([
+      ["permanent", true],
+      ["transient", false],
+    ] as const)(
+      "persists a failed recovery only for a classified %s provider error",
+      async (errorType, shouldPersistFailure) => {
+        const sandbox = createMockSandbox({
+          status: "stopped",
+          modal_object_id: "legacy-provider-id",
+          runtime_version: "1",
+          snapshot_image_id: null,
+        });
+        const storage = createMockStorage(createMockSession(), sandbox);
+        const provider = createMockProvider({
+          capabilities: { supportsPersistentResume: true },
+          recoverColdSandbox: vi.fn(async () => {
+            throw new SandboxProviderError("recovery rejected", errorType);
+          }),
+        });
+        const manager = new SandboxLifecycleManager(
+          provider,
+          storage,
+          storage,
+          createMockBroadcaster(),
+          createMockWebSocketManager(false),
+          createMockAlarmScheduler(),
+          createMockIdGenerator(),
+          createTestConfig()
+        );
+
+        await manager.spawnSandbox();
+
+        if (shouldPersistFailure) {
+          expect(storage.failColdRecovery).toHaveBeenCalledWith(
+            expect.objectContaining({
+              failureReason: expect.stringContaining("recovery rejected"),
+            })
+          );
+          expect(await storage.getColdRecoveryOperation()).toBeNull();
+        } else {
+          expect(storage.failColdRecovery).not.toHaveBeenCalled();
+          expect(await storage.getColdRecoveryOperation()).not.toBeNull();
+        }
+      }
+    );
+
+    it("defers snapshot and termination paths while recovery owns the source", async () => {
+      const sandbox = createMockSandbox({
+        status: "connecting",
+        recovery_operation: '{"kind":"daytona_cold_recovery_recovering"}',
+      });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const operation: SandboxColdRecoveryOperation = {
+        kind: "daytona_cold_recovery_recovering",
+        operationId: "recovery-1",
+        sourceProviderObjectId: "source-provider",
+        sourceSandboxId: "source-logical",
+        sourceCreatedAt: 500,
+        sourceRuntimeVersion: "1",
+        snapshotName: "recovery-snapshot",
+        replacementName: "recovery-replacement",
+        replacementSandboxId: "replacement-logical",
+        replacementAuthToken: "replacement-token",
+        targetCreatedAt: 1000,
+      };
+      vi.mocked(storage.getColdRecoveryOperation).mockResolvedValue(operation);
+      const takeSnapshot = vi.fn();
+      const stopSandbox = vi.fn(async () => ({ success: true }));
+      const provider = createMockProvider({
+        capabilities: { supportsExplicitStop: true },
+        takeSnapshot,
+        stopSandbox,
+      });
+      const wsManager = createMockWebSocketManager(true);
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        storage,
+        createMockBroadcaster(),
+        wsManager,
+        createMockAlarmScheduler(),
+        createMockIdGenerator(),
+        createTestConfig()
+      );
+
+      await manager.triggerSnapshot("execution_complete");
+      await manager.terminateUnresponsiveSandbox("stop_confirmation_timeout");
+      await expect(manager.terminateFailedSandbox("delayed fatal report")).resolves.toBe(false);
+
+      expect(takeSnapshot).not.toHaveBeenCalled();
+      expect(stopSandbox).not.toHaveBeenCalled();
+      expect(storage.calls).not.toContain("updateSandboxStatus:stale");
+      expect(storage.calls).not.toContain("updateSandboxStatus:failed");
+      expect(wsManager.detachSandboxWebSocket).not.toHaveBeenCalled();
+    });
+
+    it.each(["alarm", "warm"] as const)(
+      "%s defers competing lifecycle work during persisted recovery",
+      async (entrypoint) => {
+        const sandbox = createMockSandbox({
+          status: "connecting",
+          recovery_operation: '{"kind":"daytona_cold_recovery_recovering"}',
+        });
+        const storage = createMockStorage(createMockSession(), sandbox);
+        const operation: SandboxColdRecoveryOperation = {
+          kind: "daytona_cold_recovery_recovering",
+          operationId: "recovery-1",
+          sourceProviderObjectId: "source-provider",
+          sourceSandboxId: "source-logical",
+          sourceCreatedAt: 500,
+          sourceRuntimeVersion: "1",
+          snapshotName: "recovery-snapshot",
+          replacementName: "recovery-replacement",
+          replacementSandboxId: "replacement-logical",
+          replacementAuthToken: "replacement-token",
+          targetCreatedAt: 1000,
+        };
+        vi.mocked(storage.getColdRecoveryOperation).mockResolvedValue(operation);
+        vi.mocked(storage.completeColdRecovery).mockResolvedValue(true);
+        const createSandbox = vi.fn();
+        const resumeSandbox = vi.fn();
+        const stopSandbox = vi.fn(async () => ({ success: true }));
+        const recoverColdSandbox = vi.fn(async () => ({
+          sandboxId: "replacement-logical",
+          providerObjectId: "replacement-provider",
+          createdAt: Date.now(),
+        }));
+        const provider = createMockProvider({
+          capabilities: { supportsExplicitStop: true, supportsPersistentResume: true },
+          createSandbox,
+          resumeSandbox,
+          recoverColdSandbox,
+          stopSandbox,
+        });
+        const manager = new SandboxLifecycleManager(
+          provider,
+          storage,
+          storage,
+          createMockBroadcaster(),
+          createMockWebSocketManager(false),
+          createMockAlarmScheduler(),
+          createMockIdGenerator(),
+          createTestConfig()
+        );
+
+        if (entrypoint === "alarm") {
+          await expect(manager.handleAlarm()).resolves.toBe("no_action");
+        } else {
+          await manager.warmSandbox();
+        }
+
+        expect(recoverColdSandbox).toHaveBeenCalledTimes(entrypoint === "alarm" ? 1 : 0);
+        expect(createSandbox).not.toHaveBeenCalled();
+        expect(resumeSandbox).not.toHaveBeenCalled();
+        expect(stopSandbox).not.toHaveBeenCalled();
+      }
+    );
 
     it("keeps the provider sandbox when resume asks to retry", async () => {
       const sandbox = createMockSandbox({

@@ -167,6 +167,49 @@ export const artifactRowSchema = z.object({
 
 export type ArtifactRow = z.infer<typeof artifactRowSchema>;
 
+const sandboxColdRecoveryBaseSchema = z.object({
+  operationId: z.string().min(1),
+  sourceProviderObjectId: z.string().min(1),
+  sourceSandboxId: z.string().min(1),
+  sourceCreatedAt: z.number(),
+  sourceRuntimeVersion: z.string().nullable(),
+  snapshotName: z.string().min(1),
+  replacementName: z.string().min(1),
+  replacementSandboxId: z.string().min(1),
+  targetCreatedAt: z.number(),
+});
+
+export const sandboxColdRecoveryRecoveringSchema = sandboxColdRecoveryBaseSchema.extend({
+  kind: z.literal("daytona_cold_recovery_recovering"),
+  replacementAuthTokenEncrypted: z.string().min(1),
+});
+
+export const sandboxColdRecoveryCommittedSchema = sandboxColdRecoveryBaseSchema.extend({
+  kind: z.literal("daytona_cold_recovery_committed"),
+  replacementProviderObjectId: z.string().min(1),
+  committedAt: z.number(),
+});
+
+export const sandboxColdRecoveryFailedSchema = sandboxColdRecoveryBaseSchema.extend({
+  kind: z.literal("daytona_cold_recovery_failed"),
+  failureClass: z.literal("permanent_provider_error"),
+  failureReason: z.string().min(1).max(1000),
+  failedAt: z.number(),
+  retryPolicy: z.literal("supersede"),
+});
+
+export const sandboxColdRecoveryStateSchema = z.discriminatedUnion("kind", [
+  sandboxColdRecoveryRecoveringSchema,
+  sandboxColdRecoveryCommittedSchema,
+  sandboxColdRecoveryFailedSchema,
+]);
+
+export type SandboxColdRecoveryState = z.infer<typeof sandboxColdRecoveryStateSchema>;
+export type SandboxColdRecoveryOperation = Omit<
+  z.infer<typeof sandboxColdRecoveryRecoveringSchema>,
+  "replacementAuthTokenEncrypted"
+> & { replacementAuthToken: string };
+
 export interface SandboxRow {
   id: string;
   modal_sandbox_id: string | null; // Our generated sandbox ID
@@ -195,6 +238,7 @@ export interface SandboxRow {
    * `''` once revoked, NULL only on rows that predate persisted identities.
    */
   active_socket_id: string | null;
+  recovery_operation?: string | null;
   created_at: number;
 }
 

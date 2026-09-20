@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .constants import BOOT_COMPLETED_FILE_PATH, REPO_MANIFEST_FILE_PATH
+from .constants import (
+    BOOT_COMPLETED_FILE_PATH,
+    GIT_SYNC_REPORT_FILE_PATH,
+    REPO_MANIFEST_FILE_PATH,
+)
 from .repo_config import RepoConfigError, RepoEntry, dump_repo_manifest, parse_repositories
-from .repository_sync import RepositorySyncStatus
+from .repository_sync import RepositorySyncOutcome, RepositorySyncStatus
 from .runtime_config import BootMode, RepositoryConfig
+
+GIT_SYNC_FAILURE_MESSAGE_MAX_CHARS = 1000
 
 if TYPE_CHECKING:
     from .boot_warnings import BootWarningSink
@@ -26,6 +33,15 @@ class RepositoryBootResult:
     start_success: bool | None
     repositories: tuple[RepoEntry, ...]
     workdir: Path
+    git_sync_report: dict[str, Any] = field(
+        default_factory=lambda: {"status": "succeeded", "repositories": []}
+    )
+
+
+class RepositoryBootError(RuntimeError):
+    def __init__(self, message: str, git_sync_report: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.git_sync_report = git_sync_report
 
 
 class RepositoryBoot:
@@ -89,6 +105,27 @@ class RepositoryBoot:
             Path(REPO_MANIFEST_FILE_PATH).write_text(dump_repo_manifest(self.repositories))
         except Exception as error:
             self.log.warn("supervisor.repo_manifest_write_failed", exc=error)
+
+    def _write_git_sync_report(self, report: dict[str, Any]) -> None:
+        path = Path(GIT_SYNC_REPORT_FILE_PATH)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w") as temporary_file:
+                json.dump(report, temporary_file, separators=(",", ":"))
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            temporary_path.replace(path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    def _sync_failure_detail(self, outcome: RepositorySyncOutcome) -> str:
+        details = []
+        if outcome.exit_code is not None:
+            details.append(f"exit code {outcome.exit_code}")
+        if outcome.diagnostic:
+            details.append(outcome.diagnostic)
+        return f" ({'; '.join(details)})" if details else ""
 
     def _mark_boot_completed(self, boot_mode: BootMode) -> None:
         if boot_mode is BootMode.BUILD:
@@ -175,22 +212,22 @@ class RepositoryBoot:
         if self.repositories:
             await self.synchronizer.ensure_credentials_configured()
         sync_result = await self.synchronizer.sync(self.repositories, boot_mode)
+        git_sync_report = sync_result.report()
+        self._write_git_sync_report(git_sync_report)
         self.repositories = list(sync_result.repositories)
         git_sync_success = not sync_result.failures
         if sync_result.failures:
             if boot_mode in (BootMode.FRESH, BootMode.BUILD):
-                messages = []
-                if sync_result.timed_out:
-                    timed_out_names = ", ".join(
-                        f"{repo.owner}/{repo.name}" for repo in sync_result.timed_out
-                    )
-                    messages.append(f"git sync timed out for {timed_out_names}")
-                if sync_result.non_timeout_failures:
-                    failed_names = ", ".join(
-                        f"{repo.owner}/{repo.name}" for repo in sync_result.non_timeout_failures
-                    )
-                    messages.append(f"git sync failed for {failed_names}")
-                raise RuntimeError("; ".join(messages))
+                messages = [
+                    f"git {outcome.operation.value} {outcome.status.value} for "
+                    f"{outcome.repository.owner}/{outcome.repository.name}"
+                    f"{self._sync_failure_detail(outcome)}"
+                    for outcome in sync_result.outcomes
+                    if outcome.status is not RepositorySyncStatus.SUCCEEDED
+                ]
+                raise RepositoryBootError(
+                    "; ".join(messages)[:GIT_SYNC_FAILURE_MESSAGE_MAX_CHARS], git_sync_report
+                )
             else:
                 for outcome in sync_result.outcomes:
                     repo = outcome.repository
@@ -206,6 +243,7 @@ class RepositoryBoot:
                             f"Could not update {repo.owner}/{repo.name} from origin; "
                             "the checkout may be stale."
                         )
+                    message += self._sync_failure_detail(outcome)
                     self.warnings.record("sync", message, repo)
         self._write_repo_manifest()
 
@@ -230,12 +268,17 @@ class RepositoryBoot:
         if self.repositories and boot_mode in (BootMode.FRESH, BootMode.BUILD):
             setup_success = True
             for repo in self.repositories:
-                if await self.hooks.run_setup(repo, boot_mode):
+                try:
+                    setup_succeeded = await self.hooks.run_setup(repo, boot_mode)
+                except Exception as error:
+                    raise RepositoryBootError(str(error), git_sync_report) from error
+                if setup_succeeded:
                     continue
                 setup_success = False
                 if boot_mode is BootMode.BUILD:
-                    raise RuntimeError(
-                        f"setup hook failed for {repo.owner}/{repo.name} in build mode"
+                    raise RepositoryBootError(
+                        f"setup hook failed for {repo.owner}/{repo.name} in build mode",
+                        git_sync_report,
                     )
                 self.warnings.record(
                     "setup",
@@ -248,11 +291,17 @@ class RepositoryBoot:
             await self.tunnel_environment.wait_until_ready(expected_tunnel_ports)
             start_success = True
             for index, repo in enumerate(self.repositories):
-                if await self.hooks.run_start(repo, boot_mode):
+                try:
+                    start_succeeded = await self.hooks.run_start(repo, boot_mode)
+                except Exception as error:
+                    raise RepositoryBootError(str(error), git_sync_report) from error
+                if start_succeeded:
                     continue
                 start_success = False
                 if index == 0:
-                    raise RuntimeError(f"start hook failed for {repo.owner}/{repo.name}")
+                    raise RepositoryBootError(
+                        f"start hook failed for {repo.owner}/{repo.name}", git_sync_report
+                    )
                 self.warnings.record(
                     "start",
                     f"start.sh failed for {repo.owner}/{repo.name}; the session continues without it.",
@@ -267,4 +316,5 @@ class RepositoryBoot:
             start_success=start_success,
             repositories=tuple(self.repositories),
             workdir=self._opencode_workdir(),
+            git_sync_report=git_sync_report,
         )

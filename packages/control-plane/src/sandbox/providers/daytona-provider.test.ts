@@ -10,7 +10,12 @@ import { computeHmacHex } from "@open-inspect/shared/auth";
 import { deriveVncPassword } from "../sandbox-env";
 import { DaytonaSandboxProvider, type DaytonaProviderConfig } from "./daytona-provider";
 import { SandboxProviderError } from "../provider";
-import type { CreateSandboxConfig, ResumeConfig, StopConfig } from "../provider";
+import type {
+  ColdRecoveryConfig,
+  CreateSandboxConfig,
+  ResumeConfig,
+  StopConfig,
+} from "../provider";
 import {
   DaytonaNotFoundError,
   DaytonaApiError,
@@ -19,6 +24,8 @@ import {
   type DaytonaSignedPreviewUrlResponse,
   type DaytonaCreateSandboxParams,
   type DaytonaRestConfig,
+  type DaytonaSandboxListItem,
+  type DaytonaSnapshotResponse,
 } from "../daytona-rest-client";
 
 // ==================== Mock Factories ====================
@@ -39,6 +46,16 @@ function createMockClient(
     stopSandbox: (id: string) => Promise<void>;
     deleteSandbox: (id: string) => Promise<void>;
     recoverSandbox: (id: string) => Promise<void>;
+    createSandboxSnapshot: (id: string, name: string) => Promise<DaytonaSandboxResponse>;
+    getSnapshot: (id: string) => Promise<DaytonaSnapshotResponse>;
+    listSnapshots: (filters: {
+      name: string;
+      sourceSandboxId: string;
+    }) => Promise<DaytonaSnapshotResponse[]>;
+    listSandboxes: (filters: {
+      name: string;
+      labels: Record<string, string>;
+    }) => Promise<DaytonaSandboxListItem[]>;
     getSignedPreviewUrl: (
       id: string,
       port: number,
@@ -47,6 +64,7 @@ function createMockClient(
   }> = {},
   configOverrides: Partial<DaytonaRestConfig> = {}
 ): DaytonaRestClient {
+  let snapshotCreated = false;
   return {
     config: { ...defaultRestConfig, ...configOverrides },
     createSandbox: vi.fn(
@@ -56,15 +74,38 @@ function createMockClient(
       })
     ),
     getSandbox: vi.fn(
-      async (): Promise<DaytonaSandboxResponse> => ({
-        id: "daytona-sandbox-id",
-        state: "started",
+      async (id: string): Promise<DaytonaSandboxResponse> => ({
+        id,
+        state: id === "source-daytona-id" ? "stopped" : "started",
       })
     ),
     startSandbox: vi.fn(async () => {}),
     stopSandbox: vi.fn(async () => {}),
     deleteSandbox: vi.fn(async () => {}),
     recoverSandbox: vi.fn(async () => {}),
+    createSandboxSnapshot: vi.fn(async (id: string) => {
+      snapshotCreated = true;
+      return { id, state: "stopped" };
+    }),
+    getSnapshot: vi.fn(async () => ({
+      id: "snapshot-id",
+      name: "recovery-snapshot",
+      state: "active" as const,
+      sourceSandboxId: "source-daytona-id",
+    })),
+    listSnapshots: vi.fn(async () =>
+      snapshotCreated
+        ? [
+            {
+              id: "snapshot-id",
+              name: "recovery-snapshot",
+              state: "active" as const,
+              sourceSandboxId: "source-daytona-id",
+            },
+          ]
+        : []
+    ),
+    listSandboxes: vi.fn(async () => []),
     getSignedPreviewUrl: vi.fn(
       async (): Promise<DaytonaSignedPreviewUrlResponse> => ({
         url: "https://preview.test/signed",
@@ -101,6 +142,14 @@ const baseStopConfig: StopConfig = {
   providerObjectId: "daytona-sandbox-id",
   sessionId: "session-123",
   reason: "inactivity_timeout",
+};
+
+const baseColdRecoveryConfig: ColdRecoveryConfig = {
+  ...baseCreateConfig,
+  operationId: "recovery-1",
+  sourceProviderObjectId: "source-daytona-id",
+  snapshotName: "recovery-snapshot",
+  replacementName: "recovery-replacement",
 };
 
 // ==================== Tests ====================
@@ -385,6 +434,215 @@ describe("DaytonaSandboxProvider", () => {
         expect(e).toBeInstanceOf(SandboxProviderError);
         expect((e as SandboxProviderError).errorType).toBe("transient");
       }
+    });
+  });
+
+  describe("recoverColdSandbox", () => {
+    const recoveryLabels = {
+      openinspect_framework: "open-inspect",
+      openinspect_session_id: "session-123",
+      openinspect_expected_sandbox_id: "sandbox-456",
+      openinspect_repo: "testowner/testrepo",
+      openinspect_recovery_operation_id: "recovery-1",
+      openinspect_recovery_source_id: "source-daytona-id",
+    };
+
+    it("adopts matching snapshot and replacement without mutating the source", async () => {
+      const client = createMockClient({
+        listSnapshots: vi.fn(async () => [
+          {
+            id: "snapshot-id",
+            name: "recovery-snapshot",
+            state: "active" as const,
+            sourceSandboxId: "source-daytona-id",
+          },
+        ]),
+        listSandboxes: vi.fn(async () => [
+          {
+            id: "replacement-id",
+            name: "recovery-replacement",
+            state: "started",
+            labels: recoveryLabels,
+          },
+        ]),
+      });
+      const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+      await expect(provider.recoverColdSandbox(baseColdRecoveryConfig)).resolves.toMatchObject({
+        sandboxId: "sandbox-456",
+        providerObjectId: "replacement-id",
+      });
+
+      expect(client.createSandboxSnapshot).not.toHaveBeenCalled();
+      expect(client.createSandbox).not.toHaveBeenCalled();
+      expect(client.getSandbox).not.toHaveBeenCalledWith("source-daytona-id");
+      expect(client.listSnapshots).not.toHaveBeenCalled();
+      expect(client.startSandbox).not.toHaveBeenCalled();
+      expect(client.recoverSandbox).not.toHaveBeenCalled();
+      expect(client.deleteSandbox).not.toHaveBeenCalled();
+    });
+
+    it("creates only the missing snapshot and replacement", async () => {
+      const client = createMockClient();
+      const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+      await expect(provider.recoverColdSandbox(baseColdRecoveryConfig)).resolves.toMatchObject({
+        providerObjectId: "daytona-sandbox-id",
+      });
+
+      expect(client.createSandboxSnapshot).toHaveBeenCalledWith(
+        "source-daytona-id",
+        "recovery-snapshot"
+      );
+      expect(client.createSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "recovery-replacement",
+          snapshot: "recovery-snapshot",
+          env: expect.objectContaining({ RESTORED_FROM_SNAPSHOT: "true" }),
+          labels: recoveryLabels,
+        })
+      );
+      expect(client.startSandbox).not.toHaveBeenCalled();
+      expect(client.recoverSandbox).not.toHaveBeenCalled();
+      expect(client.deleteSandbox).not.toHaveBeenCalled();
+    });
+
+    it.each(["started", "archived"])(
+      "refuses to mutate a %s source to create its snapshot",
+      async (sourceState) => {
+        const client = createMockClient({
+          getSandbox: vi.fn(
+            async (id: string): Promise<DaytonaSandboxResponse> => ({
+              id,
+              state: sourceState,
+            })
+          ),
+        });
+        const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+        await expect(provider.recoverColdSandbox(baseColdRecoveryConfig)).rejects.toThrow(
+          "recovery source must already be stopped"
+        );
+
+        expect(client.createSandboxSnapshot).not.toHaveBeenCalled();
+        expect(client.stopSandbox).not.toHaveBeenCalledWith("source-daytona-id");
+        expect(client.startSandbox).not.toHaveBeenCalledWith("source-daytona-id");
+        expect(client.recoverSandbox).not.toHaveBeenCalledWith("source-daytona-id");
+        expect(client.deleteSandbox).not.toHaveBeenCalledWith("source-daytona-id");
+      }
+    );
+
+    it("uses an existing deterministic snapshot without requiring the source to be visible", async () => {
+      const client = createMockClient({
+        getSandbox: vi.fn(async () => {
+          throw new DaytonaNotFoundError("source no longer visible");
+        }),
+        listSnapshots: vi.fn(async () => [
+          {
+            id: "snapshot-id",
+            name: "recovery-snapshot",
+            state: "active" as const,
+            sourceSandboxId: "source-daytona-id",
+          },
+        ]),
+      });
+      const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+      await expect(provider.recoverColdSandbox(baseColdRecoveryConfig)).resolves.toMatchObject({
+        providerObjectId: "daytona-sandbox-id",
+      });
+
+      expect(client.getSandbox).not.toHaveBeenCalledWith("source-daytona-id");
+      expect(client.createSandboxSnapshot).not.toHaveBeenCalled();
+      expect(client.createSandbox).toHaveBeenCalledOnce();
+    });
+
+    it("polls a replacement when Daytona reports start already in progress", async () => {
+      vi.useFakeTimers();
+      try {
+        const states = ["starting", "started"];
+        const client = createMockClient({
+          listSandboxes: vi.fn(async () => [
+            {
+              id: "replacement-id",
+              name: "recovery-replacement",
+              state: "stopped",
+              labels: recoveryLabels,
+            },
+          ]),
+          startSandbox: vi.fn(async () => {
+            throw new DaytonaApiError("state change in progress", 409);
+          }),
+          getSandbox: vi.fn(async () => ({
+            id: "replacement-id",
+            state: states.shift() ?? "started",
+          })),
+        });
+        const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+        const recovery = provider.recoverColdSandbox(baseColdRecoveryConfig);
+        await vi.runAllTimersAsync();
+
+        await expect(recovery).resolves.toMatchObject({ providerObjectId: "replacement-id" });
+        expect(client.startSandbox).toHaveBeenCalledWith("replacement-id");
+        expect(client.listSnapshots).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("returns an adopted replacement before requesting optional tunnel URLs", async () => {
+      const client = createMockClient({
+        listSandboxes: vi.fn(async () => [
+          {
+            id: "replacement-id",
+            name: "recovery-replacement",
+            state: "started",
+            labels: recoveryLabels,
+          },
+        ]),
+        getSignedPreviewUrl: vi.fn(async () => ({ url: "https://preview.test" })),
+      });
+      const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+      await expect(
+        provider.recoverColdSandbox({ ...baseColdRecoveryConfig, codeServerEnabled: true })
+      ).resolves.toMatchObject({
+        providerObjectId: "replacement-id",
+      });
+
+      expect(client.listSnapshots).not.toHaveBeenCalled();
+      expect(client.createSandbox).not.toHaveBeenCalled();
+      expect(client.getSignedPreviewUrl).not.toHaveBeenCalled();
+    });
+
+    it("refuses to adopt a same-name replacement from another operation", async () => {
+      const client = createMockClient({
+        listSnapshots: vi.fn(async () => [
+          {
+            id: "snapshot-id",
+            name: "recovery-snapshot",
+            state: "active" as const,
+            sourceSandboxId: "source-daytona-id",
+          },
+        ]),
+        listSandboxes: vi.fn(async () => [
+          {
+            id: "other-id",
+            name: "recovery-replacement",
+            state: "started",
+            labels: { ...recoveryLabels, openinspect_recovery_operation_id: "other" },
+          },
+        ]),
+      });
+      const provider = new DaytonaSandboxProvider(client, defaultProviderConfig);
+
+      await expect(provider.recoverColdSandbox(baseColdRecoveryConfig)).rejects.toThrow(
+        "name is owned by another operation"
+      );
+      expect(client.startSandbox).not.toHaveBeenCalled();
+      expect(client.recoverSandbox).not.toHaveBeenCalled();
+      expect(client.deleteSandbox).not.toHaveBeenCalled();
     });
   });
 

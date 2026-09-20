@@ -230,9 +230,9 @@ export const DEFAULT_SPAWN_CONFIG: SpawnConfig = {
  * uncommitted filesystem state — after which the next snapshot records its
  * version and restores resume as normal.
  */
-export function isSnapshotRuntimeCompatible(snapshotRuntimeVersion: string | null): boolean {
-  if (!snapshotRuntimeVersion) return false;
-  const version = parseRuntimeVersionNumber(snapshotRuntimeVersion);
+export function isSnapshotRuntimeCompatible(runtimeVersion: string | null): boolean {
+  if (!runtimeVersion) return false;
+  const version = parseRuntimeVersionNumber(runtimeVersion);
   return version !== null && version >= MIN_COMPATIBLE_RUNTIME_VERSION;
 }
 

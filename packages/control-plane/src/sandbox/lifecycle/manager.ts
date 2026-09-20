@@ -18,11 +18,13 @@ import type { SandboxStatus } from "@open-inspect/shared/types/sessions";
 import {
   sessionHasRepository,
   type SandboxAccessKind,
+  type SandboxColdRecoveryOperation,
   type SandboxRow,
   type SessionRow,
 } from "../../session/types";
 import {
   SandboxProviderError,
+  type ColdRecoveryConfig,
   type SandboxProvider,
   type CreateSandboxConfig,
   type CreateSandboxResult,
@@ -36,6 +38,7 @@ import {
   evaluateConnectingTimeout,
   evaluateWarmDecision,
   isDeadSandboxStatus,
+  isSnapshotRuntimeCompatible,
   DEFAULT_CIRCUIT_BREAKER_CONFIG,
   DEFAULT_SPAWN_CONFIG,
   DEFAULT_INACTIVITY_CONFIG,
@@ -68,6 +71,7 @@ const log = createLogger("lifecycle-manager");
 /** TTL for terminal auth JWTs (24 hours, matching typical sandbox lifetime). */
 const TERMINAL_TOKEN_TTL_SECONDS = 86400;
 const PROVIDER_REPLACEMENT_STOP_TIMEOUT_MS = 10_000;
+const COLD_RECOVERY_RETRY_INTERVAL_MS = 5_000;
 
 // ==================== Dependency Interfaces ====================
 
@@ -94,6 +98,8 @@ interface SandboxCircuitBreakerInfo {
   snapshot_runtime_version: string | null;
   spawn_failure_count: number | null;
   last_spawn_failure: number | null;
+  runtime_version: string | null;
+  recovery_operation?: string | null;
 }
 
 /**
@@ -125,6 +131,38 @@ export interface SandboxStorage {
   getSandbox(): SandboxRow | null;
   /** Get sandbox with circuit breaker state (subset of fields) */
   getSandboxWithCircuitBreaker(): SandboxCircuitBreakerInfo | null;
+  /** Read and decrypt the persisted cold recovery operation. */
+  getColdRecoveryOperation(): Promise<SandboxColdRecoveryOperation | null>;
+  /** Persist a cold recovery operation and fence the source credentials atomically. */
+  beginColdRecovery(data: {
+    operationId: string;
+    sourceProviderObjectId: string;
+    sourceSandboxId: string;
+    sourceCreatedAt: number;
+    sourceRuntimeVersion: string | null;
+    snapshotName: string;
+    replacementName: string;
+    replacementSandboxId: string;
+    replacementAuthToken: string;
+    targetCreatedAt: number;
+  }): Promise<SandboxColdRecoveryOperation>;
+  /** Publish replacement identity, credentials, and access state atomically. */
+  completeColdRecovery(data: {
+    operationId: string;
+    providerObjectId: string;
+    committedAt: number;
+    codeServerUrl?: string;
+    codeServerPassword?: string;
+    vncUrl?: string;
+    vncPassword?: string;
+    tunnelUrls?: Record<string, string>;
+  }): Promise<boolean>;
+  /** Retain a terminal recovery failure so a later spawn can supersede it explicitly. */
+  failColdRecovery(data: {
+    operationId: string;
+    failureReason: string;
+    failedAt: number;
+  }): Promise<boolean>;
   /** Update sandbox status */
   updateSandboxStatus(status: SandboxStatus): void;
   /**
@@ -414,6 +452,12 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
    * - Fresh spawn if all conditions pass
    */
   async spawnSandbox(): Promise<void> {
+    const recovery = await this.storage.getColdRecoveryOperation();
+    if (recovery) {
+      if (this.isSpawningSandbox || this.isTerminatingSandbox) return;
+      await this.continueColdRecovery(recovery);
+      return;
+    }
     const sandboxState = this.storage.getSandboxWithCircuitBreaker();
     const now = Date.now();
 
@@ -490,6 +534,13 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         this.log.info("Spawn decision: resume", {
           provider_object_id: spawnDecision.providerObjectId,
         });
+        if (
+          this.provider.recoverColdSandbox &&
+          !isSnapshotRuntimeCompatible(sandboxState?.runtime_version ?? null)
+        ) {
+          await this.startColdRecovery(spawnDecision.providerObjectId);
+          return;
+        }
         await this.resumeSandbox(spawnDecision.providerObjectId);
         return;
 
@@ -535,6 +586,164 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       throw new SpawnSupersededError();
     }
     return { sandboxAuthToken, expectedSandboxId };
+  }
+
+  private async startColdRecovery(sourceProviderObjectId: string): Promise<void> {
+    if (this.isSpawningSandbox || this.isTerminatingSandbox) return;
+    this.isSpawningSandbox = true;
+    this.providerStartupPending = true;
+    const session = this.sessionContext.getSession();
+    const sandbox = this.storage.getSandbox();
+    if (!session || !sandbox?.modal_sandbox_id) {
+      this.reportSandboxError("Cannot recover legacy sandbox: missing persisted identity");
+      this.isSpawningSandbox = false;
+      this.providerStartupPending = false;
+      return;
+    }
+    try {
+      const operationId = this.idGenerator.generateId();
+      const createdAt = Date.now();
+      const replacementSandboxId = buildSandboxIdForSession(session, createdAt);
+      await this.scheduleColdRecoveryRetry();
+      const operation = await this.storage.beginColdRecovery({
+        operationId,
+        sourceProviderObjectId,
+        sourceSandboxId: sandbox.modal_sandbox_id,
+        sourceCreatedAt: sandbox.created_at,
+        sourceRuntimeVersion: sandbox.runtime_version,
+        snapshotName: `oi-recovery-${operationId}`,
+        replacementName: `oi-recovery-${operationId}-sandbox`,
+        replacementSandboxId,
+        replacementAuthToken: this.idGenerator.generateId(),
+        targetCreatedAt: createdAt,
+      });
+      this.wsManager.detachSandboxWebSocket(1012, "Sandbox recovery started");
+      this.broadcaster.broadcast({ type: "sandbox_status", status: "connecting" });
+      await this.runColdRecovery(operation);
+    } finally {
+      this.isSpawningSandbox = false;
+      this.providerStartupPending = false;
+    }
+  }
+
+  private async continueColdRecovery(operation: SandboxColdRecoveryOperation): Promise<void> {
+    if (this.isSpawningSandbox || this.isTerminatingSandbox) {
+      await this.scheduleColdRecoveryRetry();
+      return;
+    }
+    this.isSpawningSandbox = true;
+    this.providerStartupPending = true;
+    try {
+      await this.runColdRecovery(operation);
+    } finally {
+      this.isSpawningSandbox = false;
+      this.providerStartupPending = false;
+    }
+  }
+
+  private async runColdRecovery(operation: SandboxColdRecoveryOperation): Promise<void> {
+    if (!this.provider.recoverColdSandbox) {
+      const reason = "Sandbox provider cannot continue persisted cold recovery";
+      if (
+        await this.storage.failColdRecovery({
+          operationId: operation.operationId,
+          failureReason: reason,
+          failedAt: Date.now(),
+        })
+      ) {
+        this.broadcaster.broadcast({ type: "sandbox_status", status: "failed" });
+      }
+      this.reportSandboxError(reason);
+      return;
+    }
+    try {
+      const session = this.sessionContext.getSession();
+      if (!session) throw new Error("Cannot recover legacy sandbox: missing session");
+      this.storage.setLastSpawnError(null, null);
+      const repositories = this.sessionContext.getSessionRepositories();
+      const userEnvVars = await this.sessionContext.getUserEnvVars();
+      const { provider, model } = this.resolveProviderAndModel(session);
+      const sandboxSettings = this.parseSandboxSettings(session);
+      const recoveryConfig: ColdRecoveryConfig = {
+        operationId: operation.operationId,
+        sourceProviderObjectId: operation.sourceProviderObjectId,
+        snapshotName: operation.snapshotName,
+        replacementName: operation.replacementName,
+        sessionId: session.session_name || session.id,
+        sandboxId: operation.replacementSandboxId,
+        repoOwner: session.repo_owner,
+        repoName: session.repo_name,
+        controlPlaneUrl: this.config.controlPlaneUrl,
+        sandboxAuthToken: operation.replacementAuthToken,
+        harness: getValidHarnessOrDefault(session.harness),
+        provider,
+        model,
+        userEnvVars,
+        timeoutSeconds: this.resolveSandboxTimeoutSeconds(sandboxSettings),
+        branch: session.base_branch,
+        codeServerEnabled: session.code_server_enabled === 1,
+        vncEnabled: session.vnc_enabled === 1,
+        agentSlackNotifyEnabled: await this.resolveAgentSlackNotifyEnabled(session),
+        mcpServers: await this.loadMcpServers(repositories),
+        sandboxSettings,
+        ...multiRepoSpawnFields(repositories),
+      };
+      const result = await this.provider.recoverColdSandbox(recoveryConfig);
+      if (!result.providerObjectId) {
+        throw new Error("Cold recovery did not return a provider object ID");
+      }
+      const committedAt = Date.now();
+      const applied = await this.storage.completeColdRecovery({
+        operationId: operation.operationId,
+        providerObjectId: result.providerObjectId,
+        committedAt,
+        codeServerUrl: result.codeServerUrl,
+        codeServerPassword: result.codeServerPassword,
+        vncUrl: result.vncAccess?.url,
+        vncPassword: result.vncAccess?.password,
+        tunnelUrls: result.tunnelUrls,
+      });
+      if (!applied) {
+        this.log.info("Cold recovery completion was superseded", {
+          operation_id: operation.operationId,
+        });
+        return;
+      }
+      this.storage.resetCircuitBreaker();
+      this.broadcastSandboxDashboardUrl(result.providerObjectId);
+      this.broadcaster.broadcast({ type: "sandbox_status", status: "connecting" });
+      this.broadcaster.broadcast({ type: "sandbox_access_changed" });
+      await this.alarmScheduler.schedule(committedAt + this.config.connectingTimeout.timeoutMs);
+      this.log.info("Sandbox cold recovery completed", {
+        event: "sandbox.cold_recovery",
+        operation_id: operation.operationId,
+        source_provider_object_id: operation.sourceProviderObjectId,
+        replacement_provider_object_id: result.providerObjectId,
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Sandbox cold recovery failed";
+      if (error instanceof SandboxProviderError && error.errorType === "permanent") {
+        const failed = await this.storage.failColdRecovery({
+          operationId: operation.operationId,
+          failureReason: reason.slice(0, 1000),
+          failedAt: Date.now(),
+        });
+        if (failed) {
+          this.broadcaster.broadcast({ type: "sandbox_status", status: "failed" });
+        }
+      } else {
+        await this.scheduleColdRecoveryRetry();
+      }
+      this.reportSandboxError(reason);
+      this.log.error("Sandbox cold recovery failed", {
+        operation_id: operation.operationId,
+        error: error instanceof Error ? error : String(error),
+      });
+    }
+  }
+
+  private async scheduleColdRecoveryRetry(): Promise<void> {
+    await this.alarmScheduler.schedule(Date.now() + COLD_RECOVERY_RETRY_INTERVAL_MS);
   }
 
   /**
@@ -1150,6 +1359,13 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
    * Trigger a filesystem snapshot of the sandbox.
    */
   async triggerSnapshot(reason: string): Promise<void> {
+    if (
+      this.storage.getSandbox()?.recovery_operation &&
+      (await this.storage.getColdRecoveryOperation())
+    ) {
+      this.log.debug("Cold recovery owns snapshotting; skipping lifecycle snapshot");
+      return;
+    }
     if (!this.provider.takeSnapshot) {
       this.log.debug("Provider does not support snapshots");
       return;
@@ -1340,6 +1556,10 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
     signal?: AbortSignal,
     providerObjectId?: string
   ): Promise<void> {
+    if (await this.storage.getColdRecoveryOperation()) {
+      this.log.debug("Cold recovery owns the source; skipping provider stop");
+      return;
+    }
     if (!this.provider.stopSandbox) {
       return;
     }
@@ -1367,6 +1587,11 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
    * Handle alarm for inactivity and heartbeat monitoring.
    */
   async handleAlarm(): Promise<SandboxAlarmResult> {
+    const recovery = await this.storage.getColdRecoveryOperation();
+    if (recovery) {
+      await this.continueColdRecovery(recovery);
+      return "no_action";
+    }
     const sandbox = this.storage.getSandbox();
     if (!sandbox) {
       this.log.debug("Alarm fired: no sandbox found");
@@ -1552,6 +1777,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
 
   async terminateUnresponsiveSandbox(trigger: UnresponsiveSandboxTrigger): Promise<void> {
     const sandbox = this.storage.getSandbox();
+    if (sandbox?.recovery_operation && (await this.storage.getColdRecoveryOperation())) return;
     if (!sandbox || isDeadSandboxStatus(sandbox.status)) {
       return;
     }
@@ -1582,6 +1808,8 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
 
   async terminateFailedSandbox(reason: string): Promise<boolean> {
     const sandbox = this.storage.getSandbox();
+    if (sandbox?.recovery_operation && (await this.storage.getColdRecoveryOperation()))
+      return false;
     if (
       !sandbox ||
       sandbox.status === "stopped" ||

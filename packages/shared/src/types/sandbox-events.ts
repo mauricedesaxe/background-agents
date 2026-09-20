@@ -3,10 +3,47 @@ import { harnessIdSchema } from "../harnesses";
 import { sessionDiffBaselineRepositorySchema } from "./session-diffs";
 import { resolvedSessionAttachmentsSchema } from "./session-attachments";
 import { githubAutofixOriginSchema } from "./github-autofix";
+import { MAX_SESSION_REPOSITORIES } from "./repositories";
 
 const recordSchema = z.record(z.string(), z.unknown());
 const gitSyncStatusSchema = z.enum(["pending", "in_progress", "completed", "failed"]);
 export type GitSyncStatus = z.infer<typeof gitSyncStatusSchema>;
+
+export const GIT_SYNC_DIAGNOSTIC_MAX_CHARS = 500;
+export const GIT_SYNC_REPORT_MAX_BYTES = 8 * 1024;
+
+export const gitSyncReportSchema = z
+  .object({
+    status: z.enum(["succeeded", "failed"]),
+    repositories: z
+      .array(
+        z.object({
+          repoOwner: z.string().min(1).max(300),
+          repoName: z.string().min(1).max(200),
+          operation: z.enum(["clone", "refresh"]),
+          status: z.enum(["succeeded", "failed", "timed_out"]),
+          diagnostic: z.string().max(GIT_SYNC_DIAGNOSTIC_MAX_CHARS).optional(),
+          exitCode: z.number().int().optional(),
+        })
+      )
+      .max(MAX_SESSION_REPOSITORIES),
+  })
+  .superRefine((report, context) => {
+    const failed = report.repositories.some((repository) => repository.status !== "succeeded");
+    if ((report.status === "succeeded" && failed) || (report.status === "failed" && !failed)) {
+      context.addIssue({ code: "custom", message: "Git sync report status is inconsistent" });
+    }
+    if (new TextEncoder().encode(JSON.stringify(report)).byteLength > GIT_SYNC_REPORT_MAX_BYTES) {
+      context.addIssue({ code: "custom", message: "Git sync report exceeds byte budget" });
+    }
+  });
+export type GitSyncReport = z.infer<typeof gitSyncReportSchema>;
+
+export const sandboxErrorRequestSchema = z.object({
+  error: z.string().trim().min(1).max(1000),
+  fatal: z.boolean().optional().default(false),
+  gitSyncReport: gitSyncReportSchema.optional(),
+});
 
 const tokenUsageDetailsSchema = z
   .object({
@@ -69,6 +106,7 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
      */
     resumed: z.boolean().optional(),
     repositories: z.array(sessionDiffBaselineRepositorySchema).optional(),
+    gitSyncReport: gitSyncReportSchema.optional(),
   }),
   messageSandboxEventBaseSchema.extend({
     type: z.literal("token"),

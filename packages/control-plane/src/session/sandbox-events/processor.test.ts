@@ -55,6 +55,7 @@ function createProcessor(promptHoldOverride?: QueuedPromptHold) {
     }),
     clearMessageAwaitingStopConfirmation: vi.fn(),
     updateSandboxGitSyncStatus: vi.fn(),
+    completeSandboxGitSync: vi.fn(() => true),
     updateSessionCurrentSha: vi.fn(),
     updateSessionAgentSessionId: vi.fn(),
   };
@@ -271,6 +272,57 @@ describe("SessionSandboxEventProcessor", () => {
     await h.processor.processSandboxEvent(event);
 
     expect(h.diffService.pinBaselines).toHaveBeenCalledWith(event);
+  });
+
+  it("persists terminal git sync state before ready", async () => {
+    const h = createProcessor();
+
+    await h.processor.processSandboxEvent({
+      type: "ready",
+      sandboxId: "sb-1",
+      timestamp: 1000,
+      gitSyncReport: {
+        status: "failed",
+        repositories: [
+          {
+            repoOwner: "acme",
+            repoName: "app",
+            operation: "clone",
+            status: "failed",
+            diagnostic: "repository not found",
+          },
+        ],
+      },
+    });
+
+    expect(h.repository.completeSandboxGitSync).toHaveBeenCalledWith("failed");
+    expect(h.eventRepository.createEvent.mock.calls.map(([event]) => event.type)).toEqual([
+      "git_sync",
+      "ready",
+    ]);
+  });
+
+  it("persists one synthetic git sync event per sandbox generation", async () => {
+    const h = createProcessor();
+    h.repository.completeSandboxGitSync
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+    const event: SandboxEvent = {
+      type: "ready",
+      sandboxId: "sb-1",
+      timestamp: 1000,
+      gitSyncReport: { status: "succeeded", repositories: [] },
+    };
+
+    await h.processor.processSandboxEvent(event);
+    await h.processor.processSandboxEvent(event);
+    await h.processor.processSandboxEvent(event);
+
+    expect(h.repository.completeSandboxGitSync).toHaveBeenCalledTimes(3);
+    expect(
+      h.eventRepository.createEvent.mock.calls.filter(([created]) => created.type === "git_sync")
+    ).toHaveLength(2);
   });
 
   it("records the reported runtime version on ready", async () => {

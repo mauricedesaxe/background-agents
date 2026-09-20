@@ -64,6 +64,17 @@ export class SandboxRuntimeEventHandler {
     event: Extract<SandboxEvent, { type: "ready" }>,
     context: SandboxEventContext
   ): Promise<void> {
+    if (event.gitSyncReport) {
+      this.handleGitSync(
+        {
+          type: "git_sync",
+          sandboxId: event.sandboxId,
+          timestamp: event.timestamp,
+          status: event.gitSyncReport.status === "succeeded" ? "completed" : "failed",
+        },
+        context
+      );
+    }
     // The runtime reports which harness actually booted; the session's
     // harness is fixed at create, so a mismatch is an image/config drift
     // worth a log line, never something to reconcile silently.
@@ -97,8 +108,16 @@ export class SandboxRuntimeEventHandler {
     event: Extract<SandboxEvent, { type: "git_sync" }>,
     context: SandboxEventContext
   ): void {
+    if (
+      (event.status === "completed" || event.status === "failed") &&
+      !this.sandboxRepository.completeSandboxGitSync(event.status)
+    ) {
+      return;
+    }
     persistSandboxEvent(this.eventRepository, event, context);
-    this.sandboxRepository.updateSandboxGitSyncStatus(event.status);
+    if (event.status !== "completed" && event.status !== "failed") {
+      this.sandboxRepository.updateSandboxGitSyncStatus(event.status);
+    }
     if (event.sha) {
       this.repository.updateSessionCurrentSha(event.sha);
     }

@@ -18,13 +18,14 @@ function createMockSql() {
   const calls: Array<{ query: string; params: unknown[] }> = [];
   const data = new Map<string, unknown[]>();
   const written = new Map<string, number>();
+  let defaultRowsWritten = 0;
   const sql: SqlStorage = {
     exec(query: string, ...params: unknown[]): SqlResult {
       calls.push({ query, params });
       return {
         toArray: () => data.get(query) ?? [],
         one: () => null,
-        rowsWritten: written.get(query) ?? 0,
+        rowsWritten: written.get(query) ?? defaultRowsWritten,
       };
     },
   };
@@ -33,6 +34,9 @@ function createMockSql() {
     calls,
     setData: (query: string, rows: unknown[]) => data.set(query, rows),
     setRowsWritten: (query: string, rows: number) => written.set(query, rows),
+    setDefaultRowsWritten: (rows: number) => {
+      defaultRowsWritten = rows;
+    },
   };
 }
 
@@ -100,6 +104,256 @@ describe("SandboxRepository", () => {
     });
   });
 
+  describe("cold recovery", () => {
+    it("encrypts the replacement token and fences the source in one transaction", async () => {
+      repository = new SandboxRepository(mock.sql, log, TEST_ENCRYPTION_KEY);
+      mock.setDefaultRowsWritten(1);
+
+      await repository.beginColdRecovery({
+        operationId: "recovery-1",
+        sourceProviderObjectId: "source-provider",
+        sourceSandboxId: "source-logical",
+        sourceCreatedAt: 500,
+        sourceRuntimeVersion: "43",
+        snapshotName: "snapshot-recovery-1",
+        replacementName: "replacement-recovery-1",
+        replacementSandboxId: "replacement-logical",
+        replacementAuthToken: "replacement-secret",
+        targetCreatedAt: 1000,
+      });
+
+      const update = mock.calls.find((call) => call.query.includes("recovery_operation = ?"));
+      expect(update?.query).toContain("auth_token_hash = ''");
+      expect(update?.query).toContain("active_socket_id = ''");
+      expect(update?.query).toContain("modal_object_id = ?");
+      expect(update?.query).toContain("modal_sandbox_id = ?");
+      expect(update?.query).toContain("created_at = ?");
+      expect(update?.query).toContain("daytona_cold_recovery_committed");
+      expect(update?.query).toContain("daytona_cold_recovery_failed");
+      expect(update?.params.slice(1)).toEqual(["source-provider", "source-logical", 500]);
+      const persisted = JSON.parse(String(update?.params[0]));
+      expect(persisted.replacementAuthToken).toBeUndefined();
+      expect(persisted.replacementAuthTokenEncrypted).not.toContain("replacement-secret");
+      await expect(
+        decryptToken(persisted.replacementAuthTokenEncrypted, TEST_ENCRYPTION_KEY)
+      ).resolves.toBe("replacement-secret");
+    });
+
+    it("does not fence a source generation that changed while the token was encrypted", async () => {
+      await expect(
+        repository.beginColdRecovery({
+          operationId: "recovery-1",
+          sourceProviderObjectId: "source-provider",
+          sourceSandboxId: "source-logical",
+          sourceCreatedAt: 500,
+          sourceRuntimeVersion: "43",
+          snapshotName: "snapshot-recovery-1",
+          replacementName: "replacement-recovery-1",
+          replacementSandboxId: "replacement-logical",
+          replacementAuthToken: "replacement-secret",
+          targetCreatedAt: 1000,
+        })
+      ).rejects.toThrow("Could not persist sandbox recovery operation");
+
+      const update = mock.calls.find((call) => call.query.includes("recovery_operation = ?"));
+      expect(update?.params.slice(1)).toEqual(["source-provider", "source-logical", 500]);
+    });
+
+    it("atomically publishes replacement credentials and retains committed provenance", async () => {
+      repository = new SandboxRepository(mock.sql, log, TEST_ENCRYPTION_KEY);
+      mock.setDefaultRowsWritten(1);
+      await repository.beginColdRecovery({
+        operationId: "recovery-1",
+        sourceProviderObjectId: "source-provider",
+        sourceSandboxId: "source-logical",
+        sourceCreatedAt: 500,
+        sourceRuntimeVersion: null,
+        snapshotName: "snapshot-recovery-1",
+        replacementName: "replacement-recovery-1",
+        replacementSandboxId: "replacement-logical",
+        replacementAuthToken: "replacement-secret",
+        targetCreatedAt: 1000,
+      });
+      const persisted = mock.calls.find((call) => call.query.includes("recovery_operation = ?"))
+        ?.params[0];
+      mock.setData(`SELECT * FROM sandbox LIMIT 1`, [
+        { id: "row-1", status: "connecting", recovery_operation: persisted },
+      ]);
+
+      await expect(
+        repository.completeColdRecovery({
+          operationId: "recovery-1",
+          providerObjectId: "replacement-provider",
+          committedAt: 2000,
+          codeServerUrl: "https://code.test",
+          codeServerPassword: "code-secret",
+        })
+      ).resolves.toBe(true);
+
+      const cutover = mock.calls.find((call) =>
+        call.query.includes("git_sync_status = 'in_progress'")
+      );
+      expect(cutover?.query).toContain("modal_sandbox_id = ?");
+      expect(cutover?.query).toContain("auth_token_hash = ?");
+      expect(cutover?.params[0]).toBe("replacement-logical");
+      expect(cutover?.params[1]).toBe("replacement-provider");
+      expect(cutover?.params[3]).toBe(2000);
+      expect(JSON.parse(String(cutover?.params.at(-2)))).toEqual(
+        expect.objectContaining({
+          kind: "daytona_cold_recovery_committed",
+          operationId: "recovery-1",
+          sourceProviderObjectId: "source-provider",
+          sourceSandboxId: "source-logical",
+          sourceCreatedAt: 500,
+          sourceRuntimeVersion: null,
+          snapshotName: "snapshot-recovery-1",
+          replacementName: "replacement-recovery-1",
+          replacementSandboxId: "replacement-logical",
+          targetCreatedAt: 2000,
+          replacementProviderObjectId: "replacement-provider",
+          committedAt: 2000,
+        })
+      );
+      expect(JSON.parse(String(cutover?.params.at(-2)))).not.toHaveProperty(
+        "replacementAuthTokenEncrypted"
+      );
+      expect(cutover?.params.at(-1)).toBe("recovery-1");
+    });
+
+    it("parses recovering, committed, and failed states while exposing only active work", async () => {
+      mock.setDefaultRowsWritten(1);
+      await repository.beginColdRecovery({
+        operationId: "recovery-1",
+        sourceProviderObjectId: "source-provider",
+        sourceSandboxId: "source-logical",
+        sourceCreatedAt: 500,
+        sourceRuntimeVersion: "43",
+        snapshotName: "snapshot-recovery-1",
+        replacementName: "replacement-recovery-1",
+        replacementSandboxId: "replacement-logical",
+        replacementAuthToken: "replacement-secret",
+        targetCreatedAt: 1000,
+      });
+      const recovering = mock.calls.find((call) => call.query.includes("recovery_operation = ?"))
+        ?.params[0];
+      mock.setData(`SELECT * FROM sandbox LIMIT 1`, [
+        { id: "row-1", status: "connecting", recovery_operation: recovering },
+      ]);
+
+      await expect(repository.getColdRecoveryOperation()).resolves.toEqual(
+        expect.objectContaining({
+          kind: "daytona_cold_recovery_recovering",
+          replacementAuthToken: "replacement-secret",
+        })
+      );
+
+      const base = {
+        operationId: "recovery-1",
+        sourceProviderObjectId: "source-provider",
+        sourceSandboxId: "source-logical",
+        sourceCreatedAt: 500,
+        sourceRuntimeVersion: "43",
+        snapshotName: "snapshot-recovery-1",
+        replacementName: "replacement-recovery-1",
+        replacementSandboxId: "replacement-logical",
+        targetCreatedAt: 1000,
+      };
+      const committed = {
+        ...base,
+        kind: "daytona_cold_recovery_committed",
+        replacementProviderObjectId: "replacement-provider",
+        committedAt: 2000,
+      };
+      mock.setData(`SELECT * FROM sandbox LIMIT 1`, [
+        { id: "row-1", status: "connecting", recovery_operation: JSON.stringify(committed) },
+      ]);
+      await expect(repository.getColdRecoveryState()).resolves.toEqual(committed);
+      await expect(repository.getColdRecoveryOperation()).resolves.toBeNull();
+
+      const failed = {
+        ...base,
+        kind: "daytona_cold_recovery_failed",
+        failureClass: "permanent_provider_error",
+        failureReason: "snapshot rejected",
+        failedAt: 3000,
+        retryPolicy: "supersede",
+      };
+      mock.setData(`SELECT * FROM sandbox LIMIT 1`, [
+        { id: "row-1", status: "failed", recovery_operation: JSON.stringify(failed) },
+      ]);
+      await expect(repository.getColdRecoveryState()).resolves.toEqual(failed);
+      await expect(repository.getColdRecoveryOperation()).resolves.toBeNull();
+    });
+
+    it.each([
+      {
+        kind: "daytona_cold_recovery_recovering",
+        replacementAuthTokenEncrypted: "ciphertext",
+      },
+      {
+        kind: "daytona_cold_recovery_committed",
+        replacementProviderObjectId: "replacement-provider",
+        committedAt: 2000,
+      },
+      {
+        kind: "daytona_cold_recovery_failed",
+        failureClass: "permanent_provider_error",
+        failureReason: "snapshot rejected",
+        failedAt: 2000,
+      },
+    ])("rejects an incomplete persisted $kind state at the storage boundary", async (state) => {
+      mock.setData(`SELECT * FROM sandbox LIMIT 1`, [
+        { id: "row-1", status: "failed", recovery_operation: JSON.stringify(state) },
+      ]);
+
+      await expect(repository.getColdRecoveryState()).rejects.toThrow(
+        "Invalid persisted sandbox recovery operation"
+      );
+    });
+
+    it("persists a classified terminal failure so a later operation can supersede it", async () => {
+      mock.setDefaultRowsWritten(1);
+      await repository.beginColdRecovery({
+        operationId: "recovery-1",
+        sourceProviderObjectId: "source-provider",
+        sourceSandboxId: "source-logical",
+        sourceCreatedAt: 500,
+        sourceRuntimeVersion: null,
+        snapshotName: "snapshot-recovery-1",
+        replacementName: "replacement-recovery-1",
+        replacementSandboxId: "replacement-logical",
+        replacementAuthToken: "replacement-secret",
+        targetCreatedAt: 1000,
+      });
+      const recovering = mock.calls.find((call) => call.query.includes("recovery_operation = ?"))
+        ?.params[0];
+      mock.setData(`SELECT * FROM sandbox LIMIT 1`, [
+        { id: "row-1", status: "connecting", recovery_operation: recovering },
+      ]);
+
+      await expect(
+        repository.failColdRecovery({
+          operationId: "recovery-1",
+          failureReason: "invalid source state",
+          failedAt: 2000,
+        })
+      ).resolves.toBe(true);
+
+      const failureWrite = mock.calls.find((call) =>
+        call.query.includes("kind') = 'daytona_cold_recovery_recovering'")
+      );
+      expect(JSON.parse(String(failureWrite?.params[0]))).toEqual(
+        expect.objectContaining({
+          kind: "daytona_cold_recovery_failed",
+          sourceProviderObjectId: "source-provider",
+          failureClass: "permanent_provider_error",
+          failureReason: "invalid source state",
+          retryPolicy: "supersede",
+        })
+      );
+    });
+  });
+
   describe("updateSandboxStatus", () => {
     it("updates status", () => {
       repository.updateSandboxStatus("ready");
@@ -154,6 +408,7 @@ describe("SandboxRepository", () => {
       // ...nor its bridge: the predecessor's socket loses dispatch authority
       // here. Revoked is '' — NULL is reserved for rows that predate identities.
       expect(mock.calls[0].query).toContain("active_socket_id = ''");
+      expect(mock.calls[0].query).toContain("git_sync_status = 'in_progress'");
       expect(mock.calls[0].params).toEqual(["spawning", 1000, "modal-sb-1"]);
     });
 
@@ -166,6 +421,15 @@ describe("SandboxRepository", () => {
       });
 
       expect(mock.calls[0].query).toContain("modal_object_id = modal_object_id");
+    });
+  });
+
+  describe("updateSandboxForResume", () => {
+    it("resets git sync status in the resume reservation", () => {
+      repository.updateSandboxForResume({ status: "connecting", createdAt: 1000 });
+
+      expect(mock.calls[0].query).toContain("git_sync_status = 'in_progress'");
+      expect(mock.calls[0].params).toEqual(["connecting", 1000]);
     });
   });
 
@@ -293,6 +557,17 @@ describe("SandboxRepository", () => {
 
       expect(mock.calls.length).toBe(1);
       expect(mock.calls[0].query).toContain("UPDATE sandbox SET git_sync_status");
+      expect(mock.calls[0].params).toEqual(["completed"]);
+    });
+  });
+
+  describe("completeSandboxGitSync", () => {
+    it("claims a terminal transition only from in_progress", () => {
+      mock.setDefaultRowsWritten(1);
+
+      expect(repository.completeSandboxGitSync("completed")).toBe(true);
+
+      expect(mock.calls[0].query).toContain("git_sync_status = 'in_progress'");
       expect(mock.calls[0].params).toEqual(["completed"]);
     });
   });

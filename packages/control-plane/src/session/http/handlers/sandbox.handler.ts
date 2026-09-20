@@ -4,7 +4,12 @@ import {
   type CreateMediaArtifactRequest,
 } from "@open-inspect/shared/types/session-api";
 import type { SessionArtifact } from "@open-inspect/shared/types/artifacts";
-import { sandboxEventSchema, type SandboxEvent } from "@open-inspect/shared/types/sandbox-events";
+import {
+  sandboxErrorRequestSchema,
+  sandboxEventSchema,
+  type GitSyncReport,
+  type SandboxEvent,
+} from "@open-inspect/shared/types/sandbox-events";
 import { isDeadSandboxStatus } from "../../../sandbox/lifecycle/decisions";
 import {
   OpenAITokenNotConfiguredError,
@@ -25,13 +30,22 @@ import type { SessionSandboxEventProcessor } from "../../sandbox-events/processo
 import type { SandboxRow, SessionRow } from "../../types";
 import { assertArtifactType } from "../../artifacts";
 import { parseTunnelUrls } from "../../tunnel-urls";
-import { z } from "zod";
 
-const sandboxErrorRequestSchema = z.object({
-  error: z.string().trim().min(1).max(1000),
-  // The supervisor raises this for a failure it already decided not to retry.
-  fatal: z.boolean().optional().default(false),
-});
+const ACTIONABLE_SANDBOX_ERROR_MAX_CHARS = 4000;
+
+function withGitSyncDiagnostics(error: string, report: GitSyncReport | undefined): string {
+  if (!report || report.status !== "failed") return error;
+  const details = report.repositories
+    .filter((repository) => repository.status !== "succeeded")
+    .map((repository) => {
+      const identity = `${repository.repoOwner}/${repository.repoName}`;
+      const diagnostic = repository.diagnostic ? `: ${repository.diagnostic}` : "";
+      const exitCode = repository.exitCode === undefined ? "" : ` (exit ${repository.exitCode})`;
+      return `${identity} ${repository.operation} ${repository.status}${exitCode}${diagnostic}`;
+    });
+  if (details.length === 0) return error;
+  return `${error}\n${details.join("\n")}`.slice(0, ACTIONABLE_SANDBOX_ERROR_MAX_CHARS);
+}
 
 /**
  * HTTP boundary for the sandbox-facing endpoints: event ingestion, media
@@ -132,7 +146,32 @@ export class SandboxHandler {
       return Response.json({ status: "ignored" });
     }
 
-    await this.failSandbox(result.data.error, result.data.fatal);
+    if (result.data.fatal && result.data.gitSyncReport) {
+      const now = this.now();
+      const gitSyncStatus =
+        result.data.gitSyncReport.status === "succeeded" ? "completed" : "failed";
+      const event: Extract<SandboxEvent, { type: "git_sync" }> = {
+        type: "git_sync",
+        sandboxId: currentSandbox.modal_sandbox_id ?? currentSandbox.id,
+        timestamp: Math.floor(now / 1000),
+        status: gitSyncStatus,
+      };
+      if (this.sandboxRepository.completeSandboxGitSync(gitSyncStatus)) {
+        this.eventRepository.createEvent({
+          id: this.generateId(),
+          type: event.type,
+          data: JSON.stringify(event),
+          messageId: null,
+          createdAt: now,
+        });
+        this.messenger.broadcast({ type: "sandbox_event", event });
+      }
+    }
+
+    await this.failSandbox(
+      withGitSyncDiagnostics(result.data.error, result.data.gitSyncReport),
+      result.data.fatal
+    );
     return Response.json({ status: "ok" });
   }
 

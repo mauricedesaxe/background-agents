@@ -10,12 +10,16 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import pytest
 
 from sandbox_runtime.repository_sync import (
+    GitOperationResult,
     RepositorySyncOutcome,
     RepositorySyncResult,
     RepositorySyncStatus,
 )
 from sandbox_runtime.runtime_config import BootMode
 from sandbox_runtime.supervisor import ImageBuildExecutionCancelled
+
+SUCCESSFUL_GIT_OPERATION = GitOperationResult(RepositorySyncStatus.SUCCEEDED)
+FAILED_GIT_OPERATION = GitOperationResult(RepositorySyncStatus.FAILED, "git failed", 1)
 
 
 @pytest.fixture(autouse=True)
@@ -103,6 +107,10 @@ def _sync_result(repositories, status=RepositorySyncStatus.SUCCEEDED):
 
 def _successful_sync(repository_boot):
     return _sync_result(repository_boot.repositories)
+
+
+def _successful_git_sync_report(repository_boot):
+    return _successful_sync(repository_boot).report()
 
 
 class TestImageBuildMode:
@@ -532,6 +540,10 @@ class TestImageBuildMode:
         callback.report_failure.assert_awaited_once_with(
             "setup hook failed for acme/my-repo in build mode"
         )
+        supervisor._report_fatal_error.assert_awaited_once_with(
+            "setup hook failed for acme/my-repo in build mode",
+            _successful_git_sync_report(supervisor.repository_boot),
+        )
 
     @pytest.mark.asyncio
     async def test_enforces_execution_deadline_before_deferred_finalization(self, build_env):
@@ -726,8 +738,12 @@ class TestFromRepoImage:
         supervisor.repository_boot.repo_path.mkdir(parents=True)
         _repoint_primary(supervisor.repository_boot)
 
-        supervisor.repository_boot.synchronizer._clone_repo = AsyncMock(return_value=True)
-        supervisor.repository_boot.synchronizer._update_existing_repo = AsyncMock(return_value=True)
+        supervisor.repository_boot.synchronizer._clone_repo = AsyncMock(
+            return_value=SUCCESSFUL_GIT_OPERATION
+        )
+        supervisor.repository_boot.synchronizer._update_existing_repo = AsyncMock(
+            return_value=SUCCESSFUL_GIT_OPERATION
+        )
 
         supervisor.repository_boot.hooks.run_setup = AsyncMock(return_value=True)
         supervisor.repository_boot.hooks.run_start = AsyncMock(return_value=True)
@@ -806,7 +822,10 @@ class TestFromRepoImage:
         with patch.dict(os.environ, repo_image_env, clear=False):
             await supervisor.run()
 
-        supervisor._report_fatal_error.assert_called_once()
+        supervisor._report_fatal_error.assert_awaited_once_with(
+            "start hook failed for acme/my-repo",
+            _successful_git_sync_report(supervisor.repository_boot),
+        )
         supervisor.harness_process.start.assert_not_called()
         supervisor.agent_bridge.start.assert_not_called()
 
@@ -823,10 +842,12 @@ class TestNormalMode:
 
         async def fake_clone(repo):
             repo.path.mkdir(parents=True, exist_ok=True)
-            return True
+            return SUCCESSFUL_GIT_OPERATION
 
         supervisor.repository_boot.synchronizer._clone_repo = AsyncMock(side_effect=fake_clone)
-        supervisor.repository_boot.synchronizer._update_existing_repo = AsyncMock(return_value=True)
+        supervisor.repository_boot.synchronizer._update_existing_repo = AsyncMock(
+            return_value=SUCCESSFUL_GIT_OPERATION
+        )
 
         supervisor.repository_boot.hooks.run_setup = AsyncMock(return_value=True)
         supervisor.repository_boot.hooks.run_start = AsyncMock(return_value=True)
@@ -1081,7 +1102,7 @@ class TestUpdateExistingRepo:
                 supervisor.repository_boot.repositories[0], BootMode.FRESH
             )
 
-        assert result is True
+        assert result.status is RepositorySyncStatus.SUCCEEDED
         # set-url (scrub stale embedded token), fetch, checkout
         assert len(call_log) == 3
         assert "set-url" in call_log[0]
@@ -1107,7 +1128,7 @@ class TestUpdateExistingRepo:
             )
             mock_exec.assert_not_called()
 
-        assert result is False
+        assert result.status is RepositorySyncStatus.FAILED
 
     @pytest.mark.asyncio
     async def test_uses_explicit_refspec(self, base_env, tmp_path):
@@ -1191,7 +1212,8 @@ class TestUpdateExistingRepo:
                 supervisor.repository_boot.repositories[0], BootMode.FRESH
             )
 
-        assert result is False
+        assert result.status is RepositorySyncStatus.FAILED
+        assert result.exit_code == 1
 
     @pytest.mark.asyncio
     async def test_returns_false_on_checkout_failure(self, base_env, tmp_path):
@@ -1218,11 +1240,15 @@ class TestUpdateExistingRepo:
                 supervisor.repository_boot.repositories[0], BootMode.FRESH
             )
 
-        assert result is False
+        assert result.status is RepositorySyncStatus.FAILED
+        assert result.exit_code == 1
 
     @pytest.mark.parametrize(
         ("ensure_origin_result", "fetch_result"),
-        [(False, True), (True, False)],
+        [
+            (FAILED_GIT_OPERATION, SUCCESSFUL_GIT_OPERATION),
+            (SUCCESSFUL_GIT_OPERATION, FAILED_GIT_OPERATION),
+        ],
     )
     @pytest.mark.asyncio
     async def test_snapshot_restore_reports_ref_refresh_failures(
@@ -1240,8 +1266,8 @@ class TestUpdateExistingRepo:
             supervisor.repository_boot.repositories[0], BootMode.SNAPSHOT_RESTORE
         )
 
-        assert result is False
-        if ensure_origin_result:
+        assert result.status is RepositorySyncStatus.FAILED
+        if ensure_origin_result.status is RepositorySyncStatus.SUCCEEDED:
             supervisor.repository_boot.synchronizer._fetch_branch.assert_awaited_once()
         else:
             supervisor.repository_boot.synchronizer._fetch_branch.assert_not_awaited()
@@ -1260,7 +1286,7 @@ class TestUpdateExistingRepo:
             supervisor.repository_boot.repositories[0], BootMode.SNAPSHOT_RESTORE
         )
 
-        assert result is False
+        assert result.status is RepositorySyncStatus.FAILED
         supervisor.repository_boot.synchronizer.log.warn.assert_called_once()
 
 
@@ -1298,7 +1324,7 @@ class TestPerformGitSync:
                 supervisor.repository_boot.repositories[0], BootMode.FRESH
             )
 
-        assert result is True
+        assert result.status is RepositorySyncStatus.SUCCEEDED
 
         clone_call = next(c for c in call_log if "clone" in c)
         assert "staging" in clone_call
@@ -1332,7 +1358,7 @@ class TestPerformGitSync:
                 supervisor.repository_boot.repositories[0], BootMode.FRESH
             )
 
-        assert result is True
+        assert result.status is RepositorySyncStatus.SUCCEEDED
 
         fetch_call = next(c for c in call_log if "fetch" in c)
         assert "feature/abc:refs/remotes/origin/feature/abc" in fetch_call
@@ -1419,22 +1445,26 @@ class TestPerformGitSync:
         assert "other-secret" not in log_call.kwargs["stderr"]
         assert "https://***@example.com/acme/repo.git" in log_call.kwargs["stderr"]
 
-    def test_redact_git_stderr_masks_userinfo_in_urls(self, base_env):
+    def test_sanitize_git_diagnostic_masks_userinfo_in_urls(self, base_env):
         supervisor = _make_supervisor(base_env)
 
         stderr_text = (
             b"fatal: redirected to https://other-user:other-secret@example.com/acme/my-repo.git"
         )
 
-        redacted_stderr = supervisor.repository_boot.synchronizer._redact_git_stderr(stderr_text)
+        redacted_stderr = supervisor.repository_boot.synchronizer._sanitize_git_diagnostic(
+            stderr_text
+        )
 
         assert "other-secret" not in redacted_stderr
         assert "https://***@example.com/acme/my-repo.git" in redacted_stderr
 
-    def test_redact_git_stderr_replaces_malformed_bytes(self, base_env):
+    def test_sanitize_git_diagnostic_replaces_malformed_bytes(self, base_env):
         supervisor = _make_supervisor(base_env)
 
-        redacted_stderr = supervisor.repository_boot.synchronizer._redact_git_stderr(b"fatal: \xff")
+        redacted_stderr = supervisor.repository_boot.synchronizer._sanitize_git_diagnostic(
+            b"fatal: \xff"
+        )
 
         assert redacted_stderr == "fatal: �"
 

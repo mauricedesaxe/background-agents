@@ -36,6 +36,7 @@ from .constants import (
     BOOT_WARNINGS_FILE_PATH,
     BRIDGE_FATAL_ERROR_FILE_PATH,
     DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+    GIT_SYNC_REPORT_FILE_PATH,
     LEGACY_OPENCODE_SESSION_ID_FILE_PATH,
     MAX_SNAPSHOT_RESERVE_SECONDS,
     REPO_MANIFEST_FILE_PATH,
@@ -194,6 +195,7 @@ class AgentBridge:
         # member checkout paths through it rather than joining spec-supplied
         # names into the filesystem.
         self.repo_manifest_path = Path(REPO_MANIFEST_FILE_PATH)
+        self.git_sync_report_path = Path(GIT_SYNC_REPORT_FILE_PATH)
         self.git_signing = GitSigningRuntime(
             control_plane_url=control_plane_url,
             session_id=session_id,
@@ -253,6 +255,7 @@ class AgentBridge:
 
     def _build_ready_event(self) -> dict[str, Any]:
         repositories = load_repo_manifest(self.repo_manifest_path)
+        git_sync_report = self._load_git_sync_report()
         # The image bakes SANDBOX_VERSION; reporting it lets the control plane
         # stamp snapshots with the runtime that produced them and retire the
         # ones a later compatibility floor rules out.
@@ -274,7 +277,15 @@ class AgentBridge:
                 for position, repository in enumerate(repositories)
                 if repository.base_sha
             ],
+            **({"gitSyncReport": git_sync_report} if git_sync_report is not None else {}),
         }
+
+    def _load_git_sync_report(self) -> dict[str, Any] | None:
+        try:
+            report = json.loads(self.git_sync_report_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        return report if isinstance(report, dict) else None
 
     async def run(self) -> None:
         """Main bridge loop with reconnection handling.
