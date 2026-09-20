@@ -1,90 +1,74 @@
-# overlay/
+# Overlay contracts
 
-This directory is the source of truth for every way this fork diverges from upstream
-`ColeMurray/background-agents`. It is the one directory a sync must preserve.
+This directory is the durable source of truth for the product behavior this fork keeps when it syncs
+from `ColeMurray/background-agents`. A sync starts from upstream and restores `overlay/` before
+rebuilding the active cards.
 
-## The sync contract
+Nothing outside this directory is authoritative merely because it exists in the current tree.
+Current code is evidence that a card has been implemented, not a recipe for the next sync.
 
-This repo is a tracked fork on a **blind-sync** strategy. Every 2 weeks:
+## Cards describe outcomes
 
-1. Fetch upstream.
-2. Overwrite the whole tree with upstream, **except `overlay/`**.
-3. Read the cards here and rebuild each kept divergence onto the fresh upstream.
-4. Run the sync runbook (below) as a blocking gate before the sync PR merges.
+Each active card answers three questions:
 
-So the rule is: **sync means take all of upstream except `overlay/`.** Nothing outside this
-directory is durable. The rebuilt feature code is disposable. It gets wiped every sync and
-regenerated from these cards.
+1. What does the user or operator gain?
+2. What can a verifier observe when the outcome works?
+3. Which constraints must survive even if upstream reorganizes the implementation?
 
-## What a card is (read this before reading any card)
+A card never names a file, function, route, query, component, or current code shape. It does not
+prescribe how to rebuild the behavior. The sync agent locates the relevant implementation on the
+current upstream tree.
 
-Each card is a **requirement plus an acceptance test**, written from the outside. The requirement
-states what must be true for the user or operator, or how a failure reproduces from the outside. The
-acceptance test states what a verifier observes when it is true. It is NOT an implementation recipe,
-and it must not read like one:
+Keep constraints that protect the outcome across implementations. Data safety, authorization,
+idempotency, ordering, provider limits, deployed state, and published product thresholds are common
+examples. Delete dated implementation notes once they stop explaining a durable decision.
 
-- **No anatomy.** A card does not name the files, functions, constants, routes, or code shapes where
-  the change should land — in any section, not even as "hints". The reapply agent locates the code
-  on current upstream itself. Upstream reorganizes constantly: between two syncs it consolidated the
-  entire sandbox dependency-install area (#1816), which turned every file-anchored instruction in
-  that area into a map of a corpse. A card that names today's file teaches the next agent to patch a
-  corpse.
-- **Placement is categorical, never anatomical.** The placement decision names the sync-surviving
-  lane the divergence lives in, plus any durable constraints on it. It never names a path.
+Every active card contains exactly these sections:
 
-Dated evidence is optional provenance: a short note on where the divergence came from and what
-happened to it — added fork-side, wiped by a sync, superseded by an upstream change. It is history,
-not orientation. It must pass one test: could a reader mistake any of it for instructions? When in
-doubt, delete it.
+- `Outcome`
+- `Observable behavior`
+- `Durable constraints`
 
-To rebuild a divergence:
+Run `python overlay/check_cards.py` before a sync or after changing a card.
 
-1. Read the **requirement** (the felt outcome, or the reproduction) and the **acceptance test** (the
-   observable behavior that proves it).
-2. Locate the relevant code on current upstream **yourself**. Expect it in different files than any
-   earlier note mentioned.
-3. Implement the behavior.
-4. Prove it with the acceptance test.
-
-The **placement decision** on each card is durable. It records where sync-surviving state lives: a
-snapshot the overlay owns, a gitignored tfvar, the external `lazar-harness` repo, a plan-time guard,
-upstream-tree code, or CI config. That is the config / overlay / upstream boundary, which is the
-whole point of the overlay. Keep it.
-
-## Card frontmatter
+## Card metadata
 
 ```yaml
-id: # kebab id, matches the filename
-title: # short human title
-type: # rebuild | config-verify | runbook-step | drop
+id: # kebab id that matches the filename
+title: # short outcome-oriented title
+type: # rebuild | config-verify | runbook-step
 priority: # high | medium | low
-placement: # snapshot | gitignored-tfvar | lazar-harness | plan-time-guard | upstream-code | ci-config
-depends_on: # [card ids that must land first]
-migrations: # [applied 9xxx ids to REUSE, never re-add]  (omit if none)
-origin: # upstream issue #, commit hashes — provenance
-discussion: # link to the #328 decision comment (the mirror)
+placement: # one category listed below
+depends_on: # active card ids that must be satisfied first
+migrations: # optional applied fork migration ids
+origin: # short provenance pointer
 ```
 
-`type` is not just a label. It tells the sync automation what to do with the card:
+Allowed placement categories are:
 
-- `rebuild` — re-implement the behavior in the upstream-owned tree this sync.
-- `config-verify` — assert a sync-surviving config value is present, set it if missing. No code.
-- `runbook-step` — a blocking check the sync agent runs live; not a rebuild and not CI.
-- `drop` — a feature we deliberately do NOT rebuild, with the reason, so a requirements-first agent
-  that sees value in it does not re-introduce it.
+- `deployment-config`
+- `ci-config`
+- `managed-skills`
+- `plan-time-guard`
+- `runbook`
+- `sandbox-image`
+- `snapshot`
+- `upstream-code`
+- `upstream-doc`
 
-## Layout
+`rebuild` restores behavior that upstream does not provide. `config-verify` confirms a durable
+deployment setting. `runbook-step` is a live operational check rather than an implementation task.
 
-```
-overlay/
-  README.md            this file — the sync contract
-  rules.md             the 4 process rules every card obeys
-  runbook.md           the blocking sync gate (connect check, tfvar assert, D1 check)
-  orchestrator.md      the weekly-sync orchestrator playbook (Phase 4, #328)
-  cards/               one card per kept divergence
-  drops/               do-not-rebuild cards
-  registry.md          fragile-divergence registry: what the next reapply must know
-```
+Migration IDs are deployed-state commitments. Reuse an existing ID and its exact content when its
+schema remains required; never renumber or rewrite an applied migration.
 
-The GitHub issue `#328` is the discussion mirror, not the source of truth. When a decision changes,
-the card changes; the issue records the conversation.
+## Retired decisions
+
+Files under `drops/` record behavior that must not be rebuilt. A retired decision states what was
+dropped and why. It does not retain an implementation recipe or an acceptance test for behavior the
+product no longer wants.
+
+## Sync procedure
+
+Use `runbook.md` for the sync and verification sequence. Use `rules.md` for the policies that apply
+to every card.

@@ -1,69 +1,33 @@
 ---
 id: 07-sidebar
-title: Improved grouped session sidebar (items 7-10)
+title: Grouped session sidebar for high fan-out
 type: rebuild
 priority: high
 placement: upstream-code
 depends_on: []
-migrations: [9005, 9008]
-origin: upstream #20, #21; fork origin 0b12c30
-discussion: https://github.com/mauricedesaxe/background-agents/issues/328#issuecomment-5340089982
+origin: fork origin 0b12c30; upstream issues #20 and #21
 ---
 
-## Requirement
+## Outcome
 
-The session sidebar is grouped and usable under heavy fan-out. Upstream's flat list is inadequate
-for this workflow. Four parts, one cohesive system, all non-negotiable:
+The session sidebar remains usable under heavy fan-out by grouping sessions by repository, visually
+separating manual and automatic sessions, collapsing child-session trees by default, and letting
+each user manually mark a session unread.
 
-- **Collapsible child-session trees** (#20), **collapsed by default**. Heavy fan-out floods a flat
-  list without it. A parent with children shows a disclosure control; its children are hidden until
-  the user expands that parent, and each parent in the tree collapses independently. Expanding the
-  parent is the only way its sub-tasks show.
-- **Per-repo grouping** — the structural core. Upstream only prints repo _labels_ on a flat list;
-  the fork groups by repo.
-- **Automatic-vs-manual separation** — the repo group **visually splits** sessions into a manual and
-  an automatic bucket. This is grouping, not a filter: there is deliberately **no** Manual/Automatic
-  filter control, because the existing creator filter already excludes automation-started sessions,
-  making a separate source filter redundant. One was built and then removed for exactly that reason.
-- **Per-user manual unread** (#21) — mark-a-session-unread, per user.
+## Observable behavior
 
-## Acceptance test (the contract)
+- Sessions appear in repository groups rather than a single flat list.
+- Each repository group visibly separates manual sessions from automatic sessions.
+- There is no redundant Manual/Automatic source filter; the existing creator filter remains the
+  filtering control.
+- A parent with children has a disclosure control. Its children are hidden by default, expanding it
+  reveals them, and collapsing it hides them again.
+- Nested parents can be expanded and collapsed independently.
+- A user can mark a session unread, and the unread state is visible only for that user.
 
-Render the sidebar with a realistic set (multiple repos, automatic + manual, parent + children) and
-assert: repo grouping, automatic/manual separation, the unread marker, and that a parent's children
-are **hidden until its disclosure control is clicked** (default-collapsed, expand reveals, collapse
-hides again). Assert the sidebar renders **no** Manual/Automatic filter control. Per-state render
-tests (this repo has no Storybook; use its view-test convention), plus unit tests on the grouping
-data-model transform. This is the guardrail against a half-rebuilt sidebar.
+## Durable constraints
 
-## Placement decision (durable)
-
-- Rebuilt in the **upstream-owned tree**, reapplied each sync.
-- **Restore migrations 9005 and 9008 verbatim at their original ids** (Rule 3). The blind sync wipes
-  these fork-local files, but prod has the rows applied, so prod skips them by id and a fresh D1
-  (CI, a new environment) applies them. Restoring is required so the sidebar's columns and indexes
-  exist off a clean tree: 9005 carries per-user manual unread state, and 9008 carries the composite
-  ordering indexes that make the child trees' keyset pagination stable. 9008 is NOT a duplicate of
-  upstream's own session indexes — it creates distinct composites upstream lacks.
-- **Keep upstream's server-paginated status sections and creator filter; layer the fork's repo
-  grouping + automatic/manual separation inside them.** Do not replace the sections with a flat
-  client-side grouped list — that discards the server-side pagination heavy fan-out needs. The UX
-  (grouping + auto/manual + child collapse + unread) is fixed; how the grouping nests inside the
-  current sections is the reapply agent's call.
-
-## This is the highest reapply-cost line in the plan
-
-Biggest UI surface, and upstream **actively develops this exact surface** (they added a creator
-filter). A blind sync overwrites it every sync, so the reapply re-lands the divergence against
-changing upstream code. A half-rebuilt sidebar is precisely the silent regression that passed CI in
-#327. Phase 4 implication: this line resists the hands-off ambition. Flag it for a careful/human
-reapply pass, not a rubber-stamp.
-
-## Provenance
-
-The fork built the grouped sidebar (origin 0b12c30) for upstream issues #20 and #21; every blind
-sync wipes it, and the rebuild re-lands it against whatever the sidebar has become upstream — the
-only card flagged for a careful or human reapply pass. The two fork migrations ride along verbatim
-at their original ids each restore. The 2026-08-19 card anchored the grouping transform, the sidebar
-component, and the unread route by file, dropped in the 2026-09-11 conversion. Nothing superseded:
-the four-part UX and the no-source-filter decision stand.
+- Grouping must remain correct when a status contains more sessions than fit on one page, and the
+  creator filter must remain available.
+- Child-session trees must remain collapsed by default so fan-out does not flood the sidebar.
+- Manual/automatic separation is grouping, not an additional filter.
