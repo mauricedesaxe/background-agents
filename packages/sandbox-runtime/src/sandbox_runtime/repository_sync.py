@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .diagnostics import OPERATOR_DIAGNOSTIC_MAX_CHARS, sanitize_diagnostic_text
 from .diff_baseline import resolve_session_diff_baselines
 from .process_output import communicate_owned_subprocess, terminate_owned_subprocess
 
@@ -21,7 +21,7 @@ GH_WRAPPER_INSTALL_PATH = Path("/usr/local/bin/gh")
 GH_WRAPPER_BODY = Path(__file__).with_name("gh-wrapper.sh").read_text()
 DEFAULT_GIT_CLONE_TIMEOUT_SECONDS = 300.0
 DEFAULT_GIT_FETCH_TIMEOUT_SECONDS = 120.0
-GIT_DIAGNOSTIC_MAX_CHARS = 500
+GIT_DIAGNOSTIC_MAX_CHARS = OPERATOR_DIAGNOSTIC_MAX_CHARS
 GIT_SYNC_REPORT_MAX_BYTES = 8 * 1024
 GIT_SYNC_REPORT_MAX_REPOSITORIES = 10
 GIT_SYNC_REPO_OWNER_MAX_CHARS = 300
@@ -142,32 +142,7 @@ class RepositorySynchronizer:
         return f"https://{self.vcs_host}/{repo.owner}/{repo.name}.git"
 
     def _sanitize_git_diagnostic(self, value: bytes | str) -> str:
-        diagnostic = value.decode(errors="replace") if isinstance(value, bytes) else value
-        diagnostic = re.sub(r"(https?://)([^/\s@]+)@", r"\1***@", diagnostic)
-        diagnostic = re.sub(
-            r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+|basic\s+|token\s+)?[^\s,;]+",
-            r"\1***",
-            diagnostic,
-        )
-        diagnostic = re.sub(r"\b(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+", "***", diagnostic)
-        diagnostic = re.sub(r"\bglpat-[A-Za-z0-9_-]+", "***", diagnostic)
-        diagnostic = re.sub(
-            r"(?i)(private-token\s*[:=]\s*)[^\s,;]+",
-            r"\1***",
-            diagnostic,
-        )
-        diagnostic = re.sub(
-            r"(?i)([?&][^=&#\s]*(?:token|auth|password|secret|api[_-]?key)[^=&#\s]*=)[^&#\s]+",
-            r"\1***",
-            diagnostic,
-        )
-        diagnostic = re.sub(
-            r"(?i)(\b[A-Za-z0-9_]*(?:token|password|secret|api[_-]?key)[A-Za-z0-9_-]*\s*=\s*)"
-            r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;]+)",
-            r"\1***",
-            diagnostic,
-        )
-        return diagnostic.strip()[-GIT_DIAGNOSTIC_MAX_CHARS:]
+        return sanitize_diagnostic_text(value)[-GIT_DIAGNOSTIC_MAX_CHARS:]
 
     def _failed_operation(
         self, diagnostic: bytes | str, exit_code: int | None = None

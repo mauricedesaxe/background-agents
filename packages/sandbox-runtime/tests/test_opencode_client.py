@@ -55,6 +55,25 @@ class TestPostPrompt:
         with pytest.raises(RuntimeError, match="Async prompt failed: 500 - boom"):
             await make_client(http_client).post_prompt(SESSION_ID, {"parts": []})
 
+    async def test_rejected_prompt_sanitizes_and_bounds_response_detail(self):
+        http_client = AsyncMock()
+        http_client.post.return_value = MockResponse(
+            422,
+            text="invalid /workspace/app token=prompt-secret\x1b[31m " + "x" * 800,
+        )
+        client = make_client(http_client)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await client.post_prompt(SESSION_ID, {"parts": []})
+
+        message = str(exc_info.value)
+        assert "Async prompt failed: 422" in message
+        assert "/workspace/app" in message
+        assert "token=***" in message
+        assert "prompt-secret" not in message
+        assert "\x1b" not in message
+        assert len(message) <= 500
+
 
 class TestRequestStop:
     async def test_posts_abort_and_reports_success(self):

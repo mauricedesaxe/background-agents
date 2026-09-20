@@ -10,7 +10,8 @@ which tests the parentID-based correlation mechanism used for attributing
 events to the correct prompt.
 """
 
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -122,6 +123,98 @@ class TestToolCallEvent:
         assert event["type"] == "tool_call"
         assert event["status"] == "completed"
         assert event["output"] == "file1.txt\nfile2.txt"
+
+    def test_tool_error_uses_sanitized_state_error_when_output_is_empty(self, bridge: AgentBridge):
+        part = create_tool_part(
+            call_id="call-1",
+            tool="Bash",
+            status="error",
+            input_data={"command": "false"},
+        )
+        part["state"]["error"] = "failed at /workspace/app token=tool-secret\x1b[31m"
+
+        event = bridge.harness.prompt_stream._tool_call_event(part, "cp-message-123")
+
+        assert event is not None
+        assert event["status"] == "error"
+        assert event["output"] == "failed at /workspace/app token=***"
+
+    def test_tool_error_extracts_named_error_message(self, bridge: AgentBridge):
+        part = create_tool_part(
+            call_id="call-1",
+            tool="Bash",
+            status="error",
+            input_data={"command": "false"},
+        )
+        part["state"]["error"] = {
+            "name": "UnknownError",
+            "data": {"message": "No space left on device"},
+        }
+
+        event = bridge.harness.prompt_stream._tool_call_event(part, "cp-message-123")
+
+        assert event is not None
+        assert event["status"] == "error"
+        assert event["output"] == "No space left on device"
+
+
+@pytest.mark.asyncio
+async def test_bridge_sanitizes_only_user_visible_diagnostic_fields(bridge: AgentBridge):
+    bridge.event_forwarder.send = AsyncMock()
+
+    await bridge._send_event(
+        {
+            "type": "error",
+            "error": "failed token=event-secret\x1b[31m",
+            "error_message": "Authorization: Bearer ghp_message_secret",
+            "content": "assistant token=keep-this",
+        }
+    )
+
+    assert bridge.event_forwarder.send.await_args.args[0] == {
+        "type": "error",
+        "error": "failed token=***",
+        "error_message": "Authorization: ***",
+        "content": "assistant token=keep-this",
+    }
+
+    await bridge._send_event(
+        {"type": "warning", "scope": "setup", "message": "password=warning-secret " + "x" * 600}
+    )
+
+    warning = bridge.event_forwarder.send.await_args.args[0]
+    assert warning["message"].startswith("password=***")
+    assert len(warning["message"]) == 500
+
+
+@pytest.mark.asyncio
+async def test_failed_execution_reports_critical_disk_pressure(
+    bridge: AgentBridge, monkeypatch: pytest.MonkeyPatch
+):
+    bridge.event_forwarder.send = AsyncMock()
+    monkeypatch.setattr(
+        "sandbox_runtime.bridge.shutil.disk_usage",
+        lambda _path: SimpleNamespace(
+            total=10 * 1024**3,
+            used=10 * 1024**3 - 64 * 1024**2,
+            free=64 * 1024**2,
+        ),
+    )
+
+    await bridge._send_event(
+        {
+            "type": "execution_complete",
+            "messageId": "message-1",
+            "success": False,
+            "error": "Failed to execute statement",
+        }
+    )
+
+    event = bridge.event_forwarder.send.await_args.args[0]
+    assert event["error"] == (
+        "Sandbox filesystem is critically low on space (64 MiB free, 99% used). "
+        "Failed to execute statement"
+    )
 
 
 class TestHandlePartTranslation:

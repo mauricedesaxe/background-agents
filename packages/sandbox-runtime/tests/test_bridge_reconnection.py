@@ -168,8 +168,10 @@ class TestIsFatalConnectionError:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("status", [401, 403, 404, 410])
     async def test_run_exits_on_terminal_signing_configuration_status(
-        self, bridge, monkeypatch, status
+        self, bridge, monkeypatch, tmp_path, status
     ):
+        fatal_path = tmp_path / "fatal.txt"
+        monkeypatch.setattr("sandbox_runtime.bridge.BRIDGE_FATAL_ERROR_FILE_PATH", str(fatal_path))
         bridge.log = MagicMock()
         bridge.git_signing.initialize = AsyncMock(
             side_effect=GitSigningError(
@@ -181,11 +183,13 @@ class TestIsFatalConnectionError:
         sleep = AsyncMock()
         monkeypatch.setattr("sandbox_runtime.bridge.asyncio.sleep", sleep)
 
-        await bridge.run()
+        with pytest.raises(GitSigningError):
+            await bridge.run()
 
         bridge._connect_and_run.assert_not_awaited()
         sleep.assert_not_awaited()
         assert bridge.shutdown_event.is_set()
+        assert fatal_path.read_text() == "Commit signing configuration unavailable"
         bridge.log.info.assert_any_call(
             "bridge.run_complete",
             outcome="fatal_error",
@@ -196,7 +200,9 @@ class TestIsFatalConnectionError:
         )
 
     @pytest.mark.asyncio
-    async def test_run_exits_on_nonretryable_payload_failure(self, bridge, monkeypatch):
+    async def test_run_exits_on_nonretryable_payload_failure(self, bridge, monkeypatch, tmp_path):
+        fatal_path = tmp_path / "fatal.txt"
+        monkeypatch.setattr("sandbox_runtime.bridge.BRIDGE_FATAL_ERROR_FILE_PATH", str(fatal_path))
         bridge.log = MagicMock()
         bridge.git_signing.initialize = AsyncMock(
             side_effect=GitSigningError("Invalid commit signing configuration")
@@ -206,10 +212,12 @@ class TestIsFatalConnectionError:
         sleep = AsyncMock()
         monkeypatch.setattr("sandbox_runtime.bridge.asyncio.sleep", sleep)
 
-        await bridge.run()
+        with pytest.raises(GitSigningError):
+            await bridge.run()
 
         bridge._connect_and_run.assert_not_awaited()
         sleep.assert_not_awaited()
+        assert fatal_path.read_text() == "Invalid commit signing configuration"
 
 
 class TestSessionTerminatedError:

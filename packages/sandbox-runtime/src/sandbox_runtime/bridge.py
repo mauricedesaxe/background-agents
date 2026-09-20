@@ -18,6 +18,7 @@ import contextlib
 import json
 import math
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -43,6 +44,7 @@ from .constants import (
     SANDBOX_TIMEOUT_ENV_VAR,
     SNAPSHOT_RESERVE_FRACTION,
 )
+from .diagnostics import operator_diagnostic
 from .diff_capture import ControlPlaneDiffClient, SessionDiffRefreshWorker
 from .event_forwarder import BufferedEventForwarder
 from .git_signing import GitSigningError, GitSigningRuntime
@@ -63,6 +65,8 @@ from .log_config import configure_logging, get_logger
 from .push_operation import PushOperation
 from .repo_config import load_repo_manifest
 from .types import GitUser
+
+LOW_DISK_FREE_BYTES = 512 * 1024 * 1024
 
 configure_logging()
 
@@ -331,9 +335,12 @@ class AgentBridge:
                 except Exception as e:
                     error_str = str(e)
                     # Check for fatal HTTP errors that shouldn't trigger retry
-                    if (
-                        isinstance(e, GitSigningError) and not e.retryable
-                    ) or self._is_fatal_connection_error(error_str):
+                    if isinstance(e, GitSigningError) and not e.retryable:
+                        run_outcome = "fatal_error"
+                        self.shutdown_event.set()
+                        self._record_fatal_error(error_str)
+                        raise
+                    if self._is_fatal_connection_error(error_str):
                         run_outcome = "fatal_error"
                         self.shutdown_event.set()
                         break
@@ -584,7 +591,32 @@ class AgentBridge:
 
     async def _send_event(self, event: dict[str, Any]) -> None:
         """Send event to control plane, buffering if WS is unavailable."""
-        await self.event_forwarder.send(event)
+        sanitized = event.copy()
+        for key in ("error", "error_message"):
+            if key in sanitized:
+                sanitized[key] = operator_diagnostic(sanitized[key])
+        if sanitized.get("type") == "warning" and "message" in sanitized:
+            sanitized["message"] = operator_diagnostic(sanitized["message"])
+        if sanitized.get("type") == "execution_complete" and sanitized.get("success") is False:
+            disk_diagnostic = self._low_disk_diagnostic()
+            if disk_diagnostic:
+                sanitized["error"] = operator_diagnostic(
+                    f"{disk_diagnostic}. {sanitized.get('error') or 'Execution failed'}"
+                )
+        await self.event_forwarder.send(sanitized)
+
+    def _low_disk_diagnostic(self) -> str | None:
+        try:
+            usage = shutil.disk_usage(self.repo_path)
+        except OSError:
+            return None
+        if usage.free >= LOW_DISK_FREE_BYTES:
+            return None
+        used_percent = round(usage.used / usage.total * 100) if usage.total else 100
+        return (
+            "Sandbox filesystem is critically low on space "
+            f"({usage.free // (1024 * 1024)} MiB free, {used_percent}% used)"
+        )
 
     async def _handle_command(self, cmd: dict[str, Any]) -> asyncio.Task[None] | None:
         """Handle command from control plane.
@@ -897,7 +929,7 @@ class AgentBridge:
     def _record_fatal_error(message: str) -> None:
         """Leave the deterministic-failure cause where the supervisor reports it from."""
         with contextlib.suppress(Exception):
-            Path(BRIDGE_FATAL_ERROR_FILE_PATH).write_text(message)
+            Path(BRIDGE_FATAL_ERROR_FILE_PATH).write_text(operator_diagnostic(message))
 
     def _resolve_timeout_seconds(
         self,
@@ -997,7 +1029,7 @@ async def main() -> None:
 
     try:
         await bridge.run()
-    except HarnessStartError:
+    except (GitSigningError, HarnessStartError):
         # The cause is already recorded for the supervisor; this exit code
         # tells it not to spend its restart budget.
         sys.exit(DETERMINISTIC_FAILURE_EXIT_CODE)
