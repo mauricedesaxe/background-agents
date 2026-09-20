@@ -1,5 +1,7 @@
+import asyncio
 import subprocess
 import textwrap
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -543,3 +545,50 @@ async def test_default_signer_uses_the_configured_runtime_bin(
     )
 
     assert git(repo, "config", "gpg.ssh.program").stdout.strip() == str(install_dir / "oi-git-sign")
+
+
+@pytest.mark.asyncio
+async def test_git_config_failure_reports_exit_code_and_sanitized_stderr(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    repo = create_repository(tmp_path / "repo")
+    runtime = create_runtime(tmp_path, create_manifest(tmp_path, [repo]))
+    process = AsyncMock()
+    process.returncode = 7
+    process.communicate.return_value = (
+        b"",
+        b"fatal: cannot update /workspace/repo Authorization: Bearer ghp_secret",
+    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+
+    with pytest.raises(GitSigningError) as exc_info:
+        await runtime._run_git_config(repo, "--replace-all", "user.name", "secret argument")
+
+    message = str(exc_info.value)
+    assert "exit code 7" in message
+    assert "fatal: cannot update /workspace/repo" in message
+    assert "Authorization: ***" in message
+    assert "ghp_secret" not in message
+    assert "secret argument" not in message
+
+
+@pytest.mark.asyncio
+async def test_git_config_creation_failure_has_sanitized_detail_without_args(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    repo = create_repository(tmp_path / "repo")
+    runtime = create_runtime(tmp_path, create_manifest(tmp_path, [repo]))
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        AsyncMock(side_effect=OSError("permission denied: token=process-secret")),
+    )
+
+    with pytest.raises(GitSigningError) as exc_info:
+        await runtime._run_git_config(repo, "--replace-all", "user.name", "secret argument")
+
+    message = str(exc_info.value)
+    assert "permission denied" in message
+    assert "token=***" in message
+    assert "process-secret" not in message
+    assert "secret argument" not in message

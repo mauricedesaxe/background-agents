@@ -7,8 +7,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from sandbox_runtime.bridge import AgentBridge
-from sandbox_runtime.harness import HarnessId, HarnessStartError, TurnOutcome, parse_harness_id
+from sandbox_runtime.bridge import AgentBridge, main
+from sandbox_runtime.git_signing import GitSigningError
+from sandbox_runtime.harness import (
+    DETERMINISTIC_FAILURE_EXIT_CODE,
+    HarnessId,
+    HarnessStartError,
+    TurnOutcome,
+    parse_harness_id,
+)
 from tests.conftest import ScriptedHarness
 
 if TYPE_CHECKING:
@@ -83,6 +90,52 @@ class TestStartupLifecycle:
             reconnect_attempt_count=0,
             total_connected_duration_seconds=0.0,
         )
+
+    @pytest.mark.asyncio
+    async def test_nonretryable_signing_failure_is_recorded_and_raised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fatal_path = tmp_path / "fatal.txt"
+        monkeypatch.setattr("sandbox_runtime.bridge.BRIDGE_FATAL_ERROR_FILE_PATH", str(fatal_path))
+        bridge = _bridge(ScriptedHarness())
+        bridge.git_signing.initialize = AsyncMock(
+            side_effect=GitSigningError(
+                "Git signing failed token=startup-secret\x1b[31m", retryable=False
+            )
+        )
+
+        with pytest.raises(GitSigningError):
+            await bridge.run()
+
+        assert fatal_path.read_text() == "Git signing failed token=***"
+        assert bridge.shutdown_event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_signing_failure_exits_main_as_deterministic_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bridge = MagicMock()
+        bridge.run = AsyncMock(side_effect=GitSigningError("signing denied"))
+        monkeypatch.setattr("sandbox_runtime.bridge.AgentBridge", MagicMock(return_value=bridge))
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "bridge",
+                "--sandbox-id",
+                "sandbox-1",
+                "--session-id",
+                "session-1",
+                "--control-plane",
+                "https://control.example.com",
+                "--token",
+                "sandbox-token",
+            ],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            await main()
+
+        assert exc_info.value.code == DETERMINISTIC_FAILURE_EXIT_CODE
 
 
 class TestSessionIdentity:

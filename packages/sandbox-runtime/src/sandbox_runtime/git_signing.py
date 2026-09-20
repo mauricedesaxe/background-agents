@@ -12,6 +12,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 
 from .constants import BIN_INSTALL_DIR_ENV_VAR, DEFAULT_BIN_INSTALL_DIR, REPO_MANIFEST_FILE_PATH
+from .diagnostics import operator_diagnostic
 from .repo_config import RepoConfigError, read_repo_manifest
 from .types import GitUser
 
@@ -218,15 +219,22 @@ class GitSigningRuntime:
         if not (repository / ".git").exists():
             raise GitSigningError("Session repository is unavailable for Git configuration")
 
-        command = ["git", "config", "--local", *args]
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=repository,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
         try:
-            _stdout, _stderr = await asyncio.wait_for(
+            process = await asyncio.create_subprocess_exec(
+                "git",
+                "config",
+                "--local",
+                *args,
+                cwd=repository,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as error:
+            raise GitSigningError(
+                operator_diagnostic(f"Git signing configuration could not start: {error}")
+            ) from None
+        try:
+            _stdout, stderr = await asyncio.wait_for(
                 process.communicate(), timeout=GIT_CONFIG_TIMEOUT_SECONDS
             )
         except TimeoutError:
@@ -237,4 +245,9 @@ class GitSigningRuntime:
 
         if process.returncode == 0 or (allow_missing and process.returncode in {1, 5}):
             return
-        raise GitSigningError("Git signing configuration failed")
+        raise GitSigningError(
+            operator_diagnostic(
+                f"Git signing configuration failed with exit code {process.returncode}: "
+                f"{stderr.decode(errors='replace')}"
+            )
+        )

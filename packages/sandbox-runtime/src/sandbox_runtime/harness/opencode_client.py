@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
+from ..diagnostics import operator_diagnostic
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
@@ -133,13 +135,15 @@ class OpenCodeClient:
             timeout=self._request_timeout_seconds,
         )
         if prompt_response.status_code not in [200, 204]:
-            error_body = prompt_response.text
+            diagnostic = operator_diagnostic(
+                f"Async prompt failed: {prompt_response.status_code} - {prompt_response.text}"
+            )
             self._log.error(
                 "bridge.prompt_request_error",
                 status_code=prompt_response.status_code,
-                error_body=error_body,
+                error_body=diagnostic,
             )
-            raise RuntimeError(f"Async prompt failed: {prompt_response.status_code} - {error_body}")
+            raise RuntimeError(diagnostic)
 
     async def request_stop(self, opencode_session_id: str | None, *, reason: str) -> bool:
         """Best-effort abort of the active OpenCode prompt (saves LLM compute)."""

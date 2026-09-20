@@ -19,6 +19,7 @@ from ..child_activity import (
     PendingChildError,
     PendingChildMessage,
 )
+from ..diagnostics import operator_diagnostic
 from ..message_attribution import AssistantMessageDisposition, MessageAttribution
 from ..opencode_identifier import OpenCodeIdentifier
 from .opencode_client import (
@@ -940,13 +941,19 @@ class OpenCodePromptStream:
         if status in ("pending", "") and not tool_input:
             return None
 
+        output = tool_state.get("output", "")
+        if status == "error":
+            output = operator_diagnostic(
+                output or self._extract_error_message(tool_state.get("error"))
+            )
+
         return {
             "type": "tool_call",
             "tool": part.get("tool", ""),
             "args": tool_input,
             "callId": part.get("callID", ""),
             "status": status,
-            "output": tool_state.get("output", ""),
+            "output": output,
             "messageId": message_id,
         }
 
