@@ -4,53 +4,22 @@ title: Child-result delivery to the parent agent
 type: rebuild
 priority: high
 placement: upstream-code
-depends_on: [06-sandbox-connect]
+depends_on: []
 origin: upstream #24; fork commits 707f756 (closes #285), 3361bd8
-discussion: https://github.com/mauricedesaxe/background-agents/issues/328#issuecomment-5339757387
 ---
 
-## Requirement
+## Outcome
 
-When a fanned-out child session reaches a terminal state, the parent agent is woken with the child's
-summary so it can continue on its own. Fan-out is used heavily. On upstream, a terminal child only
-broadcasts a UI refresh and never wakes the parent, so the child's summary sits unused and the user
-must prompt the parent by hand. The feature fetches the finished child's summary (final response +
-PR artifacts), enqueues an **agent-sourced** prompt into the parent, and lets the existing message
-queue resume the parent sandbox and dispatch it. Archived and cancelled parents are left alone.
+A parent agent continues without user intervention when a child session finishes.
 
-## Acceptance test (the contract)
+## Observable behavior
 
-Parent spawns child -> child goes terminal -> the parent receives an agent-sourced prompt containing
-the child's summary and the parent sandbox resumes. A non-status update on the child (e.g. a title
-change) does NOT re-enqueue (edge-trigger: only status transitions fire delivery).
+When a child enters a terminal state, its parent receives an agent-sourced message containing the
+child's final response and pull-request artifacts. The parent resumes and can act on that result.
 
-## Placement decision (durable)
+## Durable constraints
 
-- Rebuilt in the **upstream-owned tree**, reapplied each sync, ported onto upstream's own session
-  storage shape. The fork's parallel session namespace stays dropped (see the drops).
-- Depends on card `06-sandbox-connect`: the only real prerequisite is children reaching terminal
-  with a summary, which is the connect path. Sequence after it.
-
-## Scope note
-
-Upstream already ships the summary builder (the expensive half). Missing is only the delivery
-wiring: on a terminal child status transition, fetch the summary, enqueue an agent-sourced prompt,
-wake the parent, record the delivery on the child, and guard the edge trigger against non-status
-updates. Roughly 100-150 lines on existing machinery, not a full-stack rebuild.
-
-## Reliability (upstream baseline is sound)
-
-- A child inherits the parent's non-default branch on upstream (an upstream test covers it), so the
-  fork-era "children clone base branch, lose parent work" concern looks handled on the clean
-  baseline.
-- The jj detached-HEAD no-op is fork-only and returns only with card `11-jj-pr-helper`; it is that
-  card's test burden, not this one's.
-
-## Provenance
-
-The fork built the feature first (closing #285, commits 707f756 and 3361bd8); the blind sync wiped
-it and it is rebuilt onto upstream each sync, which since ships the summary half natively. The
-2026-08-19 card carried file anchors for the delivery wiring, the summary builder, and the tests to
-port, plus a note about where the terminal-child hook sat on that baseline — all orientation, all
-dropped in the 2026-09-11 conversion. Nothing superseded: the requirement and the edge-trigger guard
-stand as written.
+- Deliver the result only when the child transitions into a terminal state.
+- A child update that does not change status must not deliver the result again.
+- Do not resume or deliver results to an archived or cancelled parent.
+- Record successful delivery so that retries do not produce duplicate parent messages.

@@ -183,6 +183,8 @@ overwrite this section; the `fork-ops-notes` CI job fails until it is reapplied 
   workflow runs at all, leaving the change on `main` looking deployed with nothing to approve.
   Confirm with `gh run list --branch main` after merging; force a run with
   `gh workflow run terraform.yml --ref main`.
+- **A healthy post-deploy plan is not empty.** Worker resources are replaced on every plan. The
+  failure signal is an unexpected resource marked `will be created`.
 - **Sandbox image changes propagate via the content-hash `buildHash` (#94).** The image plan is
   computed by `plan_image` in `packages/sandbox-images` over its declared payload roots
   (`PAYLOAD_ROOTS` plus the provider-infra package and terraform module), and Terraform consumes the
@@ -193,6 +195,6 @@ overwrite this section; the `fork-ops-notes` CI job fails until it is reapplied 
   `SANDBOX_VERSION` is the runtime version stamped on the image and reported by running sandboxes;
   it is not a propagation trigger.
 - **Fork-local D1 migrations start at id 9000** — the fork migration id floor
-  (`FORK_MIGRATION_ID_FLOOR`), per `overlay/rules.md` Rule 3. Upstream owns the ids below it. The
-  9xxx range is append-only: reuse an already-applied 9xxx id, never re-add one, and never change
-  the content of an applied id.
+  (`FORK_MIGRATION_ID_FLOOR`), per the append-only migration policy in `overlay/rules.md`. Upstream
+  owns the ids below it. The 9xxx range is append-only: reuse an already-applied 9xxx id, never
+  re-add one, and never change the content of an applied id.
