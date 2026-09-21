@@ -26,6 +26,10 @@
     "version": "1.2.2",
     "sha256": "8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8"
   },
+  "harnessCheck": {
+    "version": "0.1.0",
+    "sha256": "1ba245281ddb4363e09dde8abb635aa5e3fa56130238123b0d79dd6d8c6ade49"
+  },
   "hatchling": "1.27.0",
   "websockify": "0.13.0",
   "node": {
