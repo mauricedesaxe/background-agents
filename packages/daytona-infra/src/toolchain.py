@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 SNAPSHOT_CPU = 2
 SNAPSHOT_MEMORY_GIB = 8
-SNAPSHOT_DISK_GIB = 8
+SNAPSHOT_DISK_GIB = 30
 
 
 def build_base_image(repo_root: Path) -> Image:
