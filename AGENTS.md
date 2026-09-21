@@ -177,7 +177,7 @@ overwrite this section; the `fork-ops-notes` CI job fails until it is reapplied 
 
 - **Deploy path.** Merging to `main` triggers `terraform.yml`. Plan always runs; Apply runs
   unattended (there is no production approval gate in practice). Terraform deploys the control
-  plane, the D1 migrations, and the web app when `web_platform = "cloudflare"`. **Daytona is the
+  plane, the D1 migrations, and the web app when `web_platform = "cloudflare"`. **Modal is the
   sandbox provider this deployment runs.**
 - **A merge can produce zero workflow runs (#75).** A rebase-merge has been observed producing no
   workflow runs at all, leaving the change on `main` looking deployed with nothing to approve.
@@ -188,7 +188,7 @@ overwrite this section; the `fork-ops-notes` CI job fails until it is reapplied 
 - **Sandbox image changes propagate via the content-hash `buildHash` (#94).** The image plan is
   computed by `plan_image` in `packages/sandbox-images` over its declared payload roots
   (`PAYLOAD_ROOTS` plus the provider-infra package and terraform module), and Terraform consumes the
-  result as the Daytona snapshot `source_hash` (`daytona.tf` runs `cli.py hash`). There is no manual
+  result as the Modal image `source_hash` (`modal.tf` runs `cli.py hash`). There is no manual
   version string to bump — a changed input inside the hashed roots invalidates the snapshot on its
   own. The flip side: a change that lands outside the hashed roots ships nothing, so check that a
   harness or skills edit sits inside the declared roots before expecting it to reach sandboxes.

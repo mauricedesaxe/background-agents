@@ -16,8 +16,8 @@ how to verify that a release reached production.
 ## Observable behavior
 
 The instructions state that merging to `main` runs the Terraform deployment without a production
-approval gate and that this deployment uses Daytona. They tell the operator to confirm that the
-merge produced a workflow run and how to start `terraform.yml` when it did not.
+approval gate and that this deployment uses Modal. They tell the operator to confirm that the merge
+produced a workflow run and how to start `terraform.yml` when it did not.
 
 They also explain that a healthy post-deploy plan is not empty because worker resources are replaced
 on every plan, and that unexpected resources marked for creation indicate deployment drift.
