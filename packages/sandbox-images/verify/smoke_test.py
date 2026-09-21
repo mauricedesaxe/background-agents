@@ -221,6 +221,7 @@ def observed_tool_version(command: str, expected: str, output: str) -> str:
         "jj": r"jj\s+",
         "bd": r"bd\s+version\s+",
         "harness-check": r"harness-check\s+",
+        "lazar-checkpoint": r"lazar-checkpoint\s+",
         "google-chrome": r"Google Chrome(?: for Testing)?\s+",
     }
     # Why: ttyd, jj and bd's pinned releases append their source commit, not a prerelease label.
@@ -252,6 +253,7 @@ def inspect_image(plan: dict[str, Any], tools: dict[str, Any], *, services: bool
         ("jj", tools["jj"]["version"]),
         ("bd", tools["bd"]["version"]),
         ("harness-check", tools["harnessCheck"]["version"]),
+        ("lazar-checkpoint", tools["lazarCheckpoint"]["version"]),
         ("code-server", tools["codeServer"]["version"]),
         ("ttyd", tools["ttyd"]["version"]),
         ("google-chrome", tools["chrome"]["version"]),
