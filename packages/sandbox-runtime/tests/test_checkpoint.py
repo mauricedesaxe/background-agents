@@ -291,12 +291,18 @@ def test_rejects_off_authority_with_a_baseline(tmp_path):
 
 @pytest.mark.asyncio
 async def test_returns_a_durable_receipt(tmp_path):
-    request = {"schemaVersion": 1, "repositories": [{}]}
+    request = {
+        "schemaVersion": 1,
+        "checkpointId": "session.message",
+        "repositories": [{"identity": {"host": "github.com", "owner": "acme", "name": "api"}}],
+        "beads": {"type": "off"},
+    }
     binary = executable(
         tmp_path,
         "read request\n"
         'printf \'%s\\n\' \'{"schemaVersion":1,"status":"durable",'
-        '"repositories":[{"outcome":{"status":"unchanged"}}],'
+        '"repositories":[{"identity":{"host":"github.com","owner":"acme","name":"api"},'
+        '"outcome":{"status":"unchanged"}}],'
         '"beads":{"status":"off"}}\'',
     )
 
@@ -342,6 +348,74 @@ async def test_rejects_a_durable_status_without_repository_receipts(tmp_path):
     )
 
     with pytest.raises(CheckpointError, match="incomplete repository"):
+        await run_checkpoint(
+            {"schemaVersion": 1, "repositories": [{}]},
+            executable=binary,
+        )
+
+
+@pytest.mark.asyncio
+async def test_rejects_a_receipt_for_a_different_repository(tmp_path):
+    binary = executable(
+        tmp_path,
+        "read request\n"
+        'printf \'%s\\n\' \'{"schemaVersion":1,"status":"durable",'
+        '"repositories":[{"identity":{"host":"github.com","owner":"other","name":"api"},'
+        '"outcome":{"status":"unchanged"}}],"beads":{"status":"off"}}\'',
+    )
+
+    with pytest.raises(CheckpointError, match="incomplete repository"):
+        await run_checkpoint(
+            {
+                "schemaVersion": 1,
+                "checkpointId": "session.message",
+                "repositories": [
+                    {"identity": {"host": "github.com", "owner": "acme", "name": "api"}}
+                ],
+                "beads": {"type": "off"},
+            },
+            executable=binary,
+        )
+
+
+@pytest.mark.asyncio
+async def test_rejects_a_beads_receipt_for_different_authority(tmp_path):
+    binary = executable(
+        tmp_path,
+        "read request\n"
+        'printf \'%s\\n\' \'{"schemaVersion":1,"status":"durable",'
+        '"repositories":[{"identity":{"host":"github.com","owner":"acme","name":"api"},'
+        '"outcome":{"status":"unchanged"}}],'
+        '"beads":{"status":"writerPushed","observedBranch":"main",'
+        '"observedCommit":"abc123"}}\'',
+    )
+
+    with pytest.raises(CheckpointError, match="incomplete Beads"):
+        await run_checkpoint(
+            {
+                "schemaVersion": 1,
+                "checkpointId": "session.message",
+                "repositories": [
+                    {"identity": {"host": "github.com", "owner": "acme", "name": "api"}}
+                ],
+                "beads": {"type": "readonly"},
+            },
+            executable=binary,
+        )
+
+
+@pytest.mark.asyncio
+async def test_rejects_malformed_durable_outcomes(tmp_path):
+    binary = executable(
+        tmp_path,
+        "read request\n"
+        'printf \'%s\\n\' \'{"schemaVersion":1,"status":"durable",'
+        '"repositories":[{"identity":{"host":"github.com","owner":"acme","name":"api"},'
+        '"outcome":{"status":"blocked"}}],'
+        '"beads":{"status":"writerPushed","observedBranch":"main"}}\'',
+    )
+
+    with pytest.raises(CheckpointError, match="repository"):
         await run_checkpoint(
             {"schemaVersion": 1, "repositories": [{}]},
             executable=binary,

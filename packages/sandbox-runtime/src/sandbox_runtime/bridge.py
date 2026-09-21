@@ -32,6 +32,14 @@ from .attachment_processor import (
     AttachmentProcessor,
     parse_session_image_attachments,
 )
+from .checkpoint import (
+    BeadsAuthority,
+    BeadsBaseline,
+    CheckpointError,
+    build_checkpoint_request,
+    capture_beads_baseline,
+    run_checkpoint,
+)
 from .constants import (
     AGENT_SESSION_ID_FILE_PATH,
     BOOT_WARNINGS_FILE_PATH,
@@ -63,10 +71,13 @@ from .harness import (
 )
 from .log_config import configure_logging, get_logger
 from .push_operation import PushOperation
-from .repo_config import load_repo_manifest
-from .types import GitUser
+from .repo_config import RepoEntry, load_repo_manifest
+from .types import GitUser, SessionConfig
 
 LOW_DISK_FREE_BYTES = 512 * 1024 * 1024
+CHECKPOINT_FAILURE_MESSAGE = (
+    "The turn could not be durably checkpointed. Your message remains in progress."
+)
 
 configure_logging()
 
@@ -138,12 +149,20 @@ class AgentBridge:
         opencode_port: int = 4096,
         harness_id: HarnessId = DEFAULT_HARNESS_ID,
         harness: AgentHarness | None = None,
+        session_config: SessionConfig | None = None,
+        vcs_host: str = "github.com",
     ):
         self.sandbox_id = sandbox_id
         self.session_id = session_id
         self.control_plane_url = control_plane_url
         self.auth_token = auth_token
         self.opencode_port = opencode_port
+        self.beads_authority: BeadsAuthority | None = (
+            session_config.beads_authority if session_config is not None else None
+        )
+        self.vcs_host = vcs_host
+        self.repositories: list[RepoEntry] = []
+        self.beads_baseline: BeadsBaseline | None = None
 
         # Logger
         self.log = get_logger(
@@ -306,6 +325,20 @@ class AgentBridge:
         # in the finally below, whether startup, session loading or the run
         # loop is what ends the bridge.
         try:
+            if self.beads_authority is not None:
+                try:
+                    self.repositories = load_repo_manifest(self.repo_manifest_path)
+                    if self.repositories:
+                        self.beads_baseline = await capture_beads_baseline(
+                            self.repositories, self.beads_authority
+                        )
+                    else:
+                        self.beads_authority = None
+                except CheckpointError as error:
+                    run_outcome = "checkpoint_baseline_failed"
+                    self._record_fatal_error(str(error))
+                    self.log.error("bridge.checkpoint_baseline_failed", exc=error)
+                    raise
             try:
                 await self.harness.open()
             except HarnessStartError as error:
@@ -652,7 +685,10 @@ class AgentBridge:
                             }
                         )
                     )
-                elif exc := t.exception():
+                elif isinstance(exc := t.exception(), CheckpointError):
+                    self.log.error("bridge.checkpoint_failed", exc=exc, message_id=mid)
+                    asyncio.create_task(self._send_checkpoint_error_and_refresh(mid))
+                elif exc:
                     asyncio.create_task(
                         self._send_terminal_event_and_refresh(
                             {
@@ -694,6 +730,16 @@ class AgentBridge:
     async def _send_terminal_event_and_refresh(self, event: dict[str, Any]) -> None:
         await self._send_event(event)
         self.diff_refresh.request(str(event.get("messageId") or "") or None)
+
+    async def _send_checkpoint_error_and_refresh(self, message_id: str) -> None:
+        await self._send_event(
+            {
+                "type": "error",
+                "messageId": message_id,
+                "error": CHECKPOINT_FAILURE_MESSAGE,
+            }
+        )
+        self.diff_refresh.request(message_id)
 
     async def _handle_prompt(self, cmd: dict[str, Any]) -> None:
         """Handle prompt command - run the turn through the harness and terminalise it."""
@@ -809,15 +855,44 @@ class AgentBridge:
                 duration_ms=duration_ms,
             )
 
-        await self._send_event(
-            {
-                "type": "execution_complete",
-                "messageId": message_id,
-                "success": not had_error,
-                **({"error": error_message} if error_message else {}),
-                **({"messageCostUsd": message_cost_usd} if message_cost_usd is not None else {}),
-            }
+        completion = {
+            "type": "execution_complete",
+            "messageId": message_id,
+            "success": not had_error,
+            **({"error": error_message} if error_message else {}),
+            **({"messageCostUsd": message_cost_usd} if message_cost_usd is not None else {}),
+        }
+        if self.beads_authority is not None:
+            receipt = await self._checkpoint_turn(message_id)
+            completion["checkpointReceipt"] = receipt
+        await self._send_event(completion)
+
+    async def _checkpoint_turn(self, message_id: str) -> dict[str, Any]:
+        if self.beads_authority is None:
+            raise CheckpointError("checkpoint configuration is unavailable")
+        request = build_checkpoint_request(
+            checkpoint_id=f"{self.session_id}.{message_id}",
+            vcs_host=self.vcs_host,
+            repositories=self.repositories,
+            authority=self.beads_authority,
+            baseline=self.beads_baseline,
         )
+        try:
+            receipt = await run_checkpoint(request)
+            beads = receipt["beads"]
+            if beads["status"] == "writerPushed":
+                if self.beads_baseline is None:
+                    raise CheckpointError("writer receipt has no Beads baseline")
+                self.beads_baseline = BeadsBaseline(
+                    repository_path=self.beads_baseline.repository_path,
+                    branch=beads["observedBranch"],
+                    commit=beads["observedCommit"],
+                )
+            return receipt
+        except CheckpointError:
+            raise
+        except Exception as error:
+            raise CheckpointError("checkpoint failed") from error
 
     async def _ensure_agent_session(self) -> None:
         """Create the vendor session on first use and persist its id."""
@@ -1018,6 +1093,7 @@ async def main() -> None:
 
     args = parser.parse_args()
 
+    session_config = SessionConfig.model_validate_json(os.environ.get("SESSION_CONFIG", "{}"))
     bridge = AgentBridge(
         sandbox_id=args.sandbox_id,
         session_id=args.session_id,
@@ -1025,11 +1101,13 @@ async def main() -> None:
         auth_token=args.token,
         opencode_port=args.opencode_port,
         harness_id=parse_harness_id(args.harness),
+        session_config=session_config,
+        vcs_host=os.environ.get("VCS_HOST", "github.com"),
     )
 
     try:
         await bridge.run()
-    except (GitSigningError, HarnessStartError):
+    except (CheckpointError, GitSigningError, HarnessStartError):
         # The cause is already recorded for the supervisor; this exit code
         # tells it not to spend its restart budget.
         sys.exit(DETERMINISTIC_FAILURE_EXIT_CODE)

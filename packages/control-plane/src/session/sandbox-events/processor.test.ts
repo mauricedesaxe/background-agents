@@ -843,6 +843,17 @@ describe("SessionSandboxEventProcessor", () => {
       success: true,
       sandboxId: "sb-1",
       timestamp: 2000,
+      checkpointReceipt: {
+        schemaVersion: 1,
+        status: "durable",
+        repositories: [
+          {
+            identity: { host: "github.com", owner: "acme", name: "app" },
+            outcome: { status: "unchanged" },
+          },
+        ],
+        beads: { status: "off" },
+      },
     };
 
     await h.processor.processSandboxEvent(event);
@@ -852,6 +863,7 @@ describe("SessionSandboxEventProcessor", () => {
       expect.any(Number),
       "processing"
     );
+    expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
     expect(h.broadcastPromptQueue).toHaveBeenCalledOnce();
     expect(h.callbackService.notifyComplete).toHaveBeenCalledWith("msg-1", true, undefined);

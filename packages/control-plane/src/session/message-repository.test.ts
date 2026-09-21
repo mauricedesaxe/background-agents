@@ -512,6 +512,17 @@ describe("MessageRepository", () => {
       success: true,
       sandboxId: "sb-1",
       timestamp: 3,
+      checkpointReceipt: {
+        schemaVersion: 1 as const,
+        status: "durable" as const,
+        repositories: [
+          {
+            identity: { host: "github.com", owner: "acme", name: "app" },
+            outcome: { status: "unchanged" as const },
+          },
+        ],
+        beads: { status: "off" as const },
+      },
     };
     expect(repository.recordMessageCompletion(event, 3000, "processing")).toEqual({
       messageId: "msg-1",
@@ -522,6 +533,7 @@ describe("MessageRepository", () => {
     });
     expect(transactionSyncCalls).toBe(1);
     expect(mock.calls[2].params[0]).toBe("execution_complete:msg-1");
+    expect(JSON.parse(String(mock.calls[2].params[2]))).toEqual(event);
   });
 
   it("does not complete a message in another state", () => {
