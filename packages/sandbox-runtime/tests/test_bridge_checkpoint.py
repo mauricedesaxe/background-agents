@@ -193,6 +193,41 @@ async def test_caught_harness_cancellation_still_checkpoints(
 
 
 @pytest.mark.asyncio
+async def test_stop_does_not_cancel_an_active_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge = checkpoint_bridge(tmp_path, ScriptedHarness(output_stream))
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def checkpoint(request: dict) -> dict:
+        started.set()
+        await release.wait()
+        return durable_receipt()
+
+    monkeypatch.setattr("sandbox_runtime.bridge.run_checkpoint", checkpoint)
+    bridge._send_event = AsyncMock()
+    task = asyncio.create_task(bridge._handle_prompt(prompt("message-1")))
+    bridge._current_prompt_task = task
+    await started.wait()
+
+    await bridge._handle_stop()
+
+    assert task.cancelled() is False
+    assert task.done() is False
+    release.set()
+    await task
+    bridge._send_event.assert_awaited_with(
+        {
+            "type": "execution_complete",
+            "messageId": "message-1",
+            "success": True,
+            "checkpointReceipt": durable_receipt(),
+        }
+    )
+
+
+@pytest.mark.asyncio
 async def test_baseline_is_captured_once_before_harness_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
