@@ -53,6 +53,7 @@ function createProcessor(promptHoldOverride?: QueuedPromptHold) {
         status: "completed" as const,
       };
     }),
+    recordStopConfirmation: vi.fn(() => false),
     clearMessageAwaitingStopConfirmation: vi.fn(),
     updateSandboxGitSyncStatus: vi.fn(),
     completeSandboxGitSync: vi.fn(() => true),
@@ -983,7 +984,10 @@ describe("SessionSandboxEventProcessor", () => {
     });
 
     expect(h.repository.recordMessageCompletion).not.toHaveBeenCalled();
-    expect(h.repository.clearMessageAwaitingStopConfirmation).toHaveBeenCalledWith("msg-1");
+    expect(h.repository.recordStopConfirmation).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: "msg-1" }),
+      expect.any(Number)
+    );
   });
 
   it("delegates a failed sandbox completion", async () => {

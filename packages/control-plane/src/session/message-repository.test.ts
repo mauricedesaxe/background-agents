@@ -556,6 +556,38 @@ describe("MessageRepository", () => {
     expect(mock.calls).toHaveLength(1);
   });
 
+  it("persists a checkpointed completion that confirms a prior stop", () => {
+    mock.setMatchingData(
+      /UPDATE messages SET stop_confirmation_deadline = NULL[\s\S]*RETURNING id/,
+      [{ id: "msg-1" }]
+    );
+    const event = {
+      type: "execution_complete" as const,
+      messageId: "msg-1",
+      success: false,
+      error: "Task was cancelled",
+      sandboxId: "sb-1",
+      timestamp: 3,
+      checkpointReceipt: {
+        schemaVersion: 1 as const,
+        status: "durable" as const,
+        repositories: [
+          {
+            identity: { host: "github.com", owner: "acme", name: "app" },
+            outcome: { status: "unchanged" as const },
+          },
+        ],
+        beads: { status: "off" as const },
+      },
+    };
+
+    expect(repository.recordStopConfirmation(event, 3000)).toBe(true);
+
+    expect(mock.calls[0].params).toEqual(["msg-1"]);
+    expect(mock.calls[1].params[0]).toBe("execution_complete:msg-1");
+    expect(JSON.parse(String(mock.calls[1].params[2]))).toEqual(event);
+  });
+
   it("lists pending messages in deterministic order", () => {
     const query = `SELECT id, created_at FROM messages WHERE status = 'pending' ORDER BY created_at ASC, rowid ASC`;
     mock.setData(query, [{ id: "msg-1", created_at: 1000 }]);
