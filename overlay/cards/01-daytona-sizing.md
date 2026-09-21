@@ -14,7 +14,7 @@ Every Daytona session sandbox has enough CPU, memory, and disk to start and run 
 
 ## Observable behavior
 
-A newly built Daytona snapshot provides at least **2 vCPU, 8 GiB of memory, and 8 GiB of disk**. A
+A newly built Daytona snapshot provides at least **2 vCPU, 8 GiB of memory, and 30 GiB of disk**. A
 sandbox created from that snapshot starts the runtime without resource exhaustion.
 
 ## Durable constraints
