@@ -64,14 +64,16 @@ export class SandboxExecutionEventHandler {
   ): Promise<void> {
     // Release the processing/stop fence and settle final cost in one commit.
     // No queue invocation may see a finished turn with its budget still stale.
-    const { completion, budgetTransition } = this.transaction(() => {
+    const { completion, stopConfirmed, budgetTransition } = this.transaction(() => {
       const completion =
         context.processingMessage?.id === event.messageId
           ? this.messageRepository.recordMessageCompletion(event, context.now, "processing")
           : null;
-      if (!completion) this.messageRepository.clearMessageAwaitingStopConfirmation(event.messageId);
       return {
         completion,
+        stopConfirmed: completion
+          ? false
+          : this.messageRepository.recordStopConfirmation(event, context.now),
         budgetTransition: this.budget.observeExecutionCost(event, context.now),
       };
     });
@@ -117,7 +119,7 @@ export class SandboxExecutionEventHandler {
       this.log.info("prompt.complete", {
         event: "prompt.complete",
         message_id: event.messageId,
-        outcome: "already_stopped",
+        outcome: stopConfirmed ? "stop_confirmed" : "already_stopped",
       });
     }
 

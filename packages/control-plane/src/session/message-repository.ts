@@ -159,6 +159,20 @@ export class MessageRepository {
     this.sql.exec(`UPDATE messages SET stop_confirmation_deadline = NULL WHERE id = ?`, messageId);
   }
 
+  recordStopConfirmation(event: ExecutionCompleteEvent, completedAt: number): boolean {
+    return this.transactionSync(() => {
+      const cleared = this.sql.exec(
+        `UPDATE messages SET stop_confirmation_deadline = NULL
+         WHERE id = ? AND stop_confirmation_deadline IS NOT NULL
+         RETURNING id`,
+        event.messageId
+      );
+      if (cleared.toArray().length !== 1) return false;
+      this.eventRepository.upsertExecutionCompleteEvent(event.messageId, event, completedAt);
+      return true;
+    });
+  }
+
   /**
    * Mark every pending message as held until the user acknowledges a context
    * reset. Returns how many messages the hold now covers.
