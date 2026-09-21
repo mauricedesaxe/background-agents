@@ -103,6 +103,7 @@ export class ModalSandboxProvider implements SandboxProvider, ModalImageBuildPro
       const result = await this.client.createSandbox(
         {
           sessionId: config.sessionId,
+          beadsAuthority: config.beadsAuthority,
           sandboxId: config.sandboxId,
           repoOwner: config.repoOwner,
           repoName: config.repoName,
@@ -151,6 +152,7 @@ export class ModalSandboxProvider implements SandboxProvider, ModalImageBuildPro
         {
           snapshotImageId: config.snapshotImageId,
           sessionId: config.sessionId,
+          beadsAuthority: config.beadsAuthority,
           sandboxId: config.sandboxId,
           sandboxAuthToken: config.sandboxAuthToken,
           controlPlaneUrl: config.controlPlaneUrl,

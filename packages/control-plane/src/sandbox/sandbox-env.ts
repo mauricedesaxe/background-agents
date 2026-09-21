@@ -4,6 +4,7 @@ import { computeHmacHex } from "@open-inspect/shared/auth";
 import type { SourceControlProviderName } from "../source-control";
 import {
   DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+  type BeadsAuthority,
   type CreateSandboxConfig,
   type ImageBuildProviderTriggerConfig,
   type RestoreConfig,
@@ -38,6 +39,7 @@ export interface SessionRepositoryConfigPayload {
 /** Canonical `SESSION_CONFIG` payload handed to the sandbox runtime. */
 export interface SessionConfigPayload {
   session_id: string;
+  beads_authority: BeadsAuthority;
   repo_owner: string | null;
   repo_name: string | null;
   /** Agent harness the runtime must boot. */
@@ -55,6 +57,7 @@ export interface SessionConfigPayload {
 /** Provider-agnostic inputs needed to assemble a {@link SessionConfigPayload}. */
 export interface SessionConfigInput {
   sessionId: string;
+  beadsAuthority: BeadsAuthority;
   repoOwner: string | null;
   repoName: string | null;
   harness: HarnessId;
@@ -76,6 +79,7 @@ export interface SessionConfigInput {
 export function buildSessionConfig(input: SessionConfigInput): SessionConfigPayload {
   const payload: SessionConfigPayload = {
     session_id: input.sessionId,
+    beads_authority: input.beadsAuthority,
     repo_owner: input.repoOwner,
     repo_name: input.repoName,
     harness: input.harness,
@@ -421,6 +425,7 @@ export function buildImageBuildEnvVars(options: ImageBuildEnvVarsOptions): Recor
     REPO_NAME: primary.repoName,
     [IMAGE_BUILD_MODE_ENV_VAR]: "true",
     [SESSION_CONFIG_ENV_VAR]: JSON.stringify({
+      beads_authority: "off",
       branch: primary.baseBranch,
       repositories: options.repositories.map(toRepositoryConfigPayload),
     }),
