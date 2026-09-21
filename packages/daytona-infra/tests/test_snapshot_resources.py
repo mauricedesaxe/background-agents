@@ -24,4 +24,4 @@ def test_base_snapshot_pins_cpu_memory_and_disk(monkeypatch):
     assert params.name == "snapshot-name"
     assert params.resources.cpu == SNAPSHOT_CPU == 2
     assert params.resources.memory == SNAPSHOT_MEMORY_GIB == 8
-    assert params.resources.disk == SNAPSHOT_DISK_GIB == 30
+    assert params.resources.disk == SNAPSHOT_DISK_GIB == 10
