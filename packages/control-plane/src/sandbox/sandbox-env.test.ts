@@ -24,6 +24,7 @@ import {
 
 const baseInput = {
   sessionId: "session-123",
+  beadsAuthority: "writer" as const,
   repoOwner: "testowner",
   repoName: "testrepo",
   harness: "opencode" as const,
@@ -37,6 +38,7 @@ describe("buildSessionConfig", () => {
 
     expect(buildSessionConfig({ ...baseInput, branch: "feature/x", mcpServers })).toEqual({
       session_id: "session-123",
+      beads_authority: "writer",
       repo_owner: "testowner",
       repo_name: "testrepo",
       harness: "opencode",
@@ -108,6 +110,7 @@ describe("buildSessionConfig", () => {
 
     expect(parsed).toEqual({
       session_id: "session-123",
+      beads_authority: "writer",
       repo_owner: "testowner",
       repo_name: "testrepo",
       harness: "opencode",
@@ -157,6 +160,7 @@ describe("buildSandboxEnvVars", () => {
   const baseConfig: CreateSandboxConfig = {
     sessionId: "session-123",
     sandboxId: "sandbox-456",
+    beadsAuthority: "writer",
     repoOwner: "testowner",
     repoName: "testrepo",
     controlPlaneUrl: "https://control-plane.test",
@@ -187,6 +191,7 @@ describe("buildSandboxEnvVars", () => {
     });
     expect(JSON.parse(envVars.SESSION_CONFIG)).toEqual({
       session_id: "session-123",
+      beads_authority: "writer",
       repo_owner: "testowner",
       repo_name: "testrepo",
       harness: "opencode",
@@ -367,6 +372,7 @@ describe("buildImageBuildEnvVars", () => {
     });
 
     expect(JSON.parse(envVars.SESSION_CONFIG)).toEqual({
+      beads_authority: "off",
       branch: "main",
       repositories: [
         { repo_owner: "acme", repo_name: "web", branch: "main" },

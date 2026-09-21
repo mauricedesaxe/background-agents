@@ -123,6 +123,7 @@ const defaultProviderConfig: DaytonaProviderConfig = {
 const baseCreateConfig: CreateSandboxConfig = {
   sessionId: "session-123",
   sandboxId: "sandbox-456",
+  beadsAuthority: "writer",
   repoOwner: "testowner",
   repoName: "testrepo",
   controlPlaneUrl: "https://control-plane.test",
@@ -218,6 +219,7 @@ describe("DaytonaSandboxProvider", () => {
       const sessionConfig = JSON.parse(envVars.SESSION_CONFIG);
       expect(sessionConfig).toEqual({
         session_id: "session-123",
+        beads_authority: "writer",
         harness: "opencode",
         repo_owner: "testowner",
         repo_name: "testrepo",

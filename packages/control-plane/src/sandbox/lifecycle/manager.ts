@@ -24,6 +24,7 @@ import {
 } from "../../session/types";
 import {
   SandboxProviderError,
+  type BeadsAuthority,
   type ColdRecoveryConfig,
   type SandboxProvider,
   type CreateSandboxConfig,
@@ -315,6 +316,10 @@ function buildSandboxIdForSession(session: SessionRow, now: number): string {
     ? `${session.repo_owner}-${session.repo_name}`
     : session.id;
   return `sandbox-${sandboxName}-${now}`;
+}
+
+function beadsAuthorityForSession(session: SessionRow): BeadsAuthority {
+  return session.parent_session_id === null ? "writer" : "readonly";
 }
 
 /**
@@ -671,6 +676,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         replacementName: operation.replacementName,
         sessionId: session.session_name || session.id,
         sandboxId: operation.replacementSandboxId,
+        beadsAuthority: beadsAuthorityForSession(session),
         repoOwner: session.repo_owner,
         repoName: session.repo_name,
         controlPlaneUrl: this.config.controlPlaneUrl,
@@ -817,6 +823,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       const createConfig: CreateSandboxConfig = {
         sessionId,
         sandboxId: expectedSandboxId,
+        beadsAuthority: beadsAuthorityForSession(session),
         repoOwner: session.repo_owner,
         repoName: session.repo_name,
         controlPlaneUrl: this.config.controlPlaneUrl,
@@ -1173,6 +1180,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         snapshotImageId,
         sessionId: session.session_name || session.id,
         sandboxId: expectedSandboxId,
+        beadsAuthority: beadsAuthorityForSession(session),
         sandboxAuthToken,
         controlPlaneUrl: this.config.controlPlaneUrl,
         repoOwner: session.repo_owner,

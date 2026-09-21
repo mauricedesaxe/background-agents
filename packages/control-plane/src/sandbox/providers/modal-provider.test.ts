@@ -80,6 +80,7 @@ function createMockModalClient(
 const testConfig = {
   sessionId: "test-session",
   sandboxId: "sandbox-123",
+  beadsAuthority: "writer" as const,
   repoOwner: "testowner",
   repoName: "testrepo",
   controlPlaneUrl: "https://control-plane.test",
@@ -567,6 +568,7 @@ describe("ModalSandboxProvider", () => {
         await provider.restoreFromSnapshot({
           snapshotImageId: "img-123",
           sessionId: "session-123",
+          beadsAuthority: "writer",
           sandboxId: "sandbox-123",
           sandboxAuthToken: "token",
           harness: "opencode" as const,
@@ -595,6 +597,7 @@ describe("ModalSandboxProvider", () => {
         await provider.restoreFromSnapshot({
           snapshotImageId: "img-123",
           sessionId: "session-123",
+          beadsAuthority: "writer",
           sandboxId: "sandbox-123",
           sandboxAuthToken: "token",
           harness: "opencode" as const,
@@ -716,6 +719,7 @@ describe("ModalSandboxProvider", () => {
       const result = await provider.restoreFromSnapshot({
         snapshotImageId: "img-123",
         sessionId: "session-123",
+        beadsAuthority: "writer",
         sandboxId: "sandbox-123",
         sandboxAuthToken: "token",
         harness: "opencode" as const,

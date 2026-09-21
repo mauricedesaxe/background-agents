@@ -72,6 +72,7 @@ function createEnv(client: E2BRestClient): Record<string, string> {
 const baseCreateConfig = {
   sessionId: "sess-1",
   sandboxId: "sandbox-logical",
+  beadsAuthority: "writer" as const,
   repoOwner: "o",
   repoName: "r",
   controlPlaneUrl: "https://cp.test",

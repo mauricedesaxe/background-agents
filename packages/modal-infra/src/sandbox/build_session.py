@@ -85,6 +85,7 @@ class ModalBuildSessionService:
                 "IMAGE_BUILD_MODE": "true",
                 "SESSION_CONFIG": json.dumps(
                     {
+                        "beads_authority": "off",
                         "branch": primary["branch"],
                         "repositories": repositories,
                     }

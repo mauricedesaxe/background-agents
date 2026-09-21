@@ -218,6 +218,7 @@ async def test_create_build_sandbox_runs_gated_entrypoint_and_scrubs_callback_en
     assert kwargs["env"]["VCS_CLONE_USERNAME"] == "oauth2"
     assert kwargs["env"]["VCS_CLONE_TOKEN"] == "clone-token"
     assert json.loads(kwargs["env"]["SESSION_CONFIG"]) == {
+        "beads_authority": "off",
         "branch": "main",
         "repositories": [{"repo_owner": "acme", "repo_name": "repo", "branch": "main"}],
     }
