@@ -20,6 +20,7 @@ BEADS_BASELINE_TIMEOUT_SECONDS = 30
 _SAFE_CHECKPOINT_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 _GIT_OID = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 _BEADS_STATUS_FIELDS = {"branch", "commit", "schema_version"}
+_RECEIPT_FIELDS = {"schemaVersion", "status", "repositories", "beads"}
 
 BeadsAuthority = Literal["off", "readonly", "writer"]
 
@@ -222,14 +223,17 @@ async def run_checkpoint(
     executable: str = "lazar-checkpoint",
     timeout_seconds: float = CHECKPOINT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    process = await asyncio.create_subprocess_exec(
-        executable,
-        "checkpoint",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
-    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            executable,
+            "checkpoint",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise CheckpointError("checkpoint process failed") from error
     try:
         stdout, _stderr = await asyncio.wait_for(
             process.communicate(json.dumps(request, separators=(",", ":")).encode()),
@@ -241,12 +245,19 @@ async def run_checkpoint(
     except asyncio.CancelledError:
         await terminate_owned_subprocess(process)
         raise
+    except Exception as error:
+        await terminate_owned_subprocess(process)
+        raise CheckpointError("checkpoint process failed") from error
 
     try:
         receipt = json.loads(stdout)
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise CheckpointError("checkpoint returned an invalid receipt") from error
-    if not isinstance(receipt, dict) or receipt.get("schemaVersion") != 1:
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != _RECEIPT_FIELDS
+        or receipt.get("schemaVersion") != 1
+    ):
         raise CheckpointError("checkpoint returned an unsupported receipt")
     if process.returncode != 0 or receipt.get("status") != "durable":
         raise CheckpointError("checkpoint did not reach durable state", receipt)
@@ -257,18 +268,99 @@ async def run_checkpoint(
         or not isinstance(request_repositories, list)
         or len(repository_receipts) != len(request_repositories)
         or any(
-            not isinstance(item, dict)
-            or not isinstance(item.get("outcome"), dict)
-            or item["outcome"].get("status") not in ("unchanged", "verified")
-            for item in repository_receipts
+            not _repository_receipt_matches_request(item, requested, request.get("checkpointId"))
+            for item, requested in zip(repository_receipts, request_repositories, strict=True)
         )
     ):
         raise CheckpointError("checkpoint returned incomplete repository receipts")
     beads = receipt.get("beads")
-    if not isinstance(beads, dict) or beads.get("status") not in (
-        "off",
-        "readonly",
-        "writerPushed",
-    ):
+    if not _beads_receipt_matches_request(beads, request.get("beads")):
         raise CheckpointError("checkpoint returned an incomplete Beads receipt")
     return receipt
+
+
+def _is_durable_repository_receipt(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {"identity", "outcome"}:
+        return False
+    identity = value.get("identity")
+    if (
+        not isinstance(identity, dict)
+        or set(identity) != {"host", "owner", "name"}
+        or any(
+            not isinstance(identity.get(field), str) or not identity[field] for field in identity
+        )
+    ):
+        return False
+    outcome = value.get("outcome")
+    if not isinstance(outcome, dict):
+        return False
+    if outcome.get("status") == "unchanged":
+        return set(outcome) == {"status"}
+    return (
+        outcome.get("status") == "verified"
+        and set(outcome)
+        == {"status", "vcs", "snapshotOid", "remoteRef", "remoteOid", "disposition"}
+        and outcome.get("vcs") in ("git", "jj")
+        and isinstance(outcome.get("snapshotOid"), str)
+        and bool(_GIT_OID.fullmatch(outcome["snapshotOid"]))
+        and isinstance(outcome.get("remoteRef"), str)
+        and bool(outcome["remoteRef"])
+        and isinstance(outcome.get("remoteOid"), str)
+        and bool(_GIT_OID.fullmatch(outcome["remoteOid"]))
+        and outcome.get("disposition") in ("pushed", "alreadyPresent")
+    )
+
+
+def _is_durable_beads_receipt(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("status") == "off":
+        return set(value) == {"status"}
+    return (
+        value.get("status") in ("readonly", "writerPushed")
+        and set(value) == {"status", "observedBranch", "observedCommit"}
+        and _is_safe_beads_branch(value.get("observedBranch"))
+        and _is_safe_beads_commit(value.get("observedCommit"))
+    )
+
+
+def _repository_receipt_matches_request(
+    receipt: object, requested: object, checkpoint_id: object
+) -> bool:
+    if (
+        not isinstance(receipt, dict)
+        or not _is_durable_repository_receipt(receipt)
+        or not isinstance(requested, dict)
+    ):
+        return False
+    if receipt["identity"] != requested.get("identity"):
+        return False
+    outcome = receipt["outcome"]
+    if outcome["status"] == "unchanged":
+        return True
+    identity = requested.get("identity")
+    return (
+        isinstance(identity, dict)
+        and isinstance(checkpoint_id, str)
+        and outcome["snapshotOid"] == outcome["remoteOid"]
+        and outcome["remoteRef"]
+        == f"refs/heads/open-inspect/checkpoints/{checkpoint_id}/{identity.get('name')}"
+    )
+
+
+def _beads_receipt_matches_request(receipt: object, requested: object) -> bool:
+    if (
+        not isinstance(receipt, dict)
+        or not _is_durable_beads_receipt(receipt)
+        or not isinstance(requested, dict)
+    ):
+        return False
+    request_type = requested.get("type")
+    if not isinstance(request_type, str):
+        return False
+    expected_status = {
+        "off": "off",
+        "readonly": "readonly",
+        "writer": "writerPushed",
+    }.get(request_type)
+    return bool(receipt["status"] == expected_status)
