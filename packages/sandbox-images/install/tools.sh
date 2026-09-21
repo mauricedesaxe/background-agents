@@ -29,6 +29,9 @@ install -m 0755 "$download_dir/jj" /usr/local/bin/jj
 download_checked "https://github.com/gastownhall/beads/releases/download/v$BD_VERSION/beads_${BD_VERSION}_linux_amd64.tar.gz" "$BD_SHA256" "$download_dir/bd.tar.gz"
 tar -xzf "$download_dir/bd.tar.gz" -C "$download_dir" bd
 install -m 0755 "$download_dir/bd" /usr/local/bin/bd
+download_checked "https://github.com/mauricedesaxe/lazar-harness/releases/download/harness-check-v$HARNESS_CHECK_VERSION/harness-check-x86_64-unknown-linux-musl.tar.gz" "$HARNESS_CHECK_SHA256" "$download_dir/harness-check.tar.gz"
+tar -xzf "$download_dir/harness-check.tar.gz" -C "$download_dir" harness-check
+install -m 0755 "$download_dir/harness-check" /usr/local/bin/harness-check
 download_checked "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/linux64/chrome-linux64.zip" "$CHROME_SHA256" "$download_dir/chrome.zip"
 mkdir -p /opt/openinspect/chrome
 unzip -q "$download_dir/chrome.zip" -d /opt/openinspect/chrome

@@ -71,6 +71,7 @@ def test_smoke_test_preserves_failures(monkeypatch):
         ),
         ("ttyd", "ttyd version 1.7.7", "1.7.7"),
         ("ttyd", "ttyd version 1.7.7-40e79c7", "1.7.7"),
+        ("harness-check", "harness-check 0.1.0-dev", "0.1.0"),
         ("google-chrome", "Google Chrome for Testing 152.0.7977.82", "152.0.7977.82"),
     ],
 )

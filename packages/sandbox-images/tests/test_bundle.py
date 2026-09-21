@@ -64,6 +64,13 @@ def test_agent_browser_installs_as_checked_native_binary():
     assert "agent-browser" not in commands
 
 
+def test_harness_check_installs_from_a_checked_release_archive():
+    script = (REPO_ROOT / "packages/sandbox-images/install/tools.sh").read_text()
+    assert "harness-check-v$HARNESS_CHECK_VERSION" in script
+    assert '"$HARNESS_CHECK_SHA256"' in script
+    assert 'install -m 0755 "$download_dir/harness-check" /usr/local/bin/harness-check' in script
+
+
 @pytest.mark.parametrize("provider", PROVIDERS)
 def test_pack_rejects_stale_locks_before_creating_context(checkout, tmp_path, provider):
     path = checkout / "packages/sandbox-images/locks/runtime.txt"
