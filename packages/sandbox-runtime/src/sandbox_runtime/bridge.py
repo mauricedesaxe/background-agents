@@ -163,6 +163,7 @@ class AgentBridge:
         self.vcs_host = vcs_host
         self.repositories: list[RepoEntry] = []
         self.beads_baseline: BeadsBaseline | None = None
+        self._checkpointing = False
 
         # Logger
         self.log = get_logger(
@@ -401,9 +402,9 @@ class AgentBridge:
                 await asyncio.sleep(delay)
 
         finally:
-            # Cancel any in-flight prompt task before closing resources
             if self._current_prompt_task and not self._current_prompt_task.done():
-                self._current_prompt_task.cancel()
+                if not self._checkpointing:
+                    self._current_prompt_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._current_prompt_task
             # Cleanup failures are logged, never raised: an exception here
@@ -878,6 +879,7 @@ class AgentBridge:
             baseline=self.beads_baseline,
         )
         try:
+            self._checkpointing = True
             receipt = await run_checkpoint(request)
             beads = receipt["beads"]
             if beads["status"] == "writerPushed":
@@ -893,6 +895,8 @@ class AgentBridge:
             raise
         except Exception as error:
             raise CheckpointError("checkpoint failed") from error
+        finally:
+            self._checkpointing = False
 
     async def _ensure_agent_session(self) -> None:
         """Create the vendor session on first use and persist its id."""
@@ -905,7 +909,7 @@ class AgentBridge:
         """Handle stop command - cancel prompt task and ask the harness to abort."""
         self.log.info("bridge.stop")
         task = self._current_prompt_task
-        if task and not task.done():
+        if task and not task.done() and not self._checkpointing:
             task.cancel()
         # Best-effort: also tell the agent to stop (saves LLM compute cost)
         await self.harness.abort()
@@ -923,7 +927,11 @@ class AgentBridge:
     async def _handle_shutdown(self) -> None:
         """Handle shutdown command - graceful shutdown."""
         self.log.info("bridge.shutdown_requested")
-        if self._current_prompt_task and not self._current_prompt_task.done():
+        if (
+            self._current_prompt_task
+            and not self._current_prompt_task.done()
+            and not self._checkpointing
+        ):
             self._current_prompt_task.cancel()
         self.shutdown_event.set()
 
