@@ -911,6 +911,46 @@ class TestSSEStreaming:
         assert complete["error"] == "The agent completed without emitting assistant output."
 
     @pytest.mark.asyncio
+    async def test_no_output_guard_names_the_events_that_did_arrive(
+        self, bridge: AgentBridge, opencode_message_id: str
+    ):
+        """When the guard fires, what the harness did emit names the failure
+        mode; carry it in the message instead of leaving operators to pull
+        sandbox logs."""
+        bridge._configure_git_identity = AsyncMock()
+        bridge._send_event = AsyncMock()
+        http_client = bridge.http_client
+        http_client.sse_events = [
+            create_sse_event("server.connected", {}),
+            create_sse_event(
+                "session.updated",
+                {
+                    "sessionID": "oc-session-123",
+                    "info": {"id": "oc-session-123", "title": "Fix the login bug"},
+                },
+            ),
+            create_sse_event("session.idle", {"sessionID": "oc-session-123"}),
+        ]
+
+        await bridge._handle_prompt(
+            {
+                "messageId": "cp-msg-1",
+                "content": "Test prompt",
+                "model": "anthropic/claude-haiku-4-5",
+                "author": {"gitIdentity": {"mode": "agent-only"}},
+            }
+        )
+
+        sent_events = [call.args[0] for call in bridge._send_event.await_args_list]
+        complete = sent_events[-1]
+        assert complete["type"] == "execution_complete"
+        assert complete["success"] is False
+        assert complete["error"] == (
+            "The agent completed without emitting assistant output. "
+            "Harness events: session_title x1."
+        )
+
+    @pytest.mark.asyncio
     async def test_handle_prompt_reports_provider_cause_when_opencode_idles_after_rejections(
         self, bridge: AgentBridge, opencode_message_id: str
     ):

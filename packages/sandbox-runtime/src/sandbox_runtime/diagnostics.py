@@ -37,6 +37,15 @@ def sanitize_diagnostic_text(value: bytes | str) -> str:
     return text.strip()
 
 
+def exception_summary(error: BaseException) -> str:
+    """The exception's message, or its type name when the message is empty.
+
+    Bare ``TimeoutError`` and friends ``str()`` to the empty string, which
+    renders as a cause-less failure wherever it reaches the user.
+    """
+    return str(error) or type(error).__qualname__
+
+
 def operator_diagnostic(
     value: object,
     *,

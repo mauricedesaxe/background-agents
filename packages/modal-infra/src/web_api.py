@@ -218,7 +218,13 @@ async def _execute_endpoint(
             request_id=execution.request_id,
             **execution.log_fields,
         )
-        raise HTTPException(status_code=500, detail="Internal server error") from e
+        # The message body stays log-only (it can carry provider detail); the
+        # control plane gets the exception class and trace id so a spawn
+        # failure is actionable without workspace access to Modal's logs.
+        parts = [f"Internal server error ({type(e).__name__})"]
+        if execution.trace_id:
+            parts.append(f"trace {execution.trace_id}")
+        raise HTTPException(status_code=500, detail="; ".join(parts)) from e
     finally:
         log.info(
             "modal.http_request",

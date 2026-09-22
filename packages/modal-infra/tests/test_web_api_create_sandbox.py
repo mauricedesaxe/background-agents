@@ -248,7 +248,7 @@ async def test_sandbox_generic_failures_raise_500_and_log_request(monkeypatch, c
         )
 
     assert exc_info.value.status_code == 500
-    assert exc_info.value.detail == "Internal server error"
+    assert exc_info.value.detail == "Internal server error (RuntimeError); trace trace-1"
     error.assert_called_once_with(
         "api.error",
         exc=ANY,
