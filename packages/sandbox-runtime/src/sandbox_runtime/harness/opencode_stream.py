@@ -84,7 +84,10 @@ class _PromptState:
     pending_overflow_error: str | None = None
     provider_retry_count: int = 0
     provider_retry_cap_reached: bool = False
-    # Why: a stream that ends right after a rejection never reaches idle.
+    # The latest parent provider rejection, cleared by the next successful
+    # step. A stream that ends or idles while it is set ended by provider
+    # failure, not completion, so the endings surface it instead of reporting
+    # silent success.
     last_provider_rejection: str | None = None
 
     def __post_init__(self) -> None:
@@ -263,7 +266,7 @@ class OpenCodePromptStream:
                     )
                     yield {
                         "type": "error",
-                        "error": uncapped_rejection,
+                        "error": f"Provider request kept failing: {uncapped_rejection}",
                         "messageId": message_id,
                     }
                     return
@@ -373,6 +376,7 @@ class OpenCodePromptStream:
             if props.get("sessionID") == state.opencode_session_id:
                 self._log_parent_idle(state, "bridge.session_idle")
                 events.extend(self._unrecovered_overflow_events(state))
+                events.extend(self._unrecovered_rejection_events(state))
                 return _StreamStep(events=events, disposition=_Disposition.FINISHED_IDLE)
 
         elif event_type == "session.status":
@@ -381,6 +385,7 @@ class OpenCodePromptStream:
             if props.get("sessionID") == state.opencode_session_id and status.get("type") == "idle":
                 self._log_parent_idle(state, "bridge.session_status_idle")
                 events.extend(self._unrecovered_overflow_events(state))
+                events.extend(self._unrecovered_rejection_events(state))
                 return _StreamStep(events=events, disposition=_Disposition.FINISHED_IDLE)
 
         elif event_type == "session.error":
@@ -629,6 +634,29 @@ class OpenCodePromptStream:
             }
         ]
 
+    def _unrecovered_rejection_events(self, state: _PromptState) -> list[dict[str, Any]]:
+        """Fail the prompt when the session idles with a live provider rejection.
+
+        Retryable rejections are swallowed as ``provider_retry`` visibility
+        events on the assumption OpenCode's internal retries recover. When the
+        parent session goes idle while the last provider attempt is still
+        rejected, the turn ended by provider failure, not completion — surface
+        the rejection instead of letting idle report silent success.
+        """
+        if state.provider_retry_cap_reached or state.last_provider_rejection is None:
+            return []
+        error_text = f"Provider request kept failing: {state.last_provider_rejection}"
+        if error_text in state.emitted_error_messages:
+            return []
+        state.emitted_error_messages.add(error_text)
+        return [
+            {
+                "type": "error",
+                "error": error_text,
+                "messageId": state.message_id,
+            }
+        ]
+
     def _parent_error_event_once(self, state: _PromptState, error: object) -> dict[str, Any] | None:
         """Build one parent error event across message.updated and session.error."""
         error_msg = self._extract_error_message(error) or "Unknown error"
@@ -800,6 +828,8 @@ class OpenCodePromptStream:
             )
 
         elif part_type == "step-finish":
+            # A completed provider round trip recovers any earlier rejection.
+            state.last_provider_rejection = None
             cost = part.get("cost")
             if isinstance(cost, int | float) and not isinstance(cost, bool):
                 state.step_costs[str(part.get("id", ""))] = float(cost)
