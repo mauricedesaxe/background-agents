@@ -44,6 +44,7 @@ MAX_PROVIDER_RETRY_ATTEMPTS: Final = 4
 
 PROVIDER_REJECTION_ERROR_NAMES: Final = frozenset({"APIError", "APICallError", "AI_APICallError"})
 PROVIDER_RETRYABLE_STATUS_CODES: Final = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
+OPENCODE_VARIANT_PROVIDERS: Final = frozenset({"anthropic", "openai", "xai", "zai-coding-plan"})
 
 OPENCODE_DEFAULT_TITLE_RE: Final = re.compile(
     r"^(new session|child session) - " r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$",
@@ -1026,7 +1027,7 @@ class OpenCodePromptStream:
                 "modelID": model_id,
             }
 
-            if reasoning_effort and provider_id in {"anthropic", "openai", "xai"}:
+            if reasoning_effort and provider_id in OPENCODE_VARIANT_PROVIDERS:
                 request_body["variant"] = reasoning_effort
 
             request_body["model"] = model_spec

@@ -8,6 +8,9 @@ New features, integrations, and notable improvements to Open-Inspect — newest 
 
 **Z.AI GLM 5.3 Flash.** Adds `zai-coding-plan/glm-5.3-flash` to the opt-in Z.AI Coding Plan catalog.
 
+**Z.AI GLM 5.3 reasoning.** GLM 5.3 and GLM 5.3 Flash expose low, high, and max thinking effort in
+the picker. Thinking stays enabled; Z.AI does not support turning it off.
+
 ## September 9, 2026
 
 **Claude Fable 5.1.** Adds `claude-fable-5-1` to the model picker and integrations, with adaptive

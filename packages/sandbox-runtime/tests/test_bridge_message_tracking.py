@@ -368,6 +368,8 @@ class TestBuildPromptRequestBody:
             ("openai/gpt-5.6-sol", "low"),
             ("openai/gpt-5.6-sol", "xhigh"),
             ("openai/gpt-5.6-luna", "max"),
+            ("zai-coding-plan/glm-5.3", "low"),
+            ("zai-coding-plan/glm-5.3-flash", "max"),
         ],
     )
     def test_reasoning_effort_uses_variant(self, bridge: AgentBridge, model: str, effort: str):
@@ -403,6 +405,19 @@ class TestBuildPromptRequestBody:
 
         assert body["variant"] == "medium"
         assert body["model"] == {"providerID": "xai", "modelID": "grok-4.6"}
+
+    def test_with_zai_reasoning_effort(self, bridge: AgentBridge):
+        body = bridge.harness.prompt_stream._build_prompt_request_body(
+            "Hello",
+            "zai-coding-plan/glm-5.3-flash",
+            reasoning_effort="max",
+        )
+
+        assert body["variant"] == "max"
+        assert body["model"] == {
+            "providerID": "zai-coding-plan",
+            "modelID": "glm-5.3-flash",
+        }
 
 
 class TestOpenCodeIdentifier:

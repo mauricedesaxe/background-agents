@@ -410,7 +410,18 @@ class OpenCodeServer:
                             "claude-opus-4-5",
                         )
                     }
-                }
+                },
+                "zai-coding-plan": {
+                    "models": {
+                        model: {
+                            "variants": {
+                                effort: {"reasoningEffort": effort}
+                                for effort in ("low", "high", "max")
+                            }
+                        }
+                        for model in ("glm-5.3", "glm-5.3-flash")
+                    }
+                },
             },
         }
 
