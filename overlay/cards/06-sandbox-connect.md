@@ -4,7 +4,7 @@ title: Sandbox runtime connect verification
 type: runbook-step
 priority: high
 placement: runbook
-depends_on: [01-daytona-sizing]
+depends_on: []
 origin: fork #327 lesson
 ---
 
