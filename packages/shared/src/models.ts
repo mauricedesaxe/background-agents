@@ -219,6 +219,7 @@ export const MODEL_CATALOG = [
       { id: "opencode/glm-5", name: "GLM 5", description: "Z.ai 744B MoE" },
       { id: "opencode/glm-5.1", name: "GLM 5.1", description: "Z.ai" },
       { id: "opencode/glm-5.2", name: "GLM 5.2", description: "Z.ai" },
+      { id: "opencode/glm-5.3-flash", name: "GLM 5.3 Flash", description: "Z.ai" },
     ],
   },
   {

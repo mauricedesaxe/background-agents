@@ -2,6 +2,10 @@
 
 New features, integrations, and notable improvements to Open-Inspect — newest first.
 
+## September 22, 2026
+
+**OpenCode Zen GLM 5.3 Flash.** Adds `opencode/glm-5.3-flash` to the opt-in OpenCode Zen catalog.
+
 ## September 9, 2026
 
 **Claude Fable 5.1.** Adds `claude-fable-5-1` to the model picker and integrations, with adaptive
