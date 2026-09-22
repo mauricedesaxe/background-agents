@@ -213,7 +213,7 @@ Choose the AI model that fits your task, with per-session reasoning effort contr
 | OpenAI           | GPT 5.4, GPT 5.5, 5.3 Codex, 5.3 Codex Spark                                   |
 | xAI / SuperGrok  | Grok models (opt-in)                                                           |
 | OpenCode Zen     | Kimi K2.5/K2.6/K3, MiniMax M2.5, Qwen3.7 Max, GLM 5/5.1/5.2/5.3 Flash (opt-in) |
-| Z.AI Coding Plan | GLM 5.2/5.3 (opt-in)                                                           |
+| Z.AI Coding Plan | GLM 5.2/5.3/5.3 Flash (opt-in)                                                 |
 
 OpenAI models work with your existing ChatGPT subscription via OAuth — no separate API key needed.
 Anthropic models can run on the **Claude Agent** harness with a connected Claude subscription; see

@@ -251,6 +251,11 @@ export const MODEL_CATALOG = [
     models: [
       { id: "zai-coding-plan/glm-5.2", name: "GLM 5.2", description: "Z.AI Coding Plan" },
       { id: "zai-coding-plan/glm-5.3", name: "GLM 5.3", description: "Z.AI Coding Plan" },
+      {
+        id: "zai-coding-plan/glm-5.3-flash",
+        name: "GLM 5.3 Flash",
+        description: "Z.AI Coding Plan",
+      },
     ],
   },
   {
