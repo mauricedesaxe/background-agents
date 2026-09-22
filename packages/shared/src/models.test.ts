@@ -280,6 +280,9 @@ describe("model utilities", () => {
     expect(supportsReasoning("openai/gpt-5.4")).toBe(true);
     expect(supportsReasoning("openai/gpt-5.6-terra")).toBe(true);
     expect(supportsReasoning("xai/grok-build-0.1")).toBe(false);
+    expect(supportsReasoning("zai-coding-plan/glm-5.2")).toBe(false);
+    expect(supportsReasoning("zai-coding-plan/glm-5.3")).toBe(true);
+    expect(supportsReasoning("zai-coding-plan/glm-5.3-flash")).toBe(true);
     expect(supportsReasoning("deepseek/deepseek-v4-flash")).toBe(false);
     expect(supportsReasoning("invalid")).toBe(false);
 
@@ -296,6 +299,9 @@ describe("model utilities", () => {
     expect(getDefaultReasoningEffort("openai/gpt-5.6-terra")).toBe("medium");
     expect(getDefaultReasoningEffort("openai/gpt-5.6-luna")).toBe("medium");
     expect(getDefaultReasoningEffort("xai/grok-build-0.1")).toBeUndefined();
+    expect(getDefaultReasoningEffort("zai-coding-plan/glm-5.2")).toBeUndefined();
+    expect(getDefaultReasoningEffort("zai-coding-plan/glm-5.3")).toBe("max");
+    expect(getDefaultReasoningEffort("zai-coding-plan/glm-5.3-flash")).toBe("max");
     expect(getDefaultReasoningEffort("deepseek/deepseek-v4-pro")).toBeUndefined();
   });
 
@@ -352,7 +358,16 @@ describe("model utilities", () => {
       efforts: ["low", "medium", "high"],
       default: "high",
     });
+    expect(getReasoningConfig("zai-coding-plan/glm-5.3")).toEqual({
+      efforts: ["low", "high", "max"],
+      default: "max",
+    });
+    expect(getReasoningConfig("zai-coding-plan/glm-5.3-flash")).toEqual({
+      efforts: ["low", "high", "max"],
+      default: "max",
+    });
     expect(getReasoningConfig("xai/grok-build-0.1")).toBeUndefined();
+    expect(getReasoningConfig("zai-coding-plan/glm-5.2")).toBeUndefined();
     expect(getReasoningConfig("deepseek/deepseek-v4-flash")).toBeUndefined();
   });
 
@@ -377,6 +392,12 @@ describe("model utilities", () => {
     expect(isValidReasoningEffort("openai/gpt-5.3-codex", "max")).toBe(false);
     expect(isValidReasoningEffort("xai/grok-4.6", "high")).toBe(true);
     expect(isValidReasoningEffort("xai/grok-4.6", "xhigh")).toBe(false);
+    expect(isValidReasoningEffort("zai-coding-plan/glm-5.3", "low")).toBe(true);
+    expect(isValidReasoningEffort("zai-coding-plan/glm-5.3", "max")).toBe(true);
+    expect(isValidReasoningEffort("zai-coding-plan/glm-5.3", "medium")).toBe(false);
+    expect(isValidReasoningEffort("zai-coding-plan/glm-5.3-flash", "high")).toBe(true);
+    expect(isValidReasoningEffort("zai-coding-plan/glm-5.3-flash", "none")).toBe(false);
+    expect(isValidReasoningEffort("zai-coding-plan/glm-5.2", "max")).toBe(false);
     expect(isValidReasoningEffort("xai/grok-build-0.1", "high")).toBe(false);
     expect(isValidReasoningEffort("xai/grok-build-0.1", "xhigh")).toBe(false);
     expect(isValidReasoningEffort("deepseek/deepseek-v4-pro", "high")).toBe(false);

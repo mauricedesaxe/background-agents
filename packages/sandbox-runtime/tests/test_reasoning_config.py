@@ -38,3 +38,13 @@ async def test_manual_variants_available_when_switching_from_adaptive_model(reas
                 "max": {"thinking": {"type": "enabled", "budgetTokens": 31_999}},
             }
         }
+    zai_models = reasoning_config["provider"]["zai-coding-plan"]["models"]
+    assert set(zai_models) == {"glm-5.3", "glm-5.3-flash"}
+    for model in zai_models.values():
+        assert model == {
+            "variants": {
+                "low": {"reasoningEffort": "low"},
+                "high": {"reasoningEffort": "high"},
+                "max": {"reasoningEffort": "max"},
+            }
+        }
