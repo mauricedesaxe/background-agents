@@ -523,7 +523,11 @@ class OpenCodeServer:
 
                 await asyncio.sleep(0.5)
 
-        raise RuntimeError("OpenCode server failed to become healthy")
+        raise RuntimeError(
+            f"OpenCode server failed to become healthy within "
+            f"{self.HEALTH_CHECK_TIMEOUT:.0f}s on port {OPENCODE_PORT}; "
+            "check the opencode server logs"
+        )
 
     async def stop(self) -> None:
         if self._opencode_process and self._opencode_process.returncode is None:

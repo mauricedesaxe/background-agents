@@ -21,6 +21,7 @@ import os
 import shutil
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +45,7 @@ from .constants import (
     SANDBOX_TIMEOUT_ENV_VAR,
     SNAPSHOT_RESERVE_FRACTION,
 )
-from .diagnostics import operator_diagnostic
+from .diagnostics import exception_summary, operator_diagnostic
 from .diff_capture import ControlPlaneDiffClient, SessionDiffRefreshWorker
 from .event_forwarder import BufferedEventForwarder
 from .git_signing import GitSigningError, GitSigningRuntime
@@ -333,7 +334,7 @@ class AgentBridge:
                 except websockets.ConnectionClosed:
                     run_outcome = "connection_closed"
                 except Exception as e:
-                    error_str = str(e)
+                    error_str = exception_summary(e)
                     # Check for fatal HTTP errors that shouldn't trigger retry
                     if isinstance(e, GitSigningError) and not e.retryable:
                         run_outcome = "fatal_error"
@@ -737,11 +738,13 @@ class AgentBridge:
             attachments = await self.attachment_processor.process(session_attachments)
 
             emitted_output = False
+            emitted_event_types: Counter[str] = Counter()
 
             async def emit(event: dict[str, Any]) -> None:
                 nonlocal emitted_output, message_cost_usd
                 if event.get("type") == "execution_complete":
                     raise RuntimeError("harness must not emit execution_complete")
+                emitted_event_types[str(event.get("type"))] += 1
                 if event.get("type") in ("token", "tool_call", "step_finish"):
                     emitted_output = True
                 # A cancelled turn never returns an outcome, so the last cost
@@ -776,6 +779,15 @@ class AgentBridge:
             if not had_error and not emitted_output:
                 had_error = True
                 error_message = "The agent completed without emitting assistant output."
+                # What the harness did emit names the silent-failure mode:
+                # only provider_retry means rate limiting, only session_title
+                # means an attribution miss, nothing at all means the session
+                # went idle before doing any work.
+                seen = ", ".join(
+                    f"{name} x{count}" for name, count in sorted(emitted_event_types.items())
+                )
+                if seen:
+                    error_message += f" Harness events: {seen}."
                 self.log.error(
                     "prompt.no_output",
                     message_id=message_id,
@@ -796,7 +808,7 @@ class AgentBridge:
         except Exception as e:
             outcome = "error"
             had_error = True
-            error_message = str(e)
+            error_message = exception_summary(e)
             self.log.error("prompt.error", exc=e, message_id=message_id)
         finally:
             duration_ms = int((time.time() - start_time) * 1000)

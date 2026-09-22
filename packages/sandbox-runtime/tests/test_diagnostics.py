@@ -1,4 +1,15 @@
-from sandbox_runtime.diagnostics import OPERATOR_DIAGNOSTIC_MAX_CHARS, operator_diagnostic
+from sandbox_runtime.diagnostics import (
+    OPERATOR_DIAGNOSTIC_MAX_CHARS,
+    exception_summary,
+    operator_diagnostic,
+)
+
+
+def test_exception_summary_never_returns_empty() -> None:
+    """Bare TimeoutError str()s to ''; the summary must still name a cause."""
+    assert exception_summary(TimeoutError()) == "TimeoutError"
+    assert exception_summary(RuntimeError("boom")) == "boom"
+    assert exception_summary(ValueError("")) == "ValueError"
 
 
 def test_operator_diagnostic_decodes_strips_redacts_and_bounds() -> None:

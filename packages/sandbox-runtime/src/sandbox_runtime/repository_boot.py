@@ -12,6 +12,7 @@ from .constants import (
     GIT_SYNC_REPORT_FILE_PATH,
     REPO_MANIFEST_FILE_PATH,
 )
+from .diagnostics import exception_summary
 from .repo_config import RepoConfigError, RepoEntry, dump_repo_manifest, parse_repositories
 from .repository_sync import RepositorySyncOutcome, RepositorySyncStatus
 from .runtime_config import BootMode, RepositoryConfig
@@ -271,7 +272,7 @@ class RepositoryBoot:
                 try:
                     setup_succeeded = await self.hooks.run_setup(repo, boot_mode)
                 except Exception as error:
-                    raise RepositoryBootError(str(error), git_sync_report) from error
+                    raise RepositoryBootError(exception_summary(error), git_sync_report) from error
                 if setup_succeeded:
                     continue
                 setup_success = False
@@ -294,7 +295,7 @@ class RepositoryBoot:
                 try:
                     start_succeeded = await self.hooks.run_start(repo, boot_mode)
                 except Exception as error:
-                    raise RepositoryBootError(str(error), git_sync_report) from error
+                    raise RepositoryBootError(exception_summary(error), git_sync_report) from error
                 if start_succeeded:
                     continue
                 start_success = False
