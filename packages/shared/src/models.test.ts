@@ -59,7 +59,11 @@ const ZEN_MODELS = [
 ] as const;
 
 const DEEPSEEK_MODELS = ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"] as const;
-const ZAI_CODING_PLAN_MODELS = ["zai-coding-plan/glm-5.2", "zai-coding-plan/glm-5.3"] as const;
+const ZAI_CODING_PLAN_MODELS = [
+  "zai-coding-plan/glm-5.2",
+  "zai-coding-plan/glm-5.3",
+  "zai-coding-plan/glm-5.3-flash",
+] as const;
 
 describe("model utilities", () => {
   it("derives every public model view from the authoritative catalog", () => {
