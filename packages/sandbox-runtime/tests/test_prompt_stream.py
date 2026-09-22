@@ -1182,6 +1182,97 @@ class TestProviderRetryDetection:
         assert step.disposition is _Disposition.CONTINUE
         assert state.provider_retry_count == 1
 
+    @pytest.mark.parametrize(
+        "idle_event",
+        [
+            sse("session.idle", {"sessionID": PARENT_SESSION_ID}),
+            sse("session.status", {"sessionID": PARENT_SESSION_ID, "status": {"type": "idle"}}),
+        ],
+        ids=["session_idle", "session_status_idle"],
+    )
+    def test_idle_with_live_rejection_fails_with_descriptive_error(self, idle_event):
+        stream = make_stream()
+        state = make_state()
+        stream._apply_sse_event(
+            state,
+            sse(
+                "session.error",
+                {"sessionID": PARENT_SESSION_ID, "error": provider_rejection_error()},
+            ),
+        )
+
+        step = stream._apply_sse_event(state, idle_event)
+
+        assert step.disposition is _Disposition.FINISHED_IDLE
+        assert step.events == [
+            {
+                "type": "error",
+                "error": "Provider request kept failing: 429 rate limit exceeded",
+                "messageId": "cp-msg-1",
+            }
+        ]
+
+    def test_successful_step_finish_recovers_rejection_before_idle(self):
+        stream = make_stream()
+        state = make_state()
+        stream._apply_sse_event(
+            state,
+            sse(
+                "session.error",
+                {"sessionID": PARENT_SESSION_ID, "error": provider_rejection_error()},
+            ),
+        )
+        stream._apply_sse_event(
+            state,
+            sse(
+                "message.updated",
+                {
+                    "info": {
+                        "id": "msg_parent_1",
+                        "sessionID": PARENT_SESSION_ID,
+                        "parentID": state.opencode_message_id,
+                        "role": "assistant",
+                    }
+                },
+            ),
+        )
+
+        step = stream._apply_sse_event(
+            state,
+            sse(
+                "message.part.updated",
+                {
+                    "part": {
+                        "type": "step-finish",
+                        "id": "part_sf_1",
+                        "sessionID": PARENT_SESSION_ID,
+                        "messageID": "msg_parent_1",
+                    }
+                },
+            ),
+        )
+
+        assert state.last_provider_rejection is None
+        assert [event["type"] for event in step.events] == ["step_finish"]
+
+        idle = stream._apply_sse_event(state, sse("session.idle", {"sessionID": PARENT_SESSION_ID}))
+        assert idle.events == []
+        assert idle.disposition is _Disposition.FINISHED_IDLE
+
+    def test_idle_with_capped_rejection_does_not_double_error(self):
+        stream = make_stream()
+        state = make_state()
+        rejection = sse(
+            "session.error", {"sessionID": PARENT_SESSION_ID, "error": provider_rejection_error()}
+        )
+        for _ in range(MAX_PROVIDER_RETRY_ATTEMPTS):
+            stream._apply_sse_event(state, rejection)
+
+        step = stream._apply_sse_event(state, sse("session.idle", {"sessionID": PARENT_SESSION_ID}))
+
+        assert step.disposition is _Disposition.FINISHED_IDLE
+        assert step.events == []
+
     def test_cap_tripping_via_message_error_yields_capped_step(self):
         stream = make_stream()
         state = make_state()
@@ -1297,13 +1388,18 @@ class TestUncappedRejectionStreamEnd:
         assert terminal == [
             {
                 "type": "error",
-                "error": "429 rate limit exceeded",
+                "error": "Provider request kept failing: 429 rate limit exceeded",
                 "messageId": "cp-msg-1",
             }
         ]
         stream._client.request_stop.assert_not_awaited()
 
-    async def test_idle_after_rejection_still_completes_successfully(self):
+    async def test_idle_after_unrecovered_rejection_fails_with_provider_message(self):
+        """The production shape of a swallowed rejection: OpenCode retries
+        internally, gives up without a terminal error, and idles. The stream
+        must fail with the provider cause instead of completing silently
+        (which the bridge then reports as missing assistant output)."""
+
         async def sse_events():
             yield sse(
                 "session.error",
@@ -1313,6 +1409,53 @@ class TestUncappedRejectionStreamEnd:
             await asyncio.Future()
 
         stream = make_stream()
+        collected = await self._collect(stream, sse_events())
+
+        terminal = [event for event in collected if event.get("type") == "error"]
+        assert terminal == [
+            {
+                "type": "error",
+                "error": "Provider request kept failing: 429 rate limit exceeded",
+                "messageId": "cp-msg-1",
+            }
+        ]
+
+    async def test_idle_after_recovered_rejection_completes_successfully(self):
+        """A rejection that a later successful step recovers is history by the
+        time the session idles; the turn must still complete."""
+        stream = make_stream()
+
+        async def sse_events():
+            yield sse(
+                "session.error",
+                {"sessionID": PARENT_SESSION_ID, "error": provider_rejection_error()},
+            )
+            request_body = stream._client.post_prompt.call_args.args[1]
+            yield sse(
+                "message.updated",
+                {
+                    "info": {
+                        "id": "msg_parent_1",
+                        "sessionID": PARENT_SESSION_ID,
+                        "parentID": request_body["messageID"],
+                        "role": "assistant",
+                    }
+                },
+            )
+            yield sse(
+                "message.part.updated",
+                {
+                    "part": {
+                        "type": "step-finish",
+                        "id": "part_sf_1",
+                        "sessionID": PARENT_SESSION_ID,
+                        "messageID": "msg_parent_1",
+                    }
+                },
+            )
+            yield sse("session.idle", {"sessionID": PARENT_SESSION_ID})
+            await asyncio.Future()
+
         collected = await self._collect(stream, sse_events())
 
         terminal = [event for event in collected if event.get("type") == "error"]
