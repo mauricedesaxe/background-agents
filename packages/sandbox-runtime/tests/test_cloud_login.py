@@ -91,8 +91,8 @@ def test_bundled_launcher_and_skill_exist() -> None:
     text = skill.read_text()
     assert "oi-cloud-login" in text
     assert "wrangler login" in text
-    description = text.split("description:", 1)[1].split("\n", 1)[0]
-    assert "Railway" in description
-    assert "railway login" in description
-    assert "device-code" in description
-    assert "cli-login" in description
+    frontmatter = text.split("---", 2)[1]
+    assert "Railway" in frontmatter
+    assert "railway" in frontmatter
+    assert "device-code" in frontmatter
+    assert "cli-login" in frontmatter
