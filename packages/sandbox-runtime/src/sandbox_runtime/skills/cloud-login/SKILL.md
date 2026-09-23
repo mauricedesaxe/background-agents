@@ -1,10 +1,11 @@
 ---
 name: cloud-login
 description:
-  Log into Cloudflare Wrangler or Railway from this sandbox. Use when wrangler deploy/login, railway
-  login/up/deploy, Railway signup or account creation, the user will authorize OAuth,
-  CLOUDFLARE_API_TOKEN looks set but wrangler fails, RAILWAY_TOKEN is missing, a
-  localhost:8976/oauth/callback URL is pasted, or a Railway device-code / cli-login link appears.
+  Log into Cloudflare Wrangler or Railway from this sandbox. Use when the work involves Cloudflare,
+  using Cloudflare, Workers, Pages, Durable Objects, wrangler deploy/login, railway login/up/deploy,
+  Railway signup or account creation, the user will authorize OAuth, CLOUDFLARE_API_TOKEN looks set
+  but wrangler fails, RAILWAY_TOKEN is missing, a localhost:8976/oauth/callback URL is pasted, or a
+  Railway device-code / cli-login link appears.
 ---
 
 # cloud-login
