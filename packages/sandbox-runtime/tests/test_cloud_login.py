@@ -92,6 +92,8 @@ def test_bundled_launcher_and_skill_exist() -> None:
     assert "oi-cloud-login" in text
     assert "wrangler login" in text
     frontmatter = text.split("---", 2)[1]
+    assert "Cloudflare" in frontmatter
+    assert "using Cloudflare" in frontmatter
     assert "Railway" in frontmatter
     assert "railway" in frontmatter
     assert "device-code" in frontmatter
