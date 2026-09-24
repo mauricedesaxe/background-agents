@@ -24,7 +24,7 @@ variables {
   token_encryption_key        = "test-token-key"
   repo_secrets_encryption_key = "test-repo-key"
   nextauth_secret             = "test-browser-auth-secret-with-32-characters"
-  deployment_name             = "daytona-snapshot-memory-test"
+  deployment_name             = "daytona-memory-test"
 
   sandbox_provider      = "daytona"
   daytona_api_url       = "https://daytona.example/api"

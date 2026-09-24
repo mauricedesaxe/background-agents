@@ -6,14 +6,14 @@ resource "cloudflare_queue" "github_autofix" {
   count = var.enable_github_bot ? 1 : 0
 
   account_id = var.cloudflare_account_id
-  queue_name = "open-inspect-github-autofix-${local.name_suffix}"
+  queue_name = local.cloudflare_queue_names.github_autofix
 }
 
 resource "cloudflare_queue" "github_autofix_dlq" {
   count = var.enable_github_bot ? 1 : 0
 
   account_id = var.cloudflare_account_id
-  queue_name = "open-inspect-github-autofix-dlq-${local.name_suffix}"
+  queue_name = local.cloudflare_queue_names.github_autofix_dlq
 }
 
 # Build github-bot worker bundle (only runs during apply, not plan)

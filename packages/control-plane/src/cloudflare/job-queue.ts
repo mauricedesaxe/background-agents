@@ -8,8 +8,8 @@
  *
  * Terraform names each queue `<prefix>-<deployment name>`, the deployment
  * name being the `DEPLOYMENT_NAME` the Worker is configured with, so a
- * batch is routed by the exact name and a dead-letter queue
- * (`<prefix>-dlq-<deployment name>`) is never mistaken for a live one.
+ * batch is routed by the exact name and a dead-letter queue with its own
+ * distinct name is never mistaken for a live one.
  * Terraform also declares each consumer's `max_retries` and `retry_delay`;
  * `job-queue.test.ts` holds those equal to the kind's `JobRetryPolicy`, so
  * the two cannot drift.

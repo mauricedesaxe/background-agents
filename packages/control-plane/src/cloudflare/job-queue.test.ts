@@ -42,12 +42,22 @@ function terraformControlPlaneConsumers(): TerraformConsumer[] {
     .filter((name) => name.endsWith(".tf"))
     .map((name) => readFileSync(join(TERRAFORM_DIR, name), "utf8"))
     .join("\n");
+  const queueNameLocalPrefixes = new Map(
+    [...source.matchAll(/^\s*(\w+)\s*=\s*"([^"$]+)-\$\{local\.name_suffix\}"$/gm)].map((match) => [
+      match[1]!,
+      match[2]!,
+    ])
+  );
   const queuePrefixes = new Map(
     [
       ...source.matchAll(
-        /resource "cloudflare_queue" "(\w+)" \{[^}]*queue_name\s*=\s*"([^"$]+)-\$\{local\.name_suffix\}"/g
+        /resource "cloudflare_queue" "(\w+)" \{[^}]*queue_name\s*=\s*local\.cloudflare_queue_names\.(\w+)/g
       ),
-    ].map((match) => [match[1]!, match[2]!])
+    ].map((match) => {
+      const queuePrefix = queueNameLocalPrefixes.get(match[2]!);
+      if (!queuePrefix) throw new Error(`Missing Cloudflare Queue name local: ${match[2]}`);
+      return [match[1]!, queuePrefix];
+    })
   );
   const controlPlaneModule = /module "control_plane_worker" \{([\s\S]*?)\n\}/.exec(source)?.[1];
   if (!controlPlaneModule) throw new Error("Missing control-plane Worker module");
@@ -120,9 +130,7 @@ describe("jobKindForQueue", () => {
   it("owns only this deployment's queues: another deployment's, a dead-letter, or a foreign queue is unknown", () => {
     expect(jobKindForQueue("open-inspect-github-autofix-prod", "staging")).toBeUndefined();
     expect(jobKindForQueue("open-inspect-github-autofix-dlq-prod", "prod")).toBeUndefined();
-    expect(
-      jobKindForQueue("open-inspect-image-build-finalization-dlq-prod", "prod")
-    ).toBeUndefined();
+    expect(jobKindForQueue("open-inspect-image-build-dlq-prod", "prod")).toBeUndefined();
     expect(jobKindForQueue("open-inspect-slack-completion-prod", "prod")).toBeUndefined();
     expect(jobKindForQueue("open-inspect-github-autofix", "prod")).toBeUndefined();
   });
@@ -309,7 +317,7 @@ describe("consumeJobBatch", () => {
   it("never runs a dead-letter queue's messages as live jobs", async () => {
     const host = fakeHost();
     const poison = message("message-1", FINALIZE_PAYLOAD);
-    const deadLetter = batch("open-inspect-image-build-finalization-dlq-prod", poison);
+    const deadLetter = batch("open-inspect-image-build-dlq-prod", poison);
 
     await consumeJobBatch(deadLetter, host);
 

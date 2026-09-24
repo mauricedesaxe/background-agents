@@ -6,14 +6,14 @@ resource "cloudflare_queue" "slack_completion_delivery" {
   count = var.enable_slack_bot ? 1 : 0
 
   account_id = var.cloudflare_account_id
-  queue_name = "open-inspect-slack-completion-${local.name_suffix}"
+  queue_name = local.cloudflare_queue_names.slack_completion_delivery
 }
 
 resource "cloudflare_queue" "slack_completion_delivery_dlq" {
   count = var.enable_slack_bot ? 1 : 0
 
   account_id = var.cloudflare_account_id
-  queue_name = "open-inspect-slack-completion-dlq-${local.name_suffix}"
+  queue_name = local.cloudflare_queue_names.slack_completion_delivery_dlq
 }
 
 # Build slack-bot worker bundle (only runs during apply, not plan)

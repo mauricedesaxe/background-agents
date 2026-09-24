@@ -25,6 +25,17 @@ resource "terraform_data" "cloudflare_custom_domain_gate" {
   }
 }
 
+# Cloudflare rejects Queue names longer than 63 characters. Keep this as a hard
+# plan-time error so an invalid deployment name never reaches an apply.
+resource "terraform_data" "cloudflare_queue_name_gate" {
+  lifecycle {
+    precondition {
+      condition     = alltrue([for name in local.active_cloudflare_queue_names : length(name) <= 63])
+      error_message = "Cloudflare Queue names must not exceed 63 characters. Invalid names: ${join(", ", [for name in local.active_cloudflare_queue_names : name if length(name) > 63])}. Shorten the queue-specific prefix in Terraform; do not rename deployment_name."
+    }
+  }
+}
+
 # Fail the plan when no access control is configured. Uses terraform_data with a
 # precondition so this is a hard error, not an advisory check-block warning.
 resource "terraform_data" "access_control_gate" {

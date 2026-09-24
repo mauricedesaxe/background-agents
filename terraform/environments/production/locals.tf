@@ -6,6 +6,29 @@ locals {
   use_opencomputer_backend = var.sandbox_provider == "opencomputer"
   use_e2b_backend          = var.sandbox_provider == "e2b"
 
+  cloudflare_queue_names = {
+    image_build_finalization      = "open-inspect-image-build-finalization-${local.name_suffix}"
+    image_build_finalization_dlq  = "open-inspect-image-build-dlq-${local.name_suffix}"
+    github_autofix                = "open-inspect-github-autofix-${local.name_suffix}"
+    github_autofix_dlq            = "open-inspect-github-autofix-dlq-${local.name_suffix}"
+    slack_completion_delivery     = "open-inspect-slack-completion-${local.name_suffix}"
+    slack_completion_delivery_dlq = "open-inspect-slack-completion-dlq-${local.name_suffix}"
+  }
+  active_cloudflare_queue_names = concat(
+    [
+      local.cloudflare_queue_names.image_build_finalization,
+      local.cloudflare_queue_names.image_build_finalization_dlq,
+    ],
+    var.enable_github_bot ? [
+      local.cloudflare_queue_names.github_autofix,
+      local.cloudflare_queue_names.github_autofix_dlq,
+    ] : [],
+    var.enable_slack_bot ? [
+      local.cloudflare_queue_names.slack_completion_delivery,
+      local.cloudflare_queue_names.slack_completion_delivery_dlq,
+    ] : [],
+  )
+
   # A complete OAuth credential pair is the deployment's provider enablement
   # declaration. Runtime validation mirrors these plan-time invariants.
   github_oauth_enabled = trimspace(var.github_client_id) != "" && trimspace(var.github_client_secret) != ""

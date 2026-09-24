@@ -30,7 +30,7 @@ variables {
   token_encryption_key        = "test-token-key"
   repo_secrets_encryption_key = "test-repo-key"
   nextauth_secret             = "test-browser-auth-secret-with-32-characters"
-  deployment_name             = "daytona-credentials-pairing-test"
+  deployment_name             = "daytona-creds-test"
 
   # The deployment has moved off Daytona; the credentials outlive the switch.
   sandbox_provider   = "modal"
