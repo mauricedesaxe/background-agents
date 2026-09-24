@@ -1,0 +1,5 @@
+ts	phase	decision	why	evidence	result
+2026-09-24T13:59:10Z	frame	Set the rollback target to fork main 48ea82f and the source target to upstream 9fc10213	The sync must replace the fork tree rather than merge unrelated histories	overlay/runbook.md; git commits 48ea82f and 9fc10213	VERIFIED
+2026-09-24T14:00:12Z	baseline	Created the sync branch from upstream and restored only overlay/	Starting from upstream prevents stale fork files from surviving the sync	git commit 3204281b; python overlay/check_cards.py	VERIFIED
+2026-09-24T14:02:06Z	tracking	Created and pushed remote-backed epic background-agents-9o8	Card progress must survive this workspace and remain reviewable	bead background-agents-9o8	VERIFIED
+2026-09-24T14:04:00Z	inventory	Classified 21 cards as 19 missing, one upstream-satisfied, and one live-only check	Rebuilding only missing outcomes keeps the fork smaller	beads under background-agents-9o8	VERIFIED
