@@ -16,11 +16,13 @@ import {
   resolveBootBudgetTimeoutMs,
   evaluateWarmDecision,
   evaluateExecutionTimeout,
+  resolveInactivityTimeoutMs,
   isSandboxReconnectBlockedStatus,
   isSnapshotRuntimeCompatible,
   DEFAULT_CIRCUIT_BREAKER_CONFIG,
   DEFAULT_CONNECTING_TIMEOUT_CONFIG,
   DEFAULT_BOOT_BUDGET_CONFIG,
+  DEFAULT_INACTIVITY_CONFIG,
   DEFAULT_SPAWN_CONFIG,
   DEFAULT_EXECUTION_TIMEOUT_MS,
   type CircuitBreakerState,
@@ -627,6 +629,19 @@ describe("evaluateSpawnDecision", () => {
 });
 
 // ==================== Inactivity Timeout Tests ====================
+
+it("sets the inactivity timeout and connected-client extension to five minutes", () => {
+  expect(DEFAULT_INACTIVITY_CONFIG).toMatchObject({
+    timeoutMs: 300_000,
+    extensionMs: 300_000,
+  });
+});
+
+it("uses the inactivity default only when the deployment override is absent", () => {
+  expect(resolveInactivityTimeoutMs(undefined)).toBe(300_000);
+  expect(resolveInactivityTimeoutMs("")).toBe(300_000);
+  expect(resolveInactivityTimeoutMs("420000")).toBe(420_000);
+});
 
 describe("evaluateInactivityTimeout", () => {
   const config: InactivityConfig = {

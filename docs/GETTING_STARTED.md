@@ -1129,7 +1129,7 @@ Secrets for credentials:
 | `MODAL_ENVIRONMENT`                | Modal environment name (defaults to `main`)                                                 |
 | `MODAL_ENVIRONMENT_WEB_SUFFIX`     | Modal environment web suffix for endpoint URLs; lowercase letters, digits, dashes, or empty |
 | `SANDBOX_PROVIDER`                 | `modal`, `daytona`, or `vercel`                                                             |
-| `SANDBOX_INACTIVITY_TIMEOUT_MS`    | Idle milliseconds before a sandbox is snapshotted and stopped (defaults to `600000`)        |
+| `SANDBOX_INACTIVITY_TIMEOUT_MS`    | Idle milliseconds before a sandbox is snapshotted and stopped (defaults to `300000`)        |
 | `SANDBOX_BOOT_TIMEOUT_MS`          | Milliseconds a connected sandbox may keep booting before it fails (defaults to `1800000`)   |
 | `DAYTONA_API_URL`                  | Daytona API URL _(only if `sandbox_provider = "daytona"`)_                                  |
 | `DAYTONA_API_KEY`                  | Daytona API key _(only if `sandbox_provider = "daytona"`)_                                  |

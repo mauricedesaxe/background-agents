@@ -46,7 +46,10 @@ import {
   type SlackAgentNotifyLookup,
   type SandboxShutdownLifecycle,
 } from "../sandbox/lifecycle/manager";
-import { resolveBootBudgetTimeoutMs } from "../sandbox/lifecycle/decisions";
+import {
+  resolveBootBudgetTimeoutMs,
+  resolveInactivityTimeoutMs,
+} from "../sandbox/lifecycle/decisions";
 import { McpServerStore } from "../db/mcp-servers";
 import { UserStore } from "../db/user-store";
 import { IntegrationSettingsStore, resolveSlackSettings } from "../db/integration-settings";
@@ -1092,7 +1095,7 @@ function createLifecycleManager(deps: LifecycleManagerDeps): SandboxLifecycleMan
     getSessionId,
     inactivity: {
       ...DEFAULT_LIFECYCLE_CONFIG.inactivity,
-      timeoutMs: parseInt(env.SANDBOX_INACTIVITY_TIMEOUT_MS || "600000", 10),
+      timeoutMs: resolveInactivityTimeoutMs(env.SANDBOX_INACTIVITY_TIMEOUT_MS),
     },
     bootBudget: { timeoutMs: bootBudget.timeoutMs },
     mcpServerLookup,

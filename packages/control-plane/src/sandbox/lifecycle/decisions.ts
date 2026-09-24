@@ -442,7 +442,6 @@ export interface InactivityState {
  * Inactivity timeout configuration.
  */
 export interface InactivityConfig {
-  /** Time in ms before sandbox stops due to inactivity (default: 10 minutes) */
   timeoutMs: number;
   /** Additional time granted when clients are connected (default: 5 minutes) */
   extensionMs: number;
@@ -454,10 +453,16 @@ export interface InactivityConfig {
  * Default inactivity configuration.
  */
 export const DEFAULT_INACTIVITY_CONFIG: InactivityConfig = {
-  timeoutMs: 10 * 60 * 1000, // 10 minutes
-  extensionMs: 5 * 60 * 1000, // 5 minutes
-  minCheckIntervalMs: 30000, // 30 seconds
+  timeoutMs: 5 * 60 * 1000,
+  extensionMs: 5 * 60 * 1000,
+  minCheckIntervalMs: 30000,
 };
+
+export function resolveInactivityTimeoutMs(configuredTimeoutMs: string | undefined): number {
+  return configuredTimeoutMs
+    ? parseInt(configuredTimeoutMs, 10)
+    : DEFAULT_INACTIVITY_CONFIG.timeoutMs;
+}
 
 /**
  * Possible inactivity actions.
@@ -469,11 +474,6 @@ export type InactivityAction =
 
 /**
  * Evaluate what action to take for inactivity timeout.
- *
- * The 10-minute default timeout balances cost efficiency with user experience:
- * - Short enough to avoid wasting resources on abandoned sessions
- * - Long enough for users to read/think between prompts
- * - Snapshots preserve all state, so resume is instant
  *
  * @param state - Current inactivity state
  * @param config - Inactivity timeout configuration

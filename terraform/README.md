@@ -223,7 +223,7 @@ MODAL_API_SECRET
 
 # Sandbox provider
 SANDBOX_PROVIDER
-SANDBOX_INACTIVITY_TIMEOUT_MS # Optional; defaults to 600000
+SANDBOX_INACTIVITY_TIMEOUT_MS # Optional; defaults to 300000
 SANDBOX_BOOT_TIMEOUT_MS       # Optional; defaults to 1800000, must exceed 240000
 
 # Daytona (only if SANDBOX_PROVIDER=daytona)
