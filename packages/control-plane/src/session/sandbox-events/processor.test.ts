@@ -53,6 +53,7 @@ function createProcessor(promptHoldOverride?: QueuedPromptHold) {
         status: "completed" as const,
       };
     }),
+    recordStopConfirmation: vi.fn(() => false),
     clearMessageAwaitingStopConfirmation: vi.fn(),
     updateSandboxGitSyncStatus: vi.fn(),
     completeSandboxGitSync: vi.fn(() => true),
@@ -843,6 +844,17 @@ describe("SessionSandboxEventProcessor", () => {
       success: true,
       sandboxId: "sb-1",
       timestamp: 2000,
+      checkpointReceipt: {
+        schemaVersion: 1,
+        status: "durable",
+        repositories: [
+          {
+            identity: { host: "github.com", owner: "acme", name: "app" },
+            outcome: { status: "unchanged" },
+          },
+        ],
+        beads: { status: "off" },
+      },
     };
 
     await h.processor.processSandboxEvent(event);
@@ -852,6 +864,7 @@ describe("SessionSandboxEventProcessor", () => {
       expect.any(Number),
       "processing"
     );
+    expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
     expect(h.broadcastPromptQueue).toHaveBeenCalledOnce();
     expect(h.callbackService.notifyComplete).toHaveBeenCalledWith("msg-1", true, undefined);
@@ -971,7 +984,10 @@ describe("SessionSandboxEventProcessor", () => {
     });
 
     expect(h.repository.recordMessageCompletion).not.toHaveBeenCalled();
-    expect(h.repository.clearMessageAwaitingStopConfirmation).toHaveBeenCalledWith("msg-1");
+    expect(h.repository.recordStopConfirmation).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: "msg-1" }),
+      expect.any(Number)
+    );
   });
 
   it("delegates a failed sandbox completion", async () => {

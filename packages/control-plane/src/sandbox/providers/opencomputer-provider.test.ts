@@ -74,6 +74,7 @@ function createMockClient(overrides: Partial<OpenComputerRestClient> = {}): Open
 const baseConfig: CreateSandboxConfig = {
   sessionId: "session-1",
   sandboxId: "sandbox-acme-repo-1",
+  beadsAuthority: "writer",
   repoOwner: "acme",
   repoName: "repo",
   controlPlaneUrl: "https://control.example",
@@ -160,6 +161,7 @@ describe("OpenComputerSandboxProvider", () => {
     });
     expect(JSON.parse(createCall.env!.SESSION_CONFIG)).toMatchObject({
       session_id: "session-1",
+      beads_authority: "writer",
       repo_owner: "acme",
       repo_name: "repo",
       provider: "anthropic",
@@ -830,6 +832,7 @@ describe("OpenComputerSandboxProvider", () => {
       OI_REPO_IMAGE_FAILURE_CALLBACK_URL: "https://control.example/image-builds/build-failed",
     });
     expect(JSON.parse(createCall.env!.SESSION_CONFIG)).toEqual({
+      beads_authority: "off",
       branch: "main",
       repositories: [
         { repo_owner: "acme", repo_name: "web", branch: "main" },

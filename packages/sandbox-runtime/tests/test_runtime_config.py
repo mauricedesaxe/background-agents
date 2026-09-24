@@ -2,8 +2,19 @@ import json
 from types import MappingProxyType
 
 import pytest
+from pydantic import ValidationError
 
 from sandbox_runtime.runtime_config import BootMode, RuntimeConfig
+from sandbox_runtime.types import SessionConfig
+
+
+def test_session_config_defaults_beads_authority_to_off():
+    assert SessionConfig(session_id="session-1").beads_authority == "off"
+
+
+def test_session_config_rejects_invalid_beads_authority():
+    with pytest.raises(ValidationError):
+        SessionConfig(session_id="session-1", beads_authority="admin")
 
 
 @pytest.mark.parametrize(

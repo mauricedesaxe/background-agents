@@ -73,6 +73,79 @@ const tokenUsageDetailsSchema = z
 
 const tokenUsageSchema = z.union([z.number(), tokenUsageDetailsSchema]);
 
+const gitObjectIdSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
+const beadsBranchSchema = z
+  .string()
+  .min(1)
+  .max(255)
+  .regex(/^[\x20-\x7e]+$/)
+  .refine((branch) => !branch.startsWith("-"));
+const beadsCommitSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9]+$/);
+
+const checkpointRepositoryIdentitySchema = z
+  .object({
+    host: z.string().min(1),
+    owner: z.string().min(1),
+    name: z.string().min(1),
+  })
+  .strict();
+
+const checkpointRepositoryOutcomeSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("unchanged") }).strict(),
+  z
+    .object({
+      status: z.literal("verified"),
+      vcs: z.enum(["git", "jj"]),
+      snapshotOid: gitObjectIdSchema,
+      remoteRef: z.string().min(1),
+      remoteOid: gitObjectIdSchema,
+      disposition: z.enum(["pushed", "alreadyPresent"]),
+    })
+    .strict(),
+]);
+
+const checkpointBeadsOutcomeSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("off") }).strict(),
+  z
+    .object({
+      status: z.literal("readonly"),
+      observedBranch: beadsBranchSchema,
+      observedCommit: beadsCommitSchema,
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("writerPushed"),
+      observedBranch: beadsBranchSchema,
+      observedCommit: beadsCommitSchema,
+    })
+    .strict(),
+]);
+
+export const checkpointReceiptSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    status: z.literal("durable"),
+    repositories: z
+      .array(
+        z
+          .object({
+            identity: checkpointRepositoryIdentitySchema,
+            outcome: checkpointRepositoryOutcomeSchema,
+          })
+          .strict()
+      )
+      .min(1)
+      .max(MAX_SESSION_REPOSITORIES),
+    beads: checkpointBeadsOutcomeSchema,
+  })
+  .strict();
+export type CheckpointReceipt = z.infer<typeof checkpointReceiptSchema>;
+
 const sandboxEventBaseSchema = z.object({
   sandboxId: z.string(),
   timestamp: z.number(),
@@ -176,6 +249,7 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
     error: z.string().optional(),
     /** Final cumulative reported cost of the turn. */
     messageCostUsd: z.number().nonnegative().optional(),
+    checkpointReceipt: checkpointReceiptSchema.optional(),
   }),
   messageSandboxEventBaseSchema.extend({
     type: z.literal("context_compacted"),

@@ -26,6 +26,14 @@
     "version": "1.2.2",
     "sha256": "8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8"
   },
+  "harnessCheck": {
+    "version": "0.1.0",
+    "sha256": "8f99a4ca0800bade69f9e32cf6bd3cfee2a1976bb53b0b05fa5a6b75bc5f03bf"
+  },
+  "lazarCheckpoint": {
+    "version": "0.1.0",
+    "sha256": "15f2024822d0331c2ddf803250e2ebe0836db9857c61c10e705d48ecd9d6b0af"
+  },
   "hatchling": "1.27.0",
   "websockify": "0.13.0",
   "node": {

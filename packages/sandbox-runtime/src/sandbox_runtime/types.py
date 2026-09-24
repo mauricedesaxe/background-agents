@@ -1,7 +1,7 @@
 """Type definitions for sandbox operations."""
 
 from enum import StrEnum
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from pydantic import BaseModel
 
@@ -63,6 +63,7 @@ class SessionConfig(BaseModel):
     """
 
     session_id: str
+    beads_authority: Literal["off", "readonly", "writer"] = "off"
     repo_owner: str | None = None
     repo_name: str | None = None
     branch: str | None = None

@@ -616,6 +616,43 @@ describe("SandboxLifecycleManager", () => {
       ).toBe(true);
     });
 
+    it.each([
+      { kind: "create", parentSessionId: null, expectedAuthority: "writer" },
+      { kind: "create", parentSessionId: "parent-1", expectedAuthority: "readonly" },
+      { kind: "restore", parentSessionId: null, expectedAuthority: "writer" },
+      { kind: "restore", parentSessionId: "parent-1", expectedAuthority: "readonly" },
+    ] as const)(
+      "grants $expectedAuthority Beads authority on $kind for parent $parentSessionId",
+      async ({ kind, parentSessionId, expectedAuthority }) => {
+        const session = createMockSession({ parent_session_id: parentSessionId });
+        const sandbox = createMockSandbox({
+          status: kind === "create" ? "pending" : "stopped",
+          snapshot_image_id: kind === "restore" ? "img-abc123" : null,
+          snapshot_runtime_version: kind === "restore" ? COMPATIBLE_RUNTIME_VERSION : null,
+          created_at: Date.now() - 60000,
+        });
+        const storage = createMockStorage(session, sandbox);
+        const provider = createMockProvider();
+        const manager = new SandboxLifecycleManager(
+          provider,
+          storage,
+          storage,
+          createMockBroadcaster(),
+          createMockWebSocketManager(false),
+          createMockAlarmScheduler(),
+          createMockIdGenerator(),
+          createTestConfig()
+        );
+
+        await manager.spawnSandbox();
+
+        const operation = kind === "create" ? provider.createSandbox : provider.restoreFromSnapshot;
+        expect(operation).toHaveBeenCalledWith(
+          expect.objectContaining({ beadsAuthority: expectedAuthority })
+        );
+      }
+    );
+
     it.each(["spawn", "restore"] as const)(
       "stops the prior provider sandbox before %s overwrites its handle",
       async (kind) => {

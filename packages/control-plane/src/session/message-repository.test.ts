@@ -512,6 +512,17 @@ describe("MessageRepository", () => {
       success: true,
       sandboxId: "sb-1",
       timestamp: 3,
+      checkpointReceipt: {
+        schemaVersion: 1 as const,
+        status: "durable" as const,
+        repositories: [
+          {
+            identity: { host: "github.com", owner: "acme", name: "app" },
+            outcome: { status: "unchanged" as const },
+          },
+        ],
+        beads: { status: "off" as const },
+      },
     };
     expect(repository.recordMessageCompletion(event, 3000, "processing")).toEqual({
       messageId: "msg-1",
@@ -522,6 +533,7 @@ describe("MessageRepository", () => {
     });
     expect(transactionSyncCalls).toBe(1);
     expect(mock.calls[2].params[0]).toBe("execution_complete:msg-1");
+    expect(JSON.parse(String(mock.calls[2].params[2]))).toEqual(event);
   });
 
   it("does not complete a message in another state", () => {
@@ -542,6 +554,38 @@ describe("MessageRepository", () => {
       )
     ).toBeNull();
     expect(mock.calls).toHaveLength(1);
+  });
+
+  it("persists a checkpointed completion that confirms a prior stop", () => {
+    mock.setMatchingData(
+      /UPDATE messages SET stop_confirmation_deadline = NULL[\s\S]*RETURNING id/,
+      [{ id: "msg-1" }]
+    );
+    const event = {
+      type: "execution_complete" as const,
+      messageId: "msg-1",
+      success: false,
+      error: "Task was cancelled",
+      sandboxId: "sb-1",
+      timestamp: 3,
+      checkpointReceipt: {
+        schemaVersion: 1 as const,
+        status: "durable" as const,
+        repositories: [
+          {
+            identity: { host: "github.com", owner: "acme", name: "app" },
+            outcome: { status: "unchanged" as const },
+          },
+        ],
+        beads: { status: "off" as const },
+      },
+    };
+
+    expect(repository.recordStopConfirmation(event, 3000)).toBe(true);
+
+    expect(mock.calls[0].params).toEqual(["msg-1"]);
+    expect(mock.calls[1].params[0]).toBe("execution_complete:msg-1");
+    expect(JSON.parse(String(mock.calls[1].params[2]))).toEqual(event);
   });
 
   it("lists pending messages in deterministic order", () => {

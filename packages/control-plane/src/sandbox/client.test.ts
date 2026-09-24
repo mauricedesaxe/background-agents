@@ -216,6 +216,7 @@ describe("ModalClient", () => {
     await client.restoreSandbox({
       snapshotImageId: "img-1",
       sessionId: "session-123",
+      beadsAuthority: "writer",
       sandboxId: "sandbox-456",
       sandboxAuthToken: "auth-token",
       harness: "opencode" as const,
@@ -230,6 +231,7 @@ describe("ModalClient", () => {
     const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
     expect(body.session_config).toEqual({
       session_id: "session-123",
+      beads_authority: "writer",
       harness: "opencode",
       repo_owner: "testowner",
       repo_name: "testrepo",
@@ -255,6 +257,7 @@ describe("ModalClient", () => {
     const client = createModalClient("secret", "acme", "prod-web");
     await client.createSandbox({
       sessionId: "session-123",
+      beadsAuthority: "writer",
       sandboxId: "sandbox-456",
       repoOwner: "testowner",
       repoName: "testrepo",
@@ -268,6 +271,7 @@ describe("ModalClient", () => {
     });
 
     const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(body.beads_authority).toBe("writer");
     expect(body.repositories).toEqual([
       { repo_owner: "testowner", repo_name: "testrepo", branch: "main" },
       { repo_owner: "testowner", repo_name: "backend", branch: "develop" },
@@ -288,6 +292,7 @@ describe("ModalClient", () => {
     const client = createModalClient("secret", "acme", "prod-web");
     await client.createSandbox({
       sessionId: "session-123",
+      beadsAuthority: "writer",
       repoOwner: "testowner",
       repoName: "testrepo",
       controlPlaneUrl: "https://control-plane.test",
@@ -325,6 +330,7 @@ describe("ModalClient", () => {
     await expect(
       client.createSandbox({
         sessionId: "session-123",
+        beadsAuthority: "writer",
         repoOwner: "testowner",
         repoName: "testrepo",
         controlPlaneUrl: "https://control-plane.test",
@@ -369,6 +375,7 @@ describe("ModalClient", () => {
     const client = createModalClient("secret", "acme", "prod-web");
     const result = await client.createSandbox({
       sessionId: "session-123",
+      beadsAuthority: "writer",
       repoOwner: "testowner",
       repoName: "testrepo",
       controlPlaneUrl: "https://control-plane.test",
@@ -404,6 +411,7 @@ describe("ModalClient", () => {
     await expect(
       client.createSandbox({
         sessionId: "session-123",
+        beadsAuthority: "writer",
         repoOwner: "testowner",
         repoName: "testrepo",
         controlPlaneUrl: "https://control-plane.test",
@@ -425,6 +433,7 @@ describe("ModalClient", () => {
     await client.restoreSandbox({
       snapshotImageId: "img-1",
       sessionId: "session-123",
+      beadsAuthority: "writer",
       sandboxId: "sandbox-456",
       sandboxAuthToken: "auth-token",
       harness: "opencode" as const,
@@ -459,6 +468,7 @@ describe("ModalClient", () => {
       client.restoreSandbox({
         snapshotImageId: "img-1",
         sessionId: "session-123",
+        beadsAuthority: "writer",
         sandboxId: "sandbox-456",
         sandboxAuthToken: "auth-token",
         harness: "opencode" as const,
@@ -497,6 +507,7 @@ describe("ModalClient", () => {
       client.restoreSandbox({
         snapshotImageId: "img-1",
         sessionId: "session-123",
+        beadsAuthority: "writer",
         sandboxId: "sandbox-456",
         sandboxAuthToken: "auth-token",
         harness: "opencode" as const,
@@ -534,6 +545,7 @@ describe("ModalClient", () => {
 
     await client.createSandbox({
       sessionId: "session-123",
+      beadsAuthority: "writer",
       repoOwner: null,
       repoName: null,
       controlPlaneUrl: "https://control-plane.test",
@@ -544,6 +556,7 @@ describe("ModalClient", () => {
     await client.restoreSandbox({
       snapshotImageId: "img-1",
       sessionId: "session-123",
+      beadsAuthority: "writer",
       sandboxId: "sandbox-456",
       sandboxAuthToken: "auth-token",
       harness: "opencode" as const,

@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 
 from fastapi import Header, HTTPException
 from modal import fastapi_endpoint
@@ -114,6 +114,7 @@ class _RepositoryContextModel(_ModalRequestModel):
 
 class CreateSandboxRequest(_RepositoryContextModel):
     session_id: NonEmptyString
+    beads_authority: Literal["off", "readonly", "writer"] = "off"
     sandbox_id: str | None = None
     control_plane_url: NonEmptyString
     sandbox_auth_token: NonEmptyString
@@ -143,6 +144,7 @@ class RestoreSessionConfigRequest(_RepositoryContextModel):
     model_config = ConfigDict(extra="allow", strict=True)
 
     session_id: str | None = None
+    beads_authority: Literal["off", "readonly", "writer"] = "off"
     branch: str | None = None
     base_sha: str | None = None
     agent_session_id: str | None = None

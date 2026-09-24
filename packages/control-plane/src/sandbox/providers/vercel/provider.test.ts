@@ -103,6 +103,7 @@ const providerConfig: VercelProviderConfig = {
 const baseCreateConfig: CreateSandboxConfig = {
   sessionId: "session-123",
   sandboxId: "sandbox-456",
+  beadsAuthority: "writer",
   repoOwner: "testowner",
   repoName: "testrepo",
   controlPlaneUrl: "https://control-plane.test",
@@ -116,6 +117,7 @@ const baseRestoreConfig: RestoreConfig = {
   snapshotImageId: "snapshot-restore-1",
   sessionId: "session-123",
   sandboxId: "sandbox-456",
+  beadsAuthority: "writer",
   repoOwner: "testowner",
   repoName: "testrepo",
   controlPlaneUrl: "https://control-plane.test",
@@ -222,6 +224,7 @@ describe("VercelSandboxProvider", () => {
     );
     expect(JSON.parse(createCall.env?.SESSION_CONFIG as string)).toEqual({
       session_id: "session-123",
+      beads_authority: "writer",
       harness: "opencode",
       repo_owner: "testowner",
       repo_name: "testrepo",
@@ -743,6 +746,7 @@ describe("VercelSandboxProvider", () => {
       })
     );
     expect(JSON.parse(createCall.env?.SESSION_CONFIG as string)).toEqual({
+      beads_authority: "off",
       branch: "main",
       repositories: [
         { repo_owner: "acme", repo_name: "web", branch: "main" },

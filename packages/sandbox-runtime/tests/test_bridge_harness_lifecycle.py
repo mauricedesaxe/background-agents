@@ -114,6 +114,7 @@ class TestStartupLifecycle:
     async def test_signing_failure_exits_main_as_deterministic_failure(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.setenv("SESSION_CONFIG", '{"session_id":"session-1"}')
         bridge = MagicMock()
         bridge.run = AsyncMock(side_effect=GitSigningError("signing denied"))
         monkeypatch.setattr("sandbox_runtime.bridge.AgentBridge", MagicMock(return_value=bridge))
