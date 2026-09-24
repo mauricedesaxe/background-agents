@@ -77,13 +77,16 @@ function createHandler() {
     status: "queued" as const,
   }));
   const messageService = { enqueuePrompt };
+  const deliverChildResult = vi.fn(async () => true);
+  const acceptChildUpdate = vi.fn(async () => true);
 
   const handler = new ChildSessionsHandler(
     repository as unknown as MessageRepository,
     repository as unknown as ParticipantRepository,
     { getSession } as unknown as SessionCoreRepository,
     messenger,
-    messageService
+    messageService,
+    { deliver: deliverChildResult, acceptUpdate: acceptChildUpdate }
   );
 
   return {
@@ -92,6 +95,23 @@ function createHandler() {
     getSession,
     broadcast,
     enqueuePrompt,
+    deliverChildResult,
+    acceptChildUpdate,
+  };
+}
+
+function childResult(messageId = "message-final") {
+  return {
+    messageId,
+    authorUserId: "user-1",
+    payload: {
+      session: { title: "Child title", repoOwner: "acme", repoName: "repo" },
+      finalResponse: {
+        messageId,
+        textContent: "Finished",
+        artifacts: [],
+      },
+    },
   };
 }
 
@@ -474,6 +494,7 @@ describe("ChildSessionsHandler", () => {
         body: JSON.stringify({
           childSessionId: "child-1",
           status: "completed",
+          statusRevision: 3,
           title: "Child title",
         }),
       })
@@ -489,6 +510,97 @@ describe("ChildSessionsHandler", () => {
     });
   });
 
+  it("delivers an explicitly identified terminal child result", async () => {
+    const { handler, deliverChildResult } = createHandler();
+
+    const response = await handler.childSessionUpdate(
+      new Request("http://internal/internal/child-session/update", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          childSessionId: "child-1",
+          status: "failed",
+          statusRevision: 3,
+          title: "Child title",
+          childResult: childResult(),
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(deliverChildResult).toHaveBeenCalledWith({
+      childSessionId: "child-1",
+      status: "failed",
+      statusRevision: 3,
+      messageId: "message-final",
+      authorUserId: "user-1",
+      payload: childResult().payload,
+    });
+  });
+
+  it("rejects result metadata on a non-terminal child update", async () => {
+    const { handler, broadcast, deliverChildResult } = createHandler();
+
+    const response = await handler.childSessionUpdate(
+      new Request("http://internal/internal/child-session/update", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          childSessionId: "child-1",
+          status: "active",
+          statusRevision: 3,
+          childResult: childResult(),
+        }),
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(broadcast).not.toHaveBeenCalled();
+    expect(deliverChildResult).not.toHaveBeenCalled();
+  });
+
+  it("does not broadcast a stale terminal result update", async () => {
+    const { handler, broadcast, deliverChildResult } = createHandler();
+    deliverChildResult.mockResolvedValue(false);
+
+    const response = await handler.childSessionUpdate(
+      new Request("http://internal/internal/child-session/update", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          childSessionId: "child-1",
+          status: "completed",
+          statusRevision: 2,
+          childResult: childResult("message-old"),
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  it("does not broadcast a stale non-terminal child update", async () => {
+    const { handler, broadcast, acceptChildUpdate } = createHandler();
+    acceptChildUpdate.mockResolvedValue(false);
+
+    const response = await handler.childSessionUpdate(
+      new Request("http://internal/internal/child-session/update", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          childSessionId: "child-1",
+          status: "active",
+          statusRevision: 4,
+          title: "Stale title",
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
   it("broadcasts child session update when title is null", async () => {
     const { handler, broadcast } = createHandler();
 
@@ -499,6 +611,7 @@ describe("ChildSessionsHandler", () => {
         body: JSON.stringify({
           childSessionId: "child-1",
           status: "active",
+          statusRevision: 2,
           title: null,
         }),
       })

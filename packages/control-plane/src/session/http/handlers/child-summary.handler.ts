@@ -45,6 +45,18 @@ export class ChildSummaryHandler {
     }
 
     const options = parsedOptions.options;
+    const requestedTerminalMessage = options.resultMessageId
+      ? this.messageRepository.getMessageById(options.resultMessageId)
+      : undefined;
+    if (
+      options.resultMessageId &&
+      (!requestedTerminalMessage ||
+        (requestedTerminalMessage.status !== "completed" &&
+          requestedTerminalMessage.status !== "failed"))
+    ) {
+      return Response.json({ error: "Result message not found" }, { status: 404 });
+    }
+
     const sandbox = this.sandboxRepository.getSandbox();
     const artifacts = this.artifactRepository.listArtifacts();
     const recentEventRows = this.eventRepository.listEventPage({
@@ -54,7 +66,9 @@ export class ChildSummaryHandler {
     let trajectory: ChildSummaryTrajectoryInput | undefined;
 
     if (options.includeFinalResponse) {
-      const terminalMessage = this.messageRepository.getLatestTerminalMessage();
+      const terminalMessage = options.resultMessageId
+        ? (requestedTerminalMessage ?? null)
+        : this.messageRepository.getLatestTerminalMessage();
       const collectedEvents = terminalMessage
         ? collectFinalResponseEventRows(this.eventRepository, terminalMessage.id)
         : { eventRows: [], eventLimitReached: false };

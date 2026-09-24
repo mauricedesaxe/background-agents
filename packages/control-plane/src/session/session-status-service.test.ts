@@ -49,6 +49,7 @@ function harness(options: { session?: SessionRow | null } = {}) {
     updateSessionStatus: vi.fn(),
     getPendingOrProcessingCount: vi.fn(() => 0),
     getLatestTerminalMessage: vi.fn(() => null as MessageRow | null),
+    getProcessingMessage: vi.fn(() => null as MessageRow | null),
     getMessageCount: vi.fn(() => 3),
     getActiveDurationMs: vi.fn(() => 4500),
   };
@@ -80,6 +81,24 @@ function harness(options: { session?: SessionRow | null } = {}) {
     child: vi.fn(),
   };
   const backgroundTasks = createTestBackgroundTasks();
+  const persistChildResult = vi.fn();
+  const kickChildResult = vi.fn();
+  const buildChildResultSnapshot = vi.fn(() => ({
+    authorUserId: "user-1",
+    payload: {
+      session: { title: "Session title", repoOwner: "acme", repoName: "repo" },
+      finalResponse: null,
+    },
+  }));
+  let transactionActive = false;
+  const transactionSync = <T>(closure: () => T): T => {
+    transactionActive = true;
+    try {
+      return closure();
+    } finally {
+      transactionActive = false;
+    }
+  };
 
   const statusProjection = { project: vi.fn(async () => true) };
   const service = new SessionStatusService(
@@ -91,7 +110,10 @@ function harness(options: { session?: SessionRow | null } = {}) {
     messenger,
     sessionIndex,
     statusProjection,
-    parentSessions
+    parentSessions,
+    { persist: persistChildResult, kick: kickChildResult },
+    buildChildResultSnapshot,
+    transactionSync
   );
 
   return {
@@ -104,6 +126,11 @@ function harness(options: { session?: SessionRow | null } = {}) {
     backgroundTasks,
     parentSessions,
     parentFetch,
+    persistChildResult,
+    kickChildResult,
+    buildChildResultSnapshot,
+    transactionSync,
+    isTransactionActive: () => transactionActive,
     log,
   };
 }
@@ -255,6 +282,7 @@ describe("SessionStatusService.transition", () => {
     expect(JSON.parse(String(init?.body))).toEqual({
       childSessionId: "public-session-1",
       status: "completed",
+      statusRevision: 2,
       title: "Session title",
     });
     expect(h.backgroundTasks.submissions).not.toHaveLength(0);
@@ -295,6 +323,41 @@ describe("SessionStatusService.cancel", () => {
     await cancellation;
     expect(h.broadcast).toHaveBeenCalledWith({ type: "session_status", status: "cancelled" });
   });
+
+  it("identifies the processing message when cancellation terminalizes multiple prompts", async () => {
+    const h = harness({
+      session: createSession({ status: "active", parent_session_id: "parent-1" }),
+    });
+    h.repository.getProcessingMessage.mockReturnValue({ id: "message-active" } as MessageRow);
+    const terminalize = vi.fn();
+    h.buildChildResultSnapshot.mockImplementation(() => {
+      expect(terminalize).toHaveBeenCalledOnce();
+      expect(h.isTransactionActive()).toBe(true);
+      return {
+        authorUserId: "user-1",
+        payload: {
+          session: { title: "Session title", repoOwner: "acme", repoName: "repo" },
+          finalResponse: null,
+        },
+      };
+    });
+
+    await h.service.cancel(terminalize);
+
+    expect(h.persistChildResult).toHaveBeenCalledWith({
+      parentSessionId: "parent-1",
+      childSessionId: "public-session-1",
+      status: "cancelled",
+      title: "Session title",
+      statusRevision: 2,
+      messageId: "message-active",
+      authorUserId: "user-1",
+      payload: {
+        session: { title: "Session title", repoOwner: "acme", repoName: "repo" },
+        finalResponse: null,
+      },
+    });
+  });
 });
 
 describe("SessionStatusService.reconcileAfterExecution", () => {
@@ -308,11 +371,34 @@ describe("SessionStatusService.reconcileAfterExecution", () => {
   });
 
   it("completes when idle and the execution succeeded", async () => {
-    const h = harness({ session: createSession({ status: "active" }) });
-
-    await h.service.reconcileAfterExecution(true);
+    const h = harness({
+      session: createSession({ status: "active", parent_session_id: "parent-1" }),
+    });
+    h.repository.updateSessionStatus.mockImplementation(() => {
+      expect(h.isTransactionActive()).toBe(true);
+    });
+    h.persistChildResult.mockImplementation(() => {
+      expect(h.isTransactionActive()).toBe(true);
+    });
+    await h.service.reconcileAfterExecution(true, "message-final");
 
     expect(h.broadcast).toHaveBeenCalledWith({ type: "session_status", status: "completed" });
+    expect(h.persistChildResult).toHaveBeenCalledWith({
+      parentSessionId: "parent-1",
+      childSessionId: "public-session-1",
+      status: "completed",
+      title: "Session title",
+      statusRevision: 2,
+      messageId: "message-final",
+      authorUserId: "user-1",
+      payload: {
+        session: { title: "Session title", repoOwner: "acme", repoName: "repo" },
+        finalResponse: null,
+      },
+    });
+    expect(h.persistChildResult.mock.invocationCallOrder[0]).toBeLessThan(
+      h.kickChildResult.mock.invocationCallOrder[0]
+    );
   });
 
   it("fails when idle and the execution failed", async () => {
@@ -364,12 +450,20 @@ describe("SessionStatusService.reconcileAfterQueueRemoval", () => {
   });
 
   it("completes when no failed terminal message remains", async () => {
-    const h = harness({ session: createSession({ status: "active" }) });
-    h.repository.getLatestTerminalMessage.mockReturnValue({ status: "completed" } as MessageRow);
+    const h = harness({
+      session: createSession({ status: "active", parent_session_id: "parent-1" }),
+    });
+    h.repository.getLatestTerminalMessage.mockReturnValue({
+      id: "message-old",
+      status: "completed",
+    } as MessageRow);
 
     await h.service.reconcileAfterQueueRemoval();
 
     expect(h.broadcast).toHaveBeenCalledWith({ type: "session_status", status: "completed" });
+    expect(h.persistChildResult).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: "message-old" })
+    );
   });
 
   it("returns to created when no prompt has executed", async () => {
@@ -484,7 +578,7 @@ describe("SessionStatusService.notifyParentOfChildUpdate", () => {
     h.service.notifyParentOfChildUpdate(
       { parent_session_id: "parent-1", title: "Old title" },
       "public-session-1",
-      { status: "active", title: "New title" }
+      { status: "active", statusRevision: 4, title: "New title" }
     );
 
     const [parentId, path, init] = h.parentFetch.mock.calls[0];
@@ -493,6 +587,7 @@ describe("SessionStatusService.notifyParentOfChildUpdate", () => {
     expect(JSON.parse(String(init?.body))).toEqual({
       childSessionId: "public-session-1",
       status: "active",
+      statusRevision: 4,
       title: "New title",
     });
     expect(h.backgroundTasks.submissions).toHaveLength(1);
@@ -505,7 +600,7 @@ describe("SessionStatusService.notifyParentOfChildUpdate", () => {
     h.service.notifyParentOfChildUpdate(
       { parent_session_id: "parent-1", title: null },
       "public-session-1",
-      { status: "failed", title: null }
+      { status: "failed", statusRevision: 3, title: null }
     );
 
     // Drain the fire-and-forget notification; its failure is absorbed by the
@@ -520,6 +615,7 @@ describe("SessionStatusService.notifyParentOfChildUpdate", () => {
 
     h.service.notifyParentOfChildUpdate({ parent_session_id: null, title: null }, "child-1", {
       status: "active",
+      statusRevision: 1,
       title: null,
     });
 

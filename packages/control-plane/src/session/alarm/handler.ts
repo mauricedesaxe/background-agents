@@ -6,6 +6,7 @@ import type { SessionMessageQueue } from "../message-queue";
 import type { ExecutionStopCoordinator } from "../execution-stop-coordinator";
 import type { MessageRepository } from "../message-repository";
 import type { SessionTerminalMessageProjection } from "../terminal-message-projection";
+import type { ChildResultNotifier } from "../child-result-notification";
 
 export interface AlarmHandlerDeps {
   preserveBeforeWatchdogs?: () => Promise<"continue" | "hold_watchdogs">;
@@ -17,6 +18,7 @@ export interface AlarmHandlerDeps {
   >;
   lifecycleManager: SandboxAlarm;
   terminalMessageProjection: Pick<SessionTerminalMessageProjection, "flushPending">;
+  childResultNotifier: Pick<ChildResultNotifier, "flushPending">;
   alarmScheduler: AlarmScheduler;
   /** Resolved per use so it honors settings persisted after construction. */
   getExecutionTimeoutMs: () => number;
@@ -103,6 +105,11 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
         // The boot was for that prompt; it fails with the same words the user
         // sees, and nothing re-drives it onto a fresh sandbox.
         await deps.messageQueue.failPendingMessage(bootPrompt.id, lifecycleResult.reason);
+      }
+      try {
+        await deps.childResultNotifier.flushPending();
+      } catch (error) {
+        projectionFailure ??= { error };
       }
       if (projectionFailure) throw projectionFailure.error;
     },

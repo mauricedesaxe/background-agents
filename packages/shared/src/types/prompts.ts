@@ -5,7 +5,12 @@ export const MAX_WEB_PROMPT_CHARS = 64_000;
 export const MAX_UNFINISHED_PROMPTS = 50;
 export const BLANK_PROMPT_MESSAGE = "Prompt content must not be blank without attachments";
 
-export const clientRequestIdSchema = z.string().min(1).max(128);
+export const SYSTEM_CLIENT_REQUEST_ID_PREFIX = "system:";
+export const clientRequestIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine((value) => !value.startsWith(SYSTEM_CLIENT_REQUEST_ID_PREFIX));
 
 export function isBlankPrompt(prompt: {
   content: string;

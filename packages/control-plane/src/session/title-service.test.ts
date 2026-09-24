@@ -12,6 +12,7 @@ function sessionRow(overrides: Partial<SessionRow> = {}): SessionRow {
     session_name: "public-name",
     parent_session_id: null,
     status: "active",
+    status_revision: 1,
     updated_at: NOW - 5_000,
     ...overrides,
   } as SessionRow;
@@ -140,7 +141,7 @@ describe("SessionTitleService", () => {
     expect(h.statusService.notifyParentOfChildUpdate).toHaveBeenCalledWith(
       expect.objectContaining({ id: "session-1", title: "Child title" }),
       "public-name",
-      { status: "active", title: "Child title" }
+      { status: "active", statusRevision: 1, title: "Child title" }
     );
   });
 });

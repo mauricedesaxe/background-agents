@@ -26,6 +26,9 @@ function createHandler(preserveBeforeWatchdogs?: () => Promise<"continue" | "hol
   const terminalMessageProjection = {
     flushPending: vi.fn<() => Promise<void>>().mockResolvedValue(),
   };
+  const childResultNotifier = {
+    flushPending: vi.fn<() => Promise<void>>().mockResolvedValue(),
+  };
   const alarmScheduler = {
     schedule: vi.fn<(timestamp: number) => Promise<void>>().mockResolvedValue(),
     cancel: vi.fn<() => Promise<void>>().mockResolvedValue(),
@@ -46,6 +49,7 @@ function createHandler(preserveBeforeWatchdogs?: () => Promise<"continue" | "hol
     executionStop,
     lifecycleManager,
     terminalMessageProjection,
+    childResultNotifier,
     alarmScheduler,
     getExecutionTimeoutMs: () => 1000,
     now,
@@ -60,6 +64,7 @@ function createHandler(preserveBeforeWatchdogs?: () => Promise<"continue" | "hol
     executionStop,
     lifecycleManager,
     terminalMessageProjection,
+    childResultNotifier,
     alarmScheduler,
     now,
     log,
@@ -290,6 +295,7 @@ describe("createAlarmHandler", () => {
       executionStop,
       lifecycleManager,
       terminalMessageProjection: { flushPending: vi.fn(async () => {}) },
+      childResultNotifier: { flushPending: vi.fn(async () => {}) },
       alarmScheduler,
       getExecutionTimeoutMs: () => 1000,
       now: () => 2000,

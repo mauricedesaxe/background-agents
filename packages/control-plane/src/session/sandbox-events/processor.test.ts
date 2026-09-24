@@ -19,6 +19,7 @@ import type { MessageRepository } from "../message-repository";
 import type { SessionStatusService } from "../session-status-service";
 import type { SandboxCommandTarget, SessionWebSocketManager } from "../websocket-manager";
 import type { SessionBudgetService } from "../budget-service";
+import type { MessageRow } from "../types";
 
 function createPushSpec(repoOwner: string, repoName: string, targetBranch: string): GitPushSpec {
   return {
@@ -44,6 +45,7 @@ function createProcessor(shutdown?: {
     getSession: vi.fn(() => null),
     getProcessingMessage,
     getMessageContent: vi.fn(() => null as string | null),
+    getMessageById: vi.fn(() => null as MessageRow | null),
     addSessionCost: vi.fn(() => 1.25),
     recordMessageCompletion: vi.fn((event: { messageId: string }, completedAt: number) => {
       getProcessingMessage.mockReturnValue(null);
@@ -87,7 +89,16 @@ function createProcessor(shutdown?: {
   const diffService = { pinBaselines: vi.fn() };
   const triggerSnapshot = vi.fn(async (_reason: string) => {});
   const projectTerminalMessage = vi.fn(async () => {});
-  const statusService = { reconcileAfterExecution: vi.fn(async (_success: boolean) => {}) };
+  const persistedStatusTransition = { revision: 2 };
+  let transactionActive = false;
+  const statusService = {
+    reconcileAfterExecution: vi.fn(async (_success: boolean, _messageId?: string) => {}),
+    persistAfterExecution: vi.fn(() => {
+      expect(transactionActive).toBe(true);
+      return persistedStatusTransition;
+    }),
+    publishPersistedTransition: vi.fn(async () => {}),
+  };
   const scheduleInactivityCheck = vi.fn(async () => {});
   const processMessageQueue = vi.fn(async () => {});
   const broadcastPromptQueue = vi.fn();
@@ -148,7 +159,14 @@ function createProcessor(shutdown?: {
       processMessageQueue,
       broadcastPromptQueue,
       budgetService,
-      (closure) => closure(),
+      (closure) => {
+        transactionActive = true;
+        try {
+          return closure();
+        } finally {
+          transactionActive = false;
+        }
+      },
       offerFallbackTitle
     ),
     new SandboxRuntimeEventHandler(
@@ -544,7 +562,10 @@ describe("SessionSandboxEventProcessor", () => {
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
     expect(h.broadcastPromptQueue).toHaveBeenCalledOnce();
     expect(h.callbackService.notifyComplete).toHaveBeenCalledWith("msg-1", true, undefined);
-    expect(h.statusService.reconcileAfterExecution).toHaveBeenCalledWith(true);
+    expect(h.statusService.persistAfterExecution).toHaveBeenCalledWith(true, "msg-1");
+    expect(h.statusService.publishPersistedTransition).toHaveBeenCalledWith(
+      expect.objectContaining({ revision: 2 })
+    );
     expect(h.repository.recordMessageCompletion.mock.invocationCallOrder[0]).toBeLessThan(
       h.projectTerminalMessage.mock.invocationCallOrder[0]
     );
@@ -555,7 +576,7 @@ describe("SessionSandboxEventProcessor", () => {
       h.callbackService.notifyComplete.mock.invocationCallOrder[0]
     );
     expect(h.callbackService.notifyComplete.mock.invocationCallOrder[0]).toBeLessThan(
-      h.statusService.reconcileAfterExecution.mock.invocationCallOrder[0]
+      h.statusService.publishPersistedTransition.mock.invocationCallOrder[0]
     );
     expect(h.triggerSnapshot).toHaveBeenCalledWith("execution_complete");
     expect(h.scheduleInactivityCheck).toHaveBeenCalledTimes(1);
@@ -1013,6 +1034,10 @@ describe("SessionSandboxEventProcessor", () => {
       h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
       // No processing message — triggers the "already_stopped" branch
       h.repository.getProcessingMessage.mockReturnValue(null);
+      h.repository.getMessageById.mockReturnValue({
+        id: "msg-1",
+        status: "completed",
+      } as MessageRow);
 
       const event = {
         type: "execution_complete",
@@ -1034,6 +1059,7 @@ describe("SessionSandboxEventProcessor", () => {
       expect(h.updateLastActivity).toHaveBeenCalledOnce();
       expect(h.scheduleInactivityCheck).toHaveBeenCalledOnce();
       expect(h.processMessageQueue).toHaveBeenCalledOnce();
+      expect(h.statusService.reconcileAfterExecution).toHaveBeenCalledWith(true, "msg-1");
     });
 
     it("does not send ACK for non-critical events even with ackId", async () => {

@@ -37,7 +37,10 @@ import type { SessionWebSocketManager } from "./websocket-manager";
 import type { ParticipantService } from "./participant-service";
 import type { CallbackNotificationService } from "./callback-notification-service";
 import type { SessionStatusService } from "./session-status-service";
-import type { EnqueuePromptRequest } from "./enqueue-prompt-contract";
+import type {
+  EnqueuePromptRequest,
+  IdempotentEnqueuePromptRequest,
+} from "./enqueue-prompt-contract";
 import { getAvatarUrl } from "./participant-service";
 import { resolveParticipantName } from "./participant-name";
 import type { AlarmScheduler, BackgroundTasks, SessionWebSocket } from "../platform-ports";
@@ -97,6 +100,13 @@ export class PromptRequestConflictError extends Error {
   constructor() {
     super("clientRequestId was already used for a different prompt");
     this.name = "PromptRequestConflictError";
+  }
+}
+
+export class PromptAdmissionSupersededError extends Error {
+  constructor() {
+    super("Prompt admission was superseded");
+    this.name = "PromptAdmissionSupersededError";
   }
 }
 
@@ -212,7 +222,7 @@ export class SessionMessageQueue {
         artifact_id: command.pullRequest.artifactId,
       });
     }
-    await this.redrivePendingAutofix(admission.messageId);
+    await this.redrivePendingPrompt(admission.messageId);
     return admission;
   }
 
@@ -220,15 +230,15 @@ export class SessionMessageQueue {
     const messageId = this.messageRepository.getAutofixMessageId(feedbackKey);
     if (!messageId) return { kind: "not_found" };
 
-    await this.redrivePendingAutofix(messageId);
+    await this.redrivePendingPrompt(messageId);
     return { kind: "found", messageId };
   }
 
-  private async redrivePendingAutofix(messageId: string): Promise<void> {
+  async redrivePendingPrompt(messageId: string): Promise<void> {
     if (this.messageRepository.getMessageStatus(messageId) !== "pending") return;
 
     const session = this.repository.getSession();
-    if (!session || session.status === "archived" || session.status === "cancelled") return;
+    if (!session || !isSessionPromptable(session.status)) return;
 
     await this.sessionStatus.transition("active");
     await this.processMessageQueue();
@@ -410,9 +420,8 @@ export class SessionMessageQueue {
         event: "provider_auth.unavailable",
         model: resolvedModel,
       });
-      if (this.failMessage(message, authenticationError, now, "pending")) {
+      if (await this.failMessageAndReconcile(message, authenticationError, now, "pending")) {
         this.broadcastPromptQueue();
-        await this.sessionStatus.reconcileAfterExecution(false);
         await this.processMessageQueue();
       }
       return;
@@ -606,9 +615,8 @@ export class SessionMessageQueue {
   async failPendingMessage(messageId: string, error: string): Promise<void> {
     const message = this.messageRepository.getMessageById(messageId);
     if (!message || message.status !== "pending") return;
-    if (!this.failMessage(message, error, Date.now(), "pending")) return;
+    if (!(await this.failMessageAndReconcile(message, error, Date.now(), "pending"))) return;
     this.broadcastPromptQueue();
-    await this.sessionStatus.reconcileAfterExecution(false);
   }
 
   /**
@@ -623,12 +631,31 @@ export class SessionMessageQueue {
     const processingMessage = this.messageRepository.getProcessingMessageWithCreatedAt();
     if (!processingMessage) return;
 
-    if (!this.failMessage(processingMessage, error, now, "processing")) {
+    if (!(await this.failMessageAndReconcile(processingMessage, error, now, "processing"))) {
       return;
     }
     this.messenger.broadcast({ type: "processing_status", isProcessing: false });
     this.broadcastPromptQueue();
-    await this.sessionStatus.reconcileAfterExecution(false);
+  }
+
+  private async failMessageAndReconcile(
+    message: { id: string; created_at: number },
+    error: string,
+    completedAt: number,
+    expectedStatus: "pending" | "processing"
+  ): Promise<boolean> {
+    const persisted = this.repository.transaction(() => {
+      const failure = this.messageFailures.record(message.id, error, completedAt, expectedStatus);
+      if (!failure) return null;
+      return {
+        failure,
+        statusTransition: this.sessionStatus.persistAfterExecution(false, message.id),
+      };
+    });
+    if (!persisted) return false;
+    this.messageFailures.deliver(persisted.failure);
+    await this.sessionStatus.publishPersistedTransition(persisted.statusTransition);
+    return true;
   }
 
   private failMessage(
@@ -678,6 +705,20 @@ export class SessionMessageQueue {
   async enqueuePromptFromApi(
     data: EnqueuePromptRequest
   ): Promise<{ messageId: string; status: "queued" }> {
+    return this.enqueueTrustedPrompt(data);
+  }
+
+  async enqueueIdempotentAgentPrompt(
+    data: IdempotentEnqueuePromptRequest,
+    admissionGuard?: () => boolean
+  ): Promise<{ messageId: string; status: "queued" }> {
+    return this.enqueueTrustedPrompt(data, admissionGuard);
+  }
+
+  private async enqueueTrustedPrompt(
+    data: EnqueuePromptRequest & { clientRequestId?: string },
+    admissionGuard?: () => boolean
+  ): Promise<{ messageId: string; status: "queued" }> {
     this.assertPromptableSession();
     this.assertBudgetAvailable();
     this.assertQueueCapacity();
@@ -710,23 +751,30 @@ export class SessionMessageQueue {
       participant = this.participantRepository.getParticipantById(participant.id) ?? participant;
     }
 
-    const enqueued = await this.enqueuePromptCore({
-      participant,
-      userId: data.authorId,
-      content: data.content,
-      source: data.source,
-      model: data.model,
-      reasoningEffort: data.reasoningEffort,
-      attachments: data.attachments,
-      callbackContext: data.callbackContext,
-    });
+    const enqueued = await this.enqueuePromptCore(
+      {
+        participant,
+        userId: data.authorId,
+        content: data.content,
+        source: data.source,
+        model: data.model,
+        reasoningEffort: data.reasoningEffort,
+        attachments: data.attachments,
+        callbackContext: data.callbackContext,
+        clientRequestId: data.clientRequestId,
+      },
+      admissionGuard
+    );
 
     await this.processMessageQueue();
 
     return { messageId: enqueued.messageId, status: "queued" };
   }
 
-  private async enqueuePromptCore(data: EnqueuePromptCoreData): Promise<EnqueuedPrompt> {
+  private async enqueuePromptCore(
+    data: EnqueuePromptCoreData,
+    admissionGuard?: () => boolean
+  ): Promise<EnqueuedPrompt> {
     let requestFingerprint: string | undefined;
     if (data.clientRequestId) {
       requestFingerprint = await fingerprintWebPrompt(data.participant.id, data);
@@ -770,6 +818,7 @@ export class SessionMessageQueue {
     }
     this.assertBudgetAvailable();
     this.assertQueueCapacity(queueDepthBefore);
+    if (admissionGuard && !admissionGuard()) throw new PromptAdmissionSupersededError();
     const resolvedAttachments = resolveSessionAttachments(
       data.attachments,
       this.attachmentRepository

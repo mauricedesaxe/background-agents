@@ -64,7 +64,7 @@ export class SandboxExecutionEventHandler {
   ): Promise<void> {
     // Release the processing/stop fence and settle final cost in one commit.
     // No queue invocation may see a finished turn with its budget still stale.
-    const { completion, budgetTransition } = this.transaction(() => {
+    const { completion, budgetTransition, statusTransition } = this.transaction(() => {
       const completion =
         context.processingMessage?.id === event.messageId
           ? this.messageRepository.recordMessageCompletion(event, context.now, "processing")
@@ -73,6 +73,9 @@ export class SandboxExecutionEventHandler {
       return {
         completion,
         budgetTransition: this.budget.observeExecutionCost(event, context.now),
+        statusTransition: completion
+          ? this.statusService.persistAfterExecution(event.success, completion.messageId)
+          : null,
       };
     });
     await this.budget.deliverTransition(budgetTransition);
@@ -112,13 +115,20 @@ export class SandboxExecutionEventHandler {
           context: { message_id: event.messageId },
         }
       );
-      await this.statusService.reconcileAfterExecution(event.success);
+      await this.statusService.publishPersistedTransition(statusTransition);
     } else {
       this.log.info("prompt.complete", {
         event: "prompt.complete",
         message_id: event.messageId,
         outcome: "already_stopped",
       });
+      const terminalMessage = this.messageRepository.getMessageById(event.messageId);
+      if (terminalMessage?.status === "completed" || terminalMessage?.status === "failed") {
+        await this.statusService.reconcileAfterExecution(
+          terminalMessage.status === "completed",
+          terminalMessage.id
+        );
+      }
     }
 
     this.backgroundTasks.submit(() => this.triggerSnapshot("execution_complete"), {

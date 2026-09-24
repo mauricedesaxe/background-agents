@@ -53,7 +53,16 @@ it("a delayed archive projection cannot overwrite a successful equal-timestamp u
           return realProjection.project(id, status, revision, updatedAt);
         },
       },
-      { fetch: async () => new Response() }
+      { fetch: async () => new Response() },
+      { persist: () => {}, kick: () => {} },
+      () => ({
+        authorUserId: null,
+        payload: {
+          session: { title: "", repoOwner: null, repoName: null },
+          finalResponse: null,
+        },
+      }),
+      (closure) => closure()
     );
     const confirmation = service.confirmIndexStatus("archived").catch((error) => error);
     await started;

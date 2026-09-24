@@ -115,6 +115,20 @@ import { AutofixHandler } from "./http/handlers/autofix.handler";
 import { MessagesHandler } from "./http/handlers/messages.handler";
 import { ChildSessionsHandler } from "./http/handlers/child-sessions.handler";
 import { ChildSummaryHandler } from "./http/handlers/child-summary.handler";
+import {
+  buildChildSessionDetail,
+  collectFinalResponseEventRows,
+} from "./http/handlers/child-session-summary";
+import {
+  ChildResultDelivery,
+  SqlChildResultRevisionStore,
+  SqlChildResultSuppressionStore,
+} from "./child-result-delivery";
+import {
+  ChildResultNotifier,
+  childResultPayloadSchema,
+  SqlChildResultNotificationStore,
+} from "./child-result-notification";
 import { SessionInitHandler } from "./http/handlers/session-init.handler";
 import { SandboxHandler } from "./http/handlers/sandbox.handler";
 import { AttachmentsHandler } from "./http/handlers/attachments.handler";
@@ -259,6 +273,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
   const sessionCoreRepository = new SessionCoreRepository(sql, transaction);
   const alarmDeadlines = new PersistedAlarmDeadlineStore(sql);
   const terminalMessageProjectionStore = new PersistedTerminalMessageProjectionStore(sql);
+  const childResultNotificationStore = new SqlChildResultNotificationStore(sql);
 
   // Secrets-at-rest encryption is not optional. Every consumer below takes
   // the validated key, so no fallback path can persist a secret in plaintext.
@@ -389,6 +404,43 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     getSessionId: () => resolvePublicSessionId(sessionCoreRepository.getSession(), durableObjectId),
   });
 
+  const sessionRuntimeClient = createSessionRuntimeClientForTrace(env, durableObjectId);
+  const childResultNotifier = new ChildResultNotifier(
+    childResultNotificationStore,
+    sessionRuntimeClient,
+    backgroundTasks,
+    alarmScheduler,
+    log
+  );
+  const buildChildResultSnapshot = (messageId: string | null) => {
+    const session = sessionCoreRepository.getSession();
+    if (!session) throw new Error("Cannot build a child result without a session");
+    const message = messageId ? messageRepository.getMessageById(messageId) : null;
+    if (
+      messageId &&
+      (!message || (message.status !== "completed" && message.status !== "failed"))
+    ) {
+      throw new Error("Cannot build a child result from a non-terminal message");
+    }
+    const finalResponse = message
+      ? { message, ...collectFinalResponseEventRows(eventRepository, message.id) }
+      : undefined;
+    const detail = buildChildSessionDetail({
+      session,
+      sandbox: sandboxRepository.getSandbox(),
+      publicSessionId: resolvePublicSessionId(session, durableObjectId),
+      artifacts: artifactRepository.listArtifacts(),
+      recentEventRows: [],
+      hasUnfinishedPrompt: messageRepository.getPendingOrProcessingCount() > 0,
+      parseArtifactMetadata: (artifact) => parseArtifactMetadata(artifact, log),
+      ...(finalResponse ? { finalResponse } : {}),
+    });
+    const author = message ? participantRepository.getParticipantById(message.author_id) : null;
+    return {
+      authorUserId: author?.user_id ?? null,
+      payload: childResultPayloadSchema.parse(detail),
+    };
+  };
   const statusService = new SessionStatusService(
     backgroundTasks,
     log,
@@ -400,7 +452,10 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     new SessionStatusProjectionStore(db),
     // Parent notifications have no request of their own: each is one hop
     // under this child's trace, with its own request id.
-    createSessionRuntimeClientForTrace(env, durableObjectId)
+    sessionRuntimeClient,
+    childResultNotifier,
+    buildChildResultSnapshot,
+    transaction
   );
 
   const titleService = new SessionTitleService({
@@ -527,6 +582,32 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     stopExecution: () => executionStop.stop(),
     parseArtifactMetadata: (artifact) => parseArtifactMetadata(artifact, log),
   });
+  const childResultDelivery = new ChildResultDelivery({
+    getParent: () => {
+      const session = sessionCoreRepository.getSession();
+      return session
+        ? {
+            id: resolvePublicSessionId(session, durableObjectId),
+            status: session.status,
+          }
+        : null;
+    },
+    getOwner: () =>
+      participantRepository
+        .listParticipants()
+        .find((participant) => participant.role === "owner") ?? null,
+    getParticipantByUserId: (userId) => participantRepository.getParticipantByUserId(userId),
+    isChildOf: (childSessionId, parentSessionId) =>
+      sessionIndexStore.isChildOf(childSessionId, parentSessionId),
+    findMessageByRequestId: (clientRequestId) =>
+      messageRepository.getMessageByClientRequestId(clientRequestId),
+    enqueuePrompt: (request, admissionGuard) =>
+      messageService.enqueueIdempotentAgentPrompt(request, admissionGuard),
+    redrivePendingPrompt: (messageId) => messageService.redrivePendingPrompt(messageId),
+    suppressions: new SqlChildResultSuppressionStore(sql),
+    revisions: new SqlChildResultRevisionStore(sql),
+    log,
+  });
   const autofixHandler = new AutofixHandler(messageQueue);
   const budgetService = new SessionBudgetService(
     sessionCoreRepository,
@@ -615,6 +696,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     executionStop,
     lifecycleManager,
     terminalMessageProjection,
+    childResultNotifier,
     alarmScheduler,
     getExecutionTimeoutMs,
     now: () => Date.now(),
@@ -661,7 +743,8 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     participantRepository,
     sessionCoreRepository,
     messenger,
-    messageService
+    messageService,
+    childResultDelivery
   );
   const childSummaryHandler = new ChildSummaryHandler(
     sessionCoreRepository,
@@ -978,6 +1061,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
             await wsManager.expireAuthorizationLeases(Date.now());
             await alarmScheduler.rehydrate();
             await terminalMessageProjection.rearm();
+            await childResultNotifier.rearm();
           },
           {
             name: "alarm.rehydrate",

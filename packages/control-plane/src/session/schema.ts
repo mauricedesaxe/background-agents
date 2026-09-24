@@ -56,6 +56,35 @@ const TERMINAL_MESSAGE_PROJECTION_TABLE_SQL = `CREATE TABLE IF NOT EXISTS termin
   next_attempt_at INTEGER NOT NULL
 );`;
 
+const CHILD_RESULT_SUPPRESSIONS_TABLE_SQL = `CREATE TABLE IF NOT EXISTS child_result_suppressions (
+  child_session_id TEXT NOT NULL,
+  status_revision INTEGER NOT NULL,
+  suppressed_at INTEGER NOT NULL,
+  PRIMARY KEY (child_session_id, status_revision)
+);`;
+
+const CHILD_RESULT_NOTIFICATIONS_TABLE_SQL = `CREATE TABLE IF NOT EXISTS child_result_notifications (
+  parent_session_id TEXT NOT NULL,
+  child_session_id TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('completed', 'failed', 'cancelled')),
+  title TEXT,
+  status_revision INTEGER NOT NULL,
+  message_id TEXT,
+  author_user_id TEXT,
+  result_payload TEXT NOT NULL,
+  attempts INTEGER NOT NULL,
+  next_attempt_at INTEGER NOT NULL,
+  PRIMARY KEY (child_session_id, status_revision)
+);`;
+
+const CHILD_RESULT_REVISIONS_TABLE_SQL = `CREATE TABLE IF NOT EXISTS child_result_revisions (
+  child_session_id TEXT PRIMARY KEY,
+  latest_revision INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  message_id TEXT,
+  message_id_known INTEGER NOT NULL
+);`;
+
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS sandbox_preservation (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -222,6 +251,13 @@ ${SESSION_ALARM_STATE_TABLE_SQL}
 -- A terminal message whose D1 projection has not landed yet. Only the newest
 -- is kept: the projection is monotonic, so an older one would be a no-op.
 ${TERMINAL_MESSAGE_PROJECTION_TABLE_SQL}
+
+-- Child result transitions permanently suppressed by a closed parent.
+${CHILD_RESULT_SUPPRESSIONS_TABLE_SQL}
+
+${CHILD_RESULT_NOTIFICATIONS_TABLE_SQL}
+
+${CHILD_RESULT_REVISIONS_TABLE_SQL}
 
 -- WebSocket client mapping for hibernation recovery
 CREATE TABLE IF NOT EXISTS ws_client_mapping (
@@ -722,6 +758,11 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
     run: `CREATE TABLE IF NOT EXISTS sandbox_preservation (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1), state TEXT NOT NULL
     )`,
+  },
+  {
+    id: 55,
+    description: "Persist child result delivery state",
+    run: `${CHILD_RESULT_SUPPRESSIONS_TABLE_SQL}\n${CHILD_RESULT_NOTIFICATIONS_TABLE_SQL}\n${CHILD_RESULT_REVISIONS_TABLE_SQL}`,
   },
 ];
 

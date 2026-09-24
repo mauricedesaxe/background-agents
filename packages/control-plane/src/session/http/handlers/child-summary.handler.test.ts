@@ -132,6 +132,7 @@ function createMessage(overrides: Partial<MessageRow> = {}): MessageRow {
 function createHandler() {
   const repository = {
     listEventPage: vi.fn(),
+    getMessageById: vi.fn(),
     getLatestTerminalMessage: vi.fn(),
     getEventTimelinePage: vi.fn(),
     getPendingOrProcessingCount: vi.fn(() => 0),
@@ -256,9 +257,12 @@ describe("ChildSummaryHandler", () => {
         type: "branch",
         url: "https://example.com/tree/fix",
         metadata: '{"head":"fix"}',
+        created_at: 2,
       }),
     ]);
-    repository.getLatestTerminalMessage.mockReturnValue(createMessage({ id: "msg-final" }));
+    repository.getLatestTerminalMessage.mockReturnValue(
+      createMessage({ id: "msg-final", started_at: 1 })
+    );
     repository.listEventPage
       .mockReturnValueOnce({ events: [], hasMore: false, nextCursor: null })
       .mockReturnValueOnce({
@@ -320,7 +324,140 @@ describe("ChildSummaryHandler", () => {
     });
   });
 
-  it("scopes final response artifacts to the terminal message window", async () => {
+  it("scopes the final response and PR artifacts to resultMessageId", async () => {
+    const { handler, getSession, getSandbox, repository, artifactRepository } = createHandler();
+    getSession.mockReturnValue(createSession({ status: "completed" }));
+    getSandbox.mockReturnValue(createSandbox({ status: "stopped" }));
+    artifactRepository.listArtifacts.mockReturnValue([
+      createArtifact({
+        id: "pr-requested",
+        type: "pr",
+        url: "https://example.com/pr/10",
+        metadata: '{"number":10}',
+        created_at: 150,
+      }),
+      createArtifact({
+        id: "pr-latest",
+        type: "pr",
+        url: "https://example.com/pr/20",
+        metadata: '{"number":20}',
+        created_at: 350,
+      }),
+    ]);
+    repository.getMessageById.mockReturnValue(
+      createMessage({
+        id: "msg-requested",
+        created_at: 100,
+        started_at: 110,
+        completed_at: 200,
+      })
+    );
+    repository.getLatestTerminalMessage.mockReturnValue(
+      createMessage({
+        id: "msg-latest",
+        created_at: 300,
+        started_at: 310,
+        completed_at: 400,
+      })
+    );
+    repository.listEventPage
+      .mockReturnValueOnce({ events: [], hasMore: false, nextCursor: null })
+      .mockReturnValueOnce({
+        events: [
+          createEvent({
+            id: "token:msg-requested",
+            type: "token",
+            message_id: "msg-requested",
+            data: '{"content":"Requested answer"}',
+            created_at: 180,
+          }),
+        ],
+        hasMore: false,
+        nextCursor: null,
+      });
+
+    const response = handler.getChildSummary(
+      new URL("http://internal/internal/child-summary?include=result&resultMessageId=msg-requested")
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      finalResponse: {
+        messageId: "msg-requested",
+        textContent: "Requested answer",
+        artifacts: [
+          {
+            type: "pr",
+            url: "https://example.com/pr/10",
+            label: "PR #10",
+            metadata: { number: 10 },
+          },
+        ],
+      },
+    });
+    expect(repository.getMessageById).toHaveBeenCalledWith("msg-requested");
+    expect(repository.getLatestTerminalMessage).not.toHaveBeenCalled();
+    expect(repository.listEventPage).toHaveBeenNthCalledWith(2, {
+      limit: FINAL_RESPONSE_EVENT_PAGE_LIMIT,
+      messageId: "msg-requested",
+    });
+  });
+
+  it.each([
+    ["missing", null],
+    ["pending", createMessage({ id: "msg-requested", status: "pending", completed_at: null })],
+    [
+      "processing",
+      createMessage({ id: "msg-requested", status: "processing", completed_at: null }),
+    ],
+  ])("returns 404 when resultMessageId references a %s message", async (_case, message) => {
+    const { handler, getSession, repository, artifactRepository } = createHandler();
+    getSession.mockReturnValue(createSession());
+    repository.getMessageById.mockReturnValue(message);
+
+    const response = handler.getChildSummary(
+      new URL("http://internal/internal/child-summary?include=result&resultMessageId=msg-requested")
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "Result message not found" });
+    expect(artifactRepository.listArtifacts).not.toHaveBeenCalled();
+    expect(repository.listEventPage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "without include=result",
+      "?resultMessageId=msg-requested",
+      "resultMessageId requires include=result",
+    ],
+    [
+      "with only include=trajectory",
+      "?include=trajectory&resultMessageId=msg-requested",
+      "resultMessageId requires include=result",
+    ],
+    ["when empty", "?include=result&resultMessageId=", "Invalid resultMessageId"],
+    ["when whitespace", "?include=result&resultMessageId=%20", "Invalid resultMessageId"],
+    [
+      "when repeated",
+      "?include=result&resultMessageId=msg-a&resultMessageId=msg-b",
+      "Invalid resultMessageId",
+    ],
+  ])("returns 400 for resultMessageId %s", async (_case, query, error) => {
+    const { handler, getSession, repository, artifactRepository } = createHandler();
+    getSession.mockReturnValue(createSession());
+
+    const response = handler.getChildSummary(
+      new URL(`http://internal/internal/child-summary${query}`)
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error });
+    expect(artifactRepository.listArtifacts).not.toHaveBeenCalled();
+    expect(repository.listEventPage).not.toHaveBeenCalled();
+  });
+
+  it("scopes final response artifacts to the terminal message execution window", async () => {
     const { handler, getSession, getSandbox, repository, artifactRepository } = createHandler();
     getSession.mockReturnValue(createSession({ status: "completed" }));
     getSandbox.mockReturnValue(createSandbox({ status: "stopped" }));
@@ -331,6 +468,25 @@ describe("ChildSummaryHandler", () => {
         url: "https://example.com/tree/old",
         metadata: '{"head":"old"}',
         created_at: 10,
+      }),
+      createArtifact({
+        id: "artifact-while-queued",
+        type: "pr",
+        url: "https://example.com/pull/previous",
+        created_at: 23,
+      }),
+      createArtifact({
+        id: "artifact-at-start-boundary",
+        type: "pr",
+        url: "https://example.com/pull/boundary",
+        created_at: 25,
+      }),
+      createArtifact({
+        id: "artifact-reused",
+        type: "pr",
+        url: "https://example.com/pull/reused",
+        created_at: 10,
+        updated_at: 35,
       }),
       createArtifact({
         id: "artifact-current",
@@ -372,6 +528,14 @@ describe("ChildSummaryHandler", () => {
     expect(await response.json()).toMatchObject({
       finalResponse: {
         artifacts: [
+          {
+            type: "pr",
+            url: "https://example.com/pull/boundary",
+          },
+          {
+            type: "pr",
+            url: "https://example.com/pull/reused",
+          },
           {
             type: "branch",
             url: "https://example.com/tree/current",

@@ -20,6 +20,8 @@ function createService() {
 
   const messageQueue = {
     enqueuePromptFromApi: vi.fn(),
+    enqueueIdempotentAgentPrompt: vi.fn(),
+    redrivePendingPrompt: vi.fn(),
   } as unknown as SessionMessageQueue;
 
   const stopExecution = vi.fn();
@@ -63,6 +65,32 @@ describe("MessageService", () => {
       authorId: "user-1",
       source: "web",
     });
+  });
+
+  it("delegates pending prompt redrive to SessionMessageQueue", async () => {
+    const { service, messageQueue } = createService();
+
+    await service.redrivePendingPrompt("msg-1");
+
+    expect(messageQueue.redrivePendingPrompt).toHaveBeenCalledWith("msg-1");
+  });
+
+  it("delegates an internal idempotent agent prompt to SessionMessageQueue", async () => {
+    const { service, messageQueue } = createService();
+    vi.mocked(messageQueue.enqueueIdempotentAgentPrompt).mockResolvedValue({
+      messageId: "msg-1",
+      status: "queued",
+    });
+    const request = {
+      content: "Child result",
+      authorId: "user-1",
+      source: "agent" as const,
+      clientRequestId: "system:child-result:abc",
+    };
+
+    await service.enqueueIdempotentAgentPrompt(request);
+
+    expect(messageQueue.enqueueIdempotentAgentPrompt).toHaveBeenCalledWith(request);
   });
 
   it("stops execution and returns stopping status", async () => {

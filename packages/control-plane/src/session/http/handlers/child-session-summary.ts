@@ -31,6 +31,7 @@ const CHILD_SUMMARY_INCLUDE_VALUES = new Set<string>(CHILD_SESSION_DETAIL_INCLUD
 interface ChildSummaryOptions {
   includeFinalResponse: boolean;
   includeTrajectory: boolean;
+  resultMessageId: string | null;
   trajectoryLimit: number;
   trajectoryCursor: EventTimelineCursor | null;
 }
@@ -91,6 +92,13 @@ export function parseChildSummaryOptions(url?: URL): ChildSummaryOptionsResult {
 
   const includeTrajectory = includeValuesResult.values.has("trajectory");
   const includeFinalResponse = includeValuesResult.values.has("result");
+  const resultMessageIdResult = parseResultMessageId(
+    url?.searchParams.getAll("resultMessageId") ?? [],
+    includeFinalResponse
+  );
+  if (!resultMessageIdResult.ok) {
+    return { ok: false, error: resultMessageIdResult.error };
+  }
   const trajectoryLimitResult = includeTrajectory
     ? parseLimit(
         url?.searchParams.get("trajectoryLimit"),
@@ -114,6 +122,7 @@ export function parseChildSummaryOptions(url?: URL): ChildSummaryOptionsResult {
     options: {
       includeFinalResponse,
       includeTrajectory,
+      resultMessageId: resultMessageIdResult.messageId,
       trajectoryLimit: trajectoryLimitResult.value,
       trajectoryCursor: cursorResult.cursor,
     },
@@ -223,6 +232,21 @@ function parseIncludeValues(
   return { ok: true, values };
 }
 
+function parseResultMessageId(
+  rawValues: string[],
+  includeFinalResponse: boolean
+): { ok: true; messageId: string | null } | { ok: false; error: string } {
+  if (rawValues.length === 0) return { ok: true, messageId: null };
+  if (rawValues.length !== 1 || !rawValues[0] || rawValues[0].trim() !== rawValues[0]) {
+    return { ok: false, error: "Invalid resultMessageId" };
+  }
+  if (!includeFinalResponse) {
+    return { ok: false, error: "resultMessageId requires include=result" };
+  }
+
+  return { ok: true, messageId: rawValues[0] };
+}
+
 function parseLimit(
   raw: string | null | undefined,
   fallback: number,
@@ -289,9 +313,11 @@ function buildArtifactInfo(
 function artifactCreatedDuringMessage(artifact: ArtifactRow, message: MessageRow | null): boolean {
   if (!message) return false;
 
-  const start = message.created_at;
+  if (message.started_at === null) return false;
+  const start = message.started_at;
   const end = message.completed_at ?? Number.MAX_SAFE_INTEGER;
-  return artifact.created_at >= start && artifact.created_at <= end;
+  const attributedAt = Math.max(artifact.created_at, artifact.updated_at);
+  return attributedAt >= start && attributedAt <= end;
 }
 
 function buildFinalResponse(

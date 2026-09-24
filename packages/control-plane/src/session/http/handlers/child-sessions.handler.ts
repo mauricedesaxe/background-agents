@@ -2,8 +2,9 @@ import { getValidHarnessOrDefault } from "@open-inspect/shared/harnesses";
 import { childFollowUpPromptRequestSchema } from "@open-inspect/shared/types/session-api";
 import { isSessionPromptable } from "@open-inspect/shared/types/session-activity";
 import { z } from "zod";
-import { sessionStatusSchema } from "@open-inspect/shared/types/sessions";
 import { parsePersistedSandboxSettings } from "../../../sandbox/settings";
+import type { ChildResultDelivery } from "../../child-result-delivery";
+import { childResultPayloadSchema } from "../../child-result-notification";
 import type { SessionMessenger } from "../../messenger";
 import { PromptQueueFullError, SessionNotPromptableError } from "../../message-queue";
 import type { MessageRepository } from "../../message-repository";
@@ -19,11 +20,37 @@ const parentPromptRequestSchema = childFollowUpPromptRequestSchema.extend({
   author: activePromptAuthorSchema,
 });
 
-const childSessionUpdateBodySchema = z.object({
+const childSessionUpdateBaseSchema = z.object({
   childSessionId: z.string().min(1),
-  status: sessionStatusSchema,
+  statusRevision: z.number().int().nonnegative(),
   title: z.string().nullable().optional(),
 });
+const childResultSchema = z
+  .object({
+    messageId: z.string().min(1).nullable(),
+    authorUserId: z.string().min(1).nullable(),
+    payload: childResultPayloadSchema,
+  })
+  .superRefine((result, context) => {
+    const payloadMessageId = result.payload.finalResponse?.messageId ?? null;
+    if (payloadMessageId !== result.messageId) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "finalResponse", "messageId"],
+        message: "Result payload must match messageId",
+      });
+    }
+  });
+const childSessionUpdateBodySchema = z.union([
+  childSessionUpdateBaseSchema.extend({
+    status: z.enum(["completed", "failed", "cancelled"]),
+    childResult: childResultSchema.optional(),
+  }),
+  childSessionUpdateBaseSchema.extend({
+    status: z.enum(["created", "active", "archived"]),
+    childResult: z.never().optional(),
+  }),
+]);
 
 function resolvePromptAuthorParticipant(
   messageRepository: MessageRepository,
@@ -64,7 +91,8 @@ export class ChildSessionsHandler {
     private readonly participantRepository: ParticipantRepository,
     private readonly sessionCoreRepository: SessionCoreRepository,
     private readonly messenger: SessionMessenger,
-    private readonly messageService: Pick<MessageService, "enqueuePrompt">
+    private readonly messageService: Pick<MessageService, "enqueuePrompt">,
+    private readonly childResultDelivery: Pick<ChildResultDelivery, "acceptUpdate" | "deliver">
   ) {}
 
   getSpawnContext(): Response {
@@ -186,6 +214,25 @@ export class ChildSessionsHandler {
     }
 
     const body = result.data;
+
+    if (body.childResult) {
+      const accepted = await this.childResultDelivery.deliver({
+        childSessionId: body.childSessionId,
+        status: body.status,
+        statusRevision: body.statusRevision,
+        messageId: body.childResult.messageId,
+        authorUserId: body.childResult.authorUserId,
+        payload: body.childResult.payload,
+      });
+      if (!accepted) return Response.json({ ok: true });
+    } else {
+      const accepted = await this.childResultDelivery.acceptUpdate({
+        childSessionId: body.childSessionId,
+        status: body.status,
+        statusRevision: body.statusRevision,
+      });
+      if (!accepted) return Response.json({ ok: true });
+    }
 
     this.messenger.broadcast({
       type: "child_session_update",

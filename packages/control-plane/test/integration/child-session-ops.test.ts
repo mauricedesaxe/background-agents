@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { SELF, env } from "cloudflare:test";
 import type { SessionStatus } from "@open-inspect/shared/types/sessions";
 import { runInSessionDO } from "./session-do-access";
@@ -163,7 +163,6 @@ describe("Child session operations (list, get, cancel)", () => {
           createdAt: Date.now(),
         },
       ]);
-
       const res = await SELF.fetch(`https://test.local/sessions/${pName}/children/${childName}`, {
         headers: { Authorization: `Bearer ${sandboxToken}` },
       });
@@ -272,7 +271,6 @@ describe("Child session operations (list, get, cancel)", () => {
         createdAt: now,
         updatedAt: now,
       });
-
       // Try to get the child through the wrong parent
       const res = await SELF.fetch(
         `https://test.local/sessions/${fakeName}/children/${childName}`,
@@ -767,6 +765,174 @@ describe("Child session operations (list, get, cancel)", () => {
   });
 
   describe("POST /internal/child-session-update", () => {
+    it("delivers a terminal child result to the parent exactly once", async () => {
+      const { childName, parentStub, childStub } = await setupParentAndChild();
+      const [{ id: childOwnerId }] = await queryDO<{ id: string }>(
+        childStub,
+        "SELECT id FROM participants WHERE role = 'owner'"
+      );
+      const [{ id: parentOwnerId, user_id: parentOwnerUserId }] = await queryDO<{
+        id: string;
+        user_id: string;
+      }>(parentStub, "SELECT id, user_id FROM participants WHERE role = 'owner'");
+      const childStartedAt = Date.now() - 500;
+      await seedMessage(childStub, {
+        id: "message-child-result",
+        authorId: childOwnerId,
+        content: "Finish the child task",
+        source: "web",
+        status: "processing",
+        createdAt: Date.now() - 1_000,
+        startedAt: childStartedAt,
+      });
+      await queryDO(
+        childStub,
+        `INSERT INTO artifacts (id, type, url, metadata, created_at, updated_at)
+         VALUES (?, 'pr', ?, NULL, ?, ?), (?, 'pr', ?, NULL, ?, ?)`,
+        "artifact-previous",
+        "https://example.com/pull/previous",
+        childStartedAt - 1,
+        childStartedAt - 1,
+        "artifact-current",
+        "https://example.com/pull/current",
+        childStartedAt + 100,
+        childStartedAt + 100
+      );
+      await seedEvents(childStub, [
+        {
+          id: "token-child-result",
+          type: "token",
+          data: JSON.stringify({ content: "Child finished the requested change" }),
+          messageId: "message-child-result",
+          createdAt: Date.now() - 100,
+        },
+      ]);
+      await queryDO(
+        parentStub,
+        "UPDATE messages SET status = 'completed', completed_at = ? WHERE status = 'processing'",
+        Date.now()
+      );
+      await queryDO(parentStub, "UPDATE session SET status = 'completed'");
+
+      const completion = await childStub.fetch("http://internal/internal/sandbox-event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "execution_complete",
+          messageId: "message-child-result",
+          success: true,
+          sandboxId: "sandbox-child",
+          timestamp: Date.now() / 1_000,
+        }),
+      });
+
+      expect(completion.status).toBe(200);
+      await vi.waitFor(async () => {
+        const delivered = await queryDO<{
+          id: string;
+          content: string;
+          source: string;
+          author_id: string;
+          client_request_id: string;
+        }>(
+          parentStub,
+          `SELECT id, content, source, author_id, client_request_id FROM messages
+           WHERE client_request_id LIKE 'system:child-result:%'`
+        );
+        expect(delivered).toHaveLength(1);
+        expect(delivered[0]).toMatchObject({
+          source: "agent",
+          author_id: parentOwnerId,
+          content: expect.stringContaining("Child finished the requested change"),
+        });
+        expect(delivered[0].content).toContain("https://example.com/pull/current");
+        expect(delivered[0].content).not.toContain("https://example.com/pull/previous");
+        const [parentSession] = await queryDO<{ status: string }>(
+          parentStub,
+          "SELECT status FROM session"
+        );
+        expect(parentSession.status).toBe("active");
+      });
+
+      const [childSession] = await queryDO<{ status_revision: number }>(
+        childStub,
+        "SELECT status_revision FROM session"
+      );
+      const duplicate = await parentStub.fetch("http://internal/internal/child-session-update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          childSessionId: childName,
+          status: "completed",
+          statusRevision: childSession.status_revision,
+          title: "Child Session",
+          childResult: {
+            messageId: "message-child-result",
+            authorUserId: parentOwnerUserId,
+            payload: {
+              session: { title: "Child Session", repoOwner: null, repoName: null },
+              finalResponse: {
+                messageId: "message-child-result",
+                textContent: "Child finished the requested change",
+                artifacts: [],
+              },
+            },
+          },
+        }),
+      });
+      expect(duplicate.status).toBe(200);
+      const [{ count }] = await queryDO<{ count: number }>(
+        parentStub,
+        `SELECT COUNT(*) AS count FROM messages
+         WHERE client_request_id LIKE 'system:child-result:%'`
+      );
+      expect(count).toBe(1);
+    });
+
+    it.each(["archived", "cancelled"] as const)(
+      "suppresses a child result for a %s parent",
+      async (parentStatus) => {
+        const { childName, parentStub } = await setupParentAndChild();
+        await queryDO(parentStub, "UPDATE session SET status = ?", parentStatus);
+
+        const response = await parentStub.fetch("http://internal/internal/child-session-update", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            childSessionId: childName,
+            status: "completed",
+            statusRevision: 2,
+            title: "Child Session",
+            childResult: {
+              messageId: "message-final",
+              authorUserId: "user-1",
+              payload: {
+                session: { title: "Child Session", repoOwner: null, repoName: null },
+                finalResponse: {
+                  messageId: "message-final",
+                  textContent: "Finished",
+                  artifacts: [],
+                },
+              },
+            },
+          }),
+        });
+
+        expect(response.status).toBe(200);
+        const [{ messages }] = await queryDO<{ messages: number }>(
+          parentStub,
+          `SELECT COUNT(*) AS messages FROM messages
+           WHERE client_request_id LIKE 'system:child-result:%'`
+        );
+        const suppressions = await queryDO<{ child_session_id: string; status_revision: number }>(
+          parentStub,
+          "SELECT child_session_id, status_revision FROM child_result_suppressions"
+        );
+        expect(messages).toBe(0);
+        expect(suppressions).toEqual([{ child_session_id: childName, status_revision: 2 }]);
+      }
+    );
+
     it("broadcasts child_session_update to authenticated clients", async () => {
       const pName = parentName();
       await initNamedSessionDO(pName, { repoOwner: "acme", repoName: "web-app" });
@@ -784,6 +950,20 @@ describe("Child session operations (list, get, cancel)", () => {
         baseBranch: null,
         status: "active",
         spawnDepth: 0,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await store.create({
+        id: "child-abc-123",
+        title: "Fix the tests",
+        repoOwner: "acme",
+        repoName: "web-app",
+        model: "anthropic/claude-sonnet-4-6",
+        reasoningEffort: null,
+        baseBranch: null,
+        status: "created",
+        parentSessionId: pName,
+        spawnDepth: 1,
         createdAt: now,
         updatedAt: now,
       });
@@ -805,6 +985,7 @@ describe("Child session operations (list, get, cancel)", () => {
         body: JSON.stringify({
           childSessionId: "child-abc-123",
           status: "created",
+          statusRevision: 0,
           title: "Fix the tests",
         }),
       });

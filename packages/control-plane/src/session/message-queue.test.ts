@@ -142,6 +142,7 @@ function buildQueue(mayDispatch: () => boolean = () => true) {
   // the queue is constructed.
   let executionTimeoutMs = EXECUTION_TIMEOUT_MS;
   let awaitingStop: { id: string; deadline: number } | null = null;
+  let repositoryTransactionActive = false;
   const log = {
     debug: vi.fn(),
     info: vi.fn(),
@@ -149,8 +150,16 @@ function buildQueue(mayDispatch: () => boolean = () => true) {
     error: vi.fn(),
     child: vi.fn(),
   };
+  const transaction = <T>(closure: () => T): T => {
+    repositoryTransactionActive = true;
+    try {
+      return closure();
+    } finally {
+      repositoryTransactionActive = false;
+    }
+  };
   const repository = {
-    transaction: vi.fn((closure: () => unknown) => closure()),
+    transaction: vi.fn(transaction),
     createMessageWithAttachments: vi.fn(),
     createEvent: vi.fn(),
     getPendingOrProcessingCount: vi.fn(() => 1),
@@ -226,6 +235,11 @@ function buildQueue(mayDispatch: () => boolean = () => true) {
     transition: vi.fn(async (_status: string) => true),
     reconcileAfterExecution: vi.fn(async (_success: boolean) => {}),
     reconcileAfterQueueRemoval: vi.fn(async () => {}),
+    persistAfterExecution: vi.fn((_success: boolean, _messageId: string) => {
+      expect(repositoryTransactionActive).toBe(true);
+      return null;
+    }),
+    publishPersistedTransition: vi.fn(async () => {}),
   };
   const sandboxLifecycle = {
     spawnSandbox: vi.fn(async () => {}),
@@ -321,6 +335,7 @@ function buildQueue(mayDispatch: () => boolean = () => true) {
     getProviderAuthenticationError,
     projectTerminalMessage,
     log,
+    transaction,
     setExecutionTimeoutMs(value: number) {
       executionTimeoutMs = value;
     },
@@ -374,7 +389,7 @@ describe("SessionMessageQueue", () => {
       () => h.queue.processMessageQueue(),
       () => h.queue.broadcastPromptQueue(),
       budget,
-      (closure) => closure(),
+      (closure) => h.transaction(closure),
       () => {}
     );
     const finishing = handler.handleExecutionComplete(
@@ -546,6 +561,47 @@ describe("SessionMessageQueue", () => {
       messageId: "msg-existing",
     });
     expect(h.sessionStatus.transition).toHaveBeenCalledWith("active");
+  });
+
+  describe("redrivePendingPrompt", () => {
+    it.each(["created", "completed", "failed"] as const)(
+      "reactivates a pending prompt in a promptable %s session",
+      async (status) => {
+        const h = buildQueue();
+        h.repository.getSession.mockReturnValue(createSession({ status }));
+
+        await h.queue.redrivePendingPrompt("msg-existing");
+
+        expect(h.sessionStatus.transition).toHaveBeenCalledWith("active");
+        expect(h.repository.getNextPendingMessage).toHaveBeenCalledOnce();
+      }
+    );
+
+    it.each(["archived", "cancelled"] as const)(
+      "does not reactivate a %s session",
+      async (status) => {
+        const h = buildQueue();
+        h.repository.getSession.mockReturnValue(createSession({ status }));
+
+        await h.queue.redrivePendingPrompt("msg-existing");
+
+        expect(h.sessionStatus.transition).not.toHaveBeenCalled();
+        expect(h.repository.getNextPendingMessage).not.toHaveBeenCalled();
+      }
+    );
+
+    it.each([null, "processing", "completed", "failed"] as const)(
+      "does not redrive a prompt with status %s",
+      async (status) => {
+        const h = buildQueue();
+        h.repository.getMessageStatus.mockReturnValue(status);
+
+        await h.queue.redrivePendingPrompt("msg-existing");
+
+        expect(h.sessionStatus.transition).not.toHaveBeenCalled();
+        expect(h.repository.getNextPendingMessage).not.toHaveBeenCalled();
+      }
+    );
   });
 
   it("cancels a pending prompt and confirms it to the requester", async () => {
@@ -1605,7 +1661,9 @@ describe("SessionMessageQueue", () => {
       id: "msg-budget",
       created_at: 900,
     });
-    const preparation = h.executionStop.prepare("Session cost limit reached", 1000);
+    const preparation = h.transaction(() =>
+      h.executionStop.prepare("Session cost limit reached", 1000)
+    );
     expect(preparation).not.toBeNull();
     if (!preparation) throw new Error("Expected a prepared stop");
     await h.executionStop.deliver(preparation);
@@ -1633,12 +1691,14 @@ describe("SessionMessageQueue", () => {
     });
     h.setAlarm.mockRejectedValue(new Error("alarm unavailable"));
 
-    const preparation = h.executionStop.prepare("Session cost limit reached", 1000);
+    const preparation = h.transaction(() =>
+      h.executionStop.prepare("Session cost limit reached", 1000)
+    );
     expect(preparation).not.toBeNull();
     if (!preparation) throw new Error("Expected a prepared stop");
     await expect(h.executionStop.deliver(preparation)).resolves.toBeUndefined();
 
-    expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
+    expect(h.sessionStatus.persistAfterExecution).toHaveBeenCalledWith(false, "msg-budget");
     expect(h.wsManager.send).toHaveBeenCalledWith(sandboxWs, { type: "stop" });
     expect(h.sandboxLifecycle.terminateUnresponsiveSandbox).toHaveBeenCalledWith(
       "stop_alarm_failed"
@@ -1665,7 +1725,7 @@ describe("SessionMessageQueue", () => {
         h.wsManager.send.mockReturnValueOnce(false);
       }
       let releaseStatus!: () => void;
-      h.sessionStatus.reconcileAfterExecution.mockReturnValueOnce(
+      h.sessionStatus.publishPersistedTransition.mockReturnValueOnce(
         new Promise<void>((resolve) => {
           releaseStatus = resolve;
         })
@@ -1706,7 +1766,7 @@ describe("SessionMessageQueue", () => {
       });
       h.setAlarm.mockRejectedValueOnce(new Error("alarm unavailable"));
       let releaseStatus!: () => void;
-      h.sessionStatus.reconcileAfterExecution.mockReturnValueOnce(
+      h.sessionStatus.publishPersistedTransition.mockReturnValueOnce(
         new Promise<void>((resolve) => {
           releaseStatus = resolve;
         })
@@ -1961,7 +2021,7 @@ describe("SessionMessageQueue", () => {
 
     expect(h.repository.recordMessageCompletion).not.toHaveBeenCalled();
     expect(h.wsManager.send).not.toHaveBeenCalledWith(expect.anything(), { type: "stop" });
-    expect(h.sessionStatus.reconcileAfterExecution).not.toHaveBeenCalled();
+    expect(h.sessionStatus.persistAfterExecution).not.toHaveBeenCalled();
   });
 
   it("emits completion events and callbacks for prompts cancelled before dispatch", async () => {
@@ -2023,7 +2083,7 @@ describe("SessionMessageQueue", () => {
     expect(h.broadcast).toHaveBeenCalledWith(
       expect.objectContaining({ type: "prompt_queue_updated" })
     );
-    expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
+    expect(h.sessionStatus.persistAfterExecution).toHaveBeenCalledWith(false, "msg-head");
     expect(h.sandboxLifecycle.spawnSandbox).not.toHaveBeenCalled();
   });
 
@@ -2038,7 +2098,7 @@ describe("SessionMessageQueue", () => {
     await h.queue.failPendingMessage("msg-head", "boot budget");
 
     expect(h.repository.recordMessageCompletion).not.toHaveBeenCalled();
-    expect(h.sessionStatus.reconcileAfterExecution).not.toHaveBeenCalled();
+    expect(h.sessionStatus.persistAfterExecution).not.toHaveBeenCalled();
   });
 
   it("does nothing when the named prompt no longer exists", async () => {
@@ -2048,7 +2108,7 @@ describe("SessionMessageQueue", () => {
     await h.queue.failPendingMessage("msg-gone", "boot budget");
 
     expect(h.repository.recordMessageCompletion).not.toHaveBeenCalled();
-    expect(h.sessionStatus.reconcileAfterExecution).not.toHaveBeenCalled();
+    expect(h.sessionStatus.persistAfterExecution).not.toHaveBeenCalled();
   });
 
   it("reconciles session status when failing a stuck processing message", async () => {
@@ -2067,7 +2127,7 @@ describe("SessionMessageQueue", () => {
       expect.any(Number),
       "processing"
     );
-    expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
+    expect(h.sessionStatus.persistAfterExecution).toHaveBeenCalledWith(false, "msg-timeout");
   });
 
   it("uses a fatal sandbox reason for completion and callback notification", async () => {
@@ -2093,7 +2153,7 @@ describe("SessionMessageQueue", () => {
       false,
       "OpenCode repeatedly crashed"
     );
-    expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
+    expect(h.sessionStatus.persistAfterExecution).toHaveBeenCalledWith(false, "msg-crashed");
   });
 
   it("redrives a pending prompt after fatal sandbox termination completes", async () => {
@@ -2130,7 +2190,44 @@ describe("SessionMessageQueue", () => {
     expect(h.sandboxLifecycle.spawnSandbox).not.toHaveBeenCalled();
   });
 
-  describe("enqueuePromptFromApi", () => {
+  describe("enqueueIdempotentAgentPrompt", () => {
+    it("persists the internal client request ID as the dedupe fence", async () => {
+      const h = buildQueue();
+      const request = {
+        content: "Continue",
+        authorId: "user-1",
+        source: "agent" as const,
+        clientRequestId: "api-request-1",
+      };
+      const requestFingerprint = await fingerprintWebPrompt("part-1", request);
+
+      await h.queue.enqueueIdempotentAgentPrompt(request);
+
+      expect(h.repository.createMessageWithAttachments).toHaveBeenCalledWith(
+        expect.objectContaining({
+          clientRequestId: "api-request-1",
+          requestFingerprint,
+        }),
+        []
+      );
+
+      h.repository.getMessageByClientRequestId.mockReturnValue(
+        createMessage({
+          id: "msg-existing",
+          client_request_id: "api-request-1",
+          request_fingerprint: requestFingerprint,
+        })
+      );
+      h.repository.createMessageWithAttachments.mockClear();
+
+      await expect(h.queue.enqueueIdempotentAgentPrompt(request)).resolves.toEqual({
+        messageId: "msg-existing",
+        status: "queued",
+      });
+      expect(h.repository.getMessageByClientRequestId).toHaveBeenLastCalledWith("api-request-1");
+      expect(h.repository.createMessageWithAttachments).not.toHaveBeenCalled();
+    });
+
     it("rejects exhaustion before capacity checks or participant mutations", async () => {
       const h = buildQueue();
       h.repository.getSession.mockReturnValue(createSession({ budget_exhausted: 1 }));

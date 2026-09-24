@@ -33,3 +33,4 @@ export const enqueuePromptRequestSchema = z
   });
 
 export type EnqueuePromptRequest = z.infer<typeof enqueuePromptRequestSchema>;
+export type IdempotentEnqueuePromptRequest = EnqueuePromptRequest & { clientRequestId: string };

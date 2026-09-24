@@ -7,12 +7,16 @@ import type { MessageFailureService, RecordedMessageFailure } from "./message-fa
 import { STOP_CONFIRMATION_TIMEOUT_MS } from "./message-repository";
 import type { SessionMessenger } from "./messenger";
 import type { SessionCoreRepository } from "./session-core-repository";
-import type { SessionStatusService } from "./session-status-service";
+import type {
+  PersistedSessionStatusTransition,
+  SessionStatusService,
+} from "./session-status-service";
 import type { SessionWebSocketManager } from "./websocket-manager";
 
 export interface ExecutionStopPreparation {
   stopConfirmationDeadline: number;
   failure: RecordedMessageFailure;
+  statusTransition: PersistedSessionStatusTransition | null;
 }
 
 export class ExecutionStopCoordinator {
@@ -52,7 +56,14 @@ export class ExecutionStopCoordinator {
       stopConfirmationDeadline
     );
     this.alarmDeadlines.setPendingEarliest(stopConfirmationDeadline);
-    return { stopConfirmationDeadline, failure };
+    return {
+      stopConfirmationDeadline,
+      failure,
+      statusTransition: this.sessionStatus.persistAfterExecution(
+        false,
+        failure.completion.messageId
+      ),
+    };
   }
 
   async deliver(preparation: ExecutionStopPreparation): Promise<void> {
@@ -68,7 +79,7 @@ export class ExecutionStopCoordinator {
     const stopSent = sandboxWs !== null && this.wsManager.send(sandboxWs, { type: "stop" });
     const [alarm, status] = await Promise.allSettled([
       this.alarmScheduler.schedule(preparation.stopConfirmationDeadline),
-      this.sessionStatus.reconcileAfterExecution(false),
+      this.sessionStatus.publishPersistedTransition(preparation.statusTransition),
     ]);
     if (status.status === "rejected") {
       this.log.error("Stop status reconciliation failed", { error: status.reason });

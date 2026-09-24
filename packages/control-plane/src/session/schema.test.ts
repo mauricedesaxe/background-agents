@@ -507,6 +507,39 @@ describe("applyMigrations", () => {
     expect(migration?.run).toContain("CREATE TABLE IF NOT EXISTS session_alarm_state");
   });
 
+  it("persists child result delivery state for fresh and migrated sessions", () => {
+    expect(SCHEMA_SQL).toContain("CREATE TABLE IF NOT EXISTS child_result_suppressions");
+    expect(SCHEMA_SQL).toContain("PRIMARY KEY (child_session_id, status_revision)");
+    expect(SCHEMA_SQL).toContain("CREATE TABLE IF NOT EXISTS child_result_notifications");
+    expect(SCHEMA_SQL).toContain("CREATE TABLE IF NOT EXISTS child_result_revisions");
+
+    const migration = MIGRATIONS.find((item) => item.id === 55);
+    expect(migration?.run).toContain("CREATE TABLE IF NOT EXISTS child_result_suppressions");
+    expect(migration?.run).toContain("CREATE TABLE IF NOT EXISTS child_result_notifications");
+    expect(migration?.run).toContain("CREATE TABLE IF NOT EXISTS child_result_revisions");
+
+    const db = new DatabaseSync(":memory:");
+    try {
+      const run = migration!.run as string;
+      db.exec(run);
+      expect(() => db.exec(run)).not.toThrow();
+      db.prepare(
+        `INSERT OR IGNORE INTO child_result_suppressions
+         (child_session_id, status_revision, suppressed_at) VALUES (?, ?, ?)`
+      ).run("child-1", 2, 1000);
+      expect(
+        db
+          .prepare(
+            `SELECT child_session_id, status_revision, suppressed_at
+             FROM child_result_suppressions`
+          )
+          .get()
+      ).toEqual({ child_session_id: "child-1", status_revision: 2, suppressed_at: 1000 });
+    } finally {
+      db.close();
+    }
+  });
+
   it("adds prompt idempotency columns and index for fresh and migrated sessions", () => {
     const messagesTable = SCHEMA_SQL.split("CREATE TABLE IF NOT EXISTS messages")[1]?.split(
       ");"

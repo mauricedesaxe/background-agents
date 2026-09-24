@@ -10,6 +10,11 @@
 
 import { SessionInternalPaths } from "./contracts";
 import type { SessionRuntimeClient } from "./runtime-client";
+import type {
+  ChildResultNotifier,
+  ChildResultNotification,
+  ChildResultPayload,
+} from "./child-result-notification";
 import type { Logger } from "../logger";
 import type { SessionIndexStore } from "../db/session-index";
 import type { SessionStatusProjectionStore } from "../db/session-status-projection-store";
@@ -25,6 +30,31 @@ import { isSessionPromptable, isTurnSettled } from "@open-inspect/shared/types/s
 /** The index projections this service keeps consistent with the session row. */
 type SessionIndexProjections = Pick<SessionIndexStore, "finalizeChildAdmission" | "updateMetrics">;
 
+interface ChildResultUpdate {
+  messageId: string | null;
+}
+
+interface ChildResultSnapshot {
+  authorUserId: string | null;
+  payload: ChildResultPayload;
+}
+
+export interface PersistedSessionStatusTransition {
+  session: SessionRow;
+  publicSessionId: string;
+  status: SessionStatus;
+  updatedAt: number;
+  revision: number;
+  childResult?: ChildResultUpdate;
+  notification: ChildResultNotification | null;
+}
+
+function isChildResultStatus(
+  status: SessionStatus
+): status is "completed" | "failed" | "cancelled" {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
 export class SessionStatusService {
   constructor(
     private readonly backgroundTasks: BackgroundTasks,
@@ -36,7 +66,10 @@ export class SessionStatusService {
     private readonly sessionIndex: SessionIndexProjections,
     private readonly statusProjection: Pick<SessionStatusProjectionStore, "project">,
     /** Reaches the parent session's runtime for the child rollup. */
-    private readonly sessions: SessionRuntimeClient
+    private readonly sessions: SessionRuntimeClient,
+    private readonly childResultNotifier: Pick<ChildResultNotifier, "persist" | "kick">,
+    private readonly buildChildResultSnapshot: (messageId: string | null) => ChildResultSnapshot,
+    private readonly transactionSync: <T>(closure: () => T) => T
   ) {}
 
   /**
@@ -46,6 +79,13 @@ export class SessionStatusService {
    * refreshed in the same-status case).
    */
   async transition(status: SessionStatus): Promise<boolean> {
+    return this.transitionInternal(status);
+  }
+
+  private async transitionInternal(
+    status: SessionStatus,
+    childResult?: { messageId: string | null }
+  ): Promise<boolean> {
     const session = this.repository.getSession();
     if (!session) return false;
 
@@ -65,17 +105,68 @@ export class SessionStatusService {
       return false;
     }
 
-    const updatedAt = Math.max(Date.now(), session.updated_at + 1);
-    this.repository.updateSessionStatus(session.id, status, updatedAt);
+    const transition = this.transactionSync(() => this.persistTransition(status, childResult));
+    if (!transition) return false;
+    await this.publishPersistedTransition(transition);
+
+    return true;
+  }
+
+  /** Persist the status/outbox half while the caller still owns the message transaction. */
+  persistAfterExecution(
+    success: boolean,
+    messageId: string
+  ): PersistedSessionStatusTransition | null {
+    if (this.isSessionClosed()) return null;
+    if (this.messageRepository.getPendingOrProcessingCount() > 0) {
+      return this.persistTransition("active");
+    }
+    return this.persistTransition(success ? "completed" : "failed", { messageId });
+  }
+
+  /** Publish only after the transaction containing persistAfterExecution commits. */
+  async publishPersistedTransition(
+    transition: PersistedSessionStatusTransition | null
+  ): Promise<void> {
+    if (!transition) return;
+    if (transition.notification) this.childResultNotifier.kick(transition.notification);
     await this.projectTransition(
+      transition.session,
+      transition.publicSessionId,
+      transition.status,
+      transition.updatedAt,
+      transition.revision,
+      transition.childResult
+    );
+  }
+
+  private persistTransition(
+    status: SessionStatus,
+    childResult?: ChildResultUpdate
+  ): PersistedSessionStatusTransition | null {
+    const session = this.repository.getSession();
+    if (!session || session.status === status) return null;
+    const publicSessionId = this.getPublicSessionId(session);
+    const updatedAt = Math.max(Date.now(), session.updated_at + 1);
+    const revision = session.status_revision + 1;
+    this.repository.updateSessionStatus(session.id, status, updatedAt);
+    const notification = this.toChildResultNotification(
+      session,
+      publicSessionId,
+      status,
+      revision,
+      childResult
+    );
+    if (notification) this.childResultNotifier.persist(notification);
+    return {
       session,
       publicSessionId,
       status,
       updatedAt,
-      session.status_revision + 1
-    );
-
-    return true;
+      revision,
+      ...(childResult ? { childResult } : {}),
+      notification,
+    };
   }
 
   /**
@@ -155,14 +246,29 @@ export class SessionStatusService {
 
     const publicSessionId = this.getPublicSessionId(session);
     const updatedAt = Math.max(Date.now(), session.updated_at + 1);
-    this.repository.updateSessionStatus(session.id, "cancelled", updatedAt);
-    terminalizeUnfinishedMessages();
+    const processingMessage = this.messageRepository.getProcessingMessage();
+    const childResult = { messageId: processingMessage?.id ?? null };
+    let notification: ChildResultNotification | null = null;
+    this.transactionSync(() => {
+      this.repository.updateSessionStatus(session.id, "cancelled", updatedAt);
+      terminalizeUnfinishedMessages();
+      notification = this.toChildResultNotification(
+        session,
+        publicSessionId,
+        "cancelled",
+        session.status_revision + 1,
+        childResult
+      );
+      if (notification) this.childResultNotifier.persist(notification);
+    });
+    if (notification) this.childResultNotifier.kick(notification);
     await this.projectTransition(
       session,
       publicSessionId,
       "cancelled",
       updatedAt,
-      session.status_revision + 1
+      session.status_revision + 1,
+      childResult
     );
 
     return true;
@@ -173,7 +279,8 @@ export class SessionStatusService {
     publicSessionId: string,
     status: SessionStatus,
     updatedAt: number,
-    revision: number
+    revision: number,
+    childResult?: { messageId: string | null }
   ): Promise<void> {
     await this.syncSessionIndexStatusAndAdmission(
       publicSessionId,
@@ -190,8 +297,33 @@ export class SessionStatusService {
       this.syncSessionMetrics(publicSessionId);
     }
 
-    // Notify parent session (if this is a child) so its UI can refresh
-    this.notifyParentOfStatusChange(session, publicSessionId, status);
+    if (!childResult) {
+      this.notifyParentOfStatusChange(session, publicSessionId, status, revision);
+    }
+  }
+
+  private toChildResultNotification(
+    session: SessionRow,
+    childSessionId: string,
+    status: SessionStatus,
+    statusRevision: number,
+    childResult: { messageId: string | null } | undefined
+  ): ChildResultNotification | null {
+    if (!childResult || !session.parent_session_id) return null;
+    if (!isChildResultStatus(status)) {
+      throw new Error(`Child result cannot accompany ${status} status`);
+    }
+    const snapshot = this.buildChildResultSnapshot(childResult.messageId);
+    return {
+      parentSessionId: session.parent_session_id,
+      childSessionId,
+      status,
+      title: session.title,
+      statusRevision,
+      messageId: childResult.messageId,
+      authorUserId: snapshot.authorUserId,
+      payload: snapshot.payload,
+    };
   }
 
   /**
@@ -199,12 +331,21 @@ export class SessionStatusService {
    * when more prompts are queued, otherwise completed/failed by outcome.
    * Leaves a session that was cancelled or archived meanwhile as it is.
    */
-  async reconcileAfterExecution(success: boolean): Promise<void> {
-    if (this.isSessionClosed()) return;
-    const pendingOrProcessing = this.messageRepository.getPendingOrProcessingCount();
-    const nextStatus: SessionStatus =
-      pendingOrProcessing > 0 ? "active" : success ? "completed" : "failed";
-    await this.transition(nextStatus);
+  async reconcileAfterExecution(success: boolean, messageId?: string): Promise<void> {
+    const terminalMessageId = messageId ?? this.messageRepository.getLatestTerminalMessage()?.id;
+    if (!terminalMessageId) {
+      if (this.isSessionClosed()) return;
+      if (this.messageRepository.getPendingOrProcessingCount() > 0) {
+        await this.transition("active");
+        return;
+      }
+      await this.transition(success ? "completed" : "failed");
+      return;
+    }
+    const transition = this.transactionSync(() =>
+      this.persistAfterExecution(success, terminalMessageId)
+    );
+    await this.publishPersistedTransition(transition);
   }
 
   /** Leaves a session that was cancelled or archived meanwhile as it is. */
@@ -212,7 +353,11 @@ export class SessionStatusService {
     if (this.isSessionClosed()) return;
     if (this.messageRepository.getPendingOrProcessingCount() > 0) return;
     const nextStatus = this.getIdleStatusFromTerminalMessages();
-    await this.transition(nextStatus);
+    const terminalMessage = this.messageRepository.getLatestTerminalMessage();
+    await this.transitionInternal(
+      nextStatus,
+      terminalMessage ? { messageId: terminalMessage.id } : undefined
+    );
   }
 
   /**
@@ -221,7 +366,20 @@ export class SessionStatusService {
    */
   async reconcileFromMessageState(): Promise<void> {
     if (this.isSessionClosed()) return;
-    await this.settleFromMessageState();
+    if (this.messageRepository.getPendingOrProcessingCount() > 0) {
+      await this.transition("active");
+      return;
+    }
+    const terminalMessage = this.messageRepository.getLatestTerminalMessage();
+    const nextStatus: SessionStatus = terminalMessage
+      ? terminalMessage.status === "failed"
+        ? "failed"
+        : "completed"
+      : "created";
+    await this.transitionInternal(
+      nextStatus,
+      terminalMessage ? { messageId: terminalMessage.id } : undefined
+    );
   }
 
   /**
@@ -268,7 +426,12 @@ export class SessionStatusService {
   notifyParentOfChildUpdate(
     session: Pick<SessionRow, "parent_session_id" | "title">,
     childSessionId: string,
-    update: { status: SessionStatus; title: string | null }
+    update: {
+      status: SessionStatus;
+      statusRevision: number;
+      title: string | null;
+      childResult?: ChildResultUpdate;
+    }
   ): void {
     const parentId = session.parent_session_id;
     if (!parentId) return;
@@ -281,7 +444,9 @@ export class SessionStatusService {
           body: JSON.stringify({
             childSessionId,
             status: update.status,
+            statusRevision: update.statusRevision,
             title: update.title,
+            ...(update.childResult ? { childResult: update.childResult } : {}),
           }),
         }),
       {
@@ -298,11 +463,15 @@ export class SessionStatusService {
   private notifyParentOfStatusChange(
     session: Pick<SessionRow, "parent_session_id" | "title">,
     childSessionId: string,
-    status: SessionStatus
+    status: SessionStatus,
+    statusRevision: number,
+    childResult?: ChildResultUpdate
   ): void {
     this.notifyParentOfChildUpdate(session, childSessionId, {
       status,
+      statusRevision,
       title: session.title,
+      ...(childResult ? { childResult } : {}),
     });
   }
 

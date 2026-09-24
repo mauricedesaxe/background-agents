@@ -356,6 +356,7 @@ export async function handleSpawnChild(
           body: JSON.stringify({
             childSessionId: childId,
             status: "created",
+            statusRevision: 0,
             title: body.title,
           }),
         })

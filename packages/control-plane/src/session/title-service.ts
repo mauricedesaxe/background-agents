@@ -69,6 +69,7 @@ export class SessionTitleService {
     if (session.parent_session_id) {
       statusService.notifyParentOfChildUpdate({ ...session, title: titleText }, publicSessionId, {
         status: session.status,
+        statusRevision: session.status_revision,
         title: titleText,
       });
     }

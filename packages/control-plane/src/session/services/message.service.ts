@@ -7,7 +7,10 @@ import type { MessageRepository } from "../message-repository";
 import type { ArtifactRepository } from "../artifact-repository";
 import type { EventRepository } from "../event-repository";
 import type { SessionMessageQueue } from "../message-queue";
-import type { EnqueuePromptRequest } from "../enqueue-prompt-contract";
+import type {
+  EnqueuePromptRequest,
+  IdempotentEnqueuePromptRequest,
+} from "../enqueue-prompt-contract";
 import { SessionEventStream, type SessionEventListRequest } from "../event-stream";
 import { parseStoredSessionAttachments } from "../session-attachment-resolver";
 import type { MessageListCursor } from "../message-cursor";
@@ -41,6 +44,19 @@ export class MessageService {
 
   enqueuePrompt(request: EnqueuePromptRequest): Promise<{ messageId: string; status: "queued" }> {
     return this.deps.messageQueue.enqueuePromptFromApi(request);
+  }
+
+  enqueueIdempotentAgentPrompt(
+    request: IdempotentEnqueuePromptRequest,
+    admissionGuard?: () => boolean
+  ): Promise<{ messageId: string; status: "queued" }> {
+    return admissionGuard
+      ? this.deps.messageQueue.enqueueIdempotentAgentPrompt(request, admissionGuard)
+      : this.deps.messageQueue.enqueueIdempotentAgentPrompt(request);
+  }
+
+  redrivePendingPrompt(messageId: string): Promise<void> {
+    return this.deps.messageQueue.redrivePendingPrompt(messageId);
   }
 
   async stop(): Promise<{ status: "stopping" }> {

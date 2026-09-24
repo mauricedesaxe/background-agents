@@ -19,7 +19,22 @@ describe("enqueuePromptRequestSchema", () => {
       },
     };
 
-    expect(enqueuePromptRequestSchema.safeParse(body).success).toBe(true);
+    const result = enqueuePromptRequestSchema.safeParse(body);
+
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.content).toBe("hello");
+  });
+
+  it("does not expose the internal idempotency key through the HTTP contract", () => {
+    const result = enqueuePromptRequestSchema.safeParse({
+      content: "hello",
+      authorId: "user-1",
+      source: "web",
+      clientRequestId: "child-result-forged",
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data).not.toHaveProperty("clientRequestId");
   });
 
   it("rejects malformed enqueue prompt request bodies", () => {

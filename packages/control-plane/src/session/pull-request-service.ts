@@ -104,6 +104,7 @@ interface ExistingOpenPullRequest {
   prUrl: string;
   state: "open" | "closed" | "merged" | "draft";
   baseBranch: string;
+  artifact: ArtifactRow;
 }
 
 function claimKey(repo: RepoIdentity): string {
@@ -351,6 +352,11 @@ export class SessionPullRequestService {
       });
 
       if (existingOpenPr) {
+        this.deps.artifactRepository.updateArtifact(existingOpenPr.artifact.id, {
+          url: existingOpenPr.prUrl,
+          metadata: existingOpenPr.artifact.metadata,
+          updatedAt: Date.now(),
+        });
         return {
           kind: "created",
           prNumber: existingOpenPr.prNumber,
@@ -583,6 +589,7 @@ export class SessionPullRequestService {
         prUrl: live?.url ?? candidate.artifact.url,
         state: toDisplayStatus(live ?? { lifecycleState: "open", isDraft: candidate.isDraft }),
         baseBranch: knownBase ?? head.resolvedBaseBranch,
+        artifact: candidate.artifact,
       };
     }
 
