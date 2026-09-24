@@ -392,6 +392,7 @@ class OpenCodeServer:
         self.log.info("opencode.start")
 
         # Build OpenCode config from session settings
+        glm_53_models = ("glm-5.3", "glm-5.3-flash")
         opencode_config: dict[str, Any] = {
             "model": f"{self.provider}/{self.model}",
             "permission": {"*": {"*": "allow"}},
@@ -410,7 +411,19 @@ class OpenCodeServer:
                             "claude-opus-4-5",
                         )
                     }
-                }
+                },
+                "opencode": {"models": {model: {} for model in glm_53_models}},
+                "zai-coding-plan": {
+                    "models": {
+                        model: {
+                            "variants": {
+                                effort: {"reasoningEffort": effort}
+                                for effort in ("low", "high", "max")
+                            }
+                        }
+                        for model in glm_53_models
+                    }
+                },
             },
         }
 

@@ -9,7 +9,8 @@ GPT-6 Sol and Luna added from the 2026-09-22 retrieval.
 Source SHA-256: c9d3dc07540cf91a7b7362a3b42943132965f4ee6e8374113ee4f0f7b56b3d90
 Claude Opus 5.5 added from the 2026-09-23 retrieval.
 Source SHA-256: e20acec396a73dc3db45d0eca7f0ede5bff28f09f002ba96ce7b1b566de7b6d0
-Subset SHA-256: 78ec0a6825f9d046af0caab8526e4eced1ad443e183af53fe309bcae9dd8cbd4
+Z.AI GLM 5.3 models added from the 2026-09-24 retrieval.
+Subset SHA-256: 5d5ecc527fb4a8287eb459d72ef2d514e40ed1ab86f41a55fb1644baafc216c9
 Reconcile this frozen fixture with shared model/effort definitions when changing
 models or the binary. Mocks verify serialization, not live provider acceptance.
 """
@@ -100,6 +101,27 @@ def anthropic_events(model):
     ]
 
 
+def chat_completion_events(model):
+    return [
+        {
+            "id": "chatcmpl_test",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": model,
+            "choices": [
+                {"index": 0, "delta": {"role": "assistant", "content": "OK"}, "finish_reason": None}
+            ],
+        },
+        {
+            "id": "chatcmpl_test",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        },
+    ]
+
+
 @pytest.fixture
 async def wire_server(tmp_path, reasoning_config):
     assert subprocess.check_output([BINARY, "--version"], text=True).strip() == "1.18.29"
@@ -112,22 +134,36 @@ async def wire_server(tmp_path, reasoning_config):
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             captured.append(
-                {key: body.get(key) for key in ("model", "reasoning", "thinking", "output_config")}
-            )
-            events = (
-                anthropic_events(body["model"])
-                if self.path.endswith("/messages")
-                else openai_events(body["model"])
+                {
+                    key: body.get(key)
+                    for key in (
+                        "model",
+                        "reasoning",
+                        "reasoning_effort",
+                        "thinking",
+                        "output_config",
+                    )
+                }
             )
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
-            self.wfile.write(
-                "".join(
-                    "event: " + event["type"] + "\ndata: " + json.dumps(event) + "\n\n"
-                    for event in events
-                ).encode()
-            )
+            if self.path.endswith("/chat/completions"):
+                events = chat_completion_events(body["model"])
+                payload = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+                self.wfile.write((payload + "data: [DONE]\n\n").encode())
+            else:
+                events = (
+                    anthropic_events(body["model"])
+                    if self.path.endswith("/messages")
+                    else openai_events(body["model"])
+                )
+                self.wfile.write(
+                    "".join(
+                        "event: " + event["type"] + "\ndata: " + json.dumps(event) + "\n\n"
+                        for event in events
+                    ).encode()
+                )
 
     mock = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=mock.serve_forever, daemon=True)
@@ -136,7 +172,7 @@ async def wire_server(tmp_path, reasoning_config):
     try:
         config = reasoning_config
         config["agent"] = {"build": {"options": {"reasoningEffort": "high"}}}
-        for provider in ("openai", "anthropic"):
+        for provider in ("openai", "anthropic", "zai-coding-plan"):
             config["provider"].setdefault(provider, {})["options"] = {
                 "baseURL": f"http://127.0.0.1:{mock.server_port}/v1",
                 "apiKey": "test-only",
@@ -155,6 +191,7 @@ async def wire_server(tmp_path, reasoning_config):
                 "OPENCODE_CLIENT": "serve",
                 "OPENAI_API_KEY": "test-only",
                 "ANTHROPIC_API_KEY": "test-only",
+                "ZHIPU_API_KEY": "test-only",
             }
         )
         with socket.socket() as sock:
@@ -237,6 +274,8 @@ async def test_all_fixture_efforts_reach_provider(wire_server):
                 context = f"{provider}/{model_id} {effort}"
                 if provider == "openai":
                     assert sent["reasoning"]["effort"] == effort, context
+                elif provider == "zai-coding-plan":
+                    assert sent["reasoning_effort"] == effort, context
                 elif manual:
                     assert sent["thinking"] == {
                         "type": "enabled",

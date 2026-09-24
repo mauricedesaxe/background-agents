@@ -275,6 +275,8 @@ class TestBuildPromptRequestBody:
             ("openai/gpt-5.6-sol", "low"),
             ("openai/gpt-5.6-sol", "xhigh"),
             ("openai/gpt-5.6-luna", "max"),
+            ("zai-coding-plan/glm-5.3-flash", "low"),
+            ("zai-coding-plan/glm-5.3", "max"),
         ],
     )
     def test_reasoning_effort_uses_variant(self, bridge: AgentBridge, model: str, effort: str):
@@ -290,6 +292,11 @@ class TestBuildPromptRequestBody:
         )
         assert "variant" not in body
         assert "options" not in body["model"]
+
+        zai_body = bridge.harness.prompt_stream._build_prompt_request_body(
+            "Hello", "zai-coding-plan/glm-5.3"
+        )
+        assert "variant" not in zai_body
 
     def test_with_xai_reasoning_effort(self, bridge: AgentBridge):
         body = bridge.harness.prompt_stream._build_prompt_request_body(

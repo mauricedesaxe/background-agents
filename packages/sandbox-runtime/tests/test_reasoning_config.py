@@ -38,3 +38,16 @@ async def test_manual_variants_available_when_switching_from_adaptive_model(reas
                 "max": {"thinking": {"type": "enabled", "budgetTokens": 31_999}},
             }
         }
+
+
+async def test_glm_53_models_and_variants_are_registered(reasoning_config):
+    assert set(reasoning_config["provider"]["opencode"]["models"]) == {
+        "glm-5.3",
+        "glm-5.3-flash",
+    }
+    assert reasoning_config["provider"]["zai-coding-plan"]["models"] == {
+        model: {
+            "variants": {effort: {"reasoningEffort": effort} for effort in ("low", "high", "max")}
+        }
+        for model in ("glm-5.3", "glm-5.3-flash")
+    }

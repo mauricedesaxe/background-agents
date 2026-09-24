@@ -786,5 +786,41 @@
         }
       }
     }
+  },
+  "zai-coding-plan": {
+    "id": "zai-coding-plan",
+    "env": ["ZHIPU_API_KEY"],
+    "npm": "@ai-sdk/openai-compatible",
+    "name": "Z.AI Coding Plan",
+    "models": {
+      "glm-5.3": {
+        "id": "glm-5.3",
+        "name": "GLM-5.3",
+        "family": "glm",
+        "attachment": false,
+        "reasoning": true,
+        "reasoning_options": [{ "type": "effort", "values": ["low", "high", "max"] }],
+        "tool_call": true,
+        "temperature": true,
+        "release_date": "2026-08-14",
+        "modalities": { "input": ["text"], "output": ["text"] },
+        "limit": { "context": 1000000, "output": 131072 },
+        "cost": { "input": 0, "output": 0, "cache_read": 0, "cache_write": 0 }
+      },
+      "glm-5.3-flash": {
+        "id": "glm-5.3-flash",
+        "name": "GLM-5.3-Flash",
+        "family": "glm-flash",
+        "attachment": true,
+        "reasoning": true,
+        "reasoning_options": [{ "type": "effort", "values": ["low", "high", "max"] }],
+        "tool_call": true,
+        "temperature": true,
+        "release_date": "2026-08-26",
+        "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] },
+        "limit": { "context": 1000000, "output": 131072 },
+        "cost": { "input": 0, "output": 0, "cache_read": 0, "cache_write": 0 }
+      }
+    }
   }
 }

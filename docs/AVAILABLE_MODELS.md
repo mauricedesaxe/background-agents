@@ -81,16 +81,18 @@ instructions.
 OpenCode Zen models require `OPENCODE_API_KEY` as a global or repository secret. Zen is
 pay-per-token against `https://opencode.ai/zen/v1`.
 
-| Model ID                | Display name | Description   | Reasoning efforts | Default effort |
-| ----------------------- | ------------ | ------------- | ----------------- | -------------- |
-| `opencode/kimi-k2.5`    | Kimi K2.5    | Moonshot AI   | Not supported     | N/A            |
-| `opencode/kimi-k2.6`    | Kimi K2.6    | Moonshot AI   | Not supported     | N/A            |
-| `opencode/kimi-k3`      | Kimi K3      | Moonshot AI   | Not supported     | N/A            |
-| `opencode/minimax-m2.5` | MiniMax M2.5 | MiniMax       | Not supported     | N/A            |
-| `opencode/qwen3.7-max`  | Qwen3.7 Max  | Alibaba Cloud | Not supported     | N/A            |
-| `opencode/glm-5`        | GLM 5        | Z.ai 744B MoE | Not supported     | N/A            |
-| `opencode/glm-5.1`      | GLM 5.1      | Z.ai          | Not supported     | N/A            |
-| `opencode/glm-5.2`      | GLM 5.2      | Z.ai          | Not supported     | N/A            |
+| Model ID                 | Display name  | Description   | Reasoning efforts | Default effort |
+| ------------------------ | ------------- | ------------- | ----------------- | -------------- |
+| `opencode/kimi-k2.5`     | Kimi K2.5     | Moonshot AI   | Not supported     | N/A            |
+| `opencode/kimi-k2.6`     | Kimi K2.6     | Moonshot AI   | Not supported     | N/A            |
+| `opencode/kimi-k3`       | Kimi K3       | Moonshot AI   | Not supported     | N/A            |
+| `opencode/minimax-m2.5`  | MiniMax M2.5  | MiniMax       | Not supported     | N/A            |
+| `opencode/qwen3.7-max`   | Qwen3.7 Max   | Alibaba Cloud | Not supported     | N/A            |
+| `opencode/glm-5`         | GLM 5         | Z.ai 744B MoE | Not supported     | N/A            |
+| `opencode/glm-5.1`       | GLM 5.1       | Z.ai          | Not supported     | N/A            |
+| `opencode/glm-5.2`       | GLM 5.2       | Z.ai          | Not supported     | N/A            |
+| `opencode/glm-5.3-flash` | GLM 5.3 Flash | Z.ai          | Not supported     | N/A            |
+| `opencode/glm-5.3`       | GLM 5.3       | Z.ai          | Not supported     | N/A            |
 
 ## OpenCode Go
 
@@ -154,10 +156,11 @@ exclusively.
 
 Z.AI Coding Plan models require `ZHIPU_API_KEY` as a global or repository secret.
 
-| Model ID                  | Display name | Description      | Reasoning efforts | Default effort |
-| ------------------------- | ------------ | ---------------- | ----------------- | -------------- |
-| `zai-coding-plan/glm-5.2` | GLM 5.2      | Z.AI Coding Plan | Not supported     | N/A            |
-| `zai-coding-plan/glm-5.3` | GLM 5.3      | Z.AI Coding Plan | Not supported     | N/A            |
+| Model ID                        | Display name  | Description      | Reasoning efforts | Default effort   |
+| ------------------------------- | ------------- | ---------------- | ----------------- | ---------------- |
+| `zai-coding-plan/glm-5.2`       | GLM 5.2       | Z.AI Coding Plan | Not supported     | N/A              |
+| `zai-coding-plan/glm-5.3-flash` | GLM 5.3 Flash | Z.AI Coding Plan | low, high, max    | Provider default |
+| `zai-coding-plan/glm-5.3`       | GLM 5.3       | Z.AI Coding Plan | low, high, max    | Provider default |
 
 ## DeepSeek
 

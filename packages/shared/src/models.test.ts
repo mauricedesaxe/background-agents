@@ -59,6 +59,8 @@ const ZEN_MODELS = [
   "opencode/glm-5",
   "opencode/glm-5.1",
   "opencode/glm-5.2",
+  "opencode/glm-5.3-flash",
+  "opencode/glm-5.3",
 ] as const;
 
 const GO_MODELS = [
@@ -92,7 +94,11 @@ const GO_MODELS = [
 ] as const;
 
 const DEEPSEEK_MODELS = ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"] as const;
-const ZAI_CODING_PLAN_MODELS = ["zai-coding-plan/glm-5.2", "zai-coding-plan/glm-5.3"] as const;
+const ZAI_CODING_PLAN_MODELS = [
+  "zai-coding-plan/glm-5.2",
+  "zai-coding-plan/glm-5.3-flash",
+  "zai-coding-plan/glm-5.3",
+] as const;
 
 describe("model utilities", () => {
   it("derives every public model view from the authoritative catalog", () => {
@@ -426,6 +432,14 @@ describe("model utilities", () => {
       default: "high",
     });
     expect(getReasoningConfig("xai/grok-build-0.1")).toBeUndefined();
+    expect(getReasoningConfig("zai-coding-plan/glm-5.3-flash")).toEqual({
+      efforts: ["low", "high", "max"],
+      default: undefined,
+    });
+    expect(getReasoningConfig("zai-coding-plan/glm-5.3")).toEqual({
+      efforts: ["low", "high", "max"],
+      default: undefined,
+    });
     expect(getReasoningConfig("deepseek/deepseek-v4-flash")).toBeUndefined();
   });
 
